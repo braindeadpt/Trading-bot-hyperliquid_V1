@@ -227,65 +227,83 @@ class DataAggregator:
     def _fetch_hyperliquid(self, asset: str) -> Optional[Dict]:
         """Busca OI e funding da Hyperliquid"""
         base_url = self.sources['hyperliquid']['base_url']
+        headers = {"Content-Type": "application/json"}
         
-        # Meta (inclui OI)
-        meta_resp = requests.post(
-            f"{base_url}/info",
-            json={"type": "meta"},
-            timeout=10
-        )
-        meta_data = meta_resp.json()
-        
-        # Encontrar o asset na lista
-        universe = meta_data.get('universe', [])
-        asset_idx = None
-        for i, a in enumerate(universe):
-            if a.get('name') == asset:
-                asset_idx = i
-                break
-        
-        if asset_idx is None:
+        try:
+            # Meta (inclui OI)
+            meta_resp = requests.post(
+                f"{base_url}/info",
+                json={"type": "meta"},
+                headers=headers,
+                timeout=10
+            )
+            if not meta_resp.text:
+                logger.warning("Hyperliquid /info resposta vazia (meta)")
+                return None
+            meta_data = meta_resp.json()
+            
+            # Encontrar o asset na lista
+            universe = meta_data.get('universe', [])
+            asset_idx = None
+            for i, a in enumerate(universe):
+                if a.get('name') == asset:
+                    asset_idx = i
+                    break
+            
+            if asset_idx is None:
+                logger.warning(f"Asset {asset} nao encontrado na Hyperliquid")
+                return None
+            
+            # Funding Rate
+            funding_resp = requests.post(
+                f"{base_url}/info",
+                json={"type": "fundingRates"},
+                headers=headers,
+                timeout=10
+            )
+            funding_rate = None
+            if funding_resp.text:
+                funding_data = funding_resp.json()
+                for fr in funding_data:
+                    if fr.get('coin') == asset:
+                        funding_rate = float(fr.get('fundingRate', 0))
+                        break
+            
+            # Market Data para preço
+            mkt_resp = requests.post(
+                f"{base_url}/info",
+                json={"type": "allMids"},
+                headers=headers,
+                timeout=10
+            )
+            mark_price = 0
+            if mkt_resp.text:
+                mkt_data = mkt_resp.json()
+                mark_price = float(mkt_data.get(asset, 0))
+            
+            # OI da Hyperliquid
+            oi_usd = 0
+            oi_resp = requests.post(
+                f"{base_url}/info",
+                json={"type": "openInterest"},
+                headers=headers,
+                timeout=10
+            )
+            if oi_resp.text:
+                try:
+                    oi_data = oi_resp.json()
+                    # Hyperliquid retorna lista de OIs por asset
+                    if isinstance(oi_data, list) and asset_idx < len(oi_data):
+                        oi_usd = float(oi_data[asset_idx])
+                except Exception:
+                    pass
+            
+            return {
+                'oi_usd': oi_usd,
+                'funding_rate': funding_rate,
+                'volume_24h': 0,
+                'mark_price': mark_price
+            }
+        except Exception as e:
+            logger.warning(f"Erro Hyperliquid: {e}")
             return None
-        
-        # Funding Rate
-        funding_resp = requests.post(
-            f"{base_url}/info",
-            json={"type": "fundingRates"},
-            timeout=10
-        )
-        funding_data = funding_resp.json()
-        
-        # Procurar funding do asset específico
-        funding_rate = None
-        for fr in funding_data:
-            if fr.get('coin') == asset:
-                funding_rate = float(fr.get('fundingRate', 0))
-                break
-        
-        # Market Data para volume e preço
-        mkt_resp = requests.post(
-            f"{base_url}/info",
-            json={"type": "allMids"},
-            timeout=10
-        )
-        mkt_data = mkt_resp.json()
-        mark_price = float(mkt_data.get(asset, 0))
-        
-        # OI da Hyperliquid (precisa de endpoint específico)
-        # Por simplicidade, estimamos a partir dos dados disponíveis
-        oi_resp = requests.post(
-            f"{base_url}/info",
-            json={"type": "openInterest"},
-            timeout=10
-        )
-        
-        # TODO: Hyperliquid OI endpoint precisa de ajuste
-        # Por agora, retornamos com placeholder
-        oi_usd = 0  # Será implementado com endpoint correto
-        
-        return {
-            'oi_usd': oi_usd,
-            'funding_rate': funding_rate,
-            'volume_24h': 0,  # TODO: implementar
-            'mark_price': mark_price
-        }

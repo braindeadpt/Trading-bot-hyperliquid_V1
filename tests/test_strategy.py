@@ -38,7 +38,7 @@ def test_volume_spike_detection():
     
     print(f"Sinal: {signal}")
     assert signal == 'LONG', f"Esperado LONG, obtido {signal}"
-    print("✅ Teste passou!")
+    print(" Teste passou!")
 
 
 if __name__ == "__main__":

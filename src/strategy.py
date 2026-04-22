@@ -78,7 +78,7 @@ class MomentumStrategy:
                 oi_change > self.oi_threshold and
                 self.max_funding > funding_avg > self.min_funding):
                 
-                logger.info(f"🚀 SINAL LONG! Volume {volume_ratio:.1f}x, OI +{oi_change*100:.2f}%, Funding {funding_avg*100:.4f}%")
+                logger.info(f"[LAUNCH] SINAL LONG! Volume {volume_ratio:.1f}x, OI +{oi_change*100:.2f}%, Funding {funding_avg*100:.4f}%")
                 self.in_position = True
                 self.position_direction = 'long'
                 self.entry_price = price
@@ -100,7 +100,7 @@ class MomentumStrategy:
         
         # OI a descer enquanto preço ainda sobe = momentum a esgotar-se
         if self.position_direction == 'long' and oi_change < -0.005:
-            logger.info(f"📉 OI a descer ({oi_change*100:.2f}%) — possível exaustão do momentum")
+            logger.info(f"[DOWN] OI a descer ({oi_change*100:.2f}%) — possível exaustão do momentum")
             self._reset_position()
             return 'CLOSE_LONG'
         

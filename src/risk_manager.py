@@ -43,7 +43,7 @@ class RiskManager:
             loss_pct = (current_price - entry_price) / entry_price
         
         if loss_pct >= self.stop_loss_pct:
-            logger.warning(f"🛑 STOP LOSS! Perda: {loss_pct*100:.2f}%")
+            logger.warning(f"[STOP] STOP LOSS! Perda: {loss_pct*100:.2f}%")
             return True
         
         return False

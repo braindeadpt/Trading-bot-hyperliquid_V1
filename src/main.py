@@ -28,8 +28,8 @@ def main():
     )
     
     logger.info("=" * 50)
-    logger.info(f"🚀 {config['bot']['name']} v{config['bot']['version']}")
-    logger.info(f"📊 Paper Trading: {config['bot']['paper_trading']}")
+    logger.info(f"BOT: {config['bot']['name']} v{config['bot']['version']}")
+    logger.info(f"Paper Trading: {config['bot']['paper_trading']}")
     logger.info("=" * 50)
     
     # Inicializar componentes
@@ -56,12 +56,12 @@ def main():
             # Buscar dados agregados de OI a cada intervalo
             if current_time - last_oi_time >= oi_interval:
                 for asset in assets:
-                    logger.info(f"\n📡 Analisando {asset}...")
+                    logger.info(f"\n[SAT] Analisando {asset}...")
                     
                     data = aggregator.fetch_all_data(asset)
                     
                     if data is None:
-                        logger.error(f"❌ Falha a buscar dados de {asset}")
+                        logger.error(f" Falha a buscar dados de {asset}")
                         continue
                     
                     # Preço atual (da Hyperliquid, mais rápido)
@@ -69,7 +69,7 @@ def main():
                     current_price = hl_data.get('mark_price', 0)
                     
                     if current_price == 0:
-                        logger.warning(f"⚠️ Preço não disponível para {asset}")
+                        logger.warning(f" Preço não disponível para {asset}")
                         continue
                     
                     # Analisar estratégia
@@ -78,14 +78,14 @@ def main():
                     if signal == 'LONG' and risk.can_trade():
                         size = risk.calculate_position_size(current_price)
                         order = client.place_order(asset, 'BUY', size, current_price)
-                        logger.info(f"✅ Ordem executada: {order}")
+                        logger.info(f" Ordem executada: {order}")
                         risk.record_trade()
                     
                     # Verificar saída
                     exit_signal = strategy.should_exit(current_price, data)
                     if exit_signal:
                         client.close_position(asset)
-                        logger.info(f"📤 Posição fechada: {exit_signal}")
+                        logger.info(f"[OUT] Posição fechada: {exit_signal}")
                 
                 last_oi_time = current_time
             
@@ -93,9 +93,9 @@ def main():
             time.sleep(price_interval)
             
     except KeyboardInterrupt:
-        logger.info("\n🛑 Bot interrompido pelo utilizador")
+        logger.info("\n[STOP] Bot interrompido pelo utilizador")
     except Exception as e:
-        logger.error(f"💥 Erro fatal: {e}", exc_info=True)
+        logger.error(f" Erro fatal: {e}", exc_info=True)
         raise
 
 
