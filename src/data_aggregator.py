@@ -225,85 +225,36 @@ class DataAggregator:
         }
     
     def _fetch_hyperliquid(self, asset: str) -> Optional[Dict]:
-        """Busca OI e funding da Hyperliquid"""
+        """Busca preço da Hyperliquid (OI e funding não disponíveis na API pública /info)"""
         base_url = self.sources['hyperliquid']['base_url']
-        headers = {"Content-Type": "application/json"}
         
         try:
-            # Meta (inclui OI)
-            meta_resp = requests.post(
-                f"{base_url}/info",
-                json={"type": "meta"},
-                headers=headers,
-                timeout=10
-            )
-            if not meta_resp.text:
-                logger.warning("Hyperliquid /info resposta vazia (meta)")
-                return None
-            meta_data = meta_resp.json()
-            
-            # Encontrar o asset na lista
-            universe = meta_data.get('universe', [])
-            asset_idx = None
-            for i, a in enumerate(universe):
-                if a.get('name') == asset:
-                    asset_idx = i
-                    break
-            
-            if asset_idx is None:
-                logger.warning(f"Asset {asset} nao encontrado na Hyperliquid")
-                return None
-            
-            # Funding Rate
-            funding_resp = requests.post(
-                f"{base_url}/info",
-                json={"type": "fundingRates"},
-                headers=headers,
-                timeout=10
-            )
-            funding_rate = None
-            if funding_resp.text:
-                funding_data = funding_resp.json()
-                for fr in funding_data:
-                    if fr.get('coin') == asset:
-                        funding_rate = float(fr.get('fundingRate', 0))
-                        break
-            
-            # Market Data para preço
+            # Só buscar preço - allMids funciona na API pública
             mkt_resp = requests.post(
                 f"{base_url}/info",
                 json={"type": "allMids"},
-                headers=headers,
+                headers={"Content-Type": "application/json"},
                 timeout=10
             )
+            
             mark_price = 0
-            if mkt_resp.text:
+            if mkt_resp.status_code == 200 and mkt_resp.text:
                 mkt_data = mkt_resp.json()
                 mark_price = float(mkt_data.get(asset, 0))
             
-            # OI da Hyperliquid
-            oi_usd = 0
-            oi_resp = requests.post(
-                f"{base_url}/info",
-                json={"type": "openInterest"},
-                headers=headers,
-                timeout=10
-            )
-            if oi_resp.text:
-                try:
-                    oi_data = oi_resp.json()
-                    # Hyperliquid retorna lista de OIs por asset
-                    if isinstance(oi_data, list) and asset_idx < len(oi_data):
-                        oi_usd = float(oi_data[asset_idx])
-                except Exception:
-                    pass
-            
+            # Hyperliquid /info NÃO tem fundingRates nem openInterest públicos
+            # Funding e OI vêm de Binance + Bybit + OKX
             return {
-                'oi_usd': oi_usd,
-                'funding_rate': funding_rate,
-                'volume_24h': 0,
+                'oi_usd': 0,  # Não disponível na API pública Hyperliquid
+                'funding_rate': None,  # Não disponível na API pública Hyperliquid
+                'volume_24h': 0,  # Não disponível na API pública Hyperliquid
                 'mark_price': mark_price
             }
         except Exception as e:
-            logger.warning(f"Erro Hyperliquid: {e}")
-            return None
+            logger.warning(f"Erro Hyperliquid price: {e}")
+            return {
+                'oi_usd': 0,
+                'funding_rate': None,
+                'volume_24h': 0,
+                'mark_price': 0
+            }
