@@ -1,0 +1,62 @@
+bot:
+  name: "Hyperliquid Momentum Bot"
+  version: "0.1.0"
+  paper_trading: true
+  
+assets:
+  - "BTC"
+  - "ETH"
+  
+timeframes:
+  primary: "5m"
+  secondary: "15m"
+  
+data_sources:
+  binance:
+    enabled: true
+    base_url: "https://fapi.binance.com"
+    weight: 0.4  # peso na agregação
+  
+  bybit:
+    enabled: true
+    base_url: "https://api.bybit.com"
+    weight: 0.3
+  
+  okx:
+    enabled: true
+    base_url: "https://www.okx.com"
+    weight: 0.2
+  
+  hyperliquid:
+    enabled: true
+    base_url: "https://api.hyperliquid.xyz"
+    weight: 0.1
+
+strategy:
+  # Volume spike threshold (% acima da média)
+  volume_spike_threshold: 1.5  # 150%
+  
+  # OI change threshold (% em 1 minuto)
+  oi_change_threshold: 0.015  # 1.5%
+  
+  # Funding rate extremes para evitar overcrowding
+  max_funding_rate: 0.01  # 1%
+  min_funding_rate: -0.01
+  
+  # Timeframes para médias móveis de volume
+  volume_lookback: 20  # períodos
+  
+risk:
+  max_position_size_usd: 100
+  max_leverage: 2
+  stop_loss_pct: 0.02  # 2%
+  trailing_stop_atr_multiplier: 2
+  max_daily_trades: 5
+  
+polling:
+  oi_interval: 30  # segundos
+  price_interval: 5  # segundos (Hyperliquid WS)
+  
+logging:
+  level: "INFO"
+  file: "logs/bot.log"
