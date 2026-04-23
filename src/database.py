@@ -154,7 +154,11 @@ class BotDatabase:
         query += " ORDER BY timestamp"
         
         if limit:
-            query += f" LIMIT {limit}"
+            # Validar que limit é inteiro para prevenir SQL injection
+            limit = int(limit)
+            if limit > 0:
+                query += " LIMIT ?"
+                params.append(limit)
         
         with self._get_conn() as conn:
             rows = conn.execute(query, params).fetchall()

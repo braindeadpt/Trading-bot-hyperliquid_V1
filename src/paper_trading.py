@@ -205,6 +205,10 @@ class PaperTrader:
         self.daily_trades = 0
         self.last_day = None
         
+        # Contadores de candles bullish/bearish consecutivos
+        self.bullish_count = 0
+        self.bearish_count = 0
+        
         # Candles em memória (últimos 100)
         self.candles = deque(maxlen=100)
         
@@ -430,7 +434,17 @@ class PaperTrader:
             if not data:
                 return None
             
-            current_price = data.get('price', 0)
+            # O preço está em exchanges_data, não em 'price' directo
+            exchanges = data.get('exchanges_data', {})
+            hl_data = exchanges.get('hyperliquid', {})
+            current_price = hl_data.get('mark_price', 0)
+            
+            # Fallback: média de todos os preços disponíveis
+            if current_price <= 0:
+                prices = [ex.get('mark_price', 0) for ex in exchanges.values() if ex.get('mark_price', 0) > 0]
+                if prices:
+                    current_price = sum(prices) / len(prices)
+            
             if current_price <= 0:
                 return None
             
@@ -935,7 +949,7 @@ class PaperTrader:
             
             # Atualizar direção do TF alto para a thread MTF
             self._htf_sma = self._calculate_sma(prices, self.price_sma_period)
-            self._htf_price = price
+            self._htf_price = candle['close']
             if price > self._htf_sma * 1.005:
                 self._htf_direction = 'bull'
             elif price < self._htf_sma * 0.995:
@@ -959,7 +973,8 @@ class PaperTrader:
             # Verificar entrada
             signal = self._check_entry_signals(candle, prices, regime)
             if signal:
-                self._enter_position(asset, signal, candle['close'], candle, regime)
+                with self._lock:
+                    self._enter_position(asset, signal, candle['close'], candle, regime)
         
         except Exception as e:
             logger.error(f"Erro no ciclo de trading: {e}")
