@@ -57,6 +57,10 @@ strategy:
   # 2 candles de 5m = 10 minutos de confirmação (mais rápido que 15m)
   min_bullish_candles: 2
 
+  # Mínimo de candles bearish consecutivos para SHORT
+  # Mesmo critério — 2 candles de 5m = 10 minutos
+  min_bearish_candles: 2
+
 risk:
   max_position_size_usd: 100
   max_leverage: 2

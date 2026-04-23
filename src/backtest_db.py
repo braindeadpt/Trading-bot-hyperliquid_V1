@@ -35,6 +35,7 @@ class BacktestEngineDB:
         # Novos parâmetros de filtro
         self.price_sma_period = strat.get('price_sma_period', 20)
         self.min_bullish_candles = strat.get('min_bullish_candles', 2)
+        self.min_bearish_candles = strat.get('min_bearish_candles', 2)
         
         # Configurações de risco
         risk = config.get('risk', {})
@@ -49,16 +50,18 @@ class BacktestEngineDB:
         # Estado do backtest
         self.trades = []
         self.equity = []
-        self.current_position = None
+        self.current_position = None  # 'long' ou 'short'
         self.entry_price = 0
         self.entry_time = None
         self.volume_history = deque(maxlen=self.volume_lookback)
         self.price_history = deque(maxlen=self.price_sma_period)
         self.last_oi = 0
         self.bullish_count = 0  # Contador de candles bullish consecutivos
+        self.bearish_count = 0  # Contador de candles bearish consecutivos
         
         # Trailing stop tracking
         self.max_price_since_entry = 0
+        self.min_price_since_entry = 0
         self.trailing_stop_price = 0
         self.trailing_active = False  # Só ativa depois de atingir lucro mínimo
         
@@ -135,12 +138,18 @@ class BacktestEngineDB:
             
             funding_extreme = funding > self.max_funding or funding < self.min_funding
             
-            # Contar candles bullish consecutivos
+            # Contar candles bullish e bearish consecutivos
             candle_bullish = candle['close'] > candle['open']
+            candle_bearish = candle['close'] < candle['open']
             if candle_bullish:
                 self.bullish_count += 1
+                self.bearish_count = 0
+            elif candle_bearish:
+                self.bearish_count += 1
+                self.bullish_count = 0
             else:
                 self.bullish_count = 0
+                self.bearish_count = 0
             
             # Logging periódico
             if i % 500 == 0:
@@ -158,73 +167,87 @@ class BacktestEngineDB:
                     f"Bullish: {self.bullish_count}x{trailing_info}"
                 )
             
-            # SINAL DE ENTRADA LONG (com ou sem OI)
+            # SINAIS DE ENTRADA (LONG e SHORT)
             if self.current_position is None:
-                # FILTROS COMUNS (sempre aplicados):
-                # 1. Volume spike forte
-                # 2. Preço acima da SMA (tendência de alta)
-                # 3. Mínimo de candles bullish consecutivos
+                # Volume spike forte
                 volume_ok = volume_ratio > self.volume_threshold
-                trend_ok = price_above_sma
-                bullish_streak_ok = self.bullish_count >= self.min_bullish_candles
+                funding_ok = not funding_extreme
                 
-                # Se temos OI válido, usar critério completo
-                if oi > 0:
-                    if (volume_ok and trend_ok and bullish_streak_ok and
-                        oi_change > self.oi_threshold and
-                        not funding_extreme and
-                        price > 0):
-                        self._enter_long(symbol, price, timestamp, volume_ratio, oi_change, funding)
-                # Se não temos OI, usar critério simplificado
-                else:
-                    if (volume_ok and trend_ok and bullish_streak_ok and
-                        not funding_extreme and
-                        price > 0):
+                # LONG: Tendência de alta + candles bullish
+                if price_above_sma and self.bullish_count >= self.min_bullish_candles and volume_ok and funding_ok and price > 0:
+                    if oi > 0:
+                        if oi_change > self.oi_threshold:
+                            self._enter_long(symbol, price, timestamp, volume_ratio, oi_change, funding)
+                    else:
                         self._enter_long(symbol, price, timestamp, volume_ratio, 0, funding)
+                
+                # SHORT: Tendência de baixa + candles bearish
+                elif not price_above_sma and self.bearish_count >= self.min_bearish_candles and volume_ok and funding_ok and price > 0:
+                    if oi > 0:
+                        if oi_change < -self.oi_threshold:
+                            self._enter_short(symbol, price, timestamp, volume_ratio, oi_change, funding)
+                    else:
+                        self._enter_short(symbol, price, timestamp, volume_ratio, 0, funding)
             
-            # SINAL DE SAÍDA
+            # SINAL DE SAÍDA LONG
             elif self.current_position == 'long':
-                # Calcular lucro atual
                 gain_pct = (price - self.entry_price) / self.entry_price
                 
-                # Atualizar máximo
                 if price > self.max_price_since_entry:
                     self.max_price_since_entry = price
                 
-                # Verificar se trailing stop deve ativar
                 if gain_pct >= self.trailing_activation_pct and not self.trailing_active:
                     self.trailing_active = True
                     self.trailing_stop_price = self.max_price_since_entry * (1 - self.trailing_stop_pct)
                     dt = datetime.fromtimestamp(timestamp / 1000)
-                    logger.info(
-                        f"[{dt}] 🚀 TRAILING STOP ATIVADO! Lucro: +{gain_pct*100:.1f}% | "
-                        f"Stop: ${self.trailing_stop_price:,.2f}"
-                    )
+                    logger.info(f"[{dt}] 🚀 TRAILING LONG ATIVADO! Lucro: +{gain_pct*100:.1f}% | Stop: ${self.trailing_stop_price:,.2f}")
                 
-                # Atualizar trailing stop se ativo
                 if self.trailing_active:
                     new_trailing = self.max_price_since_entry * (1 - self.trailing_stop_pct)
                     if new_trailing > self.trailing_stop_price:
                         self.trailing_stop_price = new_trailing
-                        
-                        # Log quando trailing sobe significativamente
                         if gain_pct > 0.02:
                             dt = datetime.fromtimestamp(timestamp / 1000)
-                            logger.info(
-                                f"[{dt}] 🎯 NOVO MÁXIMO ${price:,.2f} | "
-                                f"Trailing: ${self.trailing_stop_price:,.2f} | "
-                                f"Lucro atual: +{gain_pct*100:.1f}%"
-                            )
+                            logger.info(f"[{dt}] 🎯 LONG MÁX ${price:,.2f} | Trail: ${self.trailing_stop_price:,.2f} | +{gain_pct*100:.1f}%")
                 
-                # 1. Stop loss inicial (se trailing ainda não ativou)
                 if not self.trailing_active:
                     loss_pct = (self.entry_price - price) / self.entry_price
                     if loss_pct >= self.stop_loss_pct:
                         self._exit_position(symbol, price, timestamp, 'STOP_LOSS')
                         continue
                 
-                # 2. Trailing stop (só se já ativou)
                 if self.trailing_active and price <= self.trailing_stop_price:
+                    self._exit_position(symbol, price, timestamp, 'TRAILING_STOP')
+                    continue
+            
+            # SINAL DE SAÍDA SHORT
+            elif self.current_position == 'short':
+                gain_pct = (self.entry_price - price) / self.entry_price
+                
+                if price < self.min_price_since_entry:
+                    self.min_price_since_entry = price
+                
+                if gain_pct >= self.trailing_activation_pct and not self.trailing_active:
+                    self.trailing_active = True
+                    self.trailing_stop_price = self.min_price_since_entry * (1 + self.trailing_stop_pct)
+                    dt = datetime.fromtimestamp(timestamp / 1000)
+                    logger.info(f"[{dt}] 🚀 TRAILING SHORT ATIVADO! Lucro: +{gain_pct*100:.1f}% | Stop: ${self.trailing_stop_price:,.2f}")
+                
+                if self.trailing_active:
+                    new_trailing = self.min_price_since_entry * (1 + self.trailing_stop_pct)
+                    if new_trailing < self.trailing_stop_price:
+                        self.trailing_stop_price = new_trailing
+                        if gain_pct > 0.02:
+                            dt = datetime.fromtimestamp(timestamp / 1000)
+                            logger.info(f"[{dt}] 🎯 SHORT MÍN ${price:,.2f} | Trail: ${self.trailing_stop_price:,.2f} | +{gain_pct*100:.1f}%")
+                
+                if not self.trailing_active:
+                    loss_pct = (price - self.entry_price) / self.entry_price
+                    if loss_pct >= self.stop_loss_pct:
+                        self._exit_position(symbol, price, timestamp, 'STOP_LOSS')
+                        continue
+                
+                if self.trailing_active and price >= self.trailing_stop_price:
                     self._exit_position(symbol, price, timestamp, 'TRAILING_STOP')
                     continue
             
@@ -258,6 +281,7 @@ class BacktestEngineDB:
         
         # Inicializar trailing stop tracking
         self.max_price_since_entry = price
+        self.min_price_since_entry = price
         self.trailing_stop_price = price * (1 - self.stop_loss_pct)
         self.trailing_active = False  # Começa desativado, ativa após lucro mínimo
         
@@ -287,6 +311,45 @@ class BacktestEngineDB:
             'funding': funding
         })
     
+    def _enter_short(self, symbol: str, price: float, timestamp: int,
+                     volume_ratio: float, oi_change: float, funding: float):
+        """Simula entrada SHORT"""
+        self.current_position = 'short'
+        self.entry_price = price
+        self.entry_time = timestamp
+        
+        # Inicializar trailing stop tracking para short
+        self.max_price_since_entry = price
+        self.min_price_since_entry = price
+        self.trailing_stop_price = price * (1 + self.stop_loss_pct)
+        self.trailing_active = False
+        
+        # Tamanho da posição (10% do capital)
+        position_size = min(self.max_position_usd, self.current_capital * 0.1)
+        
+        # Aplicar fee de entrada
+        fee = position_size * self.fee_pct
+        self.current_capital -= fee
+        
+        dt = datetime.fromtimestamp(timestamp / 1000)
+        logger.info(
+            f"[ENTER SHORT {symbol}] {dt} @ ${price:,.2f} | Size: ${position_size:.2f} | "
+            f"Vol: {volume_ratio:.2f}x | OI: {oi_change*100:.2f}% | "
+            f"Trailing: ${self.trailing_stop_price:,.2f}"
+        )
+        
+        self.trades.append({
+            'type': 'entry',
+            'symbol': symbol,
+            'direction': 'short',
+            'price': price,
+            'timestamp': timestamp,
+            'size_usd': position_size,
+            'volume_ratio': volume_ratio,
+            'oi_change': oi_change,
+            'funding': funding
+        })
+    
     def _exit_position(self, symbol: str, price: float, timestamp: int, reason: str):
         """Simula saída da posição"""
         if not self.current_position:
@@ -303,9 +366,13 @@ class BacktestEngineDB:
             return
         
         position_size = entry_trade['size_usd']
+        direction = entry_trade.get('direction', 'long')
         
-        # Calcular PnL
-        pnl_pct = (price - self.entry_price) / self.entry_price
+        # Calcular PnL (invertido para shorts)
+        if direction == 'short':
+            pnl_pct = (self.entry_price - price) / self.entry_price
+        else:
+            pnl_pct = (price - self.entry_price) / self.entry_price
         pnl_usd = position_size * pnl_pct
         
         # Aplicar fee de saída
@@ -341,7 +408,7 @@ class BacktestEngineDB:
         self.trades.append({
             'type': 'exit',
             'symbol': symbol,
-            'direction': 'long',
+            'direction': direction,
             'entry_price': self.entry_price,
             'exit_price': price,
             'entry_time': self.entry_time,
@@ -350,7 +417,8 @@ class BacktestEngineDB:
             'pnl_usd': pnl_usd,
             'pnl_pct': pnl_pct,
             'exit_reason': reason,
-            'max_price_reached': self.max_price_since_entry
+            'max_price_reached': self.max_price_since_entry,
+            'min_price_reached': self.min_price_since_entry
         })
         
         # Reset trailing stop
@@ -360,7 +428,7 @@ class BacktestEngineDB:
         self.trailing_stop_price = 0
     
     def _calculate_metrics(self) -> Dict:
-        """Calcula métricas finais"""
+        """Calcula métricas finais com separação Long/Short"""
         if self.total_trades == 0:
             return {
                 'total_trades': 0,
@@ -374,10 +442,22 @@ class BacktestEngineDB:
         wins = [t['pnl_usd'] for t in exits if t['pnl_usd'] > 0]
         losses = [abs(t['pnl_usd']) for t in exits if t['pnl_usd'] <= 0]
         
+        # Separar por direção
+        longs = [t for t in exits if t.get('direction', 'long') == 'long']
+        shorts = [t for t in exits if t.get('direction', 'long') == 'short']
+        
+        long_wins = [t['pnl_usd'] for t in longs if t['pnl_usd'] > 0]
+        long_losses = [abs(t['pnl_usd']) for t in longs if t['pnl_usd'] <= 0]
+        short_wins = [t['pnl_usd'] for t in shorts if t['pnl_usd'] > 0]
+        short_losses = [abs(t['pnl_usd']) for t in shorts if t['pnl_usd'] <= 0]
+        
         avg_win = sum(wins) / len(wins) if wins else 0
         avg_loss = sum(losses) / len(losses) if losses else 0
         
         profit_factor = sum(wins) / sum(losses) if losses and sum(losses) > 0 else float('inf')
+        
+        long_pf = sum(long_wins) / sum(long_losses) if long_losses and sum(long_losses) > 0 else float('inf')
+        short_pf = sum(short_wins) / sum(short_losses) if short_losses and sum(short_losses) > 0 else float('inf')
         
         win_rate = (self.winning_trades / self.total_trades) * 100
         
@@ -410,11 +490,23 @@ class BacktestEngineDB:
             'max_drawdown_pct': self.max_drawdown * 100,
             'sharpe_ratio': sharpe,
             'trades': self.trades,
-            'equity_curve': self.equity
+            'equity_curve': self.equity,
+            'longs': {
+                'count': len(longs),
+                'win_rate': len(long_wins) / len(longs) * 100 if longs else 0,
+                'profit_factor': long_pf,
+                'pnl': sum(t['pnl_usd'] for t in longs)
+            },
+            'shorts': {
+                'count': len(shorts),
+                'win_rate': len(short_wins) / len(shorts) * 100 if shorts else 0,
+                'profit_factor': short_pf,
+                'pnl': sum(t['pnl_usd'] for t in shorts)
+            }
         }
     
     def print_report(self, metrics: Dict, symbol: str = "BTC"):
-        """Imprime relatório formatado"""
+        """Imprime relatório formatado com separação Long/Short"""
         print("\n" + "="*70)
         print(f"          BACKTEST REPORT - {symbol}")
         print("="*70)
@@ -435,6 +527,24 @@ class BacktestEngineDB:
         print(f"Avg Loss:            ${metrics['avg_loss']:>12,.2f}")
         print(f"Max Drawdown:        {metrics['max_drawdown_pct']:>11.2f}%")
         print(f"Sharpe Ratio:        {metrics['sharpe_ratio']:>12.2f}")
+        print(f"-"*70)
+        
+        # Separar por direção
+        longs = metrics.get('longs', {})
+        shorts = metrics.get('shorts', {})
+        
+        if longs.get('count', 0) > 0:
+            print(f"📈 LONGS:            {longs['count']:>12} trades")
+            print(f"  Win Rate:          {longs['win_rate']:>11.1f}%")
+            print(f"  Profit Factor:     {longs['profit_factor']:>12.2f}")
+            print(f"  PnL:               ${longs['pnl']:>12,.2f}")
+        
+        if shorts.get('count', 0) > 0:
+            print(f"📉 SHORTS:           {shorts['count']:>12} trades")
+            print(f"  Win Rate:          {shorts['win_rate']:>11.1f}%")
+            print(f"  Profit Factor:     {shorts['profit_factor']:>12.2f}")
+            print(f"  PnL:               ${shorts['pnl']:>12,.2f}")
+        
         print("="*70)
         
         # Veredito
