@@ -54,8 +54,8 @@ strategy:
   price_sma_period: 60
 
   # Mínimo de candles bullish consecutivos para confirmar
-  # 3 candles de 5m = 15 minutos de confirmação
-  min_bullish_candles: 3
+  # 2 candles de 5m = 10 minutos de confirmação (mais rápido que 15m)
+  min_bullish_candles: 2
 
 risk:
   max_position_size_usd: 100
