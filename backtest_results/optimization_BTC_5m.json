@@ -1,0 +1,188 @@
+{
+  "timestamp": "2026-04-23T21:48:29.019705",
+  "symbol": "BTC",
+  "interval": "5m",
+  "total_tested": 36000,
+  "valid_found": 4025,
+  "top_10": [
+    {
+      "rank": 1,
+      "profit_factor": 7.288873032940614,
+      "win_rate": 0.4,
+      "pnl_total": 4.771030639068125,
+      "total_trades": 5,
+      "max_drawdown": 0.0005186636962754734,
+      "params": {
+        "volume_threshold": 3.5,
+        "oi_threshold": 0.005,
+        "price_sma_period": 120,
+        "min_bullish_candles": 1,
+        "trailing_activation_pct": 0.01,
+        "trailing_stop_pct": 0.01,
+        "stop_loss_pct": 0.03
+      }
+    },
+    {
+      "rank": 2,
+      "profit_factor": 7.288873032940614,
+      "win_rate": 0.4,
+      "pnl_total": 4.771030639068125,
+      "total_trades": 5,
+      "max_drawdown": 0.0005186636962754734,
+      "params": {
+        "volume_threshold": 3.5,
+        "oi_threshold": 0.01,
+        "price_sma_period": 120,
+        "min_bullish_candles": 1,
+        "trailing_activation_pct": 0.01,
+        "trailing_stop_pct": 0.01,
+        "stop_loss_pct": 0.03
+      }
+    },
+    {
+      "rank": 3,
+      "profit_factor": 7.288873032940614,
+      "win_rate": 0.4,
+      "pnl_total": 4.771030639068125,
+      "total_trades": 5,
+      "max_drawdown": 0.0005186636962754734,
+      "params": {
+        "volume_threshold": 3.5,
+        "oi_threshold": 0.015,
+        "price_sma_period": 120,
+        "min_bullish_candles": 1,
+        "trailing_activation_pct": 0.01,
+        "trailing_stop_pct": 0.01,
+        "stop_loss_pct": 0.03
+      }
+    },
+    {
+      "rank": 4,
+      "profit_factor": 7.288873032940614,
+      "win_rate": 0.4,
+      "pnl_total": 4.771030639068125,
+      "total_trades": 5,
+      "max_drawdown": 0.0005186636962754734,
+      "params": {
+        "volume_threshold": 3.5,
+        "oi_threshold": 0.02,
+        "price_sma_period": 120,
+        "min_bullish_candles": 1,
+        "trailing_activation_pct": 0.01,
+        "trailing_stop_pct": 0.01,
+        "stop_loss_pct": 0.03
+      }
+    },
+    {
+      "rank": 5,
+      "profit_factor": 7.288873032940614,
+      "win_rate": 0.4,
+      "pnl_total": 4.771030639068125,
+      "total_trades": 5,
+      "max_drawdown": 0.0005186636962754734,
+      "params": {
+        "volume_threshold": 3.5,
+        "oi_threshold": 0.03,
+        "price_sma_period": 120,
+        "min_bullish_candles": 1,
+        "trailing_activation_pct": 0.01,
+        "trailing_stop_pct": 0.01,
+        "stop_loss_pct": 0.03
+      }
+    },
+    {
+      "rank": 6,
+      "profit_factor": 7.288873032940614,
+      "win_rate": 0.4,
+      "pnl_total": 4.771030639068125,
+      "total_trades": 5,
+      "max_drawdown": 0.0005186636962754734,
+      "params": {
+        "volume_threshold": 4.0,
+        "oi_threshold": 0.005,
+        "price_sma_period": 120,
+        "min_bullish_candles": 1,
+        "trailing_activation_pct": 0.01,
+        "trailing_stop_pct": 0.01,
+        "stop_loss_pct": 0.03
+      }
+    },
+    {
+      "rank": 7,
+      "profit_factor": 7.288873032940614,
+      "win_rate": 0.4,
+      "pnl_total": 4.771030639068125,
+      "total_trades": 5,
+      "max_drawdown": 0.0005186636962754734,
+      "params": {
+        "volume_threshold": 4.0,
+        "oi_threshold": 0.01,
+        "price_sma_period": 120,
+        "min_bullish_candles": 1,
+        "trailing_activation_pct": 0.01,
+        "trailing_stop_pct": 0.01,
+        "stop_loss_pct": 0.03
+      }
+    },
+    {
+      "rank": 8,
+      "profit_factor": 7.288873032940614,
+      "win_rate": 0.4,
+      "pnl_total": 4.771030639068125,
+      "total_trades": 5,
+      "max_drawdown": 0.0005186636962754734,
+      "params": {
+        "volume_threshold": 4.0,
+        "oi_threshold": 0.015,
+        "price_sma_period": 120,
+        "min_bullish_candles": 1,
+        "trailing_activation_pct": 0.01,
+        "trailing_stop_pct": 0.01,
+        "stop_loss_pct": 0.03
+      }
+    },
+    {
+      "rank": 9,
+      "profit_factor": 7.288873032940614,
+      "win_rate": 0.4,
+      "pnl_total": 4.771030639068125,
+      "total_trades": 5,
+      "max_drawdown": 0.0005186636962754734,
+      "params": {
+        "volume_threshold": 4.0,
+        "oi_threshold": 0.02,
+        "price_sma_period": 120,
+        "min_bullish_candles": 1,
+        "trailing_activation_pct": 0.01,
+        "trailing_stop_pct": 0.01,
+        "stop_loss_pct": 0.03
+      }
+    },
+    {
+      "rank": 10,
+      "profit_factor": 7.288873032940614,
+      "win_rate": 0.4,
+      "pnl_total": 4.771030639068125,
+      "total_trades": 5,
+      "max_drawdown": 0.0005186636962754734,
+      "params": {
+        "volume_threshold": 4.0,
+        "oi_threshold": 0.03,
+        "price_sma_period": 120,
+        "min_bullish_candles": 1,
+        "trailing_activation_pct": 0.01,
+        "trailing_stop_pct": 0.01,
+        "stop_loss_pct": 0.03
+      }
+    }
+  ],
+  "best_params": {
+    "volume_threshold": 3.5,
+    "oi_threshold": 0.005,
+    "price_sma_period": 120,
+    "min_bullish_candles": 1,
+    "trailing_activation_pct": 0.01,
+    "trailing_stop_pct": 0.01,
+    "stop_loss_pct": 0.03
+  }
+}
