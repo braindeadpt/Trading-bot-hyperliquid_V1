@@ -52,7 +52,9 @@ strategy:
   price_sma_period: 20  # períodos
   
   # Mínimo de candles bullish consecutivos para confirmar
-  min_bullish_candles: 2
+  # 1 = só o candle atual precisa ser bullish (15m)
+  # 2 = 2 candles consecutivos (30m - demasiado lento para cripto)
+  min_bullish_candles: 1
   
 risk:
   max_position_size_usd: 100
