@@ -47,9 +47,9 @@ class StrategyOptimizer:
         # Resultados por timeframe
         self.results_by_interval = {}
     
-    def _load_data(self, symbol: str, interval: str) -> List[Dict]:
+    def _load_data(self, symbol: str, interval: str, days: int = 30) -> List[Dict]:
         """Carrega dados da DB para um timeframe específico"""
-        candles = self.db.get_candles_for_backtest(symbol, interval, days=30)
+        candles = self.db.get_candles_for_backtest(symbol, interval, days=days)
         
         if not candles:
             logger.warning(f"Sem dados em DB para {symbol} {interval}")
@@ -326,7 +326,7 @@ class StrategyOptimizer:
             'trades': trades,
         }
     
-    def optimize(self, symbol: str = 'BTC') -> Dict:
+    def optimize(self, symbol: str = 'BTC', days: int = 30) -> Dict:
         """
         Corre grid search completo para todos os timeframes
         Retorna os melhores resultados por timeframe
@@ -334,8 +334,8 @@ class StrategyOptimizer:
         logger.info("="*70)
         logger.info("STRATEGY OPTIMIZER v2 - Multi-Timeframe Grid Search")
         logger.info("="*70)
+        logger.info(f"Symbol: {symbol} | Days: {days}")
         logger.info(f"Timeframes: {', '.join(self.intervals)}")
-        logger.info(f"Assets: {symbol}")
         logger.info("="*70)
         
         all_results = {}
@@ -346,7 +346,7 @@ class StrategyOptimizer:
             logger.info(f"{'='*70}")
             
             # Carregar dados
-            data = self._load_data(symbol, interval)
+            data = self._load_data(symbol, interval, days)
             if not data:
                 logger.warning(f"Pulando {interval} - sem dados")
                 continue
@@ -479,6 +479,14 @@ def main():
     """Entry point - otimiza múltiplos timeframes"""
     import sys
     
+    symbol = 'BTC'
+    days = 30
+    
+    if len(sys.argv) > 1:
+        symbol = sys.argv[1].upper()
+    if len(sys.argv) > 2:
+        days = int(sys.argv[2])
+    
     # Verificar dados disponíveis
     db = BotDatabase()
     stats = db.get_stats()
@@ -490,15 +498,15 @@ def main():
     
     # Verificar quais timeframes existem
     with db._get_conn() as conn:
-        rows = conn.execute("SELECT DISTINCT interval FROM candles").fetchall()
+        rows = conn.execute("SELECT DISTINCT interval FROM candles WHERE symbol=?", (symbol,)).fetchall()
         intervals_in_db = set([r[0] for r in rows])
     
-    logger.info(f"Timeframes disponíveis: {intervals_in_db}")
+    logger.info(f"Timeframes disponíveis para {symbol}: {intervals_in_db}")
     
     optimizer = StrategyOptimizer(db)
     
     # Otimizar todos os timeframes
-    results = optimizer.optimize('BTC')
+    results = optimizer.optimize(symbol, days)
     
     if results.get('best'):
         best = results['best']
