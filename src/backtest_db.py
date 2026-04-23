@@ -32,6 +32,10 @@ class BacktestEngineDB:
         self.min_funding = strat.get('min_funding_rate', -0.001)
         self.volume_lookback = strat.get('volume_lookback', 20)
         
+        # Novos parâmetros de filtro
+        self.price_sma_period = strat.get('price_sma_period', 20)
+        self.min_bullish_candles = strat.get('min_bullish_candles', 2)
+        
         # Configurações de risco
         risk = config.get('risk', {})
         self.stop_loss_pct = risk.get('stop_loss_pct', 0.02)
@@ -45,7 +49,9 @@ class BacktestEngineDB:
         self.entry_price = 0
         self.entry_time = None
         self.volume_history = deque(maxlen=self.volume_lookback)
+        self.price_history = deque(maxlen=self.price_sma_period)
         self.last_oi = 0
+        self.bullish_count = 0  # Contador de candles bullish consecutivos
         
         # Métricas
         self.initial_capital = 10000.0
@@ -106,6 +112,11 @@ class BacktestEngineDB:
             volume_avg = sum(self.volume_history) / len(self.volume_history)
             volume_ratio = volume / volume_avg if volume_avg > 0 else 0
             
+            # SMA de preço para filtro de tendência
+            self.price_history.append(price)
+            price_sma = sum(self.price_history) / len(self.price_history) if len(self.price_history) >= self.price_sma_period else 0
+            price_above_sma = price > price_sma if price_sma > 0 else False
+            
             oi_change = 0
             if self.last_oi > 0 and oi > 0:
                 oi_change = (oi - self.last_oi) / self.last_oi
@@ -115,29 +126,43 @@ class BacktestEngineDB:
             
             funding_extreme = funding > self.max_funding or funding < self.min_funding
             
+            # Contar candles bullish consecutivos
+            candle_bullish = candle['close'] > candle['open']
+            if candle_bullish:
+                self.bullish_count += 1
+            else:
+                self.bullish_count = 0
+            
             # Logging periódico
             if i % 500 == 0:
                 dt = datetime.fromtimestamp(timestamp / 1000)
+                trend_status = "✅ ACIMA_SMA" if price_above_sma else "❌ ABAIXO_SMA"
                 logger.info(
                     f"[{dt}] ${price:,.0f} | Vol: {volume_ratio:.2f}x | "
-                    f"OI: ${oi:,.0f} | OI Δ: {oi_change*100:.3f}%"
+                    f"SMA{self.price_sma_period}: ${price_sma:,.0f} | {trend_status} | "
+                    f"Bullish: {self.bullish_count}x"
                 )
             
             # SINAL DE ENTRADA LONG (com ou sem OI)
             if self.current_position is None:
+                # FILTROS COMUNS (sempre aplicados):
+                # 1. Volume spike forte
+                # 2. Preço acima da SMA (tendência de alta)
+                # 3. Mínimo de candles bullish consecutivos
+                volume_ok = volume_ratio > self.volume_threshold
+                trend_ok = price_above_sma
+                bullish_streak_ok = self.bullish_count >= self.min_bullish_candles
+                
                 # Se temos OI válido, usar critério completo
                 if oi > 0:
-                    if (volume_ratio > self.volume_threshold and 
+                    if (volume_ok and trend_ok and bullish_streak_ok and
                         oi_change > self.oi_threshold and
                         not funding_extreme and
                         price > 0):
                         self._enter_long(symbol, price, timestamp, volume_ratio, oi_change, funding)
-                # Se não temos OI, usar critério simplificado (volume + tendência de preço)
+                # Se não temos OI, usar critério simplificado
                 else:
-                    # Verificar se há momentum de volume + candle bullish
-                    candle_bullish = candle['close'] > candle['open']
-                    if (volume_ratio > self.volume_threshold and 
-                        candle_bullish and
+                    if (volume_ok and trend_ok and bullish_streak_ok and
                         not funding_extreme and
                         price > 0):
                         self._enter_long(symbol, price, timestamp, volume_ratio, 0, funding)

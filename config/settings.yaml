@@ -34,7 +34,8 @@ data_sources:
 
 strategy:
   # Volume spike threshold (% acima da média)
-  volume_spike_threshold: 1.5  # 150%
+  # 2.5 = 250% do volume médio (muito raro, sinal forte)
+  volume_spike_threshold: 2.5
   
   # OI change threshold (% em 1 minuto)
   oi_change_threshold: 0.015  # 1.5%
@@ -44,7 +45,14 @@ strategy:
   min_funding_rate: -0.01
   
   # Timeframes para médias móveis de volume
-  volume_lookback: 20  # períodos
+  # 50 períodos = ~12h em 15m (média mais estável)
+  volume_lookback: 50
+  
+  # Filtro de tendência: só entrar se preço acima da SMA
+  price_sma_period: 20  # períodos
+  
+  # Mínimo de candles bullish consecutivos para confirmar
+  min_bullish_candles: 2
   
 risk:
   max_position_size_usd: 100
