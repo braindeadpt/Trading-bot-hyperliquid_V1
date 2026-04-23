@@ -2,31 +2,31 @@ bot:
   name: "Hyperliquid Momentum Bot"
   version: "0.1.0"
   paper_trading: true
-  
+
 assets:
   - "BTC"
   - "ETH"
-  
+
 timeframes:
   primary: "5m"
   secondary: "15m"
-  
+
 data_sources:
   binance:
     enabled: true
     base_url: "https://fapi.binance.com"
     weight: 0.4  # peso na agregação
-  
+
   bybit:
     enabled: true
     base_url: "https://api.bybit.com"
     weight: 0.3
-  
+
   okx:
     enabled: true
     base_url: "https://www.okx.com"
     weight: 0.2
-  
+
   hyperliquid:
     enabled: true
     base_url: "https://api.hyperliquid.xyz"
@@ -34,39 +34,40 @@ data_sources:
 
 strategy:
   # Volume spike threshold (% acima da média)
-  # 2.5 = 250% do volume médio (muito raro, sinal forte)
-  volume_spike_threshold: 2.5
-  
+  # 2.0 = 200% do volume médio (adequado para 5m)
+  # 5m tem mais volatilidade, por isso threshold menor que 15m
+  volume_spike_threshold: 2.0
+
   # OI change threshold (% em 1 minuto)
   oi_change_threshold: 0.015  # 1.5%
-  
+
   # Funding rate extremes para evitar overcrowding
   max_funding_rate: 0.01  # 1%
   min_funding_rate: -0.01
-  
+
   # Timeframes para médias móveis de volume
-  # 50 períodos = ~12h em 15m (média mais estável)
-  volume_lookback: 50
-  
+  # 100 períodos = ~8h em 5m (média estável para detetar spikes)
+  volume_lookback: 100
+
   # Filtro de tendência: só entrar se preço acima da SMA
-  price_sma_period: 20  # períodos
-  
+  # 60 períodos = ~5h em 5m (equivalente a 20 períodos em 15m)
+  price_sma_period: 60
+
   # Mínimo de candles bullish consecutivos para confirmar
-  # 1 = só o candle atual precisa ser bullish (15m)
-  # 2 = 2 candles consecutivos (30m - demasiado lento para cripto)
-  min_bullish_candles: 1
-  
+  # 3 candles de 5m = 15 minutos de confirmação
+  min_bullish_candles: 3
+
 risk:
   max_position_size_usd: 100
   max_leverage: 2
   stop_loss_pct: 0.02  # 2%
   trailing_stop_atr_multiplier: 2
   max_daily_trades: 5
-  
+
 polling:
   oi_interval: 30  # segundos
   price_interval: 5  # segundos (Hyperliquid WS)
-  
+
 logging:
   level: "INFO"
   file: "logs/bot.log"
