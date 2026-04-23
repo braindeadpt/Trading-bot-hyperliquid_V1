@@ -8,8 +8,8 @@ assets:
   - "ETH"
 
 timeframes:
-  primary: "15m"    # VENCEDOR 90 dias: PF 1.98, WR 69.4%, 49 trades
-  secondary: "5m"   # Testado 90d: PF 1.45, Longs PF 0.73 (perdem!)
+  primary: "15m"    # VENCEDOR com OI real: PF 2.50, WR 72.2%, 36 trades
+  secondary: "5m"   # Testado: PF 1.45, Longs PF 0.73 (perdem!)
 
 data_sources:
   binance:
@@ -33,20 +33,21 @@ data_sources:
     weight: 0.1
 
 strategy:
-  # PARÂMETROS ÓTIMOS (Grid Search v3 — 90 dias BTC, 216 combinações)
-  # Timeframe vencedor: 15m | PF: 1.98 | WR: 69.4% | DD: 0.32%
-  # Comparação 90d:
-  #   15m: PF 1.98 | 49 trades (L:24 S:25) | Long PF 1.77 | Short PF 2.21
-  #   5m:  PF 1.45 | 40 trades (L:13 S:27) | Long PF 0.73 | Short PF 2.05
+  # PARÂMETROS ÓTIMOS (Grid Search v4 — OI Real CCXT, 30 dias)
+  # Timeframe vencedor: 15m | PF: 2.50 | WR: 72.2% | DD: 0.29%
+  #   36 trades (L:18 S:18) | Long PF: 1.75 | Short PF: 3.61
+  # vs sem OI: PF 1.98 | WR: 69.4% — OI melhorou 26%!
+  # vs 5m: PF 1.45 | Longs PF: 0.73 (perdem dinheiro)
   
   # Volume spike threshold
-  # 90d vencedor: 4.0x (spikes MAIS fortes necessários em período longo)
+  # ÓTIMO: 4.0x (filtro muito apertado = apenas os MELHORES spikes)
   volume_spike_threshold: 4.0
 
-  # OI change threshold
+  # OI change threshold — AGORA FUNCIONA com dados CCXT reais!
+  # ÓTIMO: 1.0% de aumento no OI para confirmar entrada
   oi_change_threshold: 0.01  # 1.0%
 
-  # Funding rate extremes
+  # Funding rate extremes para evitar overcrowding
   max_funding_rate: 0.01
   min_funding_rate: -0.01
 
@@ -54,18 +55,19 @@ strategy:
   volume_lookback: 100
 
   # SMA período
-  # 90d vencedor: 100 em 15m = ~25h (mais estável que 60)
+  # ÓTIMO: 100 períodos em 15m = ~25h (média estável)
   price_sma_period: 100
 
   # Confirmação de candles
-  # 90d vencedor: 1 candle (15min) — rápido captura movimento
+  # ÓTIMO: 1 candle bullish (15min) — rápido captura movimento
+  # Descoberta NOVA: 2 candles bearish (30min) para shorts é melhor!
   min_bullish_candles: 1
-  min_bearish_candles: 1
+  min_bearish_candles: 2  # NOVO: 2 candles para shorts (era 1)
 
   # Short settings
   short_volume_threshold: 4.0
-  short_min_bearish_candles: 1
-  short_enabled: true  # 90d: Shorts são rentáveis em 15m (PF 2.21)!
+  short_min_bearish_candles: 2
+  short_enabled: true  # Shorts FUNCIONAM com OI real! PF 3.61
 
   # Regime detection
   market_regime_enabled: true
@@ -74,9 +76,11 @@ risk:
   max_position_size_usd: 100
   max_leverage: 2
   stop_loss_pct: 0.02
-  short_stop_loss_pct: 0.02  # 2% igual para shorts (funcionam!)
+  short_stop_loss_pct: 0.02  # 2% igual para shorts
+  # Trailing stop ativa SÓ depois de atingir este lucro mínimo
   trailing_activation_pct: 0.015  # 1.5%
-  trailing_stop_pct: 0.015  # 1.5% (90d ótimo vs 1.0% em 30d)
+  # ÓTIMO: 1.5% abaixo do máximo
+  trailing_stop_pct: 0.015  # 1.5%
   max_daily_trades: 5
 
 polling:

@@ -175,10 +175,10 @@ class BotDatabase:
             for candle in candles:
                 ts = candle['timestamp']
                 
-                # Buscar OI mais próximo
+                # Buscar OI mais próximo (janela de 1 hora = 3600000ms)
                 oi_row = conn.execute("""
                     SELECT oi_usd FROM open_interest 
-                    WHERE symbol = ? AND ABS(timestamp - ?) < 300000
+                    WHERE symbol = ? AND ABS(timestamp - ?) < 3600000
                     ORDER BY ABS(timestamp - ?) LIMIT 1
                 """, (symbol, ts, ts)).fetchone()
                 candle['oi'] = oi_row['oi_usd'] if oi_row else 0

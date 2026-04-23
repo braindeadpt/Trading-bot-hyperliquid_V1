@@ -36,8 +36,8 @@ class StrategyOptimizer:
             'stop_loss_pct': [0.02],
         }
         
-        # Timeframes a testar (para 90 dias, focar em 5m e 15m)
-        self.intervals = ['5m', '15m']
+        # Timeframes a testar (4 timeframes, 30 dias de dados OI real)
+        self.intervals = ['5m', '15m', '30m', '1h', '4h']
         
         # Filtros para eliminar combinações inválidas
         self.min_trades = 5
@@ -89,6 +89,7 @@ class StrategyOptimizer:
         
         prices = []
         volumes = []
+        oi_history = []  # Histórico de OI para calcular mudança
         
         for i, candle in enumerate(data):
             price = candle['close']
@@ -99,6 +100,7 @@ class StrategyOptimizer:
             
             prices.append(price)
             volumes.append(volume)
+            oi_history.append(oi)
             
             # Volume médio (lookback 100)
             if len(volumes) >= 100:
@@ -208,17 +210,21 @@ class StrategyOptimizer:
             
             # ENTRADA
             if current_position is None:
+                # Calcular OI change (se disponível)
+                oi_change = 0
+                if len(oi_history) >= 2 and oi > 0 and oi_history[-2] > 0:
+                    oi_change = (oi - oi_history[-2]) / oi_history[-2]
+                
                 # LONG
                 if price_above_sma and bullish_count >= params['min_bullish_candles']:
                     if volume_ratio >= params['volume_threshold'] and not funding_extreme:
+                        oi_ok = True
                         if oi > 0:
-                            # OI change não disponível em tempo real, usar threshold baixo
-                            if oi > 0:
-                                current_position = 'long'
-                        else:
-                            current_position = 'long'
+                            # Com OI: requer mudança positiva
+                            oi_ok = oi_change > params['oi_threshold']
                         
-                        if current_position == 'long':
+                        if oi_ok:
+                            current_position = 'long'
                             entry_price = price
                             position_size = min(max_position, capital * 0.1)
                             max_price = price
@@ -228,13 +234,13 @@ class StrategyOptimizer:
                 # SHORT
                 elif not price_above_sma and bearish_count >= params['min_bearish_candles']:
                     if volume_ratio >= params['volume_threshold'] and not funding_extreme:
+                        oi_ok = True
                         if oi > 0:
-                            if oi > 0:
-                                current_position = 'short'
-                        else:
-                            current_position = 'short'
+                            # Com OI: requer mudança positiva (mais OI = mais pressão, curto em pullbacks)
+                            oi_ok = oi_change > params['oi_threshold']
                         
-                        if current_position == 'short':
+                        if oi_ok:
+                            current_position = 'short'
                             entry_price = price
                             position_size = min(max_position, capital * 0.1)
                             max_price = price
