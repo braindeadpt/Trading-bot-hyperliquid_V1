@@ -236,6 +236,22 @@ class PaperTrader:
         self.latency_ms = 0
         self.last_check_time = 0
         
+        # ==================================================================
+        # MULTI-TIMEFRAME — TF Baixo para deteção rápida de spikes
+        # ==================================================================
+        self.secondary_tf = self.timeframes.get('secondary', '5m')  # 5m para confirmação rápida
+        self._mtf_thread = None
+        self._mtf_running = False
+        self._mtf_interval = 60  # segundos — busca candle 1m a cada minuto
+        self._low_tf_candles = deque(maxlen=100)  # Buffer de candles do TF baixo
+        self._last_mtf_signal = None  # Último sinal do TF baixo
+        self._mtf_cooldown = 0  # Evitar entradas duplicadas
+        
+        # Direção do TF alto (15m) — atualizada a cada 15min
+        self._htf_direction = None  # 'bull', 'bear', 'neutral'
+        self._htf_sma = 0
+        self._htf_price = 0
+        
         # Criar tabela de paper trades se não existir
         self._init_paper_trades_table()
     
@@ -289,6 +305,158 @@ class PaperTrader:
         )
         self._monitor_thread.start()
         logger.info(f"🚀 Monitor rápido iniciado: {self._monitor_interval}s intervalo")
+        
+        # Iniciar thread de multi-timeframe (TF baixo para spikes rápidos)
+        self._start_mtf_thread(asset)
+    
+    def _start_mtf_thread(self, asset: str):
+        """Inicia thread de multi-timeframe para detetar spikes no TF baixo"""
+        self._mtf_running = True
+        self._mtf_thread = threading.Thread(
+            target=self._mtf_loop,
+            args=(asset,),
+            daemon=True,
+            name="MultiTimeframe"
+        )
+        self._mtf_thread.start()
+        logger.info(f"📊 Multi-Timeframe iniciado: {self.secondary_tf} a cada {self._mtf_interval}s")
+    
+    def _mtf_loop(self, asset: str):
+        """Loop de multi-timeframe — busca candles do TF baixo e deteta spikes"""
+        while self._mtf_running:
+            try:
+                start_time = time.time()
+                self._process_low_tf_candle(asset)
+                elapsed = time.time() - start_time
+                
+                sleep_time = max(0, self._mtf_interval - elapsed)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                    
+            except Exception as e:
+                logger.error(f"Erro no MTF loop: {e}")
+                time.sleep(self._mtf_interval)
+    
+    def _process_low_tf_candle(self, asset: str):
+        """Processa candle do TF baixo (1m ou 5m) para detetar spikes em tempo real"""
+        try:
+            # Buscar candle do TF baixo
+            result = self._fetch_low_tf_candle(asset)
+            if not result:
+                return
+            
+            candle = result['candle']
+            self._low_tf_candles.append(candle)
+            
+            # Precisamos de pelo menos 20 candles para calcular média
+            if len(self._low_tf_candles) < 20:
+                return
+            
+            # Calcular volume ratio no TF baixo
+            volumes = [c['volume'] for c in self._low_tf_candles]
+            avg_volume = sum(volumes[-20:]) / 20
+            current_volume = candle['volume']
+            volume_ratio = current_volume / max(avg_volume, 1)
+            
+            price = candle['close']
+            
+            # Verificar se há direção do TF alto (15m)
+            if self._htf_direction is None:
+                return  # Ainda não temos direção do TF alto
+            
+            # Verificar cooldown (evitar entradas duplicadas)
+            current_time = time.time()
+            if current_time < self._mtf_cooldown:
+                return
+            
+            # Só entra se não estiver em posição
+            if self.current_position is not None:
+                return
+            
+            # DETETAR SPIKE NO TF BAIXO + CONFIRMAÇÃO TF ALTO
+            
+            # LONG: TF alto bullish + TF baixo volume spike + candle bullish
+            if self._htf_direction == 'bull' and volume_ratio >= self.tuner.volume_threshold:
+                # Verificar se candle é bullish
+                if price > candle['open']:
+                    # Verificar funding
+                    funding = candle.get('funding', 0)
+                    max_funding = self.config.get('strategy', {}).get('max_funding_rate', 0.01)
+                    min_funding = self.config.get('strategy', {}).get('min_funding_rate', -0.01)
+                    
+                    if not (funding > max_funding or funding < min_funding):
+                        logger.info(f"⚡ MTF SIGNAL: LONG spike no {self.secondary_tf}! "
+                                   f"Vol: {volume_ratio:.1f}x | Price: ${price:,.0f} | "
+                                   f"HTF: {self._htf_direction}")
+                        
+                        # ENTRAR IMEDIATAMENTE!
+                        with self._lock:
+                            self._enter_position(asset, 'long', price, candle, self._htf_direction)
+                        
+                        # Cooldown de 5 minutos para evitar re-entrada
+                        self._mtf_cooldown = current_time + 300
+            
+            # SHORT: TF alto bearish + TF baixo volume spike + candle bearish
+            elif self._htf_direction == 'bear' and volume_ratio >= self.tuner.volume_threshold:
+                if price < candle['open']:
+                    funding = candle.get('funding', 0)
+                    max_funding = self.config.get('strategy', {}).get('max_funding_rate', 0.01)
+                    min_funding = self.config.get('strategy', {}).get('min_funding_rate', -0.01)
+                    
+                    if not (funding > max_funding or funding < min_funding):
+                        logger.info(f"⚡ MTF SIGNAL: SHORT spike no {self.secondary_tf}! "
+                                   f"Vol: {volume_ratio:.1f}x | Price: ${price:,.0f} | "
+                                   f"HTF: {self._htf_direction}")
+                        
+                        with self._lock:
+                            self._enter_position(asset, 'short', price, candle, self._htf_direction)
+                        
+                        self._mtf_cooldown = current_time + 300
+            
+            # Log periódico do TF baixo
+            if len(self._low_tf_candles) % 10 == 0:
+                logger.info(f"📈 {self.secondary_tf} | Price: ${price:,.0f} | "
+                           f"Vol: {volume_ratio:.1f}x | HTF: {self._htf_direction} | "
+                           f"Candles: {len(self._low_tf_candles)}")
+                    
+        except Exception as e:
+            logger.warning(f"Erro no processamento MTF: {e}")
+    
+    def _fetch_low_tf_candle(self, asset: str) -> Optional[Dict]:
+        """Busca candle do timeframe baixo (1m ou 5m)"""
+        try:
+            # Usar data_aggregator para buscar preço atual
+            data = self.aggregator.fetch_all_data(asset)
+            if not data:
+                return None
+            
+            current_price = data.get('price', 0)
+            if current_price <= 0:
+                return None
+            
+            # Simular candle do TF baixo com dados atuais
+            # Em produção real, deveria buscar candles históricos do TF baixo
+            now = datetime.now()
+            
+            # Estimar OHLC do último período do TF baixo
+            # Na prática, precisaríamos de dados reais de 1m/5m
+            candle = {
+                'timestamp': int(now.timestamp() * 1000),
+                'time': now.strftime('%H:%M:%S'),
+                'open': current_price * 0.999,  # Simulado
+                'high': current_price * 1.001,
+                'low': current_price * 0.998,
+                'close': current_price,
+                'volume': data.get('volume_total', 0) / (1440 if self.secondary_tf == '1m' else 288),  # Estimativa
+                'oi': data.get('oi_total', 0),
+                'funding': data.get('funding_avg', 0)
+            }
+            
+            return {'candle': candle, 'data': data}
+            
+        except Exception as e:
+            logger.warning(f"Erro a buscar candle MTF: {e}")
+            return None
     
     def _monitor_loop(self, asset: str):
         """Loop de monitorização rápida — verifica preço a cada N segundos"""
@@ -762,8 +930,18 @@ class PaperTrader:
                 logger.info(f"A aguardar dados... {len(prices)}/20 candles")
                 return
             
-            # Detetar regime
+            # Detetar regime e guardar direção do TF alto (15m)
             regime = self._detect_market_regime(prices)
+            
+            # Atualizar direção do TF alto para a thread MTF
+            self._htf_sma = self._calculate_sma(prices, self.price_sma_period)
+            self._htf_price = price
+            if price > self._htf_sma * 1.005:
+                self._htf_direction = 'bull'
+            elif price < self._htf_sma * 0.995:
+                self._htf_direction = 'bear'
+            else:
+                self._htf_direction = 'neutral'
             
             # Verificar saída
             if self.current_position:
@@ -831,8 +1009,11 @@ class PaperTrader:
                 
         except KeyboardInterrupt:
             self._monitor_running = False
+            self._mtf_running = False
             if self._monitor_thread:
                 self._monitor_thread.join(timeout=2)
+            if self._mtf_thread:
+                self._mtf_thread.join(timeout=2)
             logger.info("\n" + "="*60)
             logger.info("PAPER TRADING PARADO")
             logger.info(f"Capital Final: ${self.capital:,.2f}")
