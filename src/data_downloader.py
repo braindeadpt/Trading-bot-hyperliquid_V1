@@ -1,6 +1,5 @@
 """
-Data Downloader - Descarrega dados históricos da Binance para backtest
-Binance API pública: gratuito, não precisa de autenticação
+Data Downloader v2 - Descarrega dados da Binance e guarda em CSV + SQLite
 """
 import requests
 import csv
@@ -20,21 +19,21 @@ class DataDownloader:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.base_url = "https://fapi.binance.com"
+        
+        # Importar database (lazy para evitar circular imports)
+        self._db = None
     
-    def download_candles(self, symbol: str, interval: str = "5m", 
-                         days_back: int = 30, end_time: Optional[datetime] = None) -> str:
-        """
-        Descarrega candles históricos da Binance Futures
-        
-        Args:
-            symbol: BTCUSDT, ETHUSDT, etc.
-            interval: 1m, 5m, 15m, 1h, 4h, 1d
-            days_back: Quantos dias de histórico
-            end_time: Data final (default: agora)
-        
-        Returns:
-            Path do ficheiro CSV guardado
-        """
+    @property
+    def db(self):
+        if self._db is None:
+            from database import BotDatabase
+            self._db = BotDatabase()
+        return self._db
+    
+    def download_candles(self, symbol: str, interval: str = "15m", 
+                         days_back: int = 30, end_time: Optional[datetime] = None,
+                         save_to_db: bool = True) -> str:
+        """Descarrega candles e guarda em CSV + SQLite"""
         if end_time is None:
             end_time = datetime.now()
         
@@ -49,7 +48,6 @@ class DataDownloader:
         all_candles = []
         current_start = start_ms
         
-        # Binance limita a 1500 candles por request
         while current_start < end_ms:
             try:
                 resp = requests.get(
@@ -69,11 +67,7 @@ class DataDownloader:
                     break
                 
                 all_candles.extend(candles)
-                
-                # Último candle timestamp + 1 intervalo
                 current_start = candles[-1][0] + 1
-                
-                # Rate limit: não exceder 1200 requests/min
                 time.sleep(0.05)
                 
             except Exception as e:
@@ -88,23 +82,36 @@ class DataDownloader:
                            'taker_buy_quote_volume', 'ignore'])
             writer.writerows(all_candles)
         
-        logger.info(f"Candles guardados: {filename} ({len(all_candles)} candles)")
+        logger.info(f"Candles CSV: {filename} ({len(all_candles)} candles)")
+        
+        # Guardar em SQLite
+        if save_to_db and all_candles:
+            formatted = []
+            for c in all_candles:
+                formatted.append({
+                    'timestamp': c[0],
+                    'open': float(c[1]),
+                    'high': float(c[2]),
+                    'low': float(c[3]),
+                    'close': float(c[4]),
+                    'volume': float(c[5])
+                })
+            
+            asset = symbol.replace('USDT', '')
+            self.db.save_candles(asset, interval, formatted)
+            logger.info(f"Candles SQLite: {len(formatted)} registos")
+        
         return str(filename)
     
     def download_open_interest_history(self, symbol: str, 
-                                       interval: str = "5m",
-                                       days_back: int = 30) -> str:
-        """
-        Descarrega histórico de Open Interest da Binance
+                                       interval: str = "15m",
+                                       days_back: int = 30,
+                                       save_to_db: bool = True) -> str:
+        """Descarrega OI history"""
+        # OI só suporta: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d
+        valid_oi_intervals = ['5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d']
+        oi_interval = interval if interval in valid_oi_intervals else '1h'
         
-        Args:
-            symbol: BTCUSDT, ETHUSDT
-            interval: 5m, 15m, 1h, 4h, 1d
-            days_back: Dias de histórico
-        
-        Returns:
-            Path do ficheiro CSV
-        """
         end_time = datetime.now()
         start_time = end_time - timedelta(days=days_back)
         start_ms = int(start_time.timestamp() * 1000)
@@ -123,7 +130,7 @@ class DataDownloader:
                     f"{self.base_url}/fapi/v1/openInterestHist",
                     params={
                         "symbol": symbol,
-                        "period": interval,
+                        "period": oi_interval,
                         "startTime": current_start,
                         "limit": 500
                     },
@@ -149,20 +156,25 @@ class DataDownloader:
                 writer.writeheader()
                 writer.writerows(all_data)
         
-        logger.info(f"OI guardado: {filename} ({len(all_data)} registos)")
+        logger.info(f"OI CSV: {filename} ({len(all_data)} registos)")
+        
+        # Guardar em SQLite
+        if save_to_db and all_data:
+            asset = symbol.replace('USDT', '')
+            for item in all_data:
+                self.db.save_oi(
+                    asset,
+                    int(item['timestamp']),
+                    float(item['sumOpenInterestValue']),
+                    'binance'
+                )
+            logger.info(f"OI SQLite: {len(all_data)} registos")
+        
         return str(filename)
     
-    def download_funding_rate_history(self, symbol: str, days_back: int = 30) -> str:
-        """
-        Descarrega histórico de Funding Rate da Binance
-        
-        Args:
-            symbol: BTCUSDT, ETHUSDT
-            days_back: Dias de histórico
-        
-        Returns:
-            Path do ficheiro CSV
-        """
+    def download_funding_rate_history(self, symbol: str, days_back: int = 30,
+                                     save_to_db: bool = True) -> str:
+        """Descarrega funding rate history"""
         end_time = datetime.now()
         start_time = end_time - timedelta(days=days_back)
         start_ms = int(start_time.timestamp() * 1000)
@@ -206,17 +218,25 @@ class DataDownloader:
                 writer.writeheader()
                 writer.writerows(all_data)
         
-        logger.info(f"Funding guardado: {filename} ({len(all_data)} registos)")
+        logger.info(f"Funding CSV: {filename} ({len(all_data)} registos)")
+        
+        # Guardar em SQLite
+        if save_to_db and all_data:
+            asset = symbol.replace('USDT', '')
+            for item in all_data:
+                self.db.save_funding(
+                    asset,
+                    int(item['fundingTime']),
+                    float(item['fundingRate']),
+                    'binance'
+                )
+            logger.info(f"Funding SQLite: {len(all_data)} registos")
+        
         return str(filename)
     
-    def download_all(self, symbol: str = "BTCUSDT", interval: str = "5m", 
+    def download_all(self, symbol: str = "BTCUSDT", interval: str = "15m", 
                      days_back: int = 30) -> List[str]:
-        """
-        Descarrega tudo (candles + OI + funding) para um symbol
-        
-        Returns:
-            Lista de paths dos ficheiros descarregados
-        """
+        """Descarrega tudo para um symbol"""
         files = []
         
         files.append(self.download_candles(symbol, interval, days_back))
@@ -229,14 +249,20 @@ class DataDownloader:
 if __name__ == "__main__":
     import sys
     
-    # CLI simples
     symbol = sys.argv[1] if len(sys.argv) > 1 else "BTCUSDT"
     days = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+    interval = sys.argv[3] if len(sys.argv) > 3 else "15m"
     
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
     
     dl = DataDownloader()
-    dl.download_all(symbol, days_back=days)
+    dl.download_all(symbol, interval, days_back=days)
     
-    print(f"\nDados descarregados para {symbol} ({days} dias)")
-    print(f"Diretório: {dl.data_dir.absolute()}")
+    print(f"\n{'='*60}")
+    print(f"✅ Dados descarregados para {symbol} ({days} dias, {interval})")
+    print(f"   CSV: {dl.data_dir}")
+    print(f"   SQLite: {dl.db.db_path}")
+    print(f"{'='*60}")

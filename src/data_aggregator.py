@@ -1,12 +1,37 @@
 """
-Data Aggregator - Agrega OI, Volume e Funding Rate de múltiplas exchanges
+Data Aggregator v2 - Com retry logic, validação de respostas e cache
 """
 import requests
 import time
+import json
+from functools import wraps
 from typing import Dict, Optional, List
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def retry_on_failure(max_retries=3, backoff_seconds=2):
+    """Decorator que retry com backoff exponencial"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    wait_time = backoff_seconds * (2 ** attempt)
+                    logger.warning(
+                        f"{func.__name__} falhou (tentativa {attempt+1}/{max_retries}): {e}. "
+                        f"Aguardando {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+            logger.error(f"{func.__name__} falhou após {max_retries} tentativas: {last_exception}")
+            raise last_exception
+        return wrapper
+    return decorator
 
 
 class DataAggregator:
@@ -15,14 +40,84 @@ class DataAggregator:
     def __init__(self, config: Dict):
         self.config = config
         self.sources = config.get('data_sources', {})
-        self.last_oi = {}  # cache do último OI por exchange
+        self.last_oi = {}
         self.last_update = 0
+        self._price_cache = {}  # Cache do último preço válido
+        self._cache_timestamp = 0
         
+        # Headers padrão para evitar bloqueios
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+    
+    def validate_api(self, source_name: str) -> bool:
+        """Testa se uma API está respondendo corretamente antes de usar"""
+        try:
+            if source_name == 'binance':
+                resp = self.session.get(
+                    "https://fapi.binance.com/fapi/v1/ping",
+                    timeout=5
+                )
+                return resp.status_code == 200
+            
+            elif source_name == 'bybit':
+                resp = self.session.get(
+                    "https://api.bybit.com/v5/market/time",
+                    timeout=5
+                )
+                data = resp.json()
+                return data.get('retCode') == 0
+            
+            elif source_name == 'okx':
+                resp = self.session.get(
+                    "https://www.okx.com/api/v5/public/time",
+                    timeout=5
+                )
+                data = resp.json()
+                return data.get('code') == '0'
+            
+            elif source_name == 'hyperliquid':
+                resp = self.session.post(
+                    "https://api.hyperliquid.xyz/info",
+                    json={"type": "meta"},
+                    headers={"Content-Type": "application/json"},
+                    timeout=5
+                )
+                # Hyperliquid meta retorna lista de tokens
+                return resp.status_code == 200 and len(resp.text) > 10
+            
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Validação falhou para {source_name}: {e}")
+            return False
+    
+    def test_all_apis(self) -> Dict[str, bool]:
+        """Testa todas as APIs configuradas e retorna status"""
+        results = {}
+        logger.info("="*60)
+        logger.info("TESTANDO APIs...")
+        
+        for name, cfg in self.sources.items():
+            if not cfg.get('enabled', False):
+                results[name] = False
+                logger.info(f"  {name}: DISABLED (config)")
+                continue
+            
+            is_ok = self.validate_api(name)
+            results[name] = is_ok
+            status = "✅ OK" if is_ok else "❌ FAIL"
+            logger.info(f"  {name}: {status}")
+        
+        ok_count = sum(1 for v in results.values() if v)
+        logger.info(f"  APIs funcionais: {ok_count}/{len(results)}")
+        logger.info("="*60)
+        
+        return results
+    
     def fetch_all_data(self, asset: str) -> Optional[Dict]:
-        """
-        Busca OI global agregado de todas as exchanges configuradas
-        Retorna: dict com oi_total, oi_change_pct, volume_total, funding_avg
-        """
+        """Busca dados agregados de todas as exchanges"""
         results = {
             'oi_total': 0,
             'oi_change_pct': 0,
@@ -34,11 +129,12 @@ class DataAggregator:
         
         valid_sources = 0
         funding_values = []
+        prices = []
         
         for source_name, source_config in self.sources.items():
             if not source_config.get('enabled', False):
                 continue
-                
+            
             try:
                 if source_name == 'binance':
                     data = self._fetch_binance(asset)
@@ -52,12 +148,13 @@ class DataAggregator:
                     continue
                 
                 if data:
-                    weight = source_config.get('weight', 0.25)
                     results['exchanges_data'][source_name] = data
                     results['oi_total'] += data.get('oi_usd', 0)
                     results['volume_total'] += data.get('volume_24h', 0)
                     if data.get('funding_rate') is not None:
                         funding_values.append(data['funding_rate'])
+                    if data.get('mark_price', 0) > 0:
+                        prices.append(data['mark_price'])
                     valid_sources += 1
                     
             except Exception as e:
@@ -67,66 +164,113 @@ class DataAggregator:
         if valid_sources == 0:
             logger.error("Nenhuma exchange respondeu!")
             return None
-            
-        # Calcular funding médio
+        
+        # Funding médio
         if funding_values:
             results['funding_avg'] = sum(funding_values) / len(funding_values)
         
-        # Calcular variação de OI (comparar com leitura anterior)
+        # Variação de OI
         if self.last_oi:
             oi_old = sum(self.last_oi.values())
             if oi_old > 0:
                 results['oi_change_pct'] = (results['oi_total'] - oi_old) / oi_old
         
-        # Guardar para próxima comparação
-        self.last_oi = {k: v.get('oi_usd', 0) for k, v in results['exchanges_data'].items()}
-        self.last_update = time.time()
+        # Guardar cache
+        self.last_oi = {
+            k: v.get('oi_usd', 0) 
+            for k, v in results['exchanges_data'].items()
+        }
         
+        # Guardar preço médio no cache
+        if prices:
+            self._price_cache[asset] = sum(prices) / len(prices)
+            self._cache_timestamp = time.time()
+        
+        self.last_update = time.time()
         return results
     
+    def get_cached_price(self, asset: str, max_age_seconds: int = 300) -> float:
+        """Retorna preço do cache se for recente"""
+        if asset in self._price_cache:
+            age = time.time() - self._cache_timestamp
+            if age < max_age_seconds:
+                return self._price_cache[asset]
+        return 0
+    
+    def _safe_json(self, response: requests.Response, source_name: str) -> Optional[Dict]:
+        """Extrai JSON de forma segura, com logging detalhado"""
+        if response.status_code != 200:
+            logger.warning(
+                f"{source_name} HTTP {response.status_code}: {response.text[:200]}"
+            )
+            return None
+        
+        if not response.text or response.text.strip() == '':
+            logger.warning(f"{source_name} resposta vazia")
+            return None
+        
+        # Verificar se é HTML (Cloudflare block, error page, etc.)
+        text_start = response.text.strip()[:20].lower()
+        if text_start.startswith('<!doctype') or text_start.startswith('<html'):
+            logger.warning(f"{source_name} retornou HTML em vez de JSON! (Cloudflare block?)")
+            return None
+        
+        try:
+            return response.json()
+        except json.JSONDecodeError as e:
+            logger.warning(
+                f"{source_name} JSON inválido: {e} | "
+                f"Primeiros 100 chars: {response.text[:100]}"
+            )
+            return None
+    
+    @retry_on_failure(max_retries=2, backoff_seconds=1)
     def _fetch_binance(self, asset: str) -> Optional[Dict]:
-        """Busca OI e funding da Binance Futures"""
+        """Busca dados da Binance Futures"""
         base_url = self.sources['binance']['base_url']
         symbol = f"{asset}USDT"
         
         # Open Interest
-        oi_resp = requests.get(
+        resp = self.session.get(
             f"{base_url}/fapi/v1/openInterest",
             params={"symbol": symbol},
             timeout=10
         )
-        oi_resp.raise_for_status()
-        oi_data = oi_resp.json()
+        oi_data = self._safe_json(resp, 'binance')
+        if not oi_data:
+            return None
         
-        # Mark Price (para calcular OI em USD)
-        price_resp = requests.get(
+        # Mark Price
+        resp = self.session.get(
             f"{base_url}/fapi/v1/premiumIndex",
             params={"symbol": symbol},
             timeout=10
         )
-        price_data = price_resp.json()
-        mark_price = float(price_data.get('markPrice', 0))
+        price_data = self._safe_json(resp, 'binance')
+        mark_price = float(price_data.get('markPrice', 0)) if price_data else 0
         
         oi_contracts = float(oi_data.get('openInterest', 0))
         oi_usd = oi_contracts * mark_price
         
-        # Funding Rate
-        funding_resp = requests.get(
+        # Funding
+        resp = self.session.get(
             f"{base_url}/fapi/v1/fundingRate",
             params={"symbol": symbol, "limit": 1},
             timeout=10
         )
-        funding_data = funding_resp.json()
-        funding_rate = float(funding_data[0].get('fundingRate', 0)) if funding_data else None
+        funding_data = self._safe_json(resp, 'binance')
+        funding_rate = None
+        if funding_data and isinstance(funding_data, list) and len(funding_data) > 0:
+            funding_rate = float(funding_data[0].get('fundingRate', 0))
         
-        # 24h Volume
-        ticker_resp = requests.get(
+        # Volume
+        resp = self.session.get(
             f"{base_url}/fapi/v1/ticker/24hr",
             params={"symbol": symbol},
             timeout=10
         )
-        ticker_data = ticker_resp.json()
-        volume = float(ticker_data.get('volume', 0)) * mark_price
+        ticker_data = self._safe_json(resp, 'binance')
+        volume = float(ticker_data.get('volume', 0)) * mark_price if ticker_data else 0
         
         return {
             'oi_usd': oi_usd,
@@ -135,87 +279,83 @@ class DataAggregator:
             'mark_price': mark_price
         }
     
+    @retry_on_failure(max_retries=2, backoff_seconds=1)
     def _fetch_bybit(self, asset: str) -> Optional[Dict]:
-        """Busca OI e funding da Bybit"""
+        """Busca dados da Bybit"""
         base_url = self.sources['bybit']['base_url']
         symbol = f"{asset}USDT"
         
-        # Open Interest
-        oi_resp = requests.get(
-            f"{base_url}/v5/market/recent-trade",
-            params={"category": "linear", "symbol": symbol, "limit": 1},
-            timeout=10
-        )
-        
-        # Usar endpoint alternativo para OI
-        oi_resp = requests.get(
+        resp = self.session.get(
             f"{base_url}/v5/market/tickers",
             params={"category": "linear", "symbol": symbol},
             timeout=10
         )
-        oi_data = oi_resp.json()
+        data = self._safe_json(resp, 'bybit')
         
-        if oi_data.get('retCode') != 0:
+        if not data or data.get('retCode') != 0:
             return None
-            
-        result = oi_data['result']['list'][0]
-        oi_usd = float(result.get('openInterest', 0)) * float(result.get('lastPrice', 0))
-        funding_rate = float(result.get('fundingRate', 0))
-        volume = float(result.get('volume24h', 0))
+        
+        result = data['result']['list'][0]
+        last_price = float(result.get('lastPrice', 0))
+        oi_contracts = float(result.get('openInterest', 0))
+        oi_usd = oi_contracts * last_price
         
         return {
             'oi_usd': oi_usd,
-            'funding_rate': funding_rate,
-            'volume_24h': volume,
-            'mark_price': float(result.get('lastPrice', 0))
+            'funding_rate': float(result.get('fundingRate', 0)),
+            'volume_24h': float(result.get('volume24h', 0)),
+            'mark_price': last_price
         }
     
+    @retry_on_failure(max_retries=2, backoff_seconds=1)
     def _fetch_okx(self, asset: str) -> Optional[Dict]:
-        """Busca OI e funding da OKX"""
+        """Busca dados da OKX"""
         base_url = self.sources['okx']['base_url']
         symbol = f"{asset}-USDT-SWAP"
         
-        # Open Interest
-        oi_resp = requests.get(
+        # OI
+        resp = self.session.get(
             f"{base_url}/api/v5/public/open-interest",
             params={"instType": "SWAP", "instId": symbol},
             timeout=10
         )
-        oi_data = oi_resp.json()
+        oi_data = self._safe_json(resp, 'okx')
         
-        if oi_data.get('code') != '0':
+        if not oi_data or oi_data.get('code') != '0':
             return None
-            
+        
         oi_contracts = float(oi_data['data'][0].get('oi', 0))
         
         # Mark Price
-        price_resp = requests.get(
+        resp = self.session.get(
             f"{base_url}/api/v5/public/mark-price",
             params={"instType": "SWAP", "instId": symbol},
             timeout=10
         )
-        price_data = price_resp.json()
-        mark_price = float(price_data['data'][0].get('markPx', 0))
+        price_data = self._safe_json(resp, 'okx')
+        mark_price = float(price_data['data'][0].get('markPx', 0)) if price_data else 0
         
         oi_usd = oi_contracts * mark_price
         
-        # Funding Rate
-        funding_resp = requests.get(
+        # Funding
+        resp = self.session.get(
             f"{base_url}/api/v5/public/funding-rate",
             params={"instId": symbol},
             timeout=10
         )
-        funding_data = funding_resp.json()
-        funding_rate = float(funding_data['data'][0].get('fundingRate', 0)) if funding_data.get('data') else None
+        funding_data = self._safe_json(resp, 'okx')
+        funding_rate = None
+        if funding_data and funding_data.get('data'):
+            funding_rate = float(funding_data['data'][0].get('fundingRate', 0))
         
         # Volume
-        ticker_resp = requests.get(
+        resp = self.session.get(
             f"{base_url}/api/v5/market/tickers",
             params={"instType": "SWAP", "instId": symbol},
             timeout=10
         )
-        ticker_data = ticker_resp.json()
-        volume = float(ticker_data['data'][0].get('volCcy24h', 0)) if ticker_data.get('data') else 0
+        ticker_data = self._safe_json(resp, 'okx')
+        volume = float(ticker_data['data'][0].get('volCcy24h', 0)) if ticker_data else 0
         
         return {
             'oi_usd': oi_usd,
@@ -224,37 +364,113 @@ class DataAggregator:
             'mark_price': mark_price
         }
     
+    @retry_on_failure(max_retries=3, backoff_seconds=2)
     def _fetch_hyperliquid(self, asset: str) -> Optional[Dict]:
-        """Busca preço da Hyperliquid (OI e funding não disponíveis na API pública /info)"""
+        """Busca preço da Hyperliquid com retry e validação robusta"""
         base_url = self.sources['hyperliquid']['base_url']
         
         try:
-            # Só buscar preço - allMids funciona na API pública
-            mkt_resp = requests.post(
+            # Usar allMids para preço de mercado
+            resp = self.session.post(
                 f"{base_url}/info",
                 json={"type": "allMids"},
                 headers={"Content-Type": "application/json"},
-                timeout=10
+                timeout=15  # Timeout maior para Hyperliquid
             )
             
-            mark_price = 0
-            if mkt_resp.status_code == 200 and mkt_resp.text:
-                mkt_data = mkt_resp.json()
-                mark_price = float(mkt_data.get(asset, 0))
+            # Verificar resposta antes de tentar JSON
+            if resp.status_code != 200:
+                logger.warning(
+                    f"Hyperliquid HTTP {resp.status_code}: "
+                    f"{resp.text[:200] if resp.text else 'empty'}"
+                )
+                return self._fallback_price(asset)
             
-            # Hyperliquid /info NÃO tem fundingRates nem openInterest públicos
-            # Funding e OI vêm de Binance + Bybit + OKX
-            return {
-                'oi_usd': 0,  # Não disponível na API pública Hyperliquid
-                'funding_rate': None,  # Não disponível na API pública Hyperliquid
-                'volume_24h': 0,  # Não disponível na API pública Hyperliquid
-                'mark_price': mark_price
-            }
-        except Exception as e:
-            logger.warning(f"Erro Hyperliquid price: {e}")
+            # Tentar parse JSON
+            try:
+                data = resp.json()
+            except json.JSONDecodeError as e:
+                # Verificar se é HTML (Cloudflare, error page, etc.)
+                text_preview = resp.text[:100].lower()
+                if '<html' in text_preview or '<!doctype' in text_preview:
+                    logger.warning("Hyperliquid retornou HTML - possível Cloudflare block")
+                else:
+                    logger.warning(f"Hyperliquid JSON inválido: {e} | Preview: {resp.text[:100]}")
+                return self._fallback_price(asset)
+            
+            # Extrair preço do asset
+            if isinstance(data, dict):
+                mark_price = float(data.get(asset, 0))
+            else:
+                logger.warning(f"Hyperliquid resposta inesperada: {type(data)}")
+                return self._fallback_price(asset)
+            
+            if mark_price > 0:
+                # Guardar no cache
+                self._price_cache[asset] = mark_price
+                self._cache_timestamp = time.time()
+            
+            # Hyperliquid não tem OI/funding públicos - usamos outras exchanges
             return {
                 'oi_usd': 0,
                 'funding_rate': None,
                 'volume_24h': 0,
-                'mark_price': 0
+                'mark_price': mark_price
             }
+            
+        except Exception as e:
+            logger.warning(f"Hyperliquid erro: {e}")
+            return self._fallback_price(asset)
+    
+    def _fallback_price(self, asset: str) -> Dict:
+        """Retorna preço do cache quando a API falha"""
+        cached = self.get_cached_price(asset, max_age_seconds=600)
+        if cached > 0:
+            logger.info(f"Usando preço em cache para {asset}: ${cached:,.2f}")
+            return {
+                'oi_usd': 0,
+                'funding_rate': None,
+                'volume_24h': 0,
+                'mark_price': cached
+            }
+        return {
+            'oi_usd': 0,
+            'funding_rate': None,
+            'volume_24h': 0,
+            'mark_price': 0
+        }
+
+
+def test_apis_command():
+    """Comando CLI para testar APIs"""
+    import sys
+    from pathlib import Path
+    
+    # Adicionar src ao path
+    sys.path.insert(0, str(Path(__file__).parent))
+    from utils import load_config
+    
+    logging.basicConfig(level=logging.INFO)
+    
+    config = load_config()
+    agg = DataAggregator(config)
+    results = agg.test_all_apis()
+    
+    print("\n" + "="*60)
+    print("RESULTADO DOS TESTES:")
+    for name, ok in results.items():
+        status = "✅ FUNCIONAL" if ok else "❌ INDISPONÍVEL"
+        print(f"  {name}: {status}")
+    
+    ok_count = sum(1 for v in results.values() if v)
+    print(f"\nTotal: {ok_count}/{len(results)} APIs OK")
+    
+    if ok_count == 0:
+        print("\n⚠️  NENHUMA API FUNCIONAL! Verifica a internet/conexão.")
+        return 1
+    
+    return 0
+
+
+if __name__ == "__main__":
+    exit(test_apis_command())
