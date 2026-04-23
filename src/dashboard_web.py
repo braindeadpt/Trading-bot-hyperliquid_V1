@@ -297,7 +297,9 @@ class WebDashboard:
                 last_trade_pnl=self.last_trade_pnl,
                 last_trade_time=self.last_trade_time,
                 last_update=self.last_update,
-                poll_interval=self.poll_interval
+                poll_interval=self.poll_interval,
+                min=min,
+                max=max
             )
         
         @self.app.route("/api/data")
