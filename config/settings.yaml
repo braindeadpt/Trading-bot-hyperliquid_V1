@@ -34,9 +34,9 @@ data_sources:
 
 strategy:
   # Volume spike threshold (% acima da média)
-  # 2.0 = 200% do volume médio (adequado para 5m)
-  # 5m tem mais volatilidade, por isso threshold menor que 15m
-  volume_spike_threshold: 2.0
+  # 2.5 = 250% do volume médio (só entra em spikes MUITO fortes)
+  # Mais filtragem = menos trades, melhor qualidade
+  volume_spike_threshold: 2.5
 
   # OI change threshold (% em 1 minuto)
   oi_change_threshold: 0.015  # 1.5%
