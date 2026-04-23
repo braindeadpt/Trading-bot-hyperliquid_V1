@@ -364,75 +364,140 @@ class DataAggregator:
             'mark_price': mark_price
         }
     
+    def _get_sanity_range(self, asset: str) -> tuple:
+        """Retorna (min, max) aceitáveis para validação de preço"""
+        ranges = {
+            'BTC': (10000.0, 200000.0),
+            'ETH': (500.0, 20000.0),
+            'SOL': (10.0, 1000.0),
+        }
+        return ranges.get(asset, (0.01, 100000.0))
+    
+    def _is_price_sane(self, asset: str, price: float) -> bool:
+        """Valida se o preço está num range realista"""
+        min_val, max_val = self._get_sanity_range(asset)
+        sane = min_val <= price <= max_val
+        if not sane and price > 0:
+            logger.error(
+                f"🚨 PREÇO INSANO detectado! {asset}=${price:,.2f} "
+                f"(esperado: ${min_val:,.0f}-${max_val:,.0f})"
+            )
+        return sane
+
     @retry_on_failure(max_retries=3, backoff_seconds=2)
     def _fetch_hyperliquid(self, asset: str) -> Optional[Dict]:
-        """Busca preço da Hyperliquid com retry e validação robusta"""
+        """Busca preço da Hyperliquid — MÉTODO ROBUSTO com fallback multi-API"""
         base_url = self.sources['hyperliquid']['base_url']
         
+        # ─── MÉTODO 1: allMids ───
         try:
-            # Usar allMids para preço de mercado
             resp = self.session.post(
                 f"{base_url}/info",
                 json={"type": "allMids"},
                 headers={"Content-Type": "application/json"},
-                timeout=15  # Timeout maior para Hyperliquid
+                timeout=15
             )
             
-            # Verificar resposta antes de tentar JSON
-            if resp.status_code != 200:
-                logger.warning(
-                    f"Hyperliquid HTTP {resp.status_code}: "
-                    f"{resp.text[:200] if resp.text else 'empty'}"
-                )
-                return self._fallback_price(asset)
-            
-            # Tentar parse JSON
-            try:
-                data = resp.json()
-            except json.JSONDecodeError as e:
-                # Verificar se é HTML (Cloudflare, error page, etc.)
-                text_preview = resp.text[:100].lower()
-                if '<html' in text_preview or '<!doctype' in text_preview:
-                    logger.warning("Hyperliquid retornou HTML - possível Cloudflare block")
-                else:
-                    logger.warning(f"Hyperliquid JSON inválido: {e} | Preview: {resp.text[:100]}")
-                return self._fallback_price(asset)
-            
-            # Extrair preço do asset
-            if isinstance(data, dict):
-                mark_price = float(data.get(asset, 0))
-            else:
-                logger.warning(f"Hyperliquid resposta inesperada: {type(data)}")
-                return self._fallback_price(asset)
-            
-            if mark_price > 0:
-                # Guardar no cache
-                self._price_cache[asset] = mark_price
-                self._cache_timestamp = time.time()
-            
-            # Hyperliquid não tem OI/funding públicos - usamos outras exchanges
-            return {
-                'oi_usd': 0,
-                'funding_rate': None,
-                'volume_24h': 0,
-                'mark_price': mark_price
-            }
-            
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    if isinstance(data, dict) and asset in data:
+                        raw = data[asset]
+                        mark_price = float(raw) if raw else 0
+                        logger.info(
+                            f"📡 [allMids] {asset} raw='{raw}' → ${mark_price:,.2f}"
+                        )
+                        
+                        if mark_price > 0 and self._is_price_sane(asset, mark_price):
+                            self._price_cache[asset] = mark_price
+                            self._cache_timestamp = time.time()
+                            return {
+                                'oi_usd': 0,
+                                'funding_rate': None,
+                                'volume_24h': 0,
+                                'mark_price': mark_price
+                            }
+                        elif mark_price > 0:
+                            logger.warning(f"⚠️ allMids deu preço insano, tentando método 2...")
+                    else:
+                        logger.warning(f"⚠️ allMids: {asset} não encontrado em dict com {len(data)} keys")
+                except Exception as e:
+                    logger.warning(f"⚠️ allMids parse falhou: {e}")
         except Exception as e:
-            logger.warning(f"Hyperliquid erro: {e}")
-            return self._fallback_price(asset)
-    
+            logger.warning(f"⚠️ allMids request falhou: {e}")
+        
+        # ─── MÉTODO 2: metaAndAssetCtxs (match por índice) ───
+        try:
+            resp = self.session.post(
+                f"{base_url}/info",
+                json={"type": "metaAndAssetCtxs"},
+                headers={"Content-Type": "application/json"},
+                timeout=15
+            )
+            
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    if isinstance(data, list) and len(data) >= 2:
+                        meta = data[0]
+                        ctxs = data[1]
+                        
+                        # Match por índice na universe
+                        universe = meta.get('universe', [])
+                        for idx, u in enumerate(universe):
+                            if isinstance(u, dict) and u.get('name') == asset:
+                                if idx < len(ctxs):
+                                    ctx = ctxs[idx]
+                                    # Tentar midPx, markPx, oraclePx nesta ordem
+                                    for px_key in ['midPx', 'markPx', 'oraclePx']:
+                                        raw = ctx.get(px_key)
+                                        if raw:
+                                            try:
+                                                mark_price = float(raw)
+                                                logger.info(
+                                                    f"📡 [metaAndAssetCtxs] {asset} "
+                                                    f"{px_key}='{raw}' → ${mark_price:,.2f}"
+                                                )
+                                                if self._is_price_sane(asset, mark_price):
+                                                    self._price_cache[asset] = mark_price
+                                                    self._cache_timestamp = time.time()
+                                                    return {
+                                                        'oi_usd': 0,
+                                                        'funding_rate': None,
+                                                        'volume_24h': 0,
+                                                        'mark_price': mark_price
+                                                    }
+                                            except:
+                                                continue
+                                break
+                        logger.warning(f"⚠️ metaAndAssetCtxs: {asset} não encontrado/match")
+                except Exception as e:
+                    logger.warning(f"⚠️ metaAndAssetCtxs parse falhou: {e}")
+        except Exception as e:
+            logger.warning(f"⚠️ metaAndAssetCtxs request falhou: {e}")
+        
+        # ─── FALLBACK: cache ───
+        return self._fallback_price(asset)
+
     def _fallback_price(self, asset: str) -> Dict:
         """Retorna preço do cache quando a API falha"""
-        cached = self.get_cached_price(asset, max_age_seconds=600)
+        cached = self.get_cached_price(asset, max_age_seconds=120)  # 2 min max
         if cached > 0:
-            logger.info(f"Usando preço em cache para {asset}: ${cached:,.2f}")
-            return {
-                'oi_usd': 0,
-                'funding_rate': None,
-                'volume_24h': 0,
-                'mark_price': cached
-            }
+            # Validar cache também
+            if self._is_price_sane(asset, cached):
+                logger.warning(
+                    f"⚠️ APIs falharam — usando CACHE para {asset}: ${cached:,.2f} "
+                    f"(idade: {time.time() - self._cache_timestamp:.0f}s)"
+                )
+                return {
+                    'oi_usd': 0,
+                    'funding_rate': None,
+                    'volume_24h': 0,
+                    'mark_price': cached
+                }
+            else:
+                logger.error(f"🚨 Cache também tem preço insano! Ignorando.")
+        logger.error(f"❌ Sem preço válido para {asset}! Dashboard mostrará 0")
         return {
             'oi_usd': 0,
             'funding_rate': None,
