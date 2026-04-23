@@ -44,6 +44,7 @@ class BacktestEngineDB:
         
         # TRAILING STOP
         self.trailing_stop_pct = risk.get('trailing_stop_pct', 0.015)  # 1.5% abaixo do máximo
+        self.trailing_activation_pct = risk.get('trailing_activation_pct', 0.015)  # Só ativa após este lucro
         
         # Estado do backtest
         self.trades = []
@@ -59,6 +60,7 @@ class BacktestEngineDB:
         # Trailing stop tracking
         self.max_price_since_entry = 0
         self.trailing_stop_price = 0
+        self.trailing_active = False  # Só ativa depois de atingir lucro mínimo
         
         # Métricas
         self.initial_capital = 10000.0
@@ -182,29 +184,47 @@ class BacktestEngineDB:
             
             # SINAL DE SAÍDA
             elif self.current_position == 'long':
-                # Atualizar trailing stop
+                # Calcular lucro atual
+                gain_pct = (price - self.entry_price) / self.entry_price
+                
+                # Atualizar máximo
                 if price > self.max_price_since_entry:
                     self.max_price_since_entry = price
-                    self.trailing_stop_price = price * (1 - self.trailing_stop_pct)
-                    
-                    # Log quando trailing stop sobe
-                    gain_pct = (price - self.entry_price) / self.entry_price
-                    if gain_pct > 0.02:  # Só logar quando temos lucro significativo
-                        dt = datetime.fromtimestamp(timestamp / 1000)
-                        logger.info(
-                            f"[{dt}] 🎯 NOVO MÁXIMO ${price:,.2f} | "
-                            f"Trailing stop ajustado: ${self.trailing_stop_price:,.2f} | "
-                            f"Lucro atual: +{gain_pct*100:.1f}%"
-                        )
                 
-                # 1. Stop loss inicial (se ainda não subiu o trailing)
-                loss_pct = (self.entry_price - price) / self.entry_price
-                if loss_pct >= self.stop_loss_pct and price < self.trailing_stop_price:
-                    self._exit_position(symbol, price, timestamp, 'STOP_LOSS')
-                    continue
+                # Verificar se trailing stop deve ativar
+                if gain_pct >= self.trailing_activation_pct and not self.trailing_active:
+                    self.trailing_active = True
+                    self.trailing_stop_price = self.max_price_since_entry * (1 - self.trailing_stop_pct)
+                    dt = datetime.fromtimestamp(timestamp / 1000)
+                    logger.info(
+                        f"[{dt}] 🚀 TRAILING STOP ATIVADO! Lucro: +{gain_pct*100:.1f}% | "
+                        f"Stop: ${self.trailing_stop_price:,.2f}"
+                    )
                 
-                # 2. Trailing stop (se já subiu acima do entry)
-                if price <= self.trailing_stop_price and self.max_price_since_entry > self.entry_price:
+                # Atualizar trailing stop se ativo
+                if self.trailing_active:
+                    new_trailing = self.max_price_since_entry * (1 - self.trailing_stop_pct)
+                    if new_trailing > self.trailing_stop_price:
+                        self.trailing_stop_price = new_trailing
+                        
+                        # Log quando trailing sobe significativamente
+                        if gain_pct > 0.02:
+                            dt = datetime.fromtimestamp(timestamp / 1000)
+                            logger.info(
+                                f"[{dt}] 🎯 NOVO MÁXIMO ${price:,.2f} | "
+                                f"Trailing: ${self.trailing_stop_price:,.2f} | "
+                                f"Lucro atual: +{gain_pct*100:.1f}%"
+                            )
+                
+                # 1. Stop loss inicial (se trailing ainda não ativou)
+                if not self.trailing_active:
+                    loss_pct = (self.entry_price - price) / self.entry_price
+                    if loss_pct >= self.stop_loss_pct:
+                        self._exit_position(symbol, price, timestamp, 'STOP_LOSS')
+                        continue
+                
+                # 2. Trailing stop (só se já ativou)
+                if self.trailing_active and price <= self.trailing_stop_price:
                     self._exit_position(symbol, price, timestamp, 'TRAILING_STOP')
                     continue
             
@@ -239,6 +259,7 @@ class BacktestEngineDB:
         # Inicializar trailing stop tracking
         self.max_price_since_entry = price
         self.trailing_stop_price = price * (1 - self.stop_loss_pct)
+        self.trailing_active = False  # Começa desativado, ativa após lucro mínimo
         
         # Tamanho da posição (10% do capital, max position size)
         position_size = min(self.max_position_usd, self.current_capital * 0.1)
