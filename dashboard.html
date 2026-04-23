@@ -404,16 +404,31 @@
   <div id="sidebar-left" class="panel">
     <h2>Configuração</h2>
 
-    <!-- Connection -->
-    <div class="field-group">
-      <div class="field-group-title">🔗 Ligação Hyperliquid</div>
+      <!-- Paper Trading Toggle — PRIMEIRO, destaque! -->
+    <div class="field" style="display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:10px;background:rgba(0,255,136,0.08);border:1px solid var(--border-bright);border-radius:0">
+      <label class="toggle">
+        <input type="checkbox" id="paper-trading" checked onchange="togglePaperMode()">
+        <span class="toggle-slider"></span>
+        <span class="toggle-label" id="paper-label"><b>🧪 PAPER TRADING — Simulação Virtual</b></span>
+      </label>
+    </div>
+    <div id="paper-banner" style="font-size:10px;color:var(--accent);line-height:1.6;margin-bottom:14px;padding:8px;background:rgba(0,255,136,0.03);border-left:2px solid var(--accent)">
+      ✅ Modo simulação — <b>não precisas de carteira Hyperliquid</b><br>
+      ✅ Capital virtual: $10,000 | Dados em tempo real via APIs públicas<br>
+      ✅ Zero risco — testa à vontade!<br>
+      💡 Para tradear com dinheiro real, desliga o Paper Trading e preenche os dados abaixo.
+    </div>
+
+    <!-- Connection — DESATIVADO quando Paper Trading ON -->
+    <div class="field-group" id="connection-group" style="opacity:0.35;pointer-events:none;filter:grayscale(0.6)">
+      <div class="field-group-title">🔒 Ligação Hyperliquid <span style="color:var(--warn);font-size:9px">(Só Real Trading)</span></div>
       <div class="field">
-        <label>Account Wallet Address <span style="color:var(--danger)">*</span></label>
+        <label>Account Wallet Address</label>
         <input type="text" id="wallet-address" placeholder="0x... (endereço público da tua conta)" maxlength="66">
         <small>Endereço público da conta principal (clica no teu nome no topo direito da Hyperliquid)</small>
       </div>
       <div class="field">
-        <label>API Wallet Private Key <span style="color:var(--danger)">*</span></label>
+        <label>API Wallet Private Key</label>
         <input type="password" id="private-key" placeholder="0x... (64 chars)" maxlength="66">
         <small>Chave privada da API Wallet (More ▸ API ▸ Generate ▸ Authorize)</small>
       </div>
@@ -479,13 +494,6 @@
       <div class="field">
         <label>Leverage (x)</label>
         <input type="number" id="leverage" value="2" min="1" max="50" step="1">
-      </div>
-      <div class="field" style="display:flex;align-items:center;gap:10px">
-        <label class="toggle">
-          <input type="checkbox" id="paper-trading" checked>
-          <span class="toggle-slider"></span>
-          <span class="toggle-label">Paper Trading</span>
-        </label>
       </div>
     </div>
 
@@ -772,16 +780,25 @@
 
     <h2 style="margin-top:14px">ℹ️ Ajuda</h2>
     <div style="font-size:10px;color:var(--fg-dim);line-height:1.6">
-      <p><b style="color:var(--accent)">Como configurar:</b></p>
-      <p>1. Vai a <a href="https://app.hyperliquid.xyz/API" target="_blank" style="color:var(--accent2)">app.hyperliquid.xyz/API</a></p>
-      <p>2. Cria API Wallet (More ▸ API)</p>
-      <p>3. Copia Private Key para cá</p>
-      <p>4. Copia Account Address (topo direito)</p>
-      <p>5. Clica "Guardar" ▸ "Iniciar Bot"</p>
-      <p style="margin-top:8px"><b style="color:var(--warn)">⚠️ Segurança:</b></p>
+      <p><b style="color:var(--accent)">🧪 Paper Trading (Recomendado para começar):</b></p>
+      <p>1. Ativa "Paper Trading" (já está ativo por defeito)</p>
+      <p>2. Escolhe o asset (BTC/ETH/SOL)</p>
+      <p>3. Ajusta capital virtual se quiseres</p>
+      <p>4. Clica "Iniciar Bot" — já está!</p>
+      <p>✅ Não precisas de conta Hyperliquid</p>
+      <p>✅ Não precisas de depositar dinheiro</p>
+      <p>✅ Testa à vontade com $10,000 virtuais</p>
+
+      <p style="margin-top:10px"><b style="color:var(--accent2)">💰 Real Trading (Quando estiveres pronto):</b></p>
+      <p>1. Desativa "Paper Trading"</p>
+      <p>2. Vai a <a href="https://app.hyperliquid.xyz/API" target="_blank" style="color:var(--accent2)">app.hyperliquid.xyz/API</a></p>
+      <p>3. Cria API Wallet (More ▸ API ▸ Generate)</p>
+      <p>4. Copia Private Key e Account Address</p>
+      <p>5. Preenche os campos de ligação</p>
+      <p>6. Clica "Testar Ligação" ▸ "Iniciar Bot"</p>
+
+      <p style="margin-top:10px"><b style="color:var(--warn)">⚠️ Segurança:</b></p>
       <p>API Wallet NÃO pode fazer withdrawals. Mas pode perder dinheiro a tradear. Só deposita o que podes perder.</p>
-      <p style="margin-top:8px"><b style="color:var(--accent)">🧪 Paper Trading:</b></p>
-      <p>Com Paper ON, o bot simula trades sem usar dinheiro real. Capital virtual = $10,000.</p>
     </div>
   </div>
 </div>
@@ -984,16 +1001,60 @@ async function testConnection() {
   res.classList.remove('hidden');
 }
 
+// ===== PAPER MODE TOGGLE =====
+function togglePaperMode() {
+  const isPaper = $('paper-trading').checked;
+  const connGroup = $('connection-group');
+  const banner = $('paper-banner');
+  const label = $('paper-label');
+  const paperStatus = $('paper-status');
+
+  if (isPaper) {
+    connGroup.style.opacity = '0.35';
+    connGroup.style.pointerEvents = 'none';
+    connGroup.style.filter = 'grayscale(0.6)';
+    banner.style.display = 'block';
+    label.innerHTML = '<b>🧪 PAPER TRADING — Simulação Virtual</b>';
+    paperStatus.textContent = 'ON';
+    paperStatus.style.color = 'var(--accent)';
+    log('🧪 Paper Trading ATIVADO — Sem credenciais necessárias', 'info');
+  } else {
+    connGroup.style.opacity = '1';
+    connGroup.style.pointerEvents = 'auto';
+    connGroup.style.filter = 'none';
+    banner.style.display = 'none';
+    label.innerHTML = '<b>💰 REAL TRADING — Dinheiro Real</b>';
+    paperStatus.textContent = 'OFF';
+    paperStatus.style.color = 'var(--danger)';
+    log('💰 Real Trading ATIVADO — Credenciais necessárias!', 'warn');
+  }
+}
+
 // ===== BOT CONTROL =====
 function startBot() {
   if (botRunning) { log('⚠️ Bot já está a correr', 'warn'); return; }
 
-  const wallet = $('wallet-address').value.trim();
-  const key = $('private-key').value.trim();
-  if (!wallet || !key) {
-    log('❌ Preenche Wallet Address e Private Key antes de iniciar', 'error');
-    alert('Preenche os campos de ligação Hyperliquid antes de iniciar!');
-    return;
+  const isPaper = $('paper-trading').checked;
+
+  // Só exige credenciais se NÃO estiver em Paper Trading
+  if (!isPaper) {
+    const wallet = $('wallet-address').value.trim();
+    const key = $('private-key').value.trim();
+    if (!wallet || !key) {
+      log('❌ Preenche Wallet Address e Private Key antes de iniciar (Real Trading)', 'error');
+      alert('Preenche os campos de ligação Hyperliquid antes de iniciar!\n\nOu ativa Paper Trading para simular sem credenciais.');
+      return;
+    }
+    if (!wallet.startsWith('0x') || wallet.length !== 42) {
+      log('❌ Wallet Address inválido', 'error');
+      alert('Wallet Address inválido. Deve começar com 0x e ter 42 caracteres.');
+      return;
+    }
+    if (!key.startsWith('0x') || key.length !== 66) {
+      log('❌ Private Key inválido', 'error');
+      alert('Private Key inválido. Deve começar com 0x e ter 66 caracteres (0x + 64 hex).');
+      return;
+    }
   }
 
   botRunning = true;
@@ -1003,9 +1064,18 @@ function startBot() {
   $('bot-text').textContent = 'RUNNING';
   $('btn-close').disabled = false;
 
-  log('🚀 BOT INICIADO! Asset: ' + $('asset').value + ' | TF: ' + $('timeframe').value + ' | Paper: ' + ($('paper-trading').checked ? 'ON' : 'OFF'), 'signal');
-  log('📡 Ligação: ' + ($('network').value === 'testnet' ? 'Testnet' : 'Mainnet'), 'info');
+  if (isPaper) {
+    log('🚀 BOT INICIADO EM PAPER TRADING! 🧪', 'signal');
+    log('📡 Dados via APIs públicas (Binance) — Sem ligação Hyperliquid', 'info');
+    $('conn-dot').className = 'status-dot on';
+    $('conn-text').textContent = 'Paper Mode';
+  } else {
+    log('🚀 BOT INICIADO EM REAL TRADING! 💰', 'signal');
+    log('📡 Ligação: ' + ($('network').value === 'testnet' ? 'Testnet' : 'Mainnet'), 'info');
+  }
+
   log('💰 Capital: ' + fmt$(parseFloat($('capital').value)) + ' | Size: ' + fmt$(parseFloat($('position-size').value)) + ' | Leverage: ' + $('leverage').value + 'x', 'info');
+  log('⏱️ Primary TF: ' + $('timeframe').value + ' | MTF: ' + $('secondary-tf').value, 'info');
 
   // Start polling dashboard API
   startPolling();
@@ -1327,6 +1397,9 @@ window.addEventListener('DOMContentLoaded', () => {
     catch (e) { console.error(e); }
   }
 
+  // Ensure paper mode UI is correct on load
+  togglePaperMode();
+
   // Render empty equity chart
   renderEquity();
 
@@ -1337,8 +1410,8 @@ window.addEventListener('DOMContentLoaded', () => {
   log('║  HYPERLIQUID MOMENTUM BOT v0.1.0     ║', 'info');
   log('║  Terminal Cypherpunk Inicializado   ║', 'info');
   log('╚═══════════════════════════════════════╝', 'info');
-  log('💡 Preenche os campos de ligação e clica "Iniciar Bot"', 'warn');
-  log('🔗 API Hyperliquid: https://app.hyperliquid.xyz/API', 'info');
+  log('🧪 Paper Trading está ATIVO — podes iniciar sem credenciais!', 'signal');
+  log('💡 Escolhe o asset e clica "Iniciar Bot" para começar', 'info');
 });
 
 window.addEventListener('resize', renderEquity);
