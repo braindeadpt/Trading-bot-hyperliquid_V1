@@ -652,13 +652,14 @@ class PaperTrader:
         except Exception as e:
             logger.error(f"Erro no ciclo de trading: {e}")
     
-    def run_continuous(self, asset: str = 'BTC', interval_seconds: int = 300):
-        """Corre em loop contínuo"""
+    def run_continuous(self, asset: str = 'BTC', interval_seconds: int = 900):
+        """Corre em loop contínuo - default 15m (900s) para timeframe 15m"""
         logger.info("="*60)
         logger.info("PAPER TRADING INICIADO")
         logger.info(f"Capital: ${self.initial_capital:,.2f}")
         logger.info(f"Asset: {asset}")
-        logger.info(f"Intervalo: {interval_seconds}s")
+        logger.info(f"Timeframe: {self.primary_tf}")
+        logger.info(f"Intervalo: {interval_seconds}s ({interval_seconds//60}m)")
         logger.info("="*60)
         
         try:

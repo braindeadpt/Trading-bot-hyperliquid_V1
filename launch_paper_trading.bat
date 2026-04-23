@@ -1,15 +1,10 @@
 @echo off
-cls
-echo ==========================================
-echo  🤖 HYPERLIQUID PAPER TRADING BOT
-echo ==========================================
+echo ============================================
+echo  PAPER TRADING - Hyperliquid Bot
+echo  Asset: BTC | Timeframe: 15m
+echo  Capital: $10,000 (virtual)
+echo ============================================
 echo.
-echo Capital Virtual: $10,000
-echo Asset: BTC
-echo Intervalo: 5 minutos
-echo.
-echo [Ctrl+C para parar]
-echo.
-python src\paper_trading.py
-echo.
+cd /d "%~dp0"
+python src/paper_trading.py
 pause
