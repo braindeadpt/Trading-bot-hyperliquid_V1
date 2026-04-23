@@ -40,6 +40,7 @@ class BacktestEngineDB:
         # Filtros separados para short (mais apertados)
         self.short_volume_threshold = strat.get('short_volume_threshold', 3.0)
         self.short_min_bearish_candles = strat.get('short_min_bearish_candles', 3)
+        self.short_enabled = strat.get('short_enabled', True)
         
         # Configurações de risco
         risk = config.get('risk', {})
@@ -190,7 +191,7 @@ class BacktestEngineDB:
                 short_volume_ok = volume_ratio > self.short_volume_threshold
                 short_bearish_ok = self.bearish_count >= self.short_min_bearish_candles
                 
-                if not price_above_sma and short_bearish_ok and short_volume_ok and funding_ok and price > 0:
+                if self.short_enabled and not price_above_sma and short_bearish_ok and short_volume_ok and funding_ok and price > 0:
                     if oi > 0:
                         if oi_change < -self.oi_threshold:
                             self._enter_short(symbol, price, timestamp, volume_ratio, oi_change, funding)

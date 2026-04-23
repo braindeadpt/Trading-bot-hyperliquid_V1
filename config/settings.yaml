@@ -69,6 +69,11 @@ strategy:
   # 3 candles = 15 minutos de confirmação (vs 10 min para long)
   short_min_bearish_candles: 3
 
+  # ATIVAR/DESATIVAR shorts
+  # Em bull market: false (focar só em longs)
+  # Em bear market: true (reativar quando mercado virar)
+  short_enabled: false
+
 risk:
   max_position_size_usd: 100
   max_leverage: 2
