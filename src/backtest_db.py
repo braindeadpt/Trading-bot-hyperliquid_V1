@@ -42,6 +42,9 @@ class BacktestEngineDB:
         self.max_position_usd = risk.get('max_position_size_usd', 500)
         self.max_leverage = risk.get('max_leverage', 3)
         
+        # TRAILING STOP
+        self.trailing_stop_pct = risk.get('trailing_stop_pct', 0.015)  # 1.5% abaixo do máximo
+        
         # Estado do backtest
         self.trades = []
         self.equity = []
@@ -52,6 +55,10 @@ class BacktestEngineDB:
         self.price_history = deque(maxlen=self.price_sma_period)
         self.last_oi = 0
         self.bullish_count = 0  # Contador de candles bullish consecutivos
+        
+        # Trailing stop tracking
+        self.max_price_since_entry = 0
+        self.trailing_stop_price = 0
         
         # Métricas
         self.initial_capital = 10000.0
@@ -137,10 +144,16 @@ class BacktestEngineDB:
             if i % 500 == 0:
                 dt = datetime.fromtimestamp(timestamp / 1000)
                 trend_status = "✅ ACIMA_SMA" if price_above_sma else "❌ ABAIXO_SMA"
+                
+                # Mostrar trailing stop se em posição
+                trailing_info = ""
+                if self.current_position:
+                    trailing_info = f" | Trail: ${self.trailing_stop_price:,.0f}"
+                
                 logger.info(
                     f"[{dt}] ${price:,.0f} | Vol: {volume_ratio:.2f}x | "
                     f"SMA{self.price_sma_period}: ${price_sma:,.0f} | {trend_status} | "
-                    f"Bullish: {self.bullish_count}x"
+                    f"Bullish: {self.bullish_count}x{trailing_info}"
                 )
             
             # SINAL DE ENTRADA LONG (com ou sem OI)
@@ -169,20 +182,31 @@ class BacktestEngineDB:
             
             # SINAL DE SAÍDA
             elif self.current_position == 'long':
-                # Stop loss
+                # Atualizar trailing stop
+                if price > self.max_price_since_entry:
+                    self.max_price_since_entry = price
+                    self.trailing_stop_price = price * (1 - self.trailing_stop_pct)
+                    
+                    # Log quando trailing stop sobe
+                    gain_pct = (price - self.entry_price) / self.entry_price
+                    if gain_pct > 0.02:  # Só logar quando temos lucro significativo
+                        dt = datetime.fromtimestamp(timestamp / 1000)
+                        logger.info(
+                            f"[{dt}] 🎯 NOVO MÁXIMO ${price:,.2f} | "
+                            f"Trailing stop ajustado: ${self.trailing_stop_price:,.2f} | "
+                            f"Lucro atual: +{gain_pct*100:.1f}%"
+                        )
+                
+                # 1. Stop loss inicial (se ainda não subiu o trailing)
                 loss_pct = (self.entry_price - price) / self.entry_price
-                if loss_pct >= self.stop_loss_pct:
+                if loss_pct >= self.stop_loss_pct and price < self.trailing_stop_price:
                     self._exit_position(symbol, price, timestamp, 'STOP_LOSS')
                     continue
                 
-                # Take profit (2x risk)
-                gain_pct = (price - self.entry_price) / self.entry_price
-                if gain_pct >= 0.04:
-                    self._exit_position(symbol, price, timestamp, 'TAKE_PROFIT')
+                # 2. Trailing stop (se já subiu acima do entry)
+                if price <= self.trailing_stop_price and self.max_price_since_entry > self.entry_price:
+                    self._exit_position(symbol, price, timestamp, 'TRAILING_STOP')
                     continue
-                
-                # Opcional: Trailing stop (desativado por padrão)
-                # Implementar se necessário
             
             # Guardar equity curve a cada candle
             self.equity.append({
@@ -212,6 +236,10 @@ class BacktestEngineDB:
         self.entry_price = price
         self.entry_time = timestamp
         
+        # Inicializar trailing stop tracking
+        self.max_price_since_entry = price
+        self.trailing_stop_price = price * (1 - self.stop_loss_pct)
+        
         # Tamanho da posição (10% do capital, max position size)
         position_size = min(self.max_position_usd, self.current_capital * 0.1)
         
@@ -222,7 +250,8 @@ class BacktestEngineDB:
         dt = datetime.fromtimestamp(timestamp / 1000)
         logger.info(
             f"[ENTER LONG {symbol}] {dt} @ ${price:,.2f} | Size: ${position_size:.2f} | "
-            f"Vol: {volume_ratio:.2f}x | OI: +{oi_change*100:.2f}%"
+            f"Vol: {volume_ratio:.2f}x | OI: +{oi_change*100:.2f}% | "
+            f"Trailing: ${self.trailing_stop_price:,.2f}"
         )
         
         self.trades.append({
@@ -278,8 +307,13 @@ class BacktestEngineDB:
             self.losing_trades += 1
         
         dt = datetime.fromtimestamp(timestamp / 1000)
+        
+        # Emoji baseado no resultado
+        emoji = "✅" if pnl_usd > 0 else "❌"
+        
         logger.info(
-            f"[EXIT {symbol}] {dt} @ ${price:,.2f} | PnL: ${pnl_usd:+.2f} ({pnl_pct*100:+.2f}%) | "
+            f"[{emoji} EXIT {symbol}] {dt} @ ${price:,.2f} | "
+            f"PnL: ${pnl_usd:+.2f} ({pnl_pct*100:+.2f}%) | "
             f"Reason: {reason} | Capital: ${self.current_capital:,.2f}"
         )
         
@@ -294,11 +328,15 @@ class BacktestEngineDB:
             'size_usd': position_size,
             'pnl_usd': pnl_usd,
             'pnl_pct': pnl_pct,
-            'exit_reason': reason
+            'exit_reason': reason,
+            'max_price_reached': self.max_price_since_entry
         })
         
+        # Reset trailing stop
         self.current_position = None
         self.entry_price = 0
+        self.max_price_since_entry = 0
+        self.trailing_stop_price = 0
     
     def _calculate_metrics(self) -> Dict:
         """Calcula métricas finais"""
