@@ -61,10 +61,19 @@ strategy:
   # Mesmo critério — 2 candles de 5m = 10 minutos
   min_bearish_candles: 2
 
+  # Threshold separado para SHORTS (mais apertado)
+  # Shorts são mais arriscados em bull market, filtrar só os MELHORES
+  short_volume_threshold: 3.0
+
+  # Mínimo de candles bearish para SHORT (mais apertado)
+  # 3 candles = 15 minutos de confirmação (vs 10 min para long)
+  short_min_bearish_candles: 3
+
 risk:
   max_position_size_usd: 100
   max_leverage: 2
   stop_loss_pct: 0.02  # 2%
+  short_stop_loss_pct: 0.025  # 2.5% para shorts (mais margem)
   # Trailing stop ativa SÓ depois de atingir este lucro mínimo
   trailing_activation_pct: 0.015  # 1.5% - só ativa trailing depois disto
   trailing_stop_pct: 0.015  # 1.5% abaixo do máximo

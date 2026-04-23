@@ -37,9 +37,14 @@ class BacktestEngineDB:
         self.min_bullish_candles = strat.get('min_bullish_candles', 2)
         self.min_bearish_candles = strat.get('min_bearish_candles', 2)
         
+        # Filtros separados para short (mais apertados)
+        self.short_volume_threshold = strat.get('short_volume_threshold', 3.0)
+        self.short_min_bearish_candles = strat.get('short_min_bearish_candles', 3)
+        
         # Configurações de risco
         risk = config.get('risk', {})
         self.stop_loss_pct = risk.get('stop_loss_pct', 0.02)
+        self.short_stop_loss_pct = risk.get('short_stop_loss_pct', 0.025)
         self.max_position_usd = risk.get('max_position_size_usd', 500)
         self.max_leverage = risk.get('max_leverage', 3)
         
@@ -181,8 +186,11 @@ class BacktestEngineDB:
                     else:
                         self._enter_long(symbol, price, timestamp, volume_ratio, 0, funding)
                 
-                # SHORT: Tendência de baixa + candles bearish
-                elif not price_above_sma and self.bearish_count >= self.min_bearish_candles and volume_ok and funding_ok and price > 0:
+                # SHORT: Tendência de baixa + candles bearish (filtros MAIS apertados)
+                short_volume_ok = volume_ratio > self.short_volume_threshold
+                short_bearish_ok = self.bearish_count >= self.short_min_bearish_candles
+                
+                if not price_above_sma and short_bearish_ok and short_volume_ok and funding_ok and price > 0:
                     if oi > 0:
                         if oi_change < -self.oi_threshold:
                             self._enter_short(symbol, price, timestamp, volume_ratio, oi_change, funding)
@@ -243,7 +251,7 @@ class BacktestEngineDB:
                 
                 if not self.trailing_active:
                     loss_pct = (price - self.entry_price) / self.entry_price
-                    if loss_pct >= self.stop_loss_pct:
+                    if loss_pct >= self.short_stop_loss_pct:
                         self._exit_position(symbol, price, timestamp, 'STOP_LOSS')
                         continue
                 
@@ -321,7 +329,7 @@ class BacktestEngineDB:
         # Inicializar trailing stop tracking para short
         self.max_price_since_entry = price
         self.min_price_since_entry = price
-        self.trailing_stop_price = price * (1 + self.stop_loss_pct)
+        self.trailing_stop_price = price * (1 + self.short_stop_loss_pct)
         self.trailing_active = False
         
         # Tamanho da posição (10% do capital)
@@ -534,13 +542,13 @@ class BacktestEngineDB:
         shorts = metrics.get('shorts', {})
         
         if longs.get('count', 0) > 0:
-            print(f"📈 LONGS:            {longs['count']:>12} trades")
+            print(f"[LONGS]              {longs['count']:>12} trades")
             print(f"  Win Rate:          {longs['win_rate']:>11.1f}%")
             print(f"  Profit Factor:     {longs['profit_factor']:>12.2f}")
             print(f"  PnL:               ${longs['pnl']:>12,.2f}")
         
         if shorts.get('count', 0) > 0:
-            print(f"📉 SHORTS:           {shorts['count']:>12} trades")
+            print(f"[SHORTS]             {shorts['count']:>12} trades")
             print(f"  Win Rate:          {shorts['win_rate']:>11.1f}%")
             print(f"  Profit Factor:     {shorts['profit_factor']:>12.2f}")
             print(f"  PnL:               ${shorts['pnl']:>12,.2f}")
