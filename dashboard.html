@@ -390,7 +390,7 @@
     </div>
     <div style="text-align:center">
       <div class="title">HYPERLIQUID MOMENTUM BOT</div>
-      <div class="version">v0.1.0 | Paper Trading: <span id="paper-status">ON</span> | MTF: <span id="mtf-status">ON</span></div>
+      <div class="version">v0.1.0 | Network: <span id="paper-status">ON (Testnet)</span> | MTF: <span id="mtf-status">ON</span></div>
     </div>
     <div class="status-bar">
       <span><span class="status-dot on" id="conn-dot"></span>Hyperliquid: <span id="conn-text">Disconnected</span></span>
@@ -404,24 +404,16 @@
   <div id="sidebar-left" class="panel">
     <h2>Configuração</h2>
 
-      <!-- Paper Trading Toggle — PRIMEIRO, destaque! -->
-    <div class="field" style="display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:10px;background:rgba(0,255,136,0.08);border:1px solid var(--border-bright);border-radius:0">
-      <label class="toggle">
-        <input type="checkbox" id="paper-trading" checked onchange="togglePaperMode()">
-        <span class="toggle-slider"></span>
-        <span class="toggle-label" id="paper-label"><b>🧪 PAPER TRADING — Simulação Virtual</b></span>
-      </label>
-    </div>
+      <!-- Network Mode Banner — Testnet vs Mainnet define o modo -->
     <div id="paper-banner" style="font-size:10px;color:var(--accent);line-height:1.6;margin-bottom:14px;padding:8px;background:rgba(0,255,136,0.03);border-left:2px solid var(--accent)">
-      ✅ Modo simulação — <b>não precisas de carteira Hyperliquid</b><br>
+      ✅ <b>Network = Testnet</b> → Modo simulação — <b>não precisas de carteira</b><br>
       ✅ Capital virtual: $10,000 | Dados em tempo real via APIs públicas<br>
-      ✅ Zero risco — testa à vontade!<br>
-      💡 Para tradear com dinheiro real, desliga o Paper Trading e preenche os dados abaixo.
+      ✅ Zero risco — testa à vontade!
     </div>
 
-    <!-- Connection — DESATIVADO quando Paper Trading ON -->
+    <!-- Connection — DESATIVADO quando Testnet selecionado -->
     <div class="field-group" id="connection-group" style="opacity:0.35;pointer-events:none;filter:grayscale(0.6)">
-      <div class="field-group-title">🔒 Ligação Hyperliquid <span style="color:var(--warn);font-size:9px">(Só Real Trading)</span></div>
+      <div class="field-group-title">🔒 Ligação Hyperliquid <span style="color:var(--warn);font-size:9px">(Só Mainnet)</span></div>
       <div class="field">
         <label>Account Wallet Address</label>
         <input type="text" id="wallet-address" placeholder="0x... (endereço público da tua conta)" maxlength="66">
@@ -780,8 +772,8 @@
 
     <h2 style="margin-top:14px">ℹ️ Ajuda</h2>
     <div style="font-size:10px;color:var(--fg-dim);line-height:1.6">
-      <p><b style="color:var(--accent)">🧪 Paper Trading (Recomendado para começar):</b></p>
-      <p>1. Ativa "Paper Trading" (já está ativo por defeito)</p>
+      <p><b style="color:var(--accent)">🧪 Testnet — Simulação (Recomendado para começar):</b></p>
+      <p>1. Network = "Testnet" (já está por defeito)</p>
       <p>2. Escolhe o asset (BTC/ETH/SOL)</p>
       <p>3. Ajusta capital virtual se quiseres</p>
       <p>4. Clica "Iniciar Bot" — já está!</p>
@@ -789,13 +781,14 @@
       <p>✅ Não precisas de depositar dinheiro</p>
       <p>✅ Testa à vontade com $10,000 virtuais</p>
 
-      <p style="margin-top:10px"><b style="color:var(--accent2)">💰 Real Trading (Quando estiveres pronto):</b></p>
-      <p>1. Desativa "Paper Trading"</p>
-      <p>2. Vai a <a href="https://app.hyperliquid.xyz/API" target="_blank" style="color:var(--accent2)">app.hyperliquid.xyz/API</a></p>
-      <p>3. Cria API Wallet (More ▸ API ▸ Generate)</p>
-      <p>4. Copia Private Key e Account Address</p>
-      <p>5. Preenche os campos de ligação</p>
-      <p>6. Clica "Testar Ligação" ▸ "Iniciar Bot"</p>
+      <p style="margin-top:10px"><b style="color:var(--accent2)">💰 Mainnet — Real Trading:</b></p>
+      <p>1. Muda Network para "Mainnet"</p>
+      <p>2. Campos de ligação ativam-se automaticamente</p>
+      <p>3. Vai a <a href="https://app.hyperliquid.xyz/API" target="_blank" style="color:var(--accent2)">app.hyperliquid.xyz/API</a></p>
+      <p>4. Cria API Wallet (More ▸ API ▸ Generate)</p>
+      <p>5. Copia Private Key e Account Address</p>
+      <p>6. Preenche os campos de ligação</p>
+      <p>7. Clica "Testar Ligação" ▸ "Iniciar Bot"</p>
 
       <p style="margin-top:10px"><b style="color:var(--warn)">⚠️ Segurança:</b></p>
       <p>API Wallet NÃO pode fazer withdrawals. Mas pode perder dinheiro a tradear. Só deposita o que podes perder.</p>
@@ -846,7 +839,7 @@ function saveConfig() {
       capital: parseFloat($('capital').value),
       position_size: parseFloat($('position-size').value),
       leverage: parseInt($('leverage').value),
-      paper_trading: $('paper-trading').checked
+      network: $('network').value
     },
     strategy: {
       volume_spike_threshold: parseFloat($('vol-threshold').value),
@@ -905,7 +898,10 @@ function applyConfig(cfg) {
     if (t.capital) $('capital').value = t.capital;
     if (t.position_size) $('position-size').value = t.position_size;
     if (t.leverage) $('leverage').value = t.leverage;
-    if (t.paper_trading !== undefined) $('paper-trading').checked = t.paper_trading;
+    if (t.network) {
+      $('network').value = t.network;
+      updateNetworkMode();
+    }
   }
   if (cfg.strategy) {
     const s = cfg.strategy;
@@ -1001,32 +997,32 @@ async function testConnection() {
   res.classList.remove('hidden');
 }
 
-// ===== PAPER MODE TOGGLE =====
-function togglePaperMode() {
-  const isPaper = $('paper-trading').checked;
+// ===== NETWORK MODE CONTROL =====
+function updateNetworkMode() {
+  const net = $('network').value;
   const connGroup = $('connection-group');
   const banner = $('paper-banner');
-  const label = $('paper-label');
   const paperStatus = $('paper-status');
 
-  if (isPaper) {
+  if (net === 'testnet') {
     connGroup.style.opacity = '0.35';
     connGroup.style.pointerEvents = 'none';
     connGroup.style.filter = 'grayscale(0.6)';
+    banner.innerHTML = '✅ <b>Network = Testnet</b> → Modo simulação — <b>não precisas de carteira</b><br>✅ Capital virtual: $10,000 | Dados em tempo real via APIs públicas<br>✅ Zero risco — testa à vontade!';
     banner.style.display = 'block';
-    label.innerHTML = '<b>🧪 PAPER TRADING — Simulação Virtual</b>';
-    paperStatus.textContent = 'ON';
+    paperStatus.textContent = 'ON (Testnet)';
     paperStatus.style.color = 'var(--accent)';
-    log('🧪 Paper Trading ATIVADO — Sem credenciais necessárias', 'info');
+    log('🧪 Modo Testnet — Simulação sem credenciais', 'info');
   } else {
     connGroup.style.opacity = '1';
     connGroup.style.pointerEvents = 'auto';
     connGroup.style.filter = 'none';
-    banner.style.display = 'none';
-    label.innerHTML = '<b>💰 REAL TRADING — Dinheiro Real</b>';
-    paperStatus.textContent = 'OFF';
+    banner.innerHTML = '💰 <b>Network = Mainnet</b> → <b>Dinheiro REAL!</b><br>⚠️ Preenche os campos de ligação antes de iniciar.<br>⚠️ Só deposita o que podes perder.';
+    banner.style.borderLeftColor = 'var(--warn)';
+    banner.style.color = 'var(--warn)';
+    paperStatus.textContent = 'OFF (Mainnet)';
     paperStatus.style.color = 'var(--danger)';
-    log('💰 Real Trading ATIVADO — Credenciais necessárias!', 'warn');
+    log('💰 Modo Mainnet — Credenciais necessárias', 'warn');
   }
 }
 
@@ -1034,15 +1030,15 @@ function togglePaperMode() {
 function startBot() {
   if (botRunning) { log('⚠️ Bot já está a correr', 'warn'); return; }
 
-  const isPaper = $('paper-trading').checked;
+  const isTestnet = $('network').value === 'testnet';
 
-  // Só exige credenciais se NÃO estiver em Paper Trading
-  if (!isPaper) {
+  // Só exige credenciais se Mainnet
+  if (!isTestnet) {
     const wallet = $('wallet-address').value.trim();
     const key = $('private-key').value.trim();
     if (!wallet || !key) {
-      log('❌ Preenche Wallet Address e Private Key antes de iniciar (Real Trading)', 'error');
-      alert('Preenche os campos de ligação Hyperliquid antes de iniciar!\n\nOu ativa Paper Trading para simular sem credenciais.');
+      log('❌ Preenche Wallet Address e Private Key antes de iniciar (Mainnet)', 'error');
+      alert('Preenche os campos de ligação Hyperliquid antes de iniciar!\n\nOu muda Network para Testnet para simular sem credenciais.');
       return;
     }
     if (!wallet.startsWith('0x') || wallet.length !== 42) {
@@ -1064,14 +1060,14 @@ function startBot() {
   $('bot-text').textContent = 'RUNNING';
   $('btn-close').disabled = false;
 
-  if (isPaper) {
-    log('🚀 BOT INICIADO EM PAPER TRADING! 🧪', 'signal');
+  if (isTestnet) {
+    log('🚀 BOT INICIADO EM TESTNET! 🧪', 'signal');
     log('📡 Dados via APIs públicas (Binance) — Sem ligação Hyperliquid', 'info');
     $('conn-dot').className = 'status-dot on';
-    $('conn-text').textContent = 'Paper Mode';
+    $('conn-text').textContent = 'Testnet';
   } else {
-    log('🚀 BOT INICIADO EM REAL TRADING! 💰', 'signal');
-    log('📡 Ligação: ' + ($('network').value === 'testnet' ? 'Testnet' : 'Mainnet'), 'info');
+    log('🚀 BOT INICIADO EM MAINNET! 💰', 'signal');
+    log('📡 Ligação real à Hyperliquid', 'info');
   }
 
   log('💰 Capital: ' + fmt$(parseFloat($('capital').value)) + ' | Size: ' + fmt$(parseFloat($('position-size').value)) + ' | Leverage: ' + $('leverage').value + 'x', 'info');
@@ -1397,8 +1393,11 @@ window.addEventListener('DOMContentLoaded', () => {
     catch (e) { console.error(e); }
   }
 
-  // Ensure paper mode UI is correct on load
-  togglePaperMode();
+  // Network dropdown listener — muda modo automaticamente
+  $('network').addEventListener('change', updateNetworkMode);
+
+  // Ensure mode UI is correct on load
+  updateNetworkMode();
 
   // Render empty equity chart
   renderEquity();
@@ -1410,8 +1409,9 @@ window.addEventListener('DOMContentLoaded', () => {
   log('║  HYPERLIQUID MOMENTUM BOT v0.1.0     ║', 'info');
   log('║  Terminal Cypherpunk Inicializado   ║', 'info');
   log('╚═══════════════════════════════════════╝', 'info');
-  log('🧪 Paper Trading está ATIVO — podes iniciar sem credenciais!', 'signal');
+  log('🧪 Testnet ativo — podes iniciar sem credenciais!', 'signal');
   log('💡 Escolhe o asset e clica "Iniciar Bot" para começar', 'info');
+  log('💰 Para real trading: muda Network para Mainnet', 'info');
 });
 
 window.addEventListener('resize', renderEquity);
