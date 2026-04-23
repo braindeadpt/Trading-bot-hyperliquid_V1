@@ -319,24 +319,36 @@ class WebDashboard:
         for asset in self.assets:
             try:
                 data = self.aggregator.fetch_all_data(asset)
+                
+                # LOG EXTREMO para debug
                 if data:
                     hl_data = data['exchanges_data'].get('hyperliquid', {})
-                    price = hl_data.get('mark_price', 0)
-                    
-                    # Calcular volume ratio (simplificado)
-                    volume_ratio = 1.0  # Placeholder - seria calculado do histórico
-                    
-                    self.current_data[asset] = {
-                        'price': price,
-                        'oi_total': data.get('oi_total', 0),
-                        'oi_change_pct': data.get('oi_change_pct', 0),
-                        'volume_ratio': volume_ratio,
-                        'funding_avg': data.get('funding_avg', 0),
-                        'signal': ''
-                    }
-                    
-                    # Verificar sinal
-                    if price > 0:
+                    raw_price = hl_data.get('mark_price', 0)
+                    logger.info(
+                        f"🖥️ DASHBOARD | {asset} | "
+                        f"hl_data={hl_data} | "
+                        f"raw_price={raw_price} | "
+                        f"exchanges={list(data['exchanges_data'].keys())}"
+                    )
+                    price = raw_price
+                else:
+                    price = 0
+                    logger.warning(f"🖥️ DASHBOARD | {asset} | fetch_all_data retornou NONE")
+                
+                # Calcular volume ratio (simplificado)
+                volume_ratio = 1.0  # Placeholder
+                
+                self.current_data[asset] = {
+                    'price': price,
+                    'oi_total': data.get('oi_total', 0) if data else 0,
+                    'oi_change_pct': data.get('oi_change_pct', 0) if data else 0,
+                    'volume_ratio': volume_ratio,
+                    'funding_avg': data.get('funding_avg', 0) if data else 0,
+                    'signal': ''
+                }
+                
+                # Verificar sinal
+                if price > 0:
                         signal = self.strategy.analyze(data, price)
                         if signal:
                             self.current_data[asset]['signal'] = signal
