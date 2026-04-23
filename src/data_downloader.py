@@ -107,7 +107,7 @@ class DataDownloader:
                                        interval: str = "15m",
                                        days_back: int = 30,
                                        save_to_db: bool = True) -> str:
-        """Descarrega OI history"""
+        """Descarrega OI history - usa OI atual como fallback se histórico falhar"""
         # OI só suporta: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d
         valid_oi_intervals = ['5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d']
         oi_interval = interval if interval in valid_oi_intervals else '1h'
@@ -124,6 +124,8 @@ class DataDownloader:
         all_data = []
         current_start = start_ms
         
+        # Tentar endpoint histórico primeiro
+        history_works = False
         while current_start < end_ms:
             try:
                 resp = requests.get(
@@ -136,19 +138,59 @@ class DataDownloader:
                     },
                     timeout=30
                 )
-                resp.raise_for_status()
-                data = resp.json()
-                
-                if not data:
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data:
+                        history_works = True
+                        all_data.extend(data)
+                        current_start = int(data[-1]['timestamp']) + 1
+                        time.sleep(0.1)
+                    else:
+                        break
+                else:
+                    logger.warning(f"OI history API retornou {resp.status_code} - usando fallback")
                     break
                 
-                all_data.extend(data)
-                current_start = int(data[-1]['timestamp']) + 1
-                time.sleep(0.1)
-                
             except Exception as e:
-                logger.error(f"Erro a descarregar OI: {e}")
+                logger.warning(f"OI history indisponível: {e}")
                 break
+        
+        # Fallback: se histórico falhou, usar OI atual como proxy
+        if not history_works or not all_data:
+            logger.info("A usar OI atual como fallback...")
+            try:
+                # Buscar OI atual + mark price
+                oi_resp = requests.get(
+                    f"{self.base_url}/fapi/v1/openInterest",
+                    params={"symbol": symbol},
+                    timeout=10
+                )
+                price_resp = requests.get(
+                    f"{self.base_url}/fapi/v1/premiumIndex",
+                    params={"symbol": symbol},
+                    timeout=10
+                )
+                
+                if oi_resp.status_code == 200 and price_resp.status_code == 200:
+                    oi_data = oi_resp.json()
+                    price_data = price_resp.json()
+                    
+                    oi_contracts = float(oi_data.get('openInterest', 0))
+                    mark_price = float(price_data.get('markPrice', 0))
+                    oi_usd = oi_contracts * mark_price
+                    
+                    # Criar entrada única com timestamp atual
+                    all_data = [{
+                        'symbol': symbol,
+                        'timestamp': str(int(time.time() * 1000)),
+                        'sumOpenInterest': str(oi_contracts),
+                        'sumOpenInterestValue': str(oi_usd)
+                    }]
+                    
+                    logger.info(f"OI atual: ${oi_usd:,.0f} (fallback)")
+                    
+            except Exception as e2:
+                logger.error(f"Fallback OI também falhou: {e2}")
         
         with open(filename, 'w', newline='') as f:
             if all_data:

@@ -123,15 +123,24 @@ class BacktestEngineDB:
                     f"OI: ${oi:,.0f} | OI Δ: {oi_change*100:.3f}%"
                 )
             
-            # SINAL DE ENTRADA LONG
+            # SINAL DE ENTRADA LONG (com ou sem OI)
             if self.current_position is None:
-                if (volume_ratio > self.volume_threshold and 
-                    oi_change > self.oi_threshold and
-                    not funding_extreme and
-                    oi > 0 and
-                    price > 0):
-                    
-                    self._enter_long(symbol, price, timestamp, volume_ratio, oi_change, funding)
+                # Se temos OI válido, usar critério completo
+                if oi > 0:
+                    if (volume_ratio > self.volume_threshold and 
+                        oi_change > self.oi_threshold and
+                        not funding_extreme and
+                        price > 0):
+                        self._enter_long(symbol, price, timestamp, volume_ratio, oi_change, funding)
+                # Se não temos OI, usar critério simplificado (volume + tendência de preço)
+                else:
+                    # Verificar se há momentum de volume + candle bullish
+                    candle_bullish = candle['close'] > candle['open']
+                    if (volume_ratio > self.volume_threshold and 
+                        candle_bullish and
+                        not funding_extreme and
+                        price > 0):
+                        self._enter_long(symbol, price, timestamp, volume_ratio, 0, funding)
             
             # SINAL DE SAÍDA
             elif self.current_position == 'long':
@@ -141,10 +150,19 @@ class BacktestEngineDB:
                     self._exit_position(symbol, price, timestamp, 'STOP_LOSS')
                     continue
                 
-                # Exaustão de momentum
-                if oi_change < -0.005 and oi > 0:
-                    self._exit_position(symbol, price, timestamp, 'OI_EXHAUSTION')
-                    continue
+                # Exaustão de momentum (com OI) ou reversão de volume (sem OI)
+                if oi > 0:
+                    # Com OI: sair se OI a descer
+                    if oi_change < -0.005:
+                        self._exit_position(symbol, price, timestamp, 'OI_EXHAUSTION')
+                        continue
+                else:
+                    # Sem OI: sair se volume normalizou + candle bearish
+                    volume_normalizou = volume_ratio < 1.2
+                    candle_bearish = candle['close'] < candle['open']
+                    if volume_normalizou and candle_bearish:
+                        self._exit_position(symbol, price, timestamp, 'MOMENTUM_FADE')
+                        continue
                 
                 # Take profit (2x risk)
                 gain_pct = (price - self.entry_price) / self.entry_price
