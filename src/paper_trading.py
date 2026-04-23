@@ -1,10 +1,11 @@
 """
-Paper Trading Engine - Bot em tempo real com dinheiro virtual
-Aprende e ajusta thresholds automaticamente baseado em resultados
+Paper Trading Engine v2 - Baixa latência para trailing stops
+Separa signal generation (15m) de position monitoring (rápido)
 """
 import logging
 import time
 import json
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
@@ -224,9 +225,16 @@ class PaperTrader:
         self.short_volume_mult = strat.get('short_volume_multiplier', 1.2)
         self.short_bearish_add = strat.get('short_bearish_add', 1)
         
-        # Contadores de candles bullish/bearish
-        self.bullish_count = 0
-        self.bearish_count = 0
+        # Threading para monitorização rápida
+        self._lock = threading.Lock()
+        self._monitor_thread = None
+        self._monitor_running = False
+        self._monitor_interval = 10  # segundos — verifica trailing stop a cada 10s
+        self._last_price = 0
+        
+        # Estatísticas de latência
+        self.latency_ms = 0
+        self.last_check_time = 0
         
         # Criar tabela de paper trades se não existir
         self._init_paper_trades_table()
@@ -265,6 +273,132 @@ class PaperTrader:
         if len(prices) < period:
             return sum(prices) / max(1, len(prices))
         return sum(prices[-period:]) / period
+    
+    # ==================================================================
+    # MONITOR RÁPIDO — Thread de baixa latência para trailing/SL
+    # ==================================================================
+    
+    def _start_monitor_thread(self, asset: str):
+        """Inicia thread de monitorização rápida"""
+        self._monitor_running = True
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_loop,
+            args=(asset,),
+            daemon=True,
+            name="FastMonitor"
+        )
+        self._monitor_thread.start()
+        logger.info(f"🚀 Monitor rápido iniciado: {self._monitor_interval}s intervalo")
+    
+    def _monitor_loop(self, asset: str):
+        """Loop de monitorização rápida — verifica preço a cada N segundos"""
+        while self._monitor_running:
+            try:
+                start_time = time.time()
+                self._fast_price_check(asset)
+                elapsed = time.time() - start_time
+                self.latency_ms = elapsed * 1000
+                
+                # Sleep restante do intervalo
+                sleep_time = max(0, self._monitor_interval - elapsed)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                    
+            except Exception as e:
+                logger.error(f"Erro no monitor rápido: {e}")
+                time.sleep(self._monitor_interval)
+    
+    def _fast_price_check(self, asset: str):
+        """Verifica preço rápido e gere trailing stop/SL"""
+        # Só importa se estivermos em posição
+        if not self.current_position:
+            return
+        
+        try:
+            # Buscar preço atual (cache se possível)
+            price = self.aggregator.get_cached_price(asset, max_age_seconds=30)
+            
+            if price <= 0:
+                # Fallback: buscar novo preço
+                data = self.aggregator.fetch_all_data(asset)
+                if data and data.get('exchanges_data'):
+                    prices = [d['mark_price'] for d in data['exchanges_data'].values() 
+                             if d.get('mark_price', 0) > 0]
+                    if prices:
+                        price = sum(prices) / len(prices)
+            
+            if price <= 0:
+                return
+            
+            self._last_price = price
+            self.last_check_time = time.time()
+            
+            with self._lock:
+                exit_reason = self._check_exit_signals_fast(price)
+                if exit_reason:
+                    self._exit_position(asset, price, exit_reason, {'close': price})
+                    
+        except Exception as e:
+            logger.warning(f"Erro no fast check: {e}")
+    
+    def _check_exit_signals_fast(self, price: float) -> Optional[str]:
+        """Versão rápida de verificação de saída (sem candles, só preço)"""
+        if self.current_position == 'long':
+            gain_pct = (price - self.entry_price) / self.entry_price
+            
+            # Atualizar máximo
+            if price > self.max_price:
+                self.max_price = price
+            
+            # Ativar trailing?
+            if gain_pct >= self.trailing_activation and not self.trailing_active:
+                self.trailing_active = True
+                self.trailing_stop = self.max_price * (1 - self.trailing_pct)
+                logger.info(f"🚀 TRAIL ATIVADO! +{gain_pct*100:.1f}% | Stop: ${self.trailing_stop:,.0f} | Price: ${price:,.0f}")
+            
+            # Atualizar trailing stop
+            if self.trailing_active:
+                new_stop = self.max_price * (1 - self.trailing_pct)
+                if new_stop > self.trailing_stop:
+                    self.trailing_stop = new_stop
+                    if self.last_check_time % 60 < self._monitor_interval:  # Log a cada ~minuto
+                        logger.info(f"📈 Trail UP: ${self.trailing_stop:,.0f} | Max: ${self.max_price:,.0f} | Price: ${price:,.0f}")
+            
+            # Check stop loss (antes de trailing ativar)
+            if not self.trailing_active:
+                loss_pct = (self.entry_price - price) / self.entry_price
+                if loss_pct >= self.stop_loss_pct:
+                    return 'STOP_LOSS'
+            
+            # Check trailing stop
+            if self.trailing_active and price <= self.trailing_stop:
+                return 'TRAILING_STOP'
+        
+        elif self.current_position == 'short':
+            gain_pct = (self.entry_price - price) / self.entry_price
+            
+            if price < self.min_price:
+                self.min_price = price
+            
+            if gain_pct >= self.trailing_activation and not self.trailing_active:
+                self.trailing_active = True
+                self.trailing_stop = self.min_price * (1 + self.trailing_pct)
+                logger.info(f"🚀 TRAIL SHORT ATIVADO! +{gain_pct*100:.1f}% | Stop: ${self.trailing_stop:,.0f}")
+            
+            if self.trailing_active:
+                new_stop = self.min_price * (1 + self.trailing_pct)
+                if new_stop < self.trailing_stop:
+                    self.trailing_stop = new_stop
+            
+            if not self.trailing_active:
+                loss_pct = (price - self.entry_price) / self.entry_price
+                if loss_pct >= self.short_stop_loss:
+                    return 'STOP_LOSS'
+            
+            if self.trailing_active and price >= self.trailing_stop:
+                return 'TRAILING_STOP'
+        
+        return None
     
     def _detect_market_regime(self, prices: list) -> str:
         """
@@ -655,12 +789,42 @@ class PaperTrader:
     def run_continuous(self, asset: str = 'BTC', interval_seconds: int = 900):
         """Corre em loop contínuo - default 15m (900s) para timeframe 15m"""
         logger.info("="*60)
-        logger.info("PAPER TRADING INICIADO")
+        logger.info("PAPER TRADING INICIADO - v2 (Baixa Latência)")
         logger.info(f"Capital: ${self.initial_capital:,.2f}")
         logger.info(f"Asset: {asset}")
         logger.info(f"Timeframe: {self.primary_tf}")
-        logger.info(f"Intervalo: {interval_seconds}s ({interval_seconds//60}m)")
+        logger.info(f"Signal Interval: {interval_seconds}s ({interval_seconds//60}m)")
+        logger.info(f"Monitor Interval: {self._monitor_interval}s (Trailing/SL)")
         logger.info("="*60)
+        
+        # Iniciar thread de monitorização rápida
+        self._start_monitor_thread(asset)
+        
+        try:
+            while True:
+                self.run_cycle(asset)
+                
+                # Log de status com latência
+                latency_info = f"Latência: {self.latency_ms:.0f}ms | " if self.latency_ms > 0 else ""
+                
+                if self.current_position:
+                    current_price = self._last_price or 0
+                    gain_pct = 0
+                    if self.current_position == 'long' and current_price > 0:
+                        gain_pct = (current_price - self.entry_price) / self.entry_price * 100
+                    elif self.current_position == 'short' and current_price > 0:
+                        gain_pct = (self.entry_price - current_price) / self.entry_price * 100
+                    
+                    trail_info = ""
+                    if self.trailing_active:
+                        trail_info = f" | Trail: ${self.trailing_stop:,.0f}"
+                    
+                    logger.info(f"📊 {self.current_position.upper()} | Price: ${current_price:,.0f} | "
+                               f"PnL: {gain_pct:+.2f}%{trail_info} | "
+                               f"{latency_info}Trades: {self.daily_trades}")
+                else:
+                    logger.info(f"📊 FLAT | Capital: ${self.capital:,.2f} | "
+                               f"{latency_info}Trades hoje: {self.daily_trades}")
         
         try:
             while True:
@@ -677,11 +841,15 @@ class PaperTrader:
                 time.sleep(interval_seconds)
                 
         except KeyboardInterrupt:
+            self._monitor_running = False
+            if self._monitor_thread:
+                self._monitor_thread.join(timeout=2)
             logger.info("\n" + "="*60)
             logger.info("PAPER TRADING PARADO")
             logger.info(f"Capital Final: ${self.capital:,.2f}")
             logger.info(f"PnL Total: ${self.capital - self.initial_capital:+.2f}")
             logger.info(f"Trades: {self.trade_count}")
+            logger.info(f"Latência média monitor: {self.latency_ms:.0f}ms")
             logger.info("="*60)
 
 

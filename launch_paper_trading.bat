@@ -1,8 +1,8 @@
 @echo off
 echo ============================================
-echo  PAPER TRADING - Hyperliquid Bot
-echo  Asset: BTC | Timeframe: 15m
-echo  Capital: $10,000 (virtual)
+echo  PAPER TRADING v2 - Hyperliquid Bot
+echo  Baixa Latencia (10s monitor + 15m sinais)
+echo  Asset: BTC | Capital: $10,000 (virtual)
 echo ============================================
 echo.
 cd /d "%~dp0"
