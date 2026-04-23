@@ -219,11 +219,11 @@ DASHBOARD_TEMPLATE = """
                         <td class="asset-name">{{ asset }}</td>
                         <td class="price">${{ "%.2f"|format(data.price) if data.price else "N/A" }}</td>
                         <td>
-                            ${{ "%.0f"|format(data.oi_total) if data.oi_total else "N/A" }}
+                            {{ format_oi(data.oi_total) }}
                             <div class="oi-bar"><div class="oi-fill" style="width: {{ min(data.oi_total / 1000000000 * 100, 100) }}%"></div></div>
                         </td>
                         <td class="{{ 'positive' if data.oi_change_pct > 0 else 'negative' }}">
-                            {{ "+%.2f"|format(data.oi_change_pct * 100) if data.oi_change_pct > 0 else "%.2f"|format(data.oi_change_pct * 100) }}%
+                            {{ format_pct(data.oi_change_pct) }}%
                         </td>
                         <td>
                             {{ "%.1f"|format(data.volume_ratio) }}x
@@ -257,6 +257,26 @@ DASHBOARD_TEMPLATE = """
 </body>
 </html>
 """
+
+def _format_oi(value: float) -> str:
+    """Formata OI em notação legível: 1.2B, 450M, 30K"""
+    if value == 0 or value is None:
+        return "N/A"
+    if abs(value) >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f}B"
+    if abs(value) >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M"
+    if abs(value) >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return f"{value:.0f}"
+
+
+def _format_pct(value: float) -> str:
+    """Formata percentagem de forma segura"""
+    if value is None:
+        return "0.00"
+    return f"{value * 100:+.2f}"
+
 
 class WebDashboard:
     """Dashboard web que abre no browser"""
@@ -299,7 +319,9 @@ class WebDashboard:
                 last_update=self.last_update,
                 poll_interval=self.poll_interval,
                 min=min,
-                max=max
+                max=max,
+                format_oi=_format_oi,
+                format_pct=_format_pct
             )
         
         @self.app.route("/api/data")

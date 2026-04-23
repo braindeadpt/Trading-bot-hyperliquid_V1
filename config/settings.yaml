@@ -5,7 +5,6 @@ bot:
 
 assets:
   - "BTC"
-  - "ETH"
 
 timeframes:
   primary: "15m"    # VENCEDOR com OI real: PF 2.50, WR 72.2%, 36 trades
