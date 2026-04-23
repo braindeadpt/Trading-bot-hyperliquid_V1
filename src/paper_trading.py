@@ -825,17 +825,6 @@ class PaperTrader:
                 else:
                     logger.info(f"📊 FLAT | Capital: ${self.capital:,.2f} | "
                                f"{latency_info}Trades hoje: {self.daily_trades}")
-        
-        try:
-            while True:
-                self.run_cycle(asset)
-                
-                # Log de status a cada ciclo
-                if self.current_position:
-                    logger.info(f"📊 Posição: {self.current_position.upper()} | "
-                               f"Capital: ${self.capital:,.2f} | Trades hoje: {self.daily_trades}")
-                else:
-                    logger.info(f"📊 FLAT | Capital: ${self.capital:,.2f} | Trades hoje: {self.daily_trades}")
                 
                 logger.info(f"💤 Aguardando {interval_seconds}s...")
                 time.sleep(interval_seconds)
