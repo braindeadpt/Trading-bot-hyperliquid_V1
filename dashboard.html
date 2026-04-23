@@ -215,6 +215,15 @@
   <div id="sidebar-left" class="panel">
     <h2>Configuração</h2>
 
+    <!-- Network Toggle — FORA da connection-group para ficar sempre clicável -->
+    <div class="field" style="margin-bottom:14px">
+      <label style="color:var(--accent);font-size:11px">🌐 Network</label>
+      <select id="network" style="border-color:var(--accent)">
+        <option value="testnet" selected>🟡 Testnet (Paper Trading)</option>
+        <option value="mainnet">🟢 Mainnet (Dinheiro Real)</option>
+      </select>
+    </div>
+
     <!-- Network Banner -->
     <div id="paper-banner" style="font-size:10px;color:var(--accent);line-height:1.6;margin-bottom:14px;padding:8px;background:rgba(0,255,136,0.03);border-left:2px solid var(--accent)">
       ✅ <b>Network = Testnet</b> → Simulação — <b>não precisas de carteira</b><br>
@@ -238,13 +247,6 @@
       <div class="field">
         <label>API Wallet Name</label>
         <input type="text" id="api-name" placeholder="ex: BotTrading" value="BotTrading">
-      </div>
-      <div class="field">
-        <label>Network</label>
-        <select id="network">
-          <option value="mainnet">🟢 Mainnet (Real)</option>
-          <option value="testnet" selected>🟡 Testnet (Paper)</option>
-        </select>
       </div>
       <button class="btn" onclick="testConnection()">▶ TESTAR LIGAÇÃO</button>
       <div id="conn-result" class="hidden"></div>
