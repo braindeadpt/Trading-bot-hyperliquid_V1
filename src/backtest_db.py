@@ -175,25 +175,14 @@ class BacktestEngineDB:
                     self._exit_position(symbol, price, timestamp, 'STOP_LOSS')
                     continue
                 
-                # Exaustão de momentum (com OI) ou reversão de volume (sem OI)
-                if oi > 0:
-                    # Com OI: sair se OI a descer
-                    if oi_change < -0.005:
-                        self._exit_position(symbol, price, timestamp, 'OI_EXHAUSTION')
-                        continue
-                else:
-                    # Sem OI: sair se volume normalizou + candle bearish
-                    volume_normalizou = volume_ratio < 1.2
-                    candle_bearish = candle['close'] < candle['open']
-                    if volume_normalizou and candle_bearish:
-                        self._exit_position(symbol, price, timestamp, 'MOMENTUM_FADE')
-                        continue
-                
                 # Take profit (2x risk)
                 gain_pct = (price - self.entry_price) / self.entry_price
                 if gain_pct >= 0.04:
                     self._exit_position(symbol, price, timestamp, 'TAKE_PROFIT')
                     continue
+                
+                # Opcional: Trailing stop (desativado por padrão)
+                # Implementar se necessário
             
             # Guardar equity curve a cada candle
             self.equity.append({
