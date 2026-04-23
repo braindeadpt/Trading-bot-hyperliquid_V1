@@ -1137,7 +1137,7 @@ function startPolling() {
   // Poll local dashboard API (Flask on :5000)
   pollInterval = setInterval(async () => {
     try {
-      const resp = await fetch('http://127.0.0.1:5000/api/status', { method: 'GET', mode: 'cors' });
+      const resp = await fetch('http://127.0.0.1:5000/api/data', { method: 'GET', mode: 'cors' });
       if (!resp.ok) return;
       const data = await resp.json();
       updateDashboard(data);
@@ -1148,80 +1148,36 @@ function startPolling() {
 }
 
 function updateDashboard(data) {
-  // Market data
-  if (data.price) $('price-btc').textContent = fmt$(data.price);
-  if (data.sma) $('sma-btc').textContent = fmt$(data.sma);
-  if (data.volume_ratio) $('vol-ratio').textContent = data.volume_ratio.toFixed(2) + 'x';
-  if (data.oi_change !== undefined) {
-    const el = $('oi-change');
-    el.textContent = (data.oi_change * 100).toFixed(2) + '%';
-    el.className = 'value ' + (data.oi_change > 0 ? 'up' : data.oi_change < 0 ? 'down' : '');
+  // data vem de /api/data — estrutura: {assets: {BTC: {...}}, total_signals, last_update, status}
+  
+  // Extrair primeiro asset (assumindo só BTC agora)
+  const assetName = Object.keys(data.assets || {})[0];
+  const assetData = assetName ? data.assets[assetName] : null;
+  
+  // Market data do asset
+  if (assetData) {
+    if (assetData.price) $('price-btc').textContent = fmt$(assetData.price);
+    // SMA, vol_ratio, funding_avg vêm do assetData se disponíveis
+    if (assetData.volume_ratio) $('vol-ratio').textContent = assetData.volume_ratio.toFixed(2) + 'x';
+    if (assetData.oi_change_pct !== undefined) {
+      const el = $('oi-change');
+      el.textContent = (assetData.oi_change_pct * 100).toFixed(2) + '%';
+      el.className = 'value ' + (assetData.oi_change_pct > 0 ? 'up' : assetData.oi_change_pct < 0 ? 'down' : '');
+    }
+    if (assetData.funding_avg !== undefined) $('funding-rate').textContent = (assetData.funding_avg * 100).toFixed(3) + '%';
+    
+    // Sinal
+    if (assetData.signal) {
+      const el = $('last-signal');
+      el.textContent = assetData.signal;
+      el.className = 'value ' + (assetData.signal.includes('LONG') ? 'up' : assetData.signal.includes('SHORT') ? 'down' : 'warn');
+    }
   }
-  if (data.funding_rate !== undefined) $('funding-rate').textContent = (data.funding_rate * 100).toFixed(3) + '%';
-  if (data.regime) $('regime').textContent = data.regime.toUpperCase();
-  if (data.htf_direction) {
-    const el = $('htf-dir');
-    el.textContent = data.htf_direction.toUpperCase();
-    el.className = 'value ' + (data.htf_direction === 'bull' ? 'up' : data.htf_direction === 'bear' ? 'down' : '');
+  
+  // Total signals
+  if (data.total_signals !== undefined) {
+    // Update se necessário
   }
-  if (data.last_signal) {
-    const el = $('last-signal');
-    el.textContent = data.last_signal;
-    el.className = 'value ' + (data.last_signal.includes('LONG') ? 'up' : data.last_signal.includes('SHORT') ? 'down' : 'warn');
-  }
-
-  // Position
-  if (data.position) {
-    const p = data.position;
-    const dirEl = $('pos-direction');
-    dirEl.textContent = p.direction || 'FLAT';
-    dirEl.className = 'value ' + (p.direction === 'LONG' ? 'up' : p.direction === 'SHORT' ? 'down' : '');
-    $('pos-entry').textContent = fmt$(p.entry_price);
-    $('pos-size').textContent = fmt$(p.size);
-    $('pos-pnl').textContent = fmtPct(p.pnl_pct);
-    $('pos-pnl-usd').textContent = fmt$(p.pnl_usd);
-    $('pos-trail').textContent = fmt$(p.trailing_stop);
-    $('pos-sl').textContent = fmt$(p.stop_loss);
-    $('pos-time').textContent = p.open_time || '--';
-
-    $('pos-dot').className = p.direction ? 'status-dot ' + (p.pnl_pct > 0 ? 'on' : 'warn') : 'status-dot off';
-    $('pos-text').textContent = p.direction || 'FLAT';
-    $('btn-close').disabled = !p.direction;
-  }
-
-  // Threads
-  if (data.threads) {
-    $('thread-signal').textContent = data.threads.signal ? 'ON' : 'OFF';
-    $('thread-monitor').textContent = data.threads.monitor ? 'ON' : 'OFF';
-    $('thread-mtf').textContent = data.threads.mtf ? 'ON' : 'OFF';
-    $('thread-latency').textContent = data.threads.latency ? data.threads.latency + 'ms' : '--';
-
-    $('monitor-status').textContent = data.threads.monitor ? 'ON' : 'OFF';
-    $('signal-status').textContent = data.threads.signal ? 'ON' : 'OFF';
-    $('mtf-thread-status').textContent = data.threads.mtf ? 'ON' : 'OFF';
-  }
-
-  // Stats
-  if (data.stats) {
-    $('cap-current').textContent = fmt$(data.stats.capital);
-    $('total-pnl').textContent = fmt$(data.stats.total_pnl);
-    $('total-trades').textContent = data.stats.trades;
-    $('win-rate').textContent = data.stats.win_rate ? data.stats.win_rate.toFixed(1) + '%' : '--';
-    $('profit-factor').textContent = data.stats.profit_factor ? data.stats.profit_factor.toFixed(2) : '--';
-    $('max-dd').textContent = data.stats.max_drawdown ? data.stats.max_drawdown.toFixed(2) + '%' : '--';
-    $('sharpe').textContent = data.stats.sharpe ? data.stats.sharpe.toFixed(2) : '--';
-  }
-
-  // Equity
-  if (data.equity) {
-    equityHistory.push(data.equity);
-    if (equityHistory.length > 500) equityHistory.shift();
-    renderEquity();
-  }
-
-  // New trade
-  if (data.new_trade) addTradeFromData(data.new_trade);
-}
 
 // ===== TRADES =====
 function addTradeFromData(t) {

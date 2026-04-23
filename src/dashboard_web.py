@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Dict, Optional
 
 from flask import Flask, render_template_string, jsonify
+from flask_cors import CORS
 
 from utils import load_config
 from database import BotDatabase
@@ -285,6 +286,7 @@ class WebDashboard:
         self.config = config
         self.db = db or BotDatabase()
         self.app = Flask(__name__)
+        CORS(self.app)  # Permitir CORS para dashboard.html aberto de qualquer origem
         
         self.aggregator = DataAggregator(config)
         self.strategy = MomentumStrategy(config)
