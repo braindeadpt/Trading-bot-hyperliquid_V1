@@ -5,7 +5,20 @@ Integra: DataAggregator + PaperTrader + Dashboard Web
 import time
 import logging
 import threading
+import sys
 from pathlib import Path
+
+# ========== WINDOWS UTF-8 FIX ==========
+if sys.platform == 'win32':
+    import os
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+    try:
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    except:
+        pass
+# ======================================
 
 from utils import load_config, setup_logging
 from data_aggregator import DataAggregator

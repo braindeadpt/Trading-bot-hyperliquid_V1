@@ -14,5 +14,6 @@ echo no canto inferior direito (system tray) e escolhe "Sair"
 echo ==================================================
 echo.
 cd /d "%~dp0"
+set PYTHONIOENCODING=utf-8
 python app_flask.py
 pause

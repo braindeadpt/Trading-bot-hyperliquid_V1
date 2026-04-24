@@ -440,7 +440,7 @@ class DataAggregator:
                         raw = data[asset]
                         mark_price = float(raw) if raw else 0
                         logger.info(
-                            f"📡 [allMids] {asset} raw='{raw}' → ${mark_price:,.2f}"
+                            f"[HL] {asset} raw='{raw}' → ${mark_price:,.2f}"
                         )
                         
                         if mark_price > 0 and self._is_price_sane(asset, mark_price):

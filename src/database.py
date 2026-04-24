@@ -12,21 +12,21 @@ logger = logging.getLogger(__name__)
 
 class BotDatabase:
     """Base de dados SQLite para o bot de trading"""
-    
+
     def __init__(self, db_path: str = "data/trading_bot.db"):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
-    
+
     def _get_conn(self):
-        """Obtém conexão com a base de dados — com WAL mode para melhor performance"""
+        """Obtém conexão com a base de dados - com WAL mode para melhor performance"""
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
-        # ⚡ WAL mode — permite leitura durante escritas, evita "database is locked"
+        # ⚡ WAL mode - permite leitura durante escritas, evita "database is locked"
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")  # Esperar até 5s se DB estiver locked
         return conn
-    
+
     def _init_db(self):
         """Inicializa tabelas"""
         with self._get_conn() as conn:
@@ -45,7 +45,7 @@ class BotDatabase:
                     UNIQUE(symbol, interval, timestamp)
                 )
             """)
-            
+
             # Open Interest
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS open_interest (
@@ -57,7 +57,7 @@ class BotDatabase:
                     UNIQUE(symbol, timestamp, exchange)
                 )
             """)
-            
+
             # Funding Rate
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS funding_rates (
@@ -69,7 +69,7 @@ class BotDatabase:
                     UNIQUE(symbol, timestamp, exchange)
                 )
             """)
-            
+
             # Trades (backtest e live)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
@@ -88,7 +88,7 @@ class BotDatabase:
                     strategy_params TEXT
                 )
             """)
-            
+
             # Price history (para análise rápida)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS price_history (
@@ -100,33 +100,33 @@ class BotDatabase:
                     UNIQUE(symbol, timestamp)
                 )
             """)
-            
+
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_candles_symbol_interval_ts 
+                CREATE INDEX IF NOT EXISTS idx_candles_symbol_interval_ts
                 ON candles(symbol, interval, timestamp)
             """)
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_oi_symbol_ts 
+                CREATE INDEX IF NOT EXISTS idx_oi_symbol_ts
                 ON open_interest(symbol, timestamp)
             """)
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_funding_symbol_ts 
+                CREATE INDEX IF NOT EXISTS idx_funding_symbol_ts
                 ON funding_rates(symbol, timestamp)
             """)
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_trades_symbol 
+                CREATE INDEX IF NOT EXISTS idx_trades_symbol
                 ON trades(symbol)
             """)
-            
+
             conn.commit()
             logger.info(f"Base de dados inicializada: {self.db_path}")
-    
+
     def save_candles(self, symbol: str, interval: str, candles: List[Dict]):
         """Guarda candles em batch"""
         with self._get_conn() as conn:
             for c in candles:
                 conn.execute("""
-                    INSERT OR REPLACE INTO candles 
+                    INSERT OR REPLACE INTO candles
                     (symbol, interval, timestamp, open, high, low, close, volume)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
@@ -135,101 +135,101 @@ class BotDatabase:
                 ))
             conn.commit()
             logger.info(f"Guardados {len(candles)} candles para {symbol} {interval}")
-    
-    def get_candles(self, symbol: str, interval: str, 
+
+    def get_candles(self, symbol: str, interval: str,
                      start_time: Optional[int] = None,
                      end_time: Optional[int] = None,
                      limit: int = 1000) -> List[Dict]:
         """Busca candles da base de dados"""
         query = """
-            SELECT * FROM candles 
+            SELECT * FROM candles
             WHERE symbol = ? AND interval = ?
         """
         params = [symbol, interval]
-        
+
         if start_time:
             query += " AND timestamp >= ?"
             params.append(start_time)
         if end_time:
             query += " AND timestamp <= ?"
             params.append(end_time)
-        
+
         query += " ORDER BY timestamp"
-        
+
         if limit:
             # Validar que limit é inteiro para prevenir SQL injection
             limit = int(limit)
             if limit > 0:
                 query += " LIMIT ?"
                 params.append(limit)
-        
+
         with self._get_conn() as conn:
             rows = conn.execute(query, params).fetchall()
             return [dict(row) for row in rows]
-    
+
     def get_candles_for_backtest(self, symbol: str, interval: str = "15m",
                                   days: int = 30) -> List[Dict]:
         """Busca candles formatados para backtest com OI e funding"""
         # Buscar candles
         candles = self.get_candles(symbol, interval, limit=10000)
-        
+
         if not candles:
             logger.warning(f"Sem candles em DB para {symbol} {interval}")
             return []
-        
+
         # ⚡ OTIMIZAÇÃO: Buscar OI e funding de UMA VEZ para todo o intervalo
         # Em vez de N+2 queries, fazemos 2 queries só
         with self._get_conn() as conn:
             # Timestamp range dos candles
             min_ts = candles[0]['timestamp']
             max_ts = candles[-1]['timestamp']
-            
+
             # Buscar TODO o OI para este intervalo (±1 hora de margem)
             oi_rows = conn.execute("""
-                SELECT timestamp, oi_usd FROM open_interest 
+                SELECT timestamp, oi_usd FROM open_interest
                 WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?
                 ORDER BY timestamp
             """, (symbol, min_ts - 3600000, max_ts + 3600000)).fetchall()
-            
+
             # Criar lookup dict: timestamp -> oi_usd
             oi_lookup = {}
             for row in oi_rows:
                 oi_lookup[row['timestamp']] = row['oi_usd']
-            
+
             # Buscar TODO o funding para este intervalo (±8 horas de margem)
             fund_rows = conn.execute("""
-                SELECT timestamp, funding_rate FROM funding_rates 
+                SELECT timestamp, funding_rate FROM funding_rates
                 WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?
                 ORDER BY timestamp
             """, (symbol, min_ts - 28800000, max_ts + 28800000)).fetchall()
-            
+
             # Criar lookup dict: timestamp -> funding_rate
             fund_lookup = {}
             for row in fund_rows:
                 fund_lookup[row['timestamp']] = row['funding_rate']
-            
+
             # Enriquecer candles usando lookups (O(1) em vez de O(N) queries)
             for candle in candles:
                 ts = candle['timestamp']
-                
+
                 # OI: encontrar o mais próximo no lookup
                 candle['oi'] = self._find_nearest(ts, oi_lookup) or 0
                 candle['funding_rate'] = self._find_nearest(ts, fund_lookup) or 0
-        
+
         logger.info(f"Backtest data: {len(candles)} candles para {symbol} (2 queries, N+2 eliminado)")
         return candles
-    
+
     def _find_nearest(self, target_ts: int, lookup: Dict[int, float]) -> Optional[float]:
         """Encontra valor mais próximo no lookup dict"""
         if not lookup:
             return None
-        
+
         nearest_ts = min(lookup.keys(), key=lambda ts: abs(ts - target_ts))
         # Só usar se estiver dentro de 1 hora
         if abs(nearest_ts - target_ts) < 3600000:
             return lookup[nearest_ts]
         return None
-    
+
     def save_oi(self, symbol: str, timestamp: int, oi_usd: float, exchange: str = 'aggregated'):
         """Guarda Open Interest"""
         with self._get_conn() as conn:
@@ -238,7 +238,10 @@ class BotDatabase:
                 VALUES (?, ?, ?, ?)
             """, (symbol, timestamp, oi_usd, exchange))
             conn.commit()
-    
+
+    # Alias para compatibilidade
+    save_open_interest = save_oi
+
     def save_funding(self, symbol: str, timestamp: int, funding_rate: float, exchange: str = 'aggregated'):
         """Guarda Funding Rate"""
         with self._get_conn() as conn:
@@ -247,7 +250,10 @@ class BotDatabase:
                 VALUES (?, ?, ?, ?)
             """, (symbol, timestamp, funding_rate, exchange))
             conn.commit()
-    
+
+    # Alias para compatibilidade
+    save_funding_rate = save_funding
+
     def save_price(self, symbol: str, price: float, source: str = 'hyperliquid'):
         """Guarda preço na tabela price_history"""
         import time
@@ -262,7 +268,7 @@ class BotDatabase:
         """Guarda um trade"""
         with self._get_conn() as conn:
             conn.execute("""
-                INSERT INTO trades 
+                INSERT INTO trades
                 (symbol, direction, entry_price, exit_price, entry_time, exit_time,
                  size_usd, pnl_usd, pnl_pct, exit_reason, is_backtest, strategy_params)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -274,51 +280,51 @@ class BotDatabase:
                 json.dumps(trade.get('strategy_params', {}))
             ))
             conn.commit()
-    
+
     def get_open_trade(self) -> Optional[Dict]:
         """
-        ⚡ CRASH RECOVERY — Busca trade aberto (sem exit_time)
+        ⚡ CRASH RECOVERY - Busca trade aberto (sem exit_time)
         Retorna o trade mais recente com exit_time IS NULL
         """
         with self._get_conn() as conn:
             row = conn.execute("""
-                SELECT * FROM trades 
-                WHERE exit_time IS NULL 
-                ORDER BY entry_time DESC 
+                SELECT * FROM trades
+                WHERE exit_time IS NULL
+                ORDER BY entry_time DESC
                 LIMIT 1
             """).fetchone()
             return dict(row) if row else None
-    
+
     def get_trades(self, symbol: Optional[str] = None, is_backtest: int = 1) -> List[Dict]:
         """Busca trades"""
         query = "SELECT * FROM trades WHERE is_backtest = ?"
         params = [is_backtest]
-        
+
         if symbol:
             query += " AND symbol = ?"
             params.append(symbol)
-        
+
         query += " ORDER BY entry_time DESC"
-        
+
         with self._get_conn() as conn:
             rows = conn.execute(query, params).fetchall()
             return [dict(row) for row in rows]
-    
+
     def get_stats(self) -> Dict:
         """Estatísticas da base de dados"""
         with self._get_conn() as conn:
             stats = {}
-            
+
             for table in ['candles', 'open_interest', 'funding_rates', 'trades']:
                 count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 stats[table] = count
-            
+
             # Symbols disponíveis
             symbols = conn.execute(
                 "SELECT DISTINCT symbol FROM candles"
             ).fetchall()
             stats['symbols'] = [row[0] for row in symbols]
-            
+
             # Date range
             date_range = conn.execute(
                 "SELECT MIN(timestamp), MAX(timestamp) FROM candles"
@@ -326,13 +332,13 @@ class BotDatabase:
             if date_range and date_range[0]:
                 stats['date_from'] = datetime.fromtimestamp(date_range[0]/1000).isoformat()
                 stats['date_to'] = datetime.fromtimestamp(date_range[1]/1000).isoformat()
-            
+
             return stats
-    
+
     def clear_old_data(self, days: int = 90):
         """Limpa dados antigos"""
         cutoff = int((datetime.now().timestamp() - days * 86400) * 1000)
-        
+
         with self._get_conn() as conn:
             for table in ['candles', 'open_interest', 'funding_rates', 'price_history']:
                 result = conn.execute(
