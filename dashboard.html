@@ -934,6 +934,46 @@ function emergencyClose() {
   closePosition('EMERGENCY_CLOSE');
 }
 
+// ===== SYNC BOT STATUS WITH SERVER =====
+async function syncBotStatus() {
+  try {
+    const resp = await fetch('/api/status');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    
+    // Sincronizar estado do bot com o servidor
+    if (data.running && !botRunning) {
+      // Servidor diz que está a correr mas dashboard pensa que está parado
+      botRunning = true;
+      $('btn-start').classList.add('active');
+      $('bot-dot').className = 'status-dot on';
+      $('bot-text').textContent = 'RUNNING';
+      $('bot-text').style.color = 'var(--accent)';
+      $('thread-monitor').textContent = 'ON';
+      $('monitor-status').textContent = 'ON';
+      log('🔁 Bot sincronizado — já estava a correr!', 'info');
+      
+      // Iniciar polling se não estiver
+      if (!pollInterval) {
+        fetchRealData();
+        pollInterval = setInterval(fetchRealData, 3000);
+      }
+    } else if (!data.running && botRunning) {
+      // Servidor diz que está parado mas dashboard pensa que está a correr
+      botRunning = false;
+      $('btn-start').classList.remove('active');
+      $('bot-dot').className = 'status-dot off';
+      $('bot-text').textContent = 'STOPPED';
+      $('bot-text').style.color = '';
+      $('thread-monitor').textContent = 'OFF';
+      $('monitor-status').textContent = 'OFF';
+      if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+    }
+  } catch (e) {
+    console.warn('Erro a sincronizar estado:', e);
+  }
+}
+
 function forceLong() {
   if (!botRunning) { log('❌ Bot não está a correr', 'error'); return; }
   if (currentPosition) { log('⚠️ Já tens posição aberta', 'warn'); return; }
@@ -972,6 +1012,9 @@ window.addEventListener('DOMContentLoaded', () => {
   loadConfig();
   updateNetworkMode();
   renderEquity();
+  
+  // Sincronizar estado do bot com o servidor
+  syncBotStatus();
 
   $('network').addEventListener('change', updateNetworkMode);
 
