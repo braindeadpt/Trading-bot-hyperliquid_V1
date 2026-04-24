@@ -36,19 +36,19 @@ def main():
     
     bot_config = config['bot']
     logger.info("=" * 50)
-    logger.info(f"🚀 BOT: {bot_config.get('name', 'Hyperliquid Momentum Bot')} v{bot_config.get('version', '0.1.0')}")
-    logger.info(f"📊 Paper Trading: {bot_config.get('paper_trading', True)}")
-    logger.info(f"💰 Capital inicial: ${config.get('risk', {}).get('initial_capital', 10000):,.2f}")
+    logger.info(f"BOT: {bot_config.get('name', 'Hyperliquid Momentum Bot')} v{bot_config.get('version', '0.1.0')}")
+    logger.info(f"Paper Trading: {bot_config.get('paper_trading', True)}")
+    logger.info(f"Capital inicial: ${config.get('risk', {}).get('initial_capital', 10000):,.2f}")
     logger.info("=" * 50)
     
     # Inicializar componentes
     assets = config['assets']
     logger.info(f"Assets monitorados: {assets}")
     
-    # ⚡ Paper Trader (com crash recovery automático)
+    # Paper Trader (com crash recovery automatico)
     trader = PaperTrader(config)
     
-    # ⚡ Dashboard Web
+    # Dashboard Web
     dashboard = create_dashboard_app(config)
     dashboard_thread = threading.Thread(
         target=lambda: dashboard.run(host='0.0.0.0', port=5000, debug=False),
@@ -56,14 +56,14 @@ def main():
         name='dashboard'
     )
     dashboard_thread.start()
-    logger.info("📱 Dashboard Web: http://127.0.0.1:5000")
+    logger.info("Dashboard Web: http://127.0.0.1:5000")
     
-    # Iniciar monitorização
-    logger.info("⏳ A iniciar monitorização...")
+    # Iniciar monitorizacao
+    logger.info("A iniciar monitorizacao...")
     trader._start_monitor_thread(assets[0])
     
     # Loop principal
-    logger.info("✅ Bot operacional! Ctrl+C para parar (graceful shutdown)")
+    logger.info("Bot operacional! Ctrl+C para parar (graceful shutdown)")
     
     try:
         while not trader.is_shutdown_requested():
@@ -82,11 +82,11 @@ def main():
                 logger.info(f"📊 Status | Capital: ${status['capital']:,.2f} | Trades: {status['trades']} | Pos: {status['position'] or 'FLAT'}")
     
     except KeyboardInterrupt:
-        logger.info("\n🛑 Ctrl+C recebido...")
+        logger.info("Ctrl+C recebido...")
     finally:
-        logger.info("🛑 A parar bot...")
-        # Graceful shutdown já é tratado pelo signal handler do PaperTrader
-        logger.info("✅ Bot parado. Boa noite!")
+        logger.info("A parar bot...")
+        # Graceful shutdown ja e tratado pelo signal handler do PaperTrader
+        logger.info("Bot parado. Boa noite!")
 
 
 if __name__ == "__main__":

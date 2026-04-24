@@ -32,6 +32,9 @@ app_state = {
     "update_count": 0,
 }
 
+# 🔒 LOCK para proteger app_state
+app_state_lock = threading.Lock()
+
 
 class BotEngine:
     """
@@ -119,7 +122,8 @@ class BotEngine:
                         
                         if price > 0:
                             self.last_price = price
-                            app_state["last_price"] = price
+                            with app_state_lock:
+                                app_state["last_price"] = price
                             
                             # Guardar na DB
                             self.db.save_price(asset, price)
@@ -131,7 +135,8 @@ class BotEngine:
                     for asset in self.assets:
                         data = self.aggregator.fetch_all_data(asset)
                         if data:
-                            app_state["last_data"] = data
+                            with app_state_lock:
+                                app_state["last_data"] = data
                             
                             # Guardar candles e OI na DB
                             self._save_market_data(asset, data)
@@ -147,7 +152,8 @@ class BotEngine:
                             )
                     
                     self.update_count += 1
-                    app_state["update_count"] = self.update_count
+                    with app_state_lock:
+                        app_state["update_count"] = self.update_count
                     last_oi_time = current_time
                 
                 # Pequeno sleep para não esgotar CPU
@@ -183,20 +189,21 @@ def start_bot_engine(config):
     global app_state
     
     if app_state.get("bot_running"):
-        logger.warning("Bot já está a correr!")
+        logger.warning("Bot ja esta a correr!")
         return False
     
     try:
         engine = BotEngine(config)
         engine.start()
         
-        app_state["bot_running"] = True
-        app_state["trader"] = engine.trader
-        app_state["aggregator"] = engine.aggregator
-        app_state["db"] = engine.db
-        app_state["config"] = config
-        app_state["capital"] = config.get('risk', {}).get('initial_capital', 10000)
-        app_state["equity_history"] = [app_state["capital"]]
+        with app_state_lock:
+            app_state["bot_running"] = True
+            app_state["trader"] = engine.trader
+            app_state["aggregator"] = engine.aggregator
+            app_state["db"] = engine.db
+            app_state["config"] = config
+            app_state["capital"] = config.get('risk', {}).get('initial_capital', 10000)
+            app_state["equity_history"] = [app_state["capital"]]
         
         return True
     except Exception as e:
@@ -212,33 +219,36 @@ def stop_bot_engine():
     if engine and hasattr(engine, 'stop'):
         engine.stop()
     
-    app_state["bot_running"] = False
+    with app_state_lock:
+        app_state["bot_running"] = False
     logger.info("[STOP] Bot parado pelo utilizador")
 
 
 def get_bot_status():
     """Retorna estado actual do bot para o frontend"""
-    return {
-        "running": app_state.get("bot_running", False),
-        "price": app_state.get("last_price", 0),
-        "asset": app_state.get("config", {}).get('assets', ['BTC'])[0] if app_state.get("config") else 'BTC',
-        "update_count": app_state.get("update_count", 0),
-        "capital": app_state.get("capital", 10000),
-        "position": app_state.get("current_position"),
-        "equity": app_state.get("equity_history", [10000])[-1] if app_state.get("equity_history") else 10000,
-    }
+    with app_state_lock:
+        return {
+            "running": app_state.get("bot_running", False),
+            "price": app_state.get("last_price", 0),
+            "asset": app_state.get("config", {}).get('assets', ['BTC'])[0] if app_state.get("config") else 'BTC',
+            "update_count": app_state.get("update_count", 0),
+            "capital": app_state.get("capital", 10000),
+            "position": app_state.get("current_position"),
+            "equity": app_state.get("equity_history", [10000])[-1] if app_state.get("equity_history") else 10000,
+        }
 
 
 def add_log(message, level="info"):
     """Adiciona log ao estado global"""
-    app_state["logs"].append({
-        "time": datetime.now().isoformat(),
-        "message": message,
-        "level": level
-    })
-    # Manter só últimos 1000 logs
-    if len(app_state["logs"]) > 1000:
-        app_state["logs"] = app_state["logs"][-1000:]
+    with app_state_lock:
+        app_state["logs"].append({
+            "time": datetime.now().isoformat(),
+            "message": message,
+            "level": level
+        })
+        # Manter so ultimos 1000 logs
+        if len(app_state["logs"]) > 1000:
+            app_state["logs"] = app_state["logs"][-1000:]
 
 
 # =============================================================================

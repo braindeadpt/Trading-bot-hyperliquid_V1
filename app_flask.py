@@ -44,7 +44,7 @@ from utils import load_config, setup_logging
 logger = logging.getLogger(__name__)
 
 # Flask app
-flask_app = Flask(__name__, static_folder='.')
+flask_app = Flask(__name__, static_folder=None)  # Segurança: não expor ficheiros do projeto
 
 # Estado
 engine = None
