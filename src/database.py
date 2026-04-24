@@ -174,29 +174,58 @@ class BotDatabase:
             logger.warning(f"Sem candles em DB para {symbol} {interval}")
             return []
         
-        # Enriquecer com OI e funding
+        # ⚡ OTIMIZAÇÃO: Buscar OI e funding de UMA VEZ para todo o intervalo
+        # Em vez de N+2 queries, fazemos 2 queries só
         with self._get_conn() as conn:
+            # Timestamp range dos candles
+            min_ts = candles[0]['timestamp']
+            max_ts = candles[-1]['timestamp']
+            
+            # Buscar TODO o OI para este intervalo (±1 hora de margem)
+            oi_rows = conn.execute("""
+                SELECT timestamp, oi_usd FROM open_interest 
+                WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?
+                ORDER BY timestamp
+            """, (symbol, min_ts - 3600000, max_ts + 3600000)).fetchall()
+            
+            # Criar lookup dict: timestamp -> oi_usd
+            oi_lookup = {}
+            for row in oi_rows:
+                oi_lookup[row['timestamp']] = row['oi_usd']
+            
+            # Buscar TODO o funding para este intervalo (±8 horas de margem)
+            fund_rows = conn.execute("""
+                SELECT timestamp, funding_rate FROM funding_rates 
+                WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?
+                ORDER BY timestamp
+            """, (symbol, min_ts - 28800000, max_ts + 28800000)).fetchall()
+            
+            # Criar lookup dict: timestamp -> funding_rate
+            fund_lookup = {}
+            for row in fund_rows:
+                fund_lookup[row['timestamp']] = row['funding_rate']
+            
+            # Enriquecer candles usando lookups (O(1) em vez de O(N) queries)
             for candle in candles:
                 ts = candle['timestamp']
                 
-                # Buscar OI mais próximo (janela de 1 hora = 3600000ms)
-                oi_row = conn.execute("""
-                    SELECT oi_usd FROM open_interest 
-                    WHERE symbol = ? AND ABS(timestamp - ?) < 3600000
-                    ORDER BY ABS(timestamp - ?) LIMIT 1
-                """, (symbol, ts, ts)).fetchone()
-                candle['oi'] = oi_row['oi_usd'] if oi_row else 0
-                
-                # Buscar funding mais próximo
-                fund_row = conn.execute("""
-                    SELECT funding_rate FROM funding_rates 
-                    WHERE symbol = ? AND ABS(timestamp - ?) < 28800000
-                    ORDER BY ABS(timestamp - ?) LIMIT 1
-                """, (symbol, ts, ts)).fetchone()
-                candle['funding_rate'] = fund_row['funding_rate'] if fund_row else 0
+                # OI: encontrar o mais próximo no lookup
+                candle['oi'] = self._find_nearest(ts, oi_lookup) or 0
+                candle['funding_rate'] = self._find_nearest(ts, fund_lookup) or 0
         
-        logger.info(f"Backtest data: {len(candles)} candles para {symbol}")
+        logger.info(f"Backtest data: {len(candles)} candles para {symbol} (2 queries, N+2 eliminado)")
         return candles
+    
+    def _find_nearest(self, target_ts: int, lookup: Dict[int, float]) -> Optional[float]:
+        """Encontra valor mais próximo no lookup dict"""
+        if not lookup:
+            return None
+        
+        nearest_ts = min(lookup.keys(), key=lambda ts: abs(ts - target_ts))
+        # Só usar se estiver dentro de 1 hora
+        if abs(nearest_ts - target_ts) < 3600000:
+            return lookup[nearest_ts]
+        return None
     
     def save_oi(self, symbol: str, timestamp: int, oi_usd: float, exchange: str = 'aggregated'):
         """Guarda Open Interest"""
@@ -232,6 +261,20 @@ class BotDatabase:
                 json.dumps(trade.get('strategy_params', {}))
             ))
             conn.commit()
+    
+    def get_open_trade(self) -> Optional[Dict]:
+        """
+        ⚡ CRASH RECOVERY — Busca trade aberto (sem exit_time)
+        Retorna o trade mais recente com exit_time IS NULL
+        """
+        with self._get_conn() as conn:
+            row = conn.execute("""
+                SELECT * FROM trades 
+                WHERE exit_time IS NULL 
+                ORDER BY entry_time DESC 
+                LIMIT 1
+            """).fetchone()
+            return dict(row) if row else None
     
     def get_trades(self, symbol: Optional[str] = None, is_backtest: int = 1) -> List[Dict]:
         """Busca trades"""

@@ -242,6 +242,9 @@ class PaperTrader:
         self.latency_ms = 0
         self.last_check_time = 0
         
+        # ⚡ CRASH RECOVERY — Restaurar posição aberta da DB se existir
+        self._recover_open_position()
+        
         # ⚡ GRACEFUL SHUTDOWN — handler de sinais
         self._shutdown_requested = False
         self._shutdown_complete = False
@@ -371,6 +374,36 @@ class PaperTrader:
         """Verifica se foi pedido shutdown"""
         return self._shutdown_requested
     
+    def _recover_open_position(self):
+        """
+        ⚡ CRASH RECOVERY — Restaura posição aberta da DB se o bot tiver crashado
+        Verifica trades com exit_time IS NULL e restaura o estado.
+        """
+        try:
+            with self._lock:
+                open_trade = self.db.get_open_trade()
+                if open_trade:
+                    symbol = open_trade['symbol']
+                    direction = open_trade['direction']
+                    entry_price = open_trade['entry_price']
+                    entry_time = open_trade['entry_time']
+                    size_usd = open_trade['size_usd']
+                    
+                    self.current_position = direction
+                    self.entry_price = entry_price
+                    self.entry_time = entry_time
+                    self.position_size = size_usd
+                    self.max_price = entry_price  # Reset — vamos recalcular com preço actual
+                    self.min_price = entry_price
+                    self.trailing_active = False
+                    self.trailing_stop = 0
+                    
+                    logger.warning(f"🚨 CRASH RECOVERY: Posição {direction.upper()} {symbol} restaurada!")
+                    logger.warning(f"   Entry: ${entry_price:,.2f} | Size: ${size_usd:,.2f}")
+                    logger.warning(f"   Trade ID: {open_trade['id']} | Entry time: {datetime.fromtimestamp(entry_time)}")
+        except Exception as e:
+            logger.warning(f"⚠️ Erro no crash recovery (ignorado): {e}")
+    
     def _mtf_loop(self, asset: str):
         """Loop de multi-timeframe — busca candles do TF baixo e deteta spikes"""
         while self._mtf_running:
@@ -419,49 +452,48 @@ class PaperTrader:
             if current_time < self._mtf_cooldown:
                 return
             
-            # Só entra se não estiver em posição
-            if self.current_position is not None:
-                return
-            
-            # DETETAR SPIKE NO TF BAIXO + CONFIRMAÇÃO TF ALTO
-            
-            # LONG: TF alto bullish + TF baixo volume spike + candle bullish
-            if self._htf_direction == 'bull' and volume_ratio >= self.tuner.volume_threshold:
-                # Verificar se candle é bullish
-                if price > candle['open']:
-                    # Verificar funding
-                    funding = candle.get('funding', 0)
-                    max_funding = self.config.get('strategy', {}).get('max_funding_rate', 0.01)
-                    min_funding = self.config.get('strategy', {}).get('min_funding_rate', -0.01)
-                    
-                    if not (funding > max_funding or funding < min_funding):
-                        logger.info(f"⚡ MTF SIGNAL: LONG spike no {self.secondary_tf}! "
-                                   f"Vol: {volume_ratio:.1f}x | Price: ${price:,.0f} | "
-                                   f"HTF: {self._htf_direction}")
+            # ⚡ FIX RACE: Verificar posição DENTRO do lock para evitar double-entry
+            with self._lock:
+                if self.current_position is not None:
+                    return
+                
+                # DETETAR SPIKE NO TF BAIXO + CONFIRMAÇÃO TF ALTO
+                
+                # LONG: TF alto bullish + TF baixo volume spike + candle bullish
+                if self._htf_direction == 'bull' and volume_ratio >= self.tuner.volume_threshold:
+                    # Verificar se candle é bullish
+                    if price > candle['open']:
+                        # Verificar funding
+                        funding = candle.get('funding', 0)
+                        max_funding = self.config.get('strategy', {}).get('max_funding_rate', 0.01)
+                        min_funding = self.config.get('strategy', {}).get('min_funding_rate', -0.01)
                         
-                        # ENTRAR IMEDIATAMENTE!
-                        with self._lock:
+                        if not (funding > max_funding or funding < min_funding):
+                            logger.info(f"⚡ MTF SIGNAL: LONG spike no {self.secondary_tf}! "
+                                       f"Vol: {volume_ratio:.1f}x | Price: ${price:,.0f} | "
+                                       f"HTF: {self._htf_direction}")
+                            
+                            # ENTRAR IMEDIATAMENTE!
                             self._enter_position(asset, 'long', price, candle, self._htf_direction)
+                            
+                            # Cooldown de 5 minutos para evitar re-entrada
+                            self._mtf_cooldown = current_time + 300
+                
+                # SHORT: TF alto bearish + TF baixo volume spike + candle bearish
+                elif self._htf_direction == 'bear' and volume_ratio >= self.tuner.volume_threshold:
+                    if price < candle['open']:
+                        funding = candle.get('funding', 0)
+                        max_funding = self.config.get('strategy', {}).get('max_funding_rate', 0.01)
+                        min_funding = self.config.get('strategy', {}).get('min_funding_rate', -0.01)
                         
-                        # Cooldown de 5 minutos para evitar re-entrada
-                        self._mtf_cooldown = current_time + 300
-            
-            # SHORT: TF alto bearish + TF baixo volume spike + candle bearish
-            elif self._htf_direction == 'bear' and volume_ratio >= self.tuner.volume_threshold:
-                if price < candle['open']:
-                    funding = candle.get('funding', 0)
-                    max_funding = self.config.get('strategy', {}).get('max_funding_rate', 0.01)
-                    min_funding = self.config.get('strategy', {}).get('min_funding_rate', -0.01)
-                    
-                    if not (funding > max_funding or funding < min_funding):
-                        logger.info(f"⚡ MTF SIGNAL: SHORT spike no {self.secondary_tf}! "
-                                   f"Vol: {volume_ratio:.1f}x | Price: ${price:,.0f} | "
-                                   f"HTF: {self._htf_direction}")
-                        
-                        with self._lock:
+                        if not (funding > max_funding or funding < min_funding):
+                            logger.info(f"⚡ MTF SIGNAL: SHORT spike no {self.secondary_tf}! "
+                                       f"Vol: {volume_ratio:.1f}x | Price: ${price:,.0f} | "
+                                       f"HTF: {self._htf_direction}")
+                            
                             self._enter_position(asset, 'short', price, candle, self._htf_direction)
-                        
-                        self._mtf_cooldown = current_time + 300
+                            
+                            self._mtf_cooldown = current_time + 300
             
             # Log periódico do TF baixo
             if len(self._low_tf_candles) % 10 == 0:
@@ -538,10 +570,6 @@ class PaperTrader:
     
     def _fast_price_check(self, asset: str):
         """Verifica preço rápido e gere trailing stop/SL"""
-        # Só importa se estivermos em posição
-        if not self.current_position:
-            return
-        
         try:
             # Buscar preço atual (cache se possível)
             price = self.aggregator.get_cached_price(asset, max_age_seconds=30)
@@ -561,7 +589,11 @@ class PaperTrader:
             self._last_price = price
             self.last_check_time = time.time()
             
+            # ⚡ FIX TOCTOU: Toda a lógica de posição DENTRO do lock
             with self._lock:
+                if not self.current_position:
+                    return
+                    
                 exit_reason = self._check_exit_signals_fast(price)
                 if exit_reason:
                     self._exit_position(asset, price, exit_reason, {'close': price})

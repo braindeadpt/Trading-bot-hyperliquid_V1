@@ -236,7 +236,9 @@ class TestEquityTracking:
 class TestThreadSafety:
     def test_concurrent_position_access(self, mock_config):
         """Mock concurrent access to position state."""
-        with patch('paper_trading.BotDatabase'):
+        with patch('paper_trading.BotDatabase') as MockDB:
+            MockDB.return_value.get_open_trade.return_value = None  # ⚡ Sem trades abertos
+            
             trader = PaperTrader(mock_config)
             errors = []
             results = []

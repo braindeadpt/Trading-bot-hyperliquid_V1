@@ -33,6 +33,7 @@ class TestCandleMemoryStress:
             mock_cursor = MagicMock()
             mock_conn.cursor.return_value = mock_cursor
             MockDB.return_value._get_conn.return_value = mock_conn
+            MockDB.return_value.get_open_trade.return_value = None  # ⚡ Sem trades abertos
 
             trader = PaperTrader(mock_config)
             # Pre-fill 20 candles so regime detection works
@@ -126,6 +127,7 @@ class TestMultiAssetThreadContention:
             try:
                 with patch('paper_trading.BotDatabase') as MockDB:
                     MockDB.return_value._get_conn.return_value = MagicMock()
+                    MockDB.return_value.get_open_trade.return_value = None  # ⚡ Sem trades abertos
                     trader = PaperTrader(mock_config)
                     traders[asset] = trader
                     candle = {
@@ -248,6 +250,7 @@ class TestBotRestartMidTrade:
         with patch('paper_trading.BotDatabase') as MockDB:
             mock_conn = MagicMock()
             MockDB.return_value._get_conn.return_value = mock_conn
+            MockDB.return_value.get_open_trade.return_value = None  # ⚡ Sem trades abertos
 
             trader_v1 = PaperTrader(mock_config)
             candle = {'volume': 1_000_000, 'oi_change': 0.01, 'funding': 0}
