@@ -1,13 +1,22 @@
-"""Shared pytest fixtures for the trading bot test suite."""
 import pytest
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import json
 import time
+import threading
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+
+def mock_response(json_data=None, status_code=200, text=None):
+    """Helper para criar respostas HTTP mock correctamente."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.text = text if text is not None else json.dumps(json_data or {})
+    resp.json.return_value = json_data or {}
+    return resp
 
 
 @pytest.fixture

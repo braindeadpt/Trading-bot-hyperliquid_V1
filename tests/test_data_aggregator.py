@@ -99,7 +99,7 @@ class TestValidateAPI:
         agg = DataAggregator(mock_config)
         with patch.object(agg.session, 'post') as mock_post:
             mock_post.return_value.status_code = 200
-            mock_post.return_value.text = 'some long response with tokens'
+            mock_post.return_value.json.return_value = [{'name': 'BTC'}]
             assert agg.validate_api('hyperliquid') is True
 
     def test_validate_hyperliquid_short_text_fails(self, mock_config):

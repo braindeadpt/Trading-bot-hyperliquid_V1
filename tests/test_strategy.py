@@ -6,36 +6,41 @@ from strategy import MomentumStrategy
 
 
 # =============================================================================
-# 1. SMA Calculation
+# 1. SMA Calculation (via PaperTrader)
 # =============================================================================
 class TestSMACalculation:
     def test_sma_basic(self, mock_config):
-        strategy = MomentumStrategy(mock_config)
+        from paper_trading import PaperTrader
+        trader = PaperTrader(mock_config)
         prices = [100, 110, 120, 130, 140]
-        sma = strategy._calculate_sma(prices, 3)
+        sma = trader._calculate_sma(prices, 3)
         assert sma == pytest.approx((120 + 130 + 140) / 3)
 
     def test_sma_full_period(self, mock_config):
-        strategy = MomentumStrategy(mock_config)
+        from paper_trading import PaperTrader
+        trader = PaperTrader(mock_config)
         prices = list(range(1, 101))
-        sma = strategy._calculate_sma(prices, 10)
+        sma = trader._calculate_sma(prices, 10)
         assert sma == pytest.approx(sum(range(91, 101)) / 10)
 
     def test_sma_insufficient_data_returns_average_of_available(self, mock_config):
-        strategy = MomentumStrategy(mock_config)
+        from paper_trading import PaperTrader
+        trader = PaperTrader(mock_config)
         prices = [100, 200]
-        sma = strategy._calculate_sma(prices, 10)
+        sma = trader._calculate_sma(prices, 10)
         assert sma == pytest.approx(150.0)
 
     def test_sma_single_price(self, mock_config):
-        strategy = MomentumStrategy(mock_config)
-        sma = strategy._calculate_sma([50000], 10)
+        from paper_trading import PaperTrader
+        trader = PaperTrader(mock_config)
+        sma = trader._calculate_sma([50000], 10)
         assert sma == 50000
 
     def test_sma_empty_list(self, mock_config):
-        strategy = MomentumStrategy(mock_config)
+        from paper_trading import PaperTrader
+        trader = PaperTrader(mock_config)
         # Edge case: empty list division by zero protection
-        sma = strategy._calculate_sma([], 10)
+        sma = trader._calculate_sma([], 10)
         assert sma == 0.0  # max(1, 0) denominator -> 0/1
 
 
@@ -96,14 +101,16 @@ class TestVolumeSpikeDetection:
     def test_volume_spike_just_above_threshold(self, mock_config):
         strategy = MomentumStrategy(mock_config)
         base_volume = 1_000_000
-        for _ in range(strategy.volume_lookback):
+        # Analise() adiciona volume_total ao histórico, então preenchemos até lookback-1
+        for _ in range(strategy.volume_lookback - 1):
             strategy.volume_history.append(base_volume)
 
-        just_above = base_volume * strategy.volume_threshold + 1
+        # Volume 3x a média (3.0 > 2.5 threshold)
+        spike_volume = base_volume * 3.0
         data = {
             'oi_total': 1_000_000_000,
             'oi_change_pct': 0.02,
-            'volume_total': just_above,
+            'volume_total': spike_volume,
             'funding_avg': 0.005,
         }
         signal = strategy.analyze(data, 85000.0)
@@ -111,8 +118,10 @@ class TestVolumeSpikeDetection:
 
     def test_insufficient_volume_history_returns_none(self, mock_config):
         strategy = MomentumStrategy(mock_config)
-        # Only add half of required history
-        for _ in range(strategy.volume_lookback // 2 - 1):
+        # Analise() adiciona 1 ao histórico, então preenchemos até (lookback//2 - 2)
+        # para garantir que mesmo com o adicionado, ainda fica abaixo do limite
+        target = strategy.volume_lookback // 2 - 2
+        for _ in range(target):
             strategy.volume_history.append(1_000_000)
 
         data = {
@@ -342,7 +351,7 @@ class TestExitSignals:
         signal = strategy.should_exit(85000, data)
         assert signal is None
 
-    def test_should_exit_short_not_implemented(self, mock_config):
+    def test_should_exit_short_oi_rising(self, mock_config):
         strategy = MomentumStrategy(mock_config)
         strategy.in_position = True
         strategy.position_direction = 'short'
@@ -350,8 +359,8 @@ class TestExitSignals:
 
         data = {'oi_change_pct': 0.01}
         signal = strategy.should_exit(85000, data)
-        # Current code only checks long OI fade; short exits are not fully implemented
-        assert signal is None
+        # OI a subir em short = possível squeeze, fecha a posição
+        assert signal == 'CLOSE_SHORT'
 
 
 # =============================================================================

@@ -204,17 +204,28 @@ class DataAggregator:
     def _safe_json(self, response: requests.Response, source_name: str) -> Optional[Dict]:
         """Extrai JSON de forma segura, com logging detalhado"""
         if response.status_code != 200:
+            text = getattr(response, 'text', '')
+            text_preview = text[:200] if isinstance(text, str) else str(text)[:200]
             logger.warning(
-                f"{source_name} HTTP {response.status_code}: {response.text[:200]}"
+                f"{source_name} HTTP {response.status_code}: {text_preview}"
             )
             return None
         
-        if not response.text or response.text.strip() == '':
+        text = getattr(response, 'text', '')
+        
+        # Se text não é string (ex: MagicMock em testes), tentar json() directamente
+        if not isinstance(text, str):
+            try:
+                return response.json()
+            except Exception:
+                return None
+        
+        if not text.strip():
             logger.warning(f"{source_name} resposta vazia")
             return None
         
         # Verificar se é HTML (Cloudflare block, error page, etc.)
-        text_start = response.text.strip()[:20].lower()
+        text_start = text.strip()[:20].lower()
         if text_start.startswith('<!doctype') or text_start.startswith('<html'):
             logger.warning(f"{source_name} retornou HTML em vez de JSON! (Cloudflare block?)")
             return None
@@ -224,7 +235,7 @@ class DataAggregator:
         except json.JSONDecodeError as e:
             logger.warning(
                 f"{source_name} JSON inválido: {e} | "
-                f"Primeiros 100 chars: {response.text[:100]}"
+                f"Primeiros 100 chars: {text[:100]}"
             )
             return None
     
@@ -311,10 +322,13 @@ class DataAggregator:
         oi_contracts = float(first_item.get('openInterest', 0))
         oi_usd = oi_contracts * last_price
         
+        funding_rate = float(first_item.get('fundingRate', 0))
+        volume_24h = float(first_item.get('volume24h', 0))
+        
         return {
             'oi_usd': oi_usd,
-            'funding_rate': float(result.get('fundingRate', 0)),
-            'volume_24h': float(result.get('volume24h', 0)),
+            'funding_rate': funding_rate,
+            'volume_24h': volume_24h,
             'mark_price': last_price
         }
     

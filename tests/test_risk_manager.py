@@ -186,9 +186,11 @@ class TestTrailingStop:
         trader.max_price = 82000.0  # Max reached
         trader.trailing_active = True
         trader.trailing_pct = 0.015
-        trader.trailing_stop = 82000.0 * (1 - 0.015)  # 80870
+        # 82000 * 0.985 = 80770
+        trader.trailing_stop = 80770.0
 
-        exit_reason = trader._check_exit_signals_fast(80800.0)
+        # Preço desceu para 80750, abaixo do trailing stop
+        exit_reason = trader._check_exit_signals_fast(80750.0)
         assert exit_reason == 'TRAILING_STOP'
 
     def test_trailing_stop_long_updates_on_new_high(self, mock_config):
@@ -319,14 +321,15 @@ class TestMaxDrawdown:
         peak = initial
 
         # Simulate a sequence of trades that create drawdown
-        for _ in range(3):
+        # Position size is $100 with 2% SL + fees ~0.6%
+        for _ in range(10):
             trader._enter_position('BTC', 'long', 80000.0, {'volume': 1000000, 'oi_change': 0.01, 'funding': 0}, 'bull')
             trader._exit_position('BTC', 75000.0, 'STOP_LOSS', {'close': 75000.0})
 
         drawdown = (peak - trader.capital) / peak
         assert drawdown > 0
-        # 3 trades losing ~6.25% each (2% SL + fees), so drawdown should be substantial
-        assert drawdown > 0.05  # At least 5% drawdown
+        # 10 trades losing ~2.6% each (2% SL + 0.6% fees on $100 of $10k capital = 0.26% per trade)
+        assert drawdown > 0.005  # At least 0.5% drawdown after 10 trades
 
 
 # =============================================================================

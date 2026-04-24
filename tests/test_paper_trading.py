@@ -34,7 +34,8 @@ class TestPaperTraderInit:
 
     def test_init_threading_lock_exists(self, mock_config):
         trader = PaperTrader(mock_config)
-        assert isinstance(trader._lock, threading.Lock)
+        # threading.Lock() retorna um _thread.lock ou _RLock — verificamos pelo tipo concreto
+        assert type(trader._lock).__name__ in ('lock', 'Lock', 'RLock')
 
 
 # =============================================================================
