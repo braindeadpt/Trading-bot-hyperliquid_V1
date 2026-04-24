@@ -5,6 +5,7 @@ Abre automaticamente numa janela/janela separada do sistema
 import json
 import webbrowser
 import threading
+import time
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -286,7 +287,7 @@ class WebDashboard:
         self.config = config
         self.db = db or BotDatabase()
         self.app = Flask(__name__)
-        CORS(self.app)  # Permitir CORS para dashboard.html aberto de qualquer origem
+        CORS(self.app, origins=["http://127.0.0.1:5000", "http://localhost:5000"])
         
         self.aggregator = DataAggregator(config)
         self.strategy = MomentumStrategy(config)
@@ -297,10 +298,16 @@ class WebDashboard:
         # Estado
         self.current_data = {}
         self.total_signals = 0
+        self._signals_date = datetime.now().date()  # Para reset diário
         self.current_pnl = 0
         self.last_trade_pnl = 0
         self.last_trade_time = "Sem trades"
         self.last_update = "Nunca"
+        
+        # Cache de API (evitar rate limits)
+        self._cache = {}
+        self._cache_timestamp = 0
+        self._cache_ttl = 10  # segundos
         
         self._setup_routes()
     
@@ -341,7 +348,21 @@ class WebDashboard:
             return jsonify(self.db.get_stats())
     
     def _update_data(self):
-        """Atualiza dados das APIs"""
+        """Atualiza dados das APIs (com cache para evitar rate limits)"""
+        now = time.time()
+        
+        # Verificar se cache ainda é válido
+        if now - self._cache_timestamp < self._cache_ttl:
+            return
+        
+        # Reset diário do contador de sinais
+        today = datetime.now().date()
+        if today != self._signals_date:
+            self.total_signals = 0
+            self._signals_date = today
+        
+        self._cache_timestamp = now
+        
         for asset in self.assets:
             try:
                 data = self.aggregator.fetch_all_data(asset)

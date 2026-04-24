@@ -18,11 +18,13 @@ class MomentumStrategy:
     """
     
     def __init__(self, config: Dict):
-        self.volume_threshold = config['strategy']['volume_spike_threshold']
-        self.oi_threshold = config['strategy']['oi_change_threshold']
-        self.max_funding = config['strategy']['max_funding_rate']
-        self.min_funding = config['strategy']['min_funding_rate']
-        self.volume_lookback = config['strategy']['volume_lookback']
+        strat = config.get('strategy', {})
+        self.volume_threshold = strat.get('volume_spike_threshold', 2.5)
+        self.oi_threshold = strat.get('oi_change_threshold', 0.015)
+        self.max_funding = strat.get('max_funding_rate', 0.01)
+        self.min_funding = strat.get('min_funding_rate', -0.01)
+        self.volume_lookback = strat.get('volume_lookback', 20)
+        self.oi_exhaustion_threshold = strat.get('oi_exhaustion_threshold', -0.005)
         
         # Histórico de volume para média móvel
         self.volume_history = deque(maxlen=self.volume_lookback)
@@ -47,8 +49,12 @@ class MomentumStrategy:
         volume_total = data.get('volume_total', 0)
         funding_avg = data.get('funding_avg', 0)
         
-        # Guardar volume no histórico
-        self.volume_history.append(volume_total)
+        # Guardar volume no histórico (só se for válido)
+        if volume_total > 0:
+            self.volume_history.append(volume_total)
+        else:
+            logger.warning("Volume total = 0 — API pode estar com problemas. Ignorando este candle.")
+            return None
         
         # Calcular média de volume (se temos dados suficientes)
         if len(self.volume_history) < self.volume_lookback // 2:
@@ -98,11 +104,17 @@ class MomentumStrategy:
         
         oi_change = data.get('oi_change_pct', 0)
         
-        # OI a descer enquanto preço ainda sobe = momentum a esgotar-se
-        if self.position_direction == 'long' and oi_change < -0.005:
-            logger.info(f"[DOWN] OI a descer ({oi_change*100:.2f}%) — possível exaustão do momentum")
+        # LONG: OI a descer enquanto preço sobe = momentum a esgotar-se
+        if self.position_direction == 'long' and oi_change < self.oi_exhaustion_threshold:
+            logger.info(f"[DOWN] OI a descer ({oi_change*100:.2f}%) — possível exaustão do momentum LONG")
             self._reset_position()
             return 'CLOSE_LONG'
+        
+        # SHORT: OI a subir enquanto preço desce = short squeeze possível
+        if self.position_direction == 'short' and oi_change > abs(self.oi_exhaustion_threshold):
+            logger.info(f"[UP] OI a subir ({oi_change*100:.2f}%) — possível exaustão do momentum SHORT")
+            self._reset_position()
+            return 'CLOSE_SHORT'
         
         # TODO: Trailing stop baseado em ATR
         # TODO: Stop loss fixo

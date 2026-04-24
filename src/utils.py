@@ -7,14 +7,26 @@ from pathlib import Path
 from typing import Dict
 
 
-def load_config(path: str = "config/settings.yaml") -> Dict:
+def load_config(path: str = None) -> Dict:
     """Carrega configuração YAML"""
+    # Se não passar path, resolve relativo a este ficheiro
+    if path is None:
+        path = Path(__file__).parent.parent / "config" / "settings.yaml"
+    
     config_path = Path(path)
     if not config_path.exists():
-        raise FileNotFoundError(f"Config não encontrado: {path}")
+        raise FileNotFoundError(f"Config não encontrado: {config_path}")
     
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise ValueError(f"Erro a parsear YAML em {config_path}: {e}")
+    
+    if not isinstance(config, dict):
+        raise ValueError(f"Config em {config_path} não é um dicionário válido")
+    
+    return config
 
 
 def setup_logging(level: str = "INFO", log_file: str = None):

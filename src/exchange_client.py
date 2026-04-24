@@ -31,9 +31,10 @@ class HyperliquidClient:
             price: Preço limite (None = market order)
         """
         if self.paper_trading:
+            price_str = f"${price:,.2f}" if price else "MARKET"
             logger.info(
                 f"🧪 PAPER TRADE | {side} {asset} | ${size:.2f} | "
-                f"Preço: ${price:,.2f if price else 'MARKET'}"
+                f"Preço: {price_str}"
             )
             return {
                 'status': 'PAPER_FILLED',
@@ -59,8 +60,9 @@ class HyperliquidClient:
     def get_balance(self) -> Dict:
         """Retorna saldo da conta (simulado)"""
         if self.paper_trading:
+            initial_capital = self.config.get('risk', {}).get('initial_capital', 10000.0)
             return {
-                'USDC': 10000.0,  # Saldo fictício para paper trading
+                'USDC': initial_capital,
                 'status': 'paper'
             }
         

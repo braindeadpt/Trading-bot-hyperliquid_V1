@@ -28,6 +28,11 @@ class RiskManager:
     
     def calculate_position_size(self, price: float, confidence: float = 1.0) -> float:
         """Calcula tamanho da posição em USD"""
+        # Validar confidence
+        if not isinstance(confidence, (int, float)):
+            confidence = 1.0
+        confidence = max(0.0, min(1.0, float(confidence)))
+        
         # Tamanho base limitado
         size = min(self.max_position * confidence, self.max_position)
         
@@ -37,6 +42,10 @@ class RiskManager:
     
     def check_stop_loss(self, entry_price: float, current_price: float, direction: str) -> bool:
         """Verifica se stop loss foi atingido"""
+        if entry_price <= 0:
+            logger.warning("Entry price inválido (<=0) — não posso calcular stop loss")
+            return False
+        
         if direction == 'long':
             loss_pct = (entry_price - current_price) / entry_price
         else:

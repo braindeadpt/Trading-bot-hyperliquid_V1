@@ -84,8 +84,12 @@ class DataAggregator:
                     headers={"Content-Type": "application/json"},
                     timeout=5
                 )
-                # Hyperliquid meta retorna lista de tokens
-                return resp.status_code == 200 and len(resp.text) > 10
+                # Verificar se é JSON válido com tokens
+                try:
+                    data = resp.json()
+                    return isinstance(data, list) and len(data) > 0
+                except (json.JSONDecodeError, ValueError):
+                    return False
             
             return False
             
@@ -295,9 +299,16 @@ class DataAggregator:
         if not data or data.get('retCode') != 0:
             return None
         
-        result = data['result']['list'][0]
-        last_price = float(result.get('lastPrice', 0))
-        oi_contracts = float(result.get('openInterest', 0))
+        # Validar estrutura antes de indexar
+        result = data.get('result', {})
+        result_list = result.get('list', [])
+        if not result_list or not isinstance(result_list, list):
+            logger.warning("Bybit resposta sem 'result.list' ou lista vazia")
+            return None
+        
+        first_item = result_list[0]
+        last_price = float(first_item.get('lastPrice', 0))
+        oi_contracts = float(first_item.get('openInterest', 0))
         oi_usd = oi_contracts * last_price
         
         return {
@@ -366,6 +377,11 @@ class DataAggregator:
     
     def _get_sanity_range(self, asset: str) -> tuple:
         """Retorna (min, max) aceitáveis para validação de preço"""
+        # Ler ranges da config se disponíveis, senão usar defaults
+        config_ranges = self.config.get('price_validation', {}).get('ranges', {})
+        if asset in config_ranges:
+            return (config_ranges[asset]['min'], config_ranges[asset]['max'])
+        
         ranges = {
             'BTC': (10000.0, 200000.0),
             'ETH': (500.0, 20000.0),
