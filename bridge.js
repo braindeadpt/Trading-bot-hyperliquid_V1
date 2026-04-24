@@ -1,34 +1,79 @@
-// ===== PYTHON BRIDGE =====
-// Verifica se está a correr dentro da app desktop (pywebview)
+// ===== BRIDGE UNIVERSAL =====
+// Funciona em 3 modos:
+// 1. STANDALONE (browser): usa localStorage + simulação
+// 2. DESKTOP (pywebview): usa window.pywebview.api
+// 3. FLASK (localhost): usa fetch('/api/...')
+
 const isDesktop = typeof window.pywebview !== 'undefined' && window.pywebview.api !== undefined;
+const isFlask = window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost';
+const isStandalone = !isDesktop && !isFlask;
 
-console.log('🖥️ Modo:', isDesktop ? 'DESKTOP (Python backend)' : 'STANDALONE (browser)');
+console.log('🖥️ Modo:', isDesktop ? 'DESKTOP (pywebview)' : isFlask ? 'FLASK (localhost)' : 'STANDALONE (browser)');
 
-// Wrapper para chamar Python ou fallback para standalone
-async function pyCall(method, ...args) {
+// Wrapper universal para chamar backend
+async function backendCall(method, ...args) {
     if (isDesktop && window.pywebview.api[method]) {
         try {
-            const result = await window.pywebview.api[method](...args);
-            return result;
+            return await window.pywebview.api[method](...args);
         } catch (e) {
             console.error('Erro Python API:', e);
             return null;
         }
     }
+    
+    if (isFlask) {
+        try {
+            let url = '/api/' + method.replace('_js_', '').replace(/_/g, '');
+            let options = { method: 'GET' };
+            
+            // Mapear métodos para endpoints
+            const endpointMap = {
+                '_js_start_bot': { url: '/api/start', method: 'POST' },
+                '_js_stop_bot': { url: '/api/stop', method: 'POST' },
+                '_js_get_status': { url: '/api/status', method: 'GET' },
+                '_js_get_logs': { url: '/api/logs', method: 'GET' },
+                '_js_get_trades': { url: '/api/trades', method: 'GET' },
+                '_js_force_long': { url: '/api/force/long', method: 'POST' },
+                '_js_force_short': { url: '/api/force/short', method: 'POST' },
+                '_js_emergency_close': { url: '/api/emergency', method: 'POST' },
+                '_js_save_config': { url: '/api/config', method: 'POST' },
+                '_js_load_config': { url: '/api/config', method: 'GET' },
+            };
+            
+            if (endpointMap[method]) {
+                url = endpointMap[method].url;
+                options.method = endpointMap[method].method;
+            }
+            
+            if (args.length > 0 && options.method === 'POST') {
+                options.headers = { 'Content-Type': 'application/json' };
+                options.body = JSON.stringify(args[0]);
+            }
+            
+            const resp = await fetch(url, options);
+            if (!resp.ok) return null;
+            return await resp.json();
+        } catch (e) {
+            console.error('Erro Flask API:', e);
+            return null;
+        }
+    }
+    
     return null;
 }
 
 // ===== OVERRIDES DO DASHBOARD =====
-// Quando em modo desktop, substituir funções para usar backend Python
+// Quando em modo desktop ou Flask, substituir funções para usar backend Python
 
-if (isDesktop) {
+if (isDesktop || isFlask) {
+    
     // Override startBot
     const originalStartBot = window.startBot;
     window.startBot = async function() {
         if (botRunning) { log('⚠️ Já está a correr', 'warn'); return; }
 
-        console.log('🚀 A iniciar bot via Python backend...');
-        const result = await pyCall('_js_start_bot');
+        console.log('🚀 A iniciar bot via backend Python...');
+        const result = await backendCall('_js_start_bot');
         if (result && result.success) {
             botRunning = true;
             document.getElementById('btn-start').classList.add('active');
@@ -44,7 +89,6 @@ if (isDesktop) {
             log('🚀 BOT INICIADO! 🐍 (Python backend)', 'signal');
             log('📡 Backend Python real a correr...', 'info');
 
-            // Iniciar polling do estado
             startStatePolling();
         } else {
             log('❌ Falha a iniciar bot: ' + (result ? result.message : 'unknown'), 'error');
@@ -56,8 +100,8 @@ if (isDesktop) {
     window.stopBot = async function() {
         if (!botRunning) { log('⚠️ Já está parado', 'warn'); return; }
 
-        console.log('🛑 A parar bot via Python backend...');
-        const result = await pyCall('_js_stop_bot');
+        console.log('🛑 A parar bot via backend Python...');
+        const result = await backendCall('_js_stop_bot');
         if (result && result.success) {
             botRunning = false;
             document.getElementById('btn-start').classList.remove('active');
@@ -81,14 +125,12 @@ if (isDesktop) {
     window.fetchRealData = async function() {
         if (!botRunning) return;
 
-        const status = await pyCall('_js_get_status');
+        const status = await backendCall('_js_get_status');
         if (!status) {
-            // Fallback para API directa se Python falhar
-            console.log('⚠️ Python backend não respondeu, fallback para API directa');
+            console.log('⚠️ Backend não respondeu, fallback para API directa');
             return originalFetchRealData();
         }
 
-        // Actualizar UI com dados do backend Python
         const price = status.price || 0;
         const markPrice = status.mark_price || price;
         const oraclePrice = status.oracle_price || price;
@@ -105,12 +147,10 @@ if (isDesktop) {
         document.getElementById('funding').textContent = status.funding !== 0 ? fmtPct(status.funding * 100) : '--';
         document.getElementById('volume').textContent = status.volume > 0 ? fmt$(status.volume) : '--';
 
-        // Status
         document.getElementById('conn-dot').className = 'status-dot on';
         document.getElementById('conn-text').textContent = 'ONLINE';
         document.getElementById('conn-text').style.color = 'var(--accent)';
 
-        // Position
         if (status.position) {
             const p = status.position;
             const pnlPct = price > 0 ? ((price - p.entryPrice) / p.entryPrice * 100 * (p.direction === 'LONG' ? 1 : -1)) : 0;
@@ -125,7 +165,6 @@ if (isDesktop) {
             document.getElementById('pos-text').textContent = p.direction + ' ' + (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(1) + '%';
             document.getElementById('btn-close').disabled = false;
 
-            // Actualizar posição global para consistência
             currentPosition = {
                 direction: p.direction,
                 entryPrice: p.entryPrice,
@@ -146,21 +185,19 @@ if (isDesktop) {
             currentPosition = null;
         }
 
-        // Equity
         const equity = status.equity || status.capital || paperCapital;
         document.getElementById('cap-current').textContent = fmt$(equity);
         const totalPnl = equity - paperCapital;
         document.getElementById('total-pnl').textContent = (totalPnl >= 0 ? '+' : '') + fmt$(totalPnl);
         document.getElementById('total-pnl').className = 'value ' + (totalPnl >= 0 ? 'up' : 'down');
 
-        // Update count
         document.getElementById('update-count').textContent = status.update_count || 0;
         document.getElementById('last-update').textContent = now();
     };
 
     // Override fetch logs
     window.fetchLogs = async function() {
-        const logs = await pyCall('_js_get_logs', 100);
+        const logs = await backendCall('_js_get_logs');
         if (logs && logs.length > 0) {
             const container = document.getElementById('log-container');
             container.innerHTML = '';
@@ -177,17 +214,17 @@ if (isDesktop) {
 
     // Override force long/short
     window.forceLong = async function() {
-        const result = await pyCall('_js_force_long');
+        const result = await backendCall('_js_force_long');
         log(result.message, result.success ? 'signal' : 'error');
     };
 
     window.forceShort = async function() {
-        const result = await pyCall('_js_force_short');
+        const result = await backendCall('_js_force_short');
         log(result.message, result.success ? 'signal' : 'error');
     };
 
     window.emergencyClose = async function() {
-        const result = await pyCall('_js_emergency_close');
+        const result = await backendCall('_js_emergency_close');
         log(result.message, result.success ? 'warn' : 'error');
     };
 
@@ -201,5 +238,15 @@ if (isDesktop) {
                 await fetchLogs();
             }
         }, 3000);
+    };
+
+    // Quando parar o bot, parar também o polling
+    const originalStopBot2 = window.stopBot;
+    window.stopBot = async function() {
+        if (statePollInterval) {
+            clearInterval(statePollInterval);
+            statePollInterval = null;
+        }
+        return originalStopBot2();
     };
 }
