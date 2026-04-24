@@ -1,246 +1,217 @@
-# 🔧 Resolução de Problemas (Troubleshooting)
-
-> _Quando algo corre mal, não entres em pânico. Tens um manual._
-
----
-
-## Problema 1: "pip não é reconhecido como nome de cmdlet"
-
-### O que vês:
-```powershell
-pip : The term 'pip' is not recognized as the name of a cmdlet...
-```
-
-### Porque acontece:
-O Windows não sabe onde o `pip` está instalado. O Python está no computador, mas o Windows não o encontrou porque o **PATH** não está configurado.
-
-### Solução — Passo a Passo:
-
-**Método 1 — Usa `python -m pip` (mais fiável):**
-```powershell
-python -m pip install -r requirements.txt
-```
-
-**Método 2 — Se `python` também não for reconhecido, usa `py`:**
-```powershell
-py -m pip install -r requirements.txt
-```
-
-**Método 3 — Reinstalar Python com PATH:**
-1. Vai a "Adicionar ou Remover Programas"
-2. Desinstala Python
-3. Descarrega de novo em [python.org](https://www.python.org/downloads/)
-4. **NO INSTALADOR, MARCA A CAIXINHA:** "Add Python to PATH" (está no fundo da primeira janela)
-5. Instala
-6. Fecha e abre o PowerShell de novo
-7. Testa: `python --version`
-
-> 💡 **Dica:** Nunca uses `pip` sozinho no Windows. `python -m pip` é sempre mais seguro.
+# 🔧 TROUBLESHOOTING.md — Resolução de Problemas
+## Hyperliquid Momentum Bot v0.1.0
 
 ---
 
-## Problema 2: "O preço mostra valor errado ou completamente absurdo"
+## 🚨 Problemas Mais Comuns
 
-### O que vês:
-No dashboard ou terminal, o preço do BTC aparece como $0, $999999, ou um valor que sabes que está errado.
+### 1. "Bot não arranca" — A janela abre e fecha logo
 
-### Porque acontece:
-1. A API da Hyperliquid ou Binance teve um problema temporário
-2. Cloudflare bloqueou o pedido (retornou HTML em vez de JSON)
-3. A resposta da API veio vazia ou mal formatada
-4. O "sanity check" do bot detetou algo estranho e recusou o preço
+**Causas prováveis:**
+- Python não instalado ou não no PATH
+- Dependências em falta (flask, pystray, pillow)
+- Erro no ficheiro de configuração
 
-### Solução — Passo a Passo:
+**Como resolver:**
 
-**Passo 1 — Verifica se é um problema da API:**
-```powershell
-python src/data_aggregator.py
-```
-Isto testa todas as APIs. Se aparecerem ❌ em todas, o problema é a tua internet ou as APIs estão em manutenção.
+1. Abre o PowerShell na pasta do bot:
+   ```powershell
+   cd C:\Users\%USERNAME%\Documents\hyperliquid-momentum-bot
+   python app_flask.py
+   ```
 
-**Passo 2 — Testa a Hyperliquid especificamente:**
-```powershell
-python test_price_now.py
-```
-
-**Passo 3 — Se só a Hyperliquid falha:**
-- Espera 5 minutos e tenta de novo. A Hyperliquid faz manutenções breves.
-- Verifica [status.hyperliquid.xyz](https://status.hyperliquid.xyz) (se existir) ou o Twitter/X da equipa.
-
-**Passo 4 — Se o dashboard mostra valor errado:**
-- Recarrega a página (F5)
-- Abre a consola do browser (F12 → separador "Console") — vês erros vermelhos?
-- Se houver erros CORS, confirma que abriste o `dashboard.html` como ficheiro local (file://) e não via servidor.
-
-> 🧠 **Nota:** O bot tem um "cache de preço" que guarda o último valor válido por 2 minutos. Se vir valor 0, significa que NENHUMA API respondeu com um preço que o bot considerasse "são".
+2. Lê a mensagem de erro. Se aparecer:
+   - `"python" não é reconhecido` → [Ver INSTALL.md](INSTALL.md#python-não-é-reconhecido-como-comando)
+   - `ModuleNotFoundError: No module named 'flask'` → Instala dependências:
+     ```powershell
+     python -m pip install flask pystray pillow
+     ```
+   - `YAML parse error` → Verifica que `config/settings.yaml` está bem formatado (não edits com Word!)
 
 ---
 
-## Problema 3: "O bot não inicia — dá erro de rede ou de ficheiro"
+### 2. "Dashboard não abre" — O bot diz que está a correr mas não vês nada
 
-### O que vês:
+**Causas prováveis:**
+- O navegador não abriu automaticamente
+- Porta 5000 ocupada por outro programa
+- Firewall a bloquear ligações locais
+
+**Como resolver:**
+
+1. Abre manualmente no navegador:
+   ```
+   http://127.0.0.1:5000
+   ```
+
+2. Se não funcionar, testa a porta:
+   ```powershell
+   python -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',5000)); print('Porta livre')"
+   ```
+   Se der erro, a porta 5000 está ocupada. Fecha outras aplicações ou muda a porta em `app_flask.py`.
+
+3. Verifica firewall/antivírus — a ligação é local (`127.0.0.1`), mas alguns antivírus bloqueiam lo.
+
+---
+
+### 3. "Preço não aparece" — O dashboard mostra "--" em vez do preço
+
+**Causas prováveis:**
+- Sem ligação à Internet
+- APIs da Hyperliquid/Binance/Bybit/OKX em baixo
+- Erro de parsing nos dados
+
+**Como resolver:**
+
+1. Verifica a tua ligação à Internet:
+   ```powershell
+   ping google.com
+   ```
+
+2. Testa as APIs individualmente:
+   ```powershell
+   python scripts/test_price_now.py
+   ```
+
+3. Verifica os logs no painel direito do dashboard — procura mensagens como:
+   - `Erro a buscar dados` → problema de rede
+   - `Expecting value: line 1 column 1` → API devolveu HTML em vez de JSON (Cloudflare/proxy)
+
+4. Se as APIs estiverem em baixo, o bot continua a tentar automaticamente (retry com backoff). Aguarda alguns minutos.
+
+---
+
+### 4. "Erro de encoding" — Mensagens com caracteres estranhos ou crash
+
+**Causa:** Windows usa codificação CP1252 por defeito. O bot precisa de UTF-8.
+
+**Como resolver:**
+
+O `start.bat` já define UTF-8 automaticamente:
+```batch
+chcp 65001 >nul
+set PYTHONIOENCODING=utf-8
 ```
-Erro fatal: [algo sobre ficheiro não encontrado ou rede]
-```
 
-### Porque acontece:
-1. O ficheiro `config/settings.yaml` não existe ou está vazio
-2. O ficheiro tem erros de formatação (YAML é sensível a espaços!)
-3. A pasta `data/` não existe e o bot tentou criar algo lá
-4. Estás a correr o bot de uma pasta errada
-
-### Solução — Passo a Passo:
-
-**Passo 1 — Confirma que estás na pasta certa:**
+Se usares `python app_flask.py` manualmente, define antes:
 ```powershell
-cd C:\Users\O_Teu_Nome\Documents\trading-bot-hyperliquid
-```
-
-**Passo 2 — Verifica se o settings.yaml existe:**
-```powershell
-ls config\settings.yaml
-```
-
-**Passo 3 — Abre o settings.yaml e verifica:**
-- Não pode ter tabs (espaços só, nunca o botão Tab)
-- A indentação tem de estar correta (ex: `bot:` tem de estar alinhado com `assets:`)
-- Não pode haver linhas vazias estranhas no meio
-
-**Passo 4 — Se alteraste o ficheiro e agora dá erro:**
-- Copia o `settings.yaml` original do repositório GitHub
-- Ou corre: `git checkout config/settings.yaml` (se tens git)
-
-**Passo 5 — Cria as pastas que faltam:**
-```powershell
-mkdir data
-mkdir logs
-mkdir backtest_results
+$env:PYTHONIOENCODING = "utf-8"
+python app_flask.py
 ```
 
 ---
 
-## Problema 4: "Não acontecem trades — o bot corre mas fica calado"
+### 5. "pystray não instalado" — Mensagem de aviso ao iniciar
 
-### O que vês:
-O bot está a correr, os logs aparecem a cada 30 segundos, mas nunca diz "SINAL LONG!" ou abre posições.
-
-### Porque acontece:
-1. O mercado está calmo — não há spikes de volume suficientes
-2. Os thresholds estão demasiado apertados
-3. O funding rate está extremo e o bot está a filtrar
-4. O bot está em "coleta de dados" — precisa de 50 amostras de volume antes de calcular média
-
-### Solução — Passo a Passo:
-
-**Passo 1 — Espera um pouco:**
-O bot precisa de recolher ~50 amostras de volume (cerca de 25 minutos em 15m) antes de poder calcular a média. Nos primeiros minutos, isto é normal.
-
-**Passo 2 — Verifica se os thresholds não estão demasiado altos:**
-Abre `config/settings.yaml` e confirma:
-```yaml
-strategy:
-  volume_spike_threshold: 4.0   # Se isto for 10.0, nunca vai disparar
-  oi_change_threshold: 0.01     # 1.0% — se for 5.0%, raro de acontecer
+**Mensagem típica:**
+```
+⚠️ pystray/pillow não instalado — system tray desativado
 ```
 
-**Passo 3 — Testa em horário de maior volume:**
-O volume de crypto é maior durante:
-- Abertura de Nova York (14:00 UTC / 15:00 Portugal)
-- Sessão asiática (meia-noite a 08:00 UTC)
+**Como resolver:**
 
-**Passo 4 — Força um trade no dashboard para testar:**
-- Abre o `dashboard.html`
-- Clica em "▶ INICIAR BOT"
-- Clica em "⬆ FORÇAR LONG"
-- Se abrir posição → tudo funciona, só não há sinais naturais agora
-
-**Passo 5 — Verifica se o funding rate está a bloquear:**
-No dashboard, olha para o cartão "Funding". Se estiver > 1.0% ou < -1.0%, o bot recusa entrar como proteção.
-
----
-
-## Problema 5: "O dashboard não atualiza — números congelados"
-
-### O que vês:
-Os números no dashboard ficam iguais, a "Última atualização" não muda, ou os logs param.
-
-### Porque acontece:
-1. O browser perdeu a ligação à internet
-2. A aba do browser foi "dormida" pelo Chrome (economia de energia)
-3. Erro JavaScript travou o polling
-4. O bot foi parado mas a página não atualizou o estado visual
-
-### Solução — Passo a Passo:
-
-**Passo 1 — Recarrega a página:**
-Pressiona **F5** (ou Ctrl + R). O dashboard vai recarregar e os números devem atualizar.
-
-> 💡 **As tuas definições ficam guardadas** no browser (localStorage), por isso não perdes nada ao recarregar.
-
-**Passo 2 — Abre a consola do browser para ver erros:**
-1. Pressiona **F12**
-2. Clica no separador **"Console"**
-3. Vês algo a vermelho? Copia o erro e pesquisa ou pergunta.
-
-**Passo 3 — Desativa o "sleep" de abas no Chrome:**
-O Chrome às vezes "dorme" abas que não estás a ver. Para evitar:
-- Chrome → `chrome://flags/#enable-throttle-display-none-and-visibility-hidden-cross-origin-iframes`
-- Ou simplesmente: **mantém a aba do dashboard visível** (não minimizes o browser)
-
-**Passo 4 — Se o bot estava a correr e parou:**
-- No dashboard, clica em **"⏹ PARAR BOT"** e depois **"▶ INICIAR BOT"** de novo
-- Ou recarrega a página e reinicia
-
-**Passo 5 — Se nada funciona:**
-- Fecha o browser completamente
-- Abre de novo
-- Abre o `dashboard.html`
-- Clica "Iniciar Bot"
-
----
-
-## Problemas Extra (Bónus)
-
-### "O bot dá erro quando tento mainnet mas eu tenho uma carteira na Hyperliquid"
-
-O bot precisa de uma **API Wallet** específica, não da tua carteira principal.
-
-1. Vai a [app.hyperliquid.xyz](https://app.hyperliquid.xyz)
-2. Clica no teu nome → "API Wallets"
-3. Cria uma API Wallet nova (ex: "BotTrading")
-4. Usa o **Wallet Address** e **Private Key** dessa API Wallet — não da tua main wallet
-
-### "Backtest diz 'Dados não encontrados'"
-
-Precisas de descarregar dados primeiro:
 ```powershell
-python src/data_downloader.py BTCUSDT 30
+python -m pip install pystray pillow
 ```
-Isto cria os ficheiros CSV na pasta `data/`. Só depois podes correr o backtest.
 
-### "O terminal fecha logo que abro o bot"
-
-O bot está a dar um erro fatal que fecha o terminal.
-
-**Solução:**
-1. Abre o PowerShell MANUALMENTE (não com duplo-clique)
-2. Navega para a pasta do bot
-3. Corre `python src/main.py`
-4. Se der erro, o terminal fica aberto e vês a mensagem
+O bot funciona mesmo sem pystray — só não terás o ícone verde na barra de tarefas. Para parar, usa `Ctrl + C`.
 
 ---
 
-## Onde Obter Mais Ajuda
+### 6. "Nenhum trade" — O bot está a correr mas não entra em posições
 
-1. **Verifica primeiro:** Este ficheiro e o `README.md`
-2. **Corre o diagnóstico:** `python diagnose.py`
-3. **Testa as APIs:** `python src/data_aggregator.py`
-4. **Abre uma issue no GitHub** com:
-   - O que estavas a fazer
-   - O erro exato (copia e cola)
-   - O sistema operativo (Windows 10/11)
-   - Versão do Python (`python --version`)
+**Isto é NORMAL na maior parte do tempo!** O bot é **selectivo** por design.
+
+**Porquê:**
+- O bot espera por **spikes de volume 4x acima da média** + **aumento de OI ≥1%** + **confirmação de direção**
+- Em mercados laterais (range) com baixa volatilidade, estes sinais são raros
+- O bot foi optimizado para **qualidade sobre quantidade** (Profit Factor 2.50)
+
+**Como verificar se está tudo OK:**
+
+1. Confirma que o bot está a correr (painel direito → "Monitor: ON")
+2. Verifica o painel "Mercado em Tempo Real" — o preço actualiza a cada 5 segundos?
+3. Abre os logs — vês mensagens como `[HL] BTC | $78,304.50 | OI: ...`?
+4. Se sim, o bot está a trabalhar corretamente. Aguarda volatilidade.
+
+**Quanto tempo esperar?**
+- Em BTC 15m: tipicamente 1-3 sinais por dia em dias voláteis
+- Em fins de semana ou mercados calmos: pode não haver nenhum sinal
+- O backtest mostrou 36 trades em 30 dias (~1.2 trades/dia em média)
 
 ---
 
-> 🛠️ **A maior parte dos problemas tem solução simples. Respira, lê o erro com atenção, e segue os passos. Não inventes — o manual existe por uma razão.**
+## 🔍 Problemas Menos Comuns
+
+### "Erro SQL / Base de dados"
+
+```
+Erro a guardar dados: BotDatabase.save_oi() missing 1 required positional argument
+```
+
+**Causa:** Bug conhecido na versão actual — a função `save_oi` foi alterada mas algumas chamadas não actualizadas.
+
+**Resolução:** O bot recupera automaticamente. O erro não impede o funcionamento — apenas não grava OI na base de dados. Será corrigido numa versão futura.
+
+---
+
+### "O bot entrou e saiu logo da mesma posição"
+
+**Causas:**
+1. Stop-loss muito apertado — aumenta de 2% para 3% se o mercado estiver volátil
+2. Trailing stop activou-se muito cedo — verifica `trailing_activation_pct` em `config/settings.yaml`
+3. Sinal contrário apareceu logo após a entrada — o bot reverte posição se o sinal inverter
+
+**Resolução:**
+- Revisa `config/settings.yaml` — ajusta `stop_loss_pct` e `trailing_stop_pct`
+- Verifica os logs para entender o motivo da saída (STOP_LOSS, TRAILING_STOP, SIGNAL_REVERSE)
+
+---
+
+### "Force Long/Short não funciona"
+
+**Causa:** Na versão actual (v0.1.0), os botões Force Long/Short e Emergency Close ainda **não estão totalmente implementados** no backend. O frontend mostra os botões mas o servidor Flask responde com "Ainda não implementado".
+
+**Resolução:** Será implementado numa versão futura. Por agora, o bot opera apenas em modo automático.
+
+---
+
+## 📋 Checklist de Diagnóstico Rápido
+
+Quando algo corre mal, percorre esta lista:
+
+```
+□ O Python está instalado? (python --version)
+□ As dependências estão instaladas? (pip list | findstr flask)
+□ O start.bat está na pasta correcta?
+□ A Internet está ligada?
+□ A porta 5000 está livre?
+□ O config/settings.yaml está intacto?
+□ Os logs mostram erros específicos?
+□ O preço actualiza no dashboard?
+□ Há volatilidade no mercado? (Bitcoin está a mover-se?)
+```
+
+---
+
+## 🛠️ Ferramentas de Diagnóstico Incluídas
+
+O projeto inclui scripts de diagnóstico na pasta `scripts/`:
+
+| Script | Como usar | O que faz |
+|--------|-----------|-----------|
+| `scripts/test_price_now.py` | `python scripts/test_price_now.py` | Testa se consegue buscar preço da API |
+| `scripts/diagnose.py` | `python scripts/diagnose.py` | Diagnóstico completo do ambiente |
+| `scripts/debug_api.py` | `python scripts/debug_api.py` | Testa todas as APIs individualmente |
+
+---
+
+## 📞 Onde Pedir Ajuda
+
+1. **Lê os logs** — painel direito do dashboard mostra tudo em tempo real
+2. **Verifica ficheiro de log** — `logs/bot.log` tem histórico completo
+3. **Corre diagnóstico** — `python scripts/diagnose.py`
+
+---
+
+*Última actualização: 2026-04-24 | Versão do bot: v0.1.0*

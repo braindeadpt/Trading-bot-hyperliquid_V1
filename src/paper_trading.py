@@ -1037,16 +1037,17 @@ class PaperTrader:
             
             # Verificar saída
             if self.current_position:
-                exit_reason = self._check_exit_signals(candle, prices)
-                if exit_reason:
-                    self._exit_position(asset, candle['close'], exit_reason, candle)
-                    
-                    # Auto-tune após cada 5 trades
-                    if self.trade_count % 5 == 0:
-                        tune_result = self.tuner.analyze_and_tune()
-                        if tune_result['tuned']:
-                            logger.info("🤖 Auto-Tune ajustou thresholds!")
-                    return
+                with self._lock:
+                    exit_reason = self._check_exit_signals(candle, prices)
+                    if exit_reason:
+                        self._exit_position(asset, candle['close'], exit_reason, candle)
+                        
+                        # Auto-tune após cada 5 trades
+                        if self.trade_count % 5 == 0:
+                            tune_result = self.tuner.analyze_and_tune()
+                            if tune_result['tuned']:
+                                logger.info("Auto-Tune ajustou thresholds!")
+                        return
             
             # Verificar entrada
             signal = self._check_entry_signals(candle, prices, regime)
