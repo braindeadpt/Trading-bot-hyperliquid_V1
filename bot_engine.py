@@ -159,14 +159,16 @@ class BotEngine:
     
     def _save_market_data(self, asset, data):
         """Guarda dados de mercado na base de dados"""
+        import time
         try:
+            ts = int(time.time())
             # Guardar OI
             if data.get('oi_total', 0) > 0:
-                self.db.save_open_interest(asset, data['oi_total'])
+                self.db.save_open_interest(asset, ts, data['oi_total'])
             
             # Guardar funding
             if data.get('funding_avg', 0) != 0:
-                self.db.save_funding_rate(asset, data['funding_avg'])
+                self.db.save_funding_rate(asset, ts, data['funding_avg'])
                 
         except Exception as e:
             logger.warning(f"Erro a guardar dados: {e}")
