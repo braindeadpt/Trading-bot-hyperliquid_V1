@@ -5,19 +5,12 @@ Corre numa thread separada, gerido pela app desktop
 import threading
 import time
 import logging
-import sys
+import os, sys
 from datetime import datetime
 
 # ========== WINDOWS UTF-8 FIX ==========
 if sys.platform == 'win32':
-    import os
     os.environ['PYTHONIOENCODING'] = 'utf-8'
-    try:
-        import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-    except:
-        pass
 # ======================================
 
 logger = logging.getLogger(__name__)

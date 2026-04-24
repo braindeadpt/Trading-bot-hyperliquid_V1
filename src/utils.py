@@ -36,12 +36,21 @@ def load_config(path: str = None) -> Dict:
 
 
 def setup_logging(level: str = "INFO", log_file: str = None):
-    """Configura logging"""
-    handlers = [logging.StreamHandler()]
+    """Configura logging com UTF-8 no Windows"""
+    import sys
+    
+    # StreamHandler com UTF-8
+    stream_handler = logging.StreamHandler()
+    if sys.platform == 'win32':
+        # Forçar UTF-8 no output do terminal
+        import os
+        os.environ['PYTHONIOENCODING'] = 'utf-8'
+    
+    handlers = [stream_handler]
     
     if log_file:
         Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file))
+        handlers.append(logging.FileHandler(log_file, encoding='utf-8'))
     
     logging.basicConfig(
         level=getattr(logging, level.upper()),

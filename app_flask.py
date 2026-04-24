@@ -19,17 +19,10 @@ from pathlib import Path
 from datetime import datetime
 
 # ========== WINDOWS UTF-8 FIX ==========
-# Windows usa cp1252 por defeito — forçar UTF-8 para emojis funcionarem
-import sys
+# Forçar UTF-8 no ambiente Python
+import os, sys
 if sys.platform == 'win32':
-    import os
     os.environ['PYTHONIOENCODING'] = 'utf-8'
-    try:
-        import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-    except:
-        pass
 # ======================================
 
 from flask import Flask, jsonify, send_from_directory, request
