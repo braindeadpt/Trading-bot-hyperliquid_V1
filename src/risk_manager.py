@@ -3,6 +3,7 @@ Gestão de risco
 """
 import logging
 from typing import Dict
+from datetime import datetime, date
 
 logger = logging.getLogger(__name__)
 
@@ -11,13 +12,22 @@ class RiskManager:
     """Controla tamanho de posição, stops e limites diários"""
     
     def __init__(self, config: Dict):
-        self.max_position = config['risk']['max_position_size_usd']
-        self.max_leverage = config['risk']['max_leverage']
-        self.stop_loss_pct = config['risk']['stop_loss_pct']
-        self.max_daily_trades = config['risk']['max_daily_trades']
+        risk = config.get('risk', {})
+        self.max_position = risk.get('max_position_size_usd', 100)
+        self.max_leverage = risk.get('max_leverage', 2)
+        self.stop_loss_pct = risk.get('stop_loss_pct', 0.02)
+        self.max_daily_trades = risk.get('max_daily_trades', 5)
+        
+        # ⚡ CIRCUIT BREAKER — Perda diária máxima
+        self.daily_loss_limit_pct = risk.get('daily_loss_limit_pct', 0.05)  # 5% default
+        self.daily_loss_hard_stop_pct = risk.get('daily_loss_hard_stop_pct', 0.10)  # 10% hard stop
         
         self.daily_trades = 0
+        self.daily_pnl = 0.0  # PnL acumulado do dia
+        self.daily_date = date.today()
         self.positions = {}  # asset -> position info
+        self._circuit_tripped = False  # True = parado por circuit breaker
+        self._circuit_reason = None
     
     def can_trade(self) -> bool:
         """Verifica se podemos abrir nova posição"""
@@ -56,6 +66,58 @@ class RiskManager:
             return True
         
         return False
+    
+    def check_circuit_breaker(self, current_capital: float, initial_capital: float) -> bool:
+        """
+        ⚡ CIRCUIT BREAKER — Verifica se atingimos o limite de perda diária.
+        Retorna True se trading deve PARAR.
+        """
+        # Reset diário
+        today = date.today()
+        if today != self.daily_date:
+            self.daily_date = today
+            self.daily_pnl = 0.0
+            self.daily_trades = 0
+            self._circuit_tripped = False
+            self._circuit_reason = None
+            logger.info("🔄 Novo dia — circuit breaker resetado")
+        
+        if self._circuit_tripped:
+            return True
+        
+        # Calcular perda do dia em percentagem
+        if initial_capital > 0:
+            daily_loss_pct = (initial_capital - current_capital) / initial_capital
+        else:
+            daily_loss_pct = 0
+        
+        # Hard stop (10%) — para IMEDIATAMENTE
+        if daily_loss_pct >= self.daily_loss_hard_stop_pct:
+            self._circuit_tripped = True
+            self._circuit_reason = f"HARD STOP: Perda diária {daily_loss_pct*100:.1f}% >= {self.daily_loss_hard_stop_pct*100:.1f}%"
+            logger.critical(f"🛑 {self._circuit_reason}")
+            logger.critical("🛑 BOT PARADO — Circuit breaker ativado!")
+            return True
+        
+        # Soft stop (5%) — avisa mas permite recuperação
+        if daily_loss_pct >= self.daily_loss_limit_pct:
+            self._circuit_tripped = True
+            self._circuit_reason = f"SOFT STOP: Perda diária {daily_loss_pct*100:.1f}% >= {self.daily_loss_limit_pct*100:.1f}%"
+            logger.critical(f"🛑 {self._circuit_reason}")
+            logger.critical("🛑 BOT PARADO — Circuit breaker ativado!")
+            return True
+        
+        return False
+    
+    def get_circuit_status(self) -> Dict:
+        """Retorna estado do circuit breaker"""
+        return {
+            'tripped': self._circuit_tripped,
+            'reason': self._circuit_reason,
+            'daily_loss_limit_pct': self.daily_loss_limit_pct,
+            'daily_loss_hard_stop_pct': self.daily_loss_hard_stop_pct,
+            'daily_pnl': self.daily_pnl,
+        }
     
     def record_trade(self):
         """Regista uma trade executada"""

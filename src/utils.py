@@ -8,7 +8,7 @@ from typing import Dict
 
 
 def load_config(path: str = None) -> Dict:
-    """Carrega configuração YAML"""
+    """Carrega configuração YAML com validação de keys obrigatórias"""
     # Se não passar path, resolve relativo a este ficheiro
     if path is None:
         path = Path(__file__).parent.parent / "config" / "settings.yaml"
@@ -25,6 +25,12 @@ def load_config(path: str = None) -> Dict:
     
     if not isinstance(config, dict):
         raise ValueError(f"Config em {config_path} não é um dicionário válido")
+    
+    # ⚡ VALIDAÇÃO DE KEYS OBRIGATÓRIAS
+    REQUIRED_TOP_KEYS = ['bot', 'assets', 'strategy', 'risk']
+    for key in REQUIRED_TOP_KEYS:
+        if key not in config:
+            raise ValueError(f"Config obrigatória em falta: '{key}'. Verifica {config_path}")
     
     return config
 

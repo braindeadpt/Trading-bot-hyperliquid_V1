@@ -81,6 +81,20 @@ risk:
   # ÓTIMO: 1.5% abaixo do máximo
   trailing_stop_pct: 0.015  # 1.5%
   max_daily_trades: 5
+  
+  # ⚡ CIRCUIT BREAKER — Perda diária máxima
+  # SOFT STOP: Para trading se perder 5% num dia
+  daily_loss_limit_pct: 0.05
+  # HARD STOP: Para IMEDIATAMENTE se perder 10% num dia
+  daily_loss_hard_stop_pct: 0.10
+  
+  # ⚡ MAINNET SAFETY
+  # Confirmar antes de mudar para mainnet (evitar acidentes)
+  mainnet_confirm_required: true
+  # Tamanho máximo em mainnet (limita exposição inicial)
+  mainnet_max_position_usd: 50
+  # Primeiro trade em mainnet com tamanho mínimo ($10)
+  mainnet_first_trade_size: 10
 
 polling:
   oi_interval: 30

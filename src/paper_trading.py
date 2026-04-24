@@ -6,6 +6,8 @@ import logging
 import time
 import json
 import threading
+import signal
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
@@ -240,6 +242,11 @@ class PaperTrader:
         self.latency_ms = 0
         self.last_check_time = 0
         
+        # ⚡ GRACEFUL SHUTDOWN — handler de sinais
+        self._shutdown_requested = False
+        self._shutdown_complete = False
+        self._setup_signal_handlers()
+        
         # ==================================================================
         # MULTI-TIMEFRAME — TF Baixo para deteção rápida de spikes
         # ==================================================================
@@ -322,8 +329,47 @@ class PaperTrader:
             daemon=True,
             name="MultiTimeframe"
         )
-        self._mtf_thread.start()
-        logger.info(f"📊 Multi-Timeframe iniciado: {self.secondary_tf} a cada {self._mtf_interval}s")
+    def _setup_signal_handlers(self):
+        """⚡ GRACEFUL SHUTDOWN — handlers para SIGINT e SIGTERM"""
+        def _handle_shutdown(signum, frame):
+            logger.warning(f"\n{'='*50}")
+            logger.warning(f"🛑 SINAL RECEBIDO ({signum}) — A iniciar graceful shutdown...")
+            logger.warning(f"{'='*50}")
+            self._shutdown_requested = True
+            
+            # Se temos posição aberta, fechar
+            if self.current_position:
+                logger.warning(f"🛑 A fechar posição {self.current_position} antes de parar...")
+                with self._lock:
+                    # Buscar preço actual
+                    try:
+                        data = self.aggregator.fetch_all_data(self.assets[0])
+                        if data:
+                            hl = data.get('exchanges_data', {}).get('hyperliquid', {})
+                            price = hl.get('mark_price', self.entry_price)
+                            self._exit_position(self.assets[0], price, 'GRACEFUL_SHUTDOWN', {'close': price})
+                    except Exception as e:
+                        logger.error(f"Erro ao fechar posição no shutdown: {e}")
+            
+            # Parar threads
+            self._monitor_running = False
+            self._mtf_running = False
+            self._shutdown_complete = True
+            
+            logger.warning("✅ Shutdown completo. A sair...")
+            sys.exit(0)
+        
+        # ⚡ Só configurar signals na thread principal
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, _handle_shutdown)   # Ctrl+C
+            signal.signal(signal.SIGTERM, _handle_shutdown)  # kill / systemctl stop
+            logger.info("⚡ Graceful shutdown configurado (Ctrl+C fecha posições)")
+        else:
+            logger.debug("Signal handlers ignorados — não estamos na thread principal")
+    
+    def is_shutdown_requested(self) -> bool:
+        """Verifica se foi pedido shutdown"""
+        return self._shutdown_requested
     
     def _mtf_loop(self, asset: str):
         """Loop de multi-timeframe — busca candles do TF baixo e deteta spikes"""
