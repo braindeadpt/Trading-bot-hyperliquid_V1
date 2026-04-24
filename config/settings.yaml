@@ -73,7 +73,17 @@ strategy:
 
 risk:
   max_position_size_usd: 100
-  max_leverage: 2
+  max_leverage: 3  # Upgrade from 2x → 3x after Swarm V3 leverage optimization
+  adaptive_leverage: true  # Auto-adjust: 2x (risky) / 3x (normal) / 5x (optimal)
+  adaptive_conditions:
+    low_leverage:
+      funding_threshold: 0.0005  # Funding > 0.05% → 2x (expensive to hold)
+      volatility_threshold: 0.06  # ATR14 > 6% → 2x (too volatile)
+      streak_threshold: 3  # 3+ consecutive losses → 2x (bad run)
+    high_leverage:
+      funding_threshold: -0.0002  # Funding < -0.02% → 5x (get paid to hold)
+      volatility_threshold: 0.03  # ATR14 < 3% → 5x (calm market)
+      regime_boost: true  # Bull regime + long / Bear regime + short → +1x boost
   stop_loss_pct: 0.02
   short_stop_loss_pct: 0.02  # 2% igual para shorts
   # Trailing stop ativa SÓ depois de atingir este lucro mínimo

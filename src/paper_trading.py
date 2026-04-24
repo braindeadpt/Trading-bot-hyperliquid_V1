@@ -186,6 +186,12 @@ class PaperTrader:
         self.capital = self.initial_capital
         self.max_position_usd = config.get('risk', {}).get('max_position_size_usd', 100)
         self.max_leverage = config.get('risk', {}).get('max_leverage', 2)
+        
+        # Leverage adaptativa
+        self.adaptive_leverage = config.get('risk', {}).get('adaptive_leverage', False)
+        self.adaptive_config = config.get('risk', {}).get('adaptive_conditions', {})
+        self.current_leverage = self.max_leverage
+        
         self.fee_pct = 0.00035  # 0.035% Hyperliquid taker
         
         # Componentes
@@ -282,6 +288,7 @@ class PaperTrader:
                 entry_time TEXT NOT NULL,
                 entry_price REAL NOT NULL,
                 position_size REAL NOT NULL,
+                leverage REAL DEFAULT 2,
                 exit_time TEXT,
                 exit_price REAL,
                 pnl_usd REAL,
@@ -293,6 +300,12 @@ class PaperTrader:
                 market_regime TEXT
             )
         ''')
+        
+        # Migracao: adicionar coluna leverage se nao existir
+        try:
+            cursor.execute("ALTER TABLE paper_trades ADD COLUMN leverage REAL DEFAULT 2")
+        except Exception:
+            pass  # Coluna ja existe
         
         conn.commit()
         conn.close()
@@ -912,11 +925,92 @@ class PaperTrader:
         
         return None
     
-    def _enter_position(self, asset: str, side: str, price: float, candle: Dict, regime: str):
-        """Abre posição virtual"""
-        position_size = min(self.max_position_usd, self.capital * 0.1)
+    def _calculate_adaptive_leverage(self, side: str, candle: Dict, regime: str) -> int:
+        """Calcula leverage adaptativa baseada em condicoes de mercado"""
+        if not self.adaptive_leverage:
+            return self.max_leverage
         
-        fee = position_size * self.fee_pct * 2  # Entrada + saída estimada
+        base = self.max_leverage  # Default (3x)
+        low_cfg = self.adaptive_config.get('low_leverage', {})
+        high_cfg = self.adaptive_config.get('high_leverage', {})
+        
+        # Obter metricas do candle
+        funding = candle.get('funding_rate', 0)
+        atr14 = candle.get('atr14', 0)  # Se disponivel
+        
+        # Verificar streak de perdas
+        recent_trades = self.db.get_recent_trades(limit=5) if hasattr(self, 'db') and self.db else []
+        loss_streak = 0
+        for t in reversed(recent_trades):
+            pnl = t.get('pnl_pct', 0)
+            if pnl < 0:
+                loss_streak += 1
+            else:
+                break
+        
+        # === CONDICOES PARA LEVERAGE BAIXA (2x) ===
+        low_factors = 0
+        
+        # Funding positivo alto (caro manter posicao)
+        funding_thresh = low_cfg.get('funding_threshold', 0.0005)
+        if funding > funding_thresh:
+            low_factors += 1
+        
+        # Volatilidade alta
+        if atr14 > low_cfg.get('volatility_threshold', 0.06):
+            low_factors += 1
+        
+        # Streak de perdas
+        if loss_streak >= low_cfg.get('streak_threshold', 3):
+            low_factors += 1
+        
+        # Regime contra a posicao
+        if regime == 'bear' and side == 'long':
+            low_factors += 1
+        elif regime == 'bull' and side == 'short':
+            low_factors += 1
+        
+        if low_factors >= 2:
+            return 2  # Reduzir para 2x
+        
+        # === CONDICOES PARA LEVERAGE ALTA (5x) ===
+        high_factors = 0
+        
+        # Funding negativo (pagam-te para segurar)
+        funding_high = high_cfg.get('funding_threshold', -0.0002)
+        if funding < funding_high:
+            high_factors += 1
+        
+        # Volatilidade baixa
+        if atr14 > 0 and atr14 < high_cfg.get('volatility_threshold', 0.03):
+            high_factors += 1
+        
+        # Regime a favor da posicao (boost)
+        if high_cfg.get('regime_boost', False):
+            if regime == 'bull' and side == 'long':
+                high_factors += 1
+            elif regime == 'bear' and side == 'short':
+                high_factors += 1
+        
+        if high_factors >= 2:
+            return 5  # Aumentar para 5x
+        
+        return base  # 3x default
+    
+    def _enter_position(self, asset: str, side: str, price: float, candle: Dict, regime: str):
+        """Abre posicao virtual"""
+        # Leverage adaptativa
+        self.current_leverage = self._calculate_adaptive_leverage(side, candle, regime)
+        
+        position_size = min(self.max_position_usd, self.capital * 0.1)
+        margin = position_size / self.current_leverage
+        fee = position_size * self.fee_pct * 2  # Entrada + saida estimada
+        
+        # Verificar se ha capital suficiente para margin + fee
+        if margin + fee > self.capital:
+            logger.warning(f"Capital insuficiente para {side.upper()} {asset}: "
+                          f"margin=${margin:.2f} + fee=${fee:.2f} > capital=${self.capital:.2f}")
+            return
         
         self.current_position = side
         self.entry_price = price
@@ -936,7 +1030,8 @@ class PaperTrader:
         self.daily_trades += 1
         
         logger.info(f"[ENTER {side.upper()} {asset}] {self.entry_time.strftime('%H:%M')} @ ${price:,.2f} | "
-                   f"Size: ${position_size:,.2f} | Vol: {candle.get('volume', 0):,.0f} | "
+                   f"Size: ${position_size:,.2f} | Leverage: {self.current_leverage}x | "
+                   f"Margin: ${margin:,.2f} | Vol: {candle.get('volume', 0):,.0f} | "
                    f"OI: {candle.get('oi_change', 0)*100:.2f}% | Regime: {regime}")
         
         # Guardar na DB
@@ -944,9 +1039,10 @@ class PaperTrader:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO paper_trades (symbol, side, entry_time, entry_price, position_size,
-                                     volume_ratio, oi_change, funding_rate, market_regime)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     leverage, volume_ratio, oi_change, funding_rate, market_regime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (asset, side, self.entry_time.isoformat(), price, position_size,
+              self.current_leverage,
               candle.get('volume', 0) / max(1, sum(c['volume'] for c in list(self.candles)[-20:]) / 20) if len(self.candles) >= 20 else 1.0,
               candle.get('oi_change', 0), candle.get('funding', 0), regime))
         conn.commit()
