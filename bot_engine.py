@@ -198,6 +198,7 @@ def start_bot_engine(config):
         
         with app_state_lock:
             app_state["bot_running"] = True
+            app_state["engine"] = engine          # Guardar BotEngine para poder parar
             app_state["trader"] = engine.trader
             app_state["aggregator"] = engine.aggregator
             app_state["db"] = engine.db
@@ -215,12 +216,14 @@ def stop_bot_engine():
     """Para o motor do bot"""
     global app_state
     
-    engine = app_state.get("trader")
+    # Parar o BotEngine (não o trader)
+    engine = app_state.get("engine")
     if engine and hasattr(engine, 'stop'):
         engine.stop()
     
     with app_state_lock:
         app_state["bot_running"] = False
+        app_state["engine"] = None
     logger.info("[STOP] Bot parado pelo utilizador")
 
 
