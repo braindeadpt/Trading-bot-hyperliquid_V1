@@ -12,7 +12,6 @@ from datetime import datetime
 from typing import Dict, Optional
 
 from flask import Flask, render_template_string, jsonify
-from flask_cors import CORS
 
 from utils import load_config
 from database import BotDatabase
@@ -20,6 +19,13 @@ from data_aggregator import DataAggregator
 from strategy import MomentumStrategy
 
 logger = logging.getLogger(__name__)
+
+try:
+    from flask_cors import CORS
+    HAS_CORS = True
+except ImportError:
+    HAS_CORS = False
+    logger.warning("flask_cors não instalado — CORS desactivado (instala: pip install flask-cors)")
 
 # Template HTML do dashboard
 DASHBOARD_TEMPLATE = """
@@ -287,7 +293,8 @@ class WebDashboard:
         self.config = config
         self.db = db or BotDatabase()
         self.app = Flask(__name__)
-        CORS(self.app, origins=["http://127.0.0.1:5000", "http://localhost:5000"])
+        if HAS_CORS:
+            CORS(self.app, origins=["http://127.0.0.1:5000", "http://localhost:5000"])
         
         self.aggregator = DataAggregator(config)
         self.strategy = MomentumStrategy(config)
@@ -429,6 +436,17 @@ class WebDashboard:
         
         # Iniciar servidor Flask
         self.app.run(host=host, port=port, debug=debug, use_reloader=False)
+
+
+def create_dashboard_app(config: Dict, db: Optional[BotDatabase] = None):
+    """
+    ⚡ Factory para criar dashboard Flask
+    Retorna objecto com atributo .app (Flask app)
+    """
+    dashboard = WebDashboard(config, db)
+    # Expõe a app Flask para compatibilidade
+    dashboard.app = dashboard.app
+    return dashboard
 
 
 def main():
