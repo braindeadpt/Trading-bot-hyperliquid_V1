@@ -54,7 +54,7 @@ def main():
     
     # Iniciar monitorização
     logger.info("⏳ A iniciar monitorização...")
-    trader.start_monitoring(assets[0])
+    trader._start_monitor_thread(assets[0])
     
     # Loop principal
     logger.info("✅ Bot operacional! Ctrl+C para parar (graceful shutdown)")
@@ -79,7 +79,7 @@ def main():
         logger.info("\n🛑 Ctrl+C recebido...")
     finally:
         logger.info("🛑 A parar bot...")
-        trader.stop_monitoring()
+        # Graceful shutdown já é tratado pelo signal handler do PaperTrader
         logger.info("✅ Bot parado. Boa noite!")
 
 

@@ -152,9 +152,14 @@ class DataAggregator:
                     continue
                 
                 if data:
+                    # ⚡ VALIDAÇÃO: OI e volume devem ser positivos
+                    oi_usd = data.get('oi_usd', 0)
+                    volume_24h = data.get('volume_24h', 0)
+                    if oi_usd > 0:
+                        results['oi_total'] += oi_usd
+                    if volume_24h > 0:
+                        results['volume_total'] += volume_24h
                     results['exchanges_data'][source_name] = data
-                    results['oi_total'] += data.get('oi_usd', 0)
-                    results['volume_total'] += data.get('volume_24h', 0)
                     if data.get('funding_rate') is not None:
                         funding_values.append(data['funding_rate'])
                     if data.get('mark_price', 0) > 0:
