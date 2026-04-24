@@ -17,6 +17,7 @@ from data_aggregator import DataAggregator
 from database import BotDatabase
 from strategy import MomentumStrategy
 from utils import load_config
+from volume_profile import VolumeProfile
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,12 @@ class PaperTrader:
         self.db = BotDatabase()
         self.strategy = MomentumStrategy(config)
         self.tuner = AutoTuner(config, self.db)
+        
+        # Volume Profile (Fase A do roadmap)
+        vp_lookback = config.get('strategy', {}).get('vp_lookback', 96)  # 96 candles de 15m = 24h
+        self.volume_profile = VolumeProfile(lookback=vp_lookback)
+        self.vp_enabled = config.get('strategy', {}).get('vp_enabled', True)
+        self.last_vp = None  # Cache do último VP calculado
         
         # Estado
         self.current_position = None  # None, 'long', 'short'
@@ -832,15 +839,31 @@ class PaperTrader:
         if self.current_position is not None:
             return None
         
+        # Calcular Volume Profile (para filtro de qualidade)
+        vp_info = ""
+        if self.vp_enabled and len(self.candles) >= 20:
+            candles_list = list(self.candles)
+            self.last_vp = self.volume_profile.calculate(candles_list)
+            if self.last_vp:
+                vp_info = f" | {self.volume_profile.format_profile(self.last_vp)}"
+        
         # LONG
         if price_above_sma and self.bullish_count >= self.min_bullish:
             thresholds = self._get_thresholds_for_regime(regime, 'long')
             
             if volume_ratio >= thresholds['volume'] and not funding_extreme:
                 # Verificar OI se disponível
-                if oi > 0 and oi_change >= thresholds['oi']:
-                    return 'long'
-                elif oi == 0:  # Sem OI, usar só volume + candle
+                oi_ok = (oi > 0 and oi_change >= thresholds['oi']) or oi == 0
+                
+                if oi_ok:
+                    # Filtro Volume Profile
+                    if self.vp_enabled and self.last_vp:
+                        allowed, reason = self.volume_profile.filter_entry(price, 'long', self.last_vp)
+                        if not allowed:
+                            logger.info(f"  [VP BLOCK] LONG bloqueado: {reason}{vp_info}")
+                            return None
+                        logger.info(f"  [VP OK] LONG aprovado: {reason}")
+                    
                     return 'long'
         
         # SHORT (se ativado)
@@ -848,9 +871,17 @@ class PaperTrader:
             thresholds = self._get_thresholds_for_regime(regime, 'short')
             
             if volume_ratio >= thresholds['volume'] and not funding_extreme:
-                if oi > 0 and oi_change <= -thresholds['oi']:
-                    return 'short'
-                elif oi == 0:
+                oi_ok = (oi > 0 and oi_change <= -thresholds['oi']) or oi == 0
+                
+                if oi_ok:
+                    # Filtro Volume Profile
+                    if self.vp_enabled and self.last_vp:
+                        allowed, reason = self.volume_profile.filter_entry(price, 'short', self.last_vp)
+                        if not allowed:
+                            logger.info(f"  [VP BLOCK] SHORT bloqueado: {reason}{vp_info}")
+                            return None
+                        logger.info(f"  [VP OK] SHORT aprovado: {reason}")
+                    
                     return 'short'
         
         return None

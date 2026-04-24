@@ -71,6 +71,10 @@ strategy:
   # Regime detection
   market_regime_enabled: true
 
+  # Volume Profile (Fase A — filtro de qualidade para entradas)
+  vp_enabled: true           # Ativar filtro Volume Profile
+  vp_lookback: 96            # Candles para calcular VP (96 de 15m = 24h)
+
 risk:
   max_position_size_usd: 100
   max_leverage: 3  # Upgrade from 2x → 3x after Swarm V3 leverage optimization
