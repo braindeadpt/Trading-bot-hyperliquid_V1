@@ -57,7 +57,7 @@ class BotEngine:
         self.last_price = 0
         self.update_count = 0
         
-        logger.info("🚀 BotEngine inicializado")
+        logger.info("[BotEngine] inicializado")
     
     def start(self):
         """Arranca o motor numa thread"""
@@ -69,7 +69,7 @@ class BotEngine:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True, name="bot-engine")
         self._thread.start()
-        logger.info("✅ BotEngine iniciado")
+        logger.info("[OK] BotEngine iniciado")
     
     def stop(self):
         """Para o motor graciosamente"""
@@ -83,7 +83,7 @@ class BotEngine:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
         
-        logger.info("🛑 BotEngine parado")
+        logger.info("[STOP] BotEngine parado")
     
     def _run(self):
         """Loop principal do motor"""
@@ -135,7 +135,7 @@ class BotEngine:
                             vol = data.get('volume_total', 0)
                             funding = data.get('funding_avg', 0)
                             logger.info(
-                                f"📡 {asset} | ${self.last_price:,.2f} | "
+                                f"[HL] {asset} | ${self.last_price:,.2f} | "
                                 f"OI: ${oi:,.0f} | Vol: ${vol:,.0f} | "
                                 f"Funding: {funding*100:.4f}%"
                             )
@@ -205,7 +205,7 @@ def stop_bot_engine():
         engine.stop()
     
     app_state["bot_running"] = False
-    logger.info("🛑 Bot parado pelo utilizador")
+    logger.info("[STOP] Bot parado pelo utilizador")
 
 
 def get_bot_status():

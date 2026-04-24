@@ -248,6 +248,16 @@ class BotDatabase:
             """, (symbol, timestamp, funding_rate, exchange))
             conn.commit()
     
+    def save_price(self, symbol: str, price: float, source: str = 'hyperliquid'):
+        """Guarda preço na tabela price_history"""
+        import time
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO price_history (symbol, timestamp, price, source)
+                VALUES (?, ?, ?, ?)
+            """, (symbol, int(time.time()), price, source))
+            conn.commit()
+
     def save_trade(self, trade: Dict):
         """Guarda um trade"""
         with self._get_conn() as conn:
