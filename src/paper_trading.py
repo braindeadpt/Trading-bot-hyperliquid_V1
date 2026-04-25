@@ -251,6 +251,15 @@ class PaperTrader:
         self._monitor_interval = 10  # segundos — verifica trailing stop a cada 10s
         self._last_price = 0
         
+        # ⚡ COOLDOWN — Evita entradas repetidas
+        self._last_entry_time = 0  # timestamp da última entrada
+        self._cooldown_seconds = config.get('strategy', {}).get('entry_cooldown_seconds', 300)
+        
+        # ⚡ FILTRO DE REGIME — Não tradar em condições extremas
+        self._regime_filter_enabled = config.get('strategy', {}).get('regime_filter_enabled', True)
+        self._max_volatility_pct = config.get('strategy', {}).get('max_volatility_pct', 5.0)
+        self._max_price_vs_sma_pct = config.get('strategy', {}).get('max_price_vs_sma_pct', 5.0)
+        
         # Estatísticas de latência
         self.latency_ms = 0
         self.last_check_time = 0
@@ -795,6 +804,53 @@ class PaperTrader:
             logger.error(f"Erro a buscar candle: {e}")
             return None
     
+    def _check_cooldown(self) -> bool:
+        """
+        Verifica se cooldown entre entradas está respeitado.
+        Retorna True se pode entrar, False se está em cooldown.
+        """
+        current_time = time.time()
+        elapsed = current_time - self._last_entry_time
+        if elapsed < self._cooldown_seconds:
+            logger.info(f"  [COOLDOWN] {self._cooldown_seconds - elapsed:.0f}s restantes antes de nova entrada")
+            return False
+        return True
+    
+    def _check_regime_filter(self, regime: str, prices: list, candle: Dict) -> tuple[bool, str]:
+        """
+        Filtro de regime operacional — bloqueia entradas em condições extremas.
+        Retorna (pode_entrar, razão).
+        """
+        if not self._regime_filter_enabled:
+            return True, ""
+        
+        current_price = prices[-1] if prices else 0
+        
+        # 1. Verificar volatilidade (evitar whipsaw)
+        volatility = 0
+        if len(prices) >= 14:
+            diffs = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
+            avg_diff = sum(diffs[-14:]) / 14
+            volatility = (avg_diff / current_price) * 100 if current_price > 0 else 0
+        
+        if volatility > self._max_volatility_pct:
+            return False, f"REGIME_FILTER: volatilidade_alta({volatility:.1f}% > {self._max_volatility_pct}%)"
+        
+        # 2. Verificar distância da SMA200 (evitar entradas em topos/fundos)
+        if len(prices) >= 200:
+            sma_200 = self._calculate_sma(prices, 200)
+        elif len(prices) >= 60:
+            sma_200 = self._calculate_sma(prices, 60)
+        else:
+            return True, ""  # Dados insuficientes
+        
+        if sma_200 > 0:
+            price_vs_sma_pct = abs((current_price - sma_200) / sma_200) * 100
+            if price_vs_sma_pct > self._max_price_vs_sma_pct:
+                return False, f"REGIME_FILTER: preco_extended({price_vs_sma_pct:.1f}% vs SMA200 > {self._max_price_vs_sma_pct}%)"
+        
+        return True, ""
+    
     def _check_entry_signals(self, candle: Dict, prices: list, regime: str,
                               volume_ratio: float, price_above_sma: bool,
                               funding_extreme: bool, oi_ok_long: bool,
@@ -802,8 +858,18 @@ class PaperTrader:
         """Verifica se há sinal de entrada e GUARDA na DB (mesmo os que não entram)"""
         price = candle['close']
         
-        # Se já em posição, não entrar — mas ainda logamos o regime
+        # Se já em posição, não entrar
         if self.current_position is not None:
+            return None
+        
+        # ⚡ COOLDOWN — Evita entradas repetidas
+        if not self._check_cooldown():
+            return None
+        
+        # ⚡ FILTRO DE REGIME — Bloqueia entradas em condições extremas
+        regime_ok, regime_reason = self._check_regime_filter(regime, prices, candle)
+        if not regime_ok:
+            self._log_signal('BTC', 'BLOCKED', 0.0, candle, regime, regime_reason, executed=False)
             return None
         
         # Calcular Volume Profile (para filtro de qualidade)
@@ -828,7 +894,6 @@ class PaperTrader:
                     vp_allowed, vp_reason = self.volume_profile.filter_entry(price, 'long', self.last_vp)
                     if not vp_allowed:
                         logger.info(f"  [VP BLOCK] LONG bloqueado: {vp_reason}{vp_info}")
-                        # LOG: Sinal rejeitado por Volume Profile
                         self._log_signal('BTC', 'LONG', 0.0, candle, regime,
                                         f"VP_BLOCK: {vp_reason}", executed=False)
                         return None
@@ -1058,6 +1123,9 @@ class PaperTrader:
         
         self.trade_count += 1
         self.daily_trades += 1
+        
+        # ⚡ COOLDOWN — Registar timestamp da entrada
+        self._last_entry_time = time.time()
         
         logger.info(f"[ENTER {side.upper()} {asset}] {self.entry_time.strftime('%H:%M')} @ ${price:,.2f} | "
                    f"Size: ${position_size:,.2f} | Leverage: {self.current_leverage}x | "
