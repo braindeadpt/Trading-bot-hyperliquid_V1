@@ -206,6 +206,28 @@ class DataAggregator:
                 return self._price_cache[asset]
         return 0
     
+    def _is_price_sane(self, asset: str, price: float) -> bool:
+        """
+        Validação de sanidade do preço — evita preços corruptos da API.
+        Retorna True se o preço parece razoável para o asset.
+        """
+        if price <= 0 or price != price:  # NaN check
+            return False
+        
+        # Limites aproximados por asset (ajustáveis)
+        limits = {
+            'BTC': (1000.0, 200000.0),
+            'ETH': (100.0, 20000.0),
+        }
+        
+        low, high = limits.get(asset, (1.0, 1000000.0))
+        
+        if price < low or price > high:
+            logger.warning(f"⚠️ Preço fora de limites: {asset}=${price:,.2f} (esperado: ${low:,.0f}-${high:,.0f})")
+            return False
+        
+        return True
+
     def _safe_json(self, response: requests.Response, source_name: str) -> Optional[Dict]:
         """Extrai JSON de forma segura, com logging detalhado"""
         if response.status_code != 200:
