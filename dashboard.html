@@ -347,6 +347,39 @@
       </div>
     </div>
 
+    <!-- Performance Real -->
+    <div class="section">
+      <h2>📊 Performance Real (Base de Dados)</h2>
+      <div class="data-grid">
+        <div class="data-card"><div class="label">Win Rate</div><div class="value" id="real-win-rate">--</div></div>
+        <div class="data-card"><div class="label">Profit Factor</div><div class="value" id="real-pf">--</div></div>
+        <div class="data-card"><div class="label">Total Trades</div><div class="value" id="real-trades">--</div></div>
+        <div class="data-card"><div class="label">Total PnL</div><div class="value" id="real-pnl">--</div></div>
+        <div class="data-card"><div class="label">Max DD</div><div class="value" id="real-dd">--</div></div>
+        <div class="data-card"><div class="label">Sharpe</div><div class="value" id="real-sharpe">--</div></div>
+      </div>
+      <div style="margin-top:10px;font-size:10px;color:var(--fg-dim)">
+        📡 Dados de: <span id="perf-data-source">SQLite (últimos 7 dias)</span>
+      </div>
+    </div>
+
+    <!-- Sinais -->
+    <div class="section tall">
+      <h2>📡 Sinais Recentes (Base de Dados)</h2>
+      <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+        <div class="data-card" style="flex:1;min-width:120px"><div class="label">Total</div><div class="value" id="sig-total">--</div></div>
+        <div class="data-card" style="flex:1;min-width:120px"><div class="label">Executados</div><div class="value" id="sig-executed">--</div></div>
+        <div class="data-card" style="flex:1;min-width:120px"><div class="label">Rejeitados</div><div class="value" id="sig-rejected">--</div></div>
+        <div class="data-card" style="flex:1;min-width:120px"><div class="label">Taxa Exec.</div><div class="value" id="sig-rate">--</div></div>
+      </div>
+      <table>
+        <thead><tr><th>Tempo</th><th>Tipo</th><th>Conf.</th><th>Preço</th><th>Regime</th><th>Razão</th><th>Status</th></tr></thead>
+        <tbody id="signals-body">
+          <tr><td colspan="7" style="text-align:center;color:var(--fg-dim)">A carregar sinais...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
     <!-- Trades -->
     <div class="section tall">
       <h2>📋 Trades Recentes</h2>
@@ -1007,7 +1040,103 @@ function resetStats() {
   log('🔄 Estatísticas resetadas', 'info');
 }
 
-// ===== INIT =====
+// ===== PERFORMANCE REAL (v2.0) =====
+let performanceData = null;
+let signalsData = null;
+
+async function fetchRealPerformance() {
+  try {
+    const resp = await fetch('/api/performance?asset=BTC&days=7');
+    if (!resp.ok) return;
+    performanceData = await resp.json();
+    renderPerformance();
+  } catch (e) {
+    console.warn('Erro a buscar performance:', e);
+  }
+}
+
+function renderPerformance() {
+  if (!performanceData || !performanceData.latest) return;
+  
+  const latest = performanceData.latest;
+  if (latest.total_trades === 0) {
+    $('real-win-rate').textContent = 'N/A';
+    $('real-pf').textContent = 'N/A';
+    $('real-trades').textContent = '0';
+    $('real-pnl').textContent = '$0.00';
+    $('real-dd').textContent = 'N/A';
+    $('real-sharpe').textContent = 'N/A';
+    return;
+  }
+  
+  $('real-win-rate').textContent = latest.win_rate ? latest.win_rate.toFixed(1) + '%' : '--';
+  $('real-pf').textContent = latest.profit_factor ? latest.profit_factor.toFixed(2) : '--';
+  $('real-trades').textContent = latest.total_trades || '0';
+  $('real-pnl').textContent = (latest.total_pnl >= 0 ? '+' : '') + fmt$(latest.total_pnl);
+  $('real-pnl').className = 'value ' + (latest.total_pnl >= 0 ? 'up' : 'down');
+  $('real-dd').textContent = latest.max_drawdown ? '$' + latest.max_drawdown.toFixed(2) : '--';
+  $('real-dd').className = 'value warn';
+  $('real-sharpe').textContent = latest.sharpe_ratio ? latest.sharpe_ratio.toFixed(2) : '--';
+}
+
+async function fetchRealSignals() {
+  try {
+    const resp = await fetch('/api/signals?asset=BTC&days=1&limit=50');
+    if (!resp.ok) return;
+    signalsData = await resp.json();
+    renderSignals();
+    renderSignalStats();
+  } catch (e) {
+    console.warn('Erro a buscar sinais:', e);
+  }
+}
+
+function renderSignals() {
+  const tbody = $('signals-body');
+  if (!signalsData || !signalsData.signals || signalsData.signals.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--fg-dim)">Sem sinais nas últimas 24h.</td></tr>';
+    return;
+  }
+  
+  tbody.innerHTML = signalsData.signals.map(s => {
+    const ts = s.timestamp;
+    const date = ts ? new Date(ts).toLocaleTimeString('pt-PT', {hour: '2-digit', minute:'2-digit', second:'2-digit'}) : '--';
+    const type = s.signal_type || '?';
+    const conf = s.confidence !== null ? (s.confidence * 100).toFixed(0) + '%' : '--';
+    const price = s.entry_price ? fmt$(s.entry_price) : '--';
+    const regime = s.market_regime || '--';
+    const reason = s.reason || '';
+    const status = s.executed ? 
+      '<span style="color:var(--accent)">✅ EXEC</span>' : 
+      '<span style="color:var(--warn)">❌ REJ</span>';
+    
+    // Colorir o tipo
+    const typeClass = type === 'LONG' ? 'td-up' : type === 'SHORT' ? 'td-down' : '';
+    
+    return `<tr>
+      <td>${date}</td>
+      <td class="${typeClass}">${type}</td>
+      <td>${conf}</td>
+      <td>${price}</td>
+      <td>${regime}</td>
+      <td style="font-size:10px;max-width:150px;overflow:hidden;text-overflow:ellipsis">${reason}</td>
+      <td>${status}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderSignalStats() {
+  if (!signalsData || !signalsData.stats) return;
+  const s = signalsData.stats;
+  $('sig-total').textContent = s.total || 0;
+  $('sig-executed').textContent = s.executed || 0;
+  $('sig-executed').className = 'value up';
+  $('sig-rejected').textContent = s.rejected || 0;
+  $('sig-rejected').className = 'value warn';
+  $('sig-rate').textContent = s.execution_rate ? s.execution_rate.toFixed(1) + '%' : '--';
+}
+
+// ===== INIT v2.0 =====
 window.addEventListener('DOMContentLoaded', () => {
   loadConfig();
   updateNetworkMode();
@@ -1024,6 +1153,14 @@ window.addEventListener('DOMContentLoaded', () => {
   log('╚═══════════════════════════════════════╝', 'info');
   log('🧪 Testnet ativo — sem credenciais', 'signal');
   log('💡 Clica "Iniciar Bot" para começar', 'info');
+  
+  // Buscar dados reais da DB
+  fetchRealPerformance();
+  fetchRealSignals();
+  
+  // Atualizar a cada 30 segundos
+  setInterval(fetchRealPerformance, 30000);
+  setInterval(fetchRealSignals, 30000);
 });
 
 window.addEventListener('resize', renderEquity);

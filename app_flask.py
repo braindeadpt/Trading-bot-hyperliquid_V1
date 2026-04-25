@@ -40,6 +40,8 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from bot_engine import BotEngine, get_bot_status, start_bot_engine, stop_bot_engine, app_state
 from utils import load_config, setup_logging
+from database import BotDatabase
+from performance_tracker import PerformanceTracker
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +164,110 @@ def api_emergency():
     if trader:
         return jsonify({"success": False, "message": "Ainda não implementado"})
     return jsonify({"success": False, "message": "Sem posição aberta"})
+
+
+# =============================================================================
+# NOVOS ENDPOINTS v2.0 — DADOS REAIS DA BASE DE DADOS
+# =============================================================================
+
+@flask_app.route('/api/performance')
+def api_performance():
+    """Retorna performance real da base de dados"""
+    asset = request.args.get('asset', 'BTC')
+    days = request.args.get('days', 7, type=int)
+    
+    db = BotDatabase()
+    tracker = PerformanceTracker(db)
+    
+    # Sumário dos últimos N dias
+    summary = tracker.generate_summary(asset, days)
+    
+    # Último relatório diário
+    latest = tracker.generate_daily_report(asset)
+    
+    return jsonify({
+        'summary': summary,
+        'latest': latest,
+        'asset': asset,
+        'days': days
+    })
+
+@flask_app.route('/api/signals')
+def api_signals():
+    """Retorna sinais da base de dados (aceites e rejeitados)"""
+    asset = request.args.get('asset', 'BTC')
+    days = request.args.get('days', 1, type=int)
+    executed_only = request.args.get('executed_only', 'false').lower() == 'true'
+    limit = request.args.get('limit', 100, type=int)
+    
+    # Calcular timestamp de início
+    from datetime import datetime, timedelta
+    start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+    
+    db = BotDatabase()
+    signals = db.get_signals(
+        asset=asset,
+        start_time=start_time,
+        executed_only=executed_only,
+        limit=limit
+    )
+    
+    # Análise rápida
+    total = len(signals)
+    executed = len([s for s in signals if s.get('executed')])
+    rejected = total - executed
+    
+    # Razões de rejeição
+    rejection_reasons = {}
+    for s in signals:
+        if not s.get('executed'):
+            reason = s.get('reason', 'unknown')
+            if 'FILTER:' in reason:
+                key = reason.replace('FILTER:', '').strip().split('|')[0].strip()
+            elif 'VP_BLOCK' in reason:
+                key = 'volume_profile'
+            else:
+                key = reason
+            rejection_reasons[key] = rejection_reasons.get(key, 0) + 1
+    
+    return jsonify({
+        'signals': signals,
+        'stats': {
+            'total': total,
+            'executed': executed,
+            'rejected': rejected,
+            'execution_rate': round((executed / total * 100), 1) if total > 0 else 0,
+            'rejection_reasons': rejection_reasons,
+            'long_signals': len([s for s in signals if s.get('signal_type') == 'LONG']),
+            'short_signals': len([s for s in signals if s.get('signal_type') == 'SHORT']),
+            'exit_signals': len([s for s in signals if s.get('signal_type') == 'EXIT'])
+        },
+        'asset': asset,
+        'days': days
+    })
+
+@flask_app.route('/api/regime')
+def api_regime():
+    """Retorna regime de mercado recente"""
+    asset = request.args.get('asset', 'BTC')
+    limit = request.args.get('limit', 24, type=int)
+    
+    db = BotDatabase()
+    regimes = db.get_market_regime(asset, limit=limit)
+    
+    return jsonify({
+        'regimes': regimes,
+        'count': len(regimes),
+        'asset': asset
+    })
+
+@flask_app.route('/api/stats')
+def api_stats():
+    """Retorna estatísticas gerais da base de dados"""
+    db = BotDatabase()
+    stats = db.get_stats_v2()
+    
+    return jsonify(stats)
 
 
 # =============================================================================
