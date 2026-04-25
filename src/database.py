@@ -582,6 +582,16 @@ class BotDatabase:
             rows = conn.execute(query, params).fetchall()
             return [dict(row) for row in rows]
 
+    def get_recent_trades(self, limit: int = 50) -> List[Dict]:
+        """Busca trades recentes (paper_trades) — usado pela dashboard"""
+        with self._get_conn() as conn:
+            rows = conn.execute("""
+                SELECT * FROM paper_trades
+                ORDER BY entry_time DESC
+                LIMIT ?
+            """, (limit,)).fetchall()
+            return [dict(row) for row in rows]
+
     def get_stats_v2(self) -> Dict:
         """Estatísticas completas v2"""
         stats = self.get_stats()
