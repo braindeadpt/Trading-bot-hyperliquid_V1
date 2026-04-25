@@ -795,95 +795,94 @@ class PaperTrader:
             logger.error(f"Erro a buscar candle: {e}")
             return None
     
-    def _check_entry_signals(self, candle: Dict, prices: list, regime: str) -> Optional[str]:
-        """Verifica se há sinal de entrada"""
+    def _check_entry_signals(self, candle: Dict, prices: list, regime: str,
+                              volume_ratio: float, price_above_sma: bool,
+                              funding_extreme: bool, oi_ok_long: bool,
+                              oi_ok_short: bool) -> Optional[str]:
+        """Verifica se há sinal de entrada e GUARDA na DB (mesmo os que não entram)"""
         price = candle['close']
-        volume = candle['volume']
-        oi = candle['oi']
-        oi_change = candle.get('oi_change', 0)
-        funding = candle.get('funding', 0)
         
-        # Calcular SMA
-        sma = self._calculate_sma(prices, self.price_sma_period)
-        price_above_sma = price > sma
-        
-        # Funding extremo?
-        max_funding = self.config.get('strategy', {}).get('max_funding_rate', 0.01)
-        min_funding = self.config.get('strategy', {}).get('min_funding_rate', -0.01)
-        funding_extreme = funding > max_funding or funding < min_funding
-        
-        # Calcular volume ratio (vs média dos últimos candles)
-        if len(self.candles) >= 20:
-            avg_volume = sum(c['volume'] for c in list(self.candles)[-20:]) / 20
-            volume_ratio = volume / max(avg_volume, 1)
-        else:
-            volume_ratio = 1.0
-        
-        # Atualizar contadores de candles bullish/bearish
-        if price > candle['open']:
-            self.bullish_count += 1
-            self.bearish_count = 0
-        elif price < candle['open']:
-            self.bearish_count += 1
-            self.bullish_count = 0
-        else:
-            self.bullish_count = 0
-            self.bearish_count = 0
-        
-        logger.info(f"{candle['time'] if isinstance(candle.get('time'), str) else datetime.now().strftime('%H:%M')} "
-                   f"${price:,.0f} | Vol: {volume_ratio:.1f}x | SMA: {sma:,.0f} | "
-                   f"{'ABOVE' if price_above_sma else 'BELOW'} | Bullish: {self.bullish_count}x | "
-                   f"Regime: {regime}")
-        
-        # Se já em posição, não entrar
+        # Se já em posição, não entrar — mas ainda logamos o regime
         if self.current_position is not None:
             return None
         
         # Calcular Volume Profile (para filtro de qualidade)
         vp_info = ""
+        vp_allowed = True
+        vp_reason = ""
         if self.vp_enabled and len(self.candles) >= 20:
             candles_list = list(self.candles)
             self.last_vp = self.volume_profile.calculate(candles_list)
             if self.last_vp:
                 vp_info = f" | {self.volume_profile.format_profile(self.last_vp)}"
         
-        # LONG
+        # ============================================================
+        # LONG Signal Analysis
+        # ============================================================
         if price_above_sma and self.bullish_count >= self.min_bullish:
             thresholds = self._get_thresholds_for_regime(regime, 'long')
             
-            if volume_ratio >= thresholds['volume'] and not funding_extreme:
-                # Verificar OI se disponível
-                oi_ok = (oi > 0 and oi_change >= thresholds['oi']) or oi == 0
+            if volume_ratio >= thresholds['volume'] and not funding_extreme and oi_ok_long:
+                # Filtro Volume Profile
+                if self.vp_enabled and self.last_vp:
+                    vp_allowed, vp_reason = self.volume_profile.filter_entry(price, 'long', self.last_vp)
+                    if not vp_allowed:
+                        logger.info(f"  [VP BLOCK] LONG bloqueado: {vp_reason}{vp_info}")
+                        # LOG: Sinal rejeitado por Volume Profile
+                        self._log_signal('BTC', 'LONG', 0.0, candle, regime,
+                                        f"VP_BLOCK: {vp_reason}", executed=False)
+                        return None
+                    logger.info(f"  [VP OK] LONG aprovado: {vp_reason}")
                 
-                if oi_ok:
-                    # Filtro Volume Profile
-                    if self.vp_enabled and self.last_vp:
-                        allowed, reason = self.volume_profile.filter_entry(price, 'long', self.last_vp)
-                        if not allowed:
-                            logger.info(f"  [VP BLOCK] LONG bloqueado: {reason}{vp_info}")
-                            return None
-                        logger.info(f"  [VP OK] LONG aprovado: {reason}")
-                    
-                    return 'long'
+                # LOG: Sinal aceite!
+                self._log_signal('BTC', 'LONG', 1.0, candle, regime,
+                                f"ENTRY: vol={volume_ratio:.1f}x | {vp_reason}", executed=True)
+                return 'long'
+            else:
+                # LOG: Sinal rejeitado (volume, funding, OI)
+                reason_parts = []
+                if volume_ratio < thresholds['volume']:
+                    reason_parts.append(f"vol_low({volume_ratio:.1f}x<{thresholds['volume']})")
+                if funding_extreme:
+                    reason_parts.append("funding_extreme")
+                if not oi_ok_long:
+                    reason_parts.append("oi_insufficient")
+                
+                self._log_signal('BTC', 'LONG', 0.0, candle, regime,
+                                f"FILTER: {' | '.join(reason_parts)}", executed=False)
         
-        # SHORT (se ativado)
+        # ============================================================
+        # SHORT Signal Analysis
+        # ============================================================
         if self.short_enabled and not price_above_sma and self.bearish_count >= self.min_bearish:
             thresholds = self._get_thresholds_for_regime(regime, 'short')
             
-            if volume_ratio >= thresholds['volume'] and not funding_extreme:
-                oi_ok = (oi > 0 and oi_change <= -thresholds['oi']) or oi == 0
+            if volume_ratio >= thresholds['volume'] and not funding_extreme and oi_ok_short:
+                if self.vp_enabled and self.last_vp:
+                    vp_allowed, vp_reason = self.volume_profile.filter_entry(price, 'short', self.last_vp)
+                    if not vp_allowed:
+                        logger.info(f"  [VP BLOCK] SHORT bloqueado: {vp_reason}{vp_info}")
+                        self._log_signal('BTC', 'SHORT', 0.0, candle, regime,
+                                        f"VP_BLOCK: {vp_reason}", executed=False)
+                        return None
+                    logger.info(f"  [VP OK] SHORT aprovado: {vp_reason}")
                 
-                if oi_ok:
-                    # Filtro Volume Profile
-                    if self.vp_enabled and self.last_vp:
-                        allowed, reason = self.volume_profile.filter_entry(price, 'short', self.last_vp)
-                        if not allowed:
-                            logger.info(f"  [VP BLOCK] SHORT bloqueado: {reason}{vp_info}")
-                            return None
-                        logger.info(f"  [VP OK] SHORT aprovado: {reason}")
-                    
-                    return 'short'
+                self._log_signal('BTC', 'SHORT', 1.0, candle, regime,
+                                f"ENTRY: vol={volume_ratio:.1f}x | {vp_reason}", executed=True)
+                return 'short'
+            else:
+                reason_parts = []
+                if volume_ratio < thresholds['volume']:
+                    reason_parts.append(f"vol_low({volume_ratio:.1f}x<{thresholds['volume']})")
+                if funding_extreme:
+                    reason_parts.append("funding_extreme")
+                if not oi_ok_short:
+                    reason_parts.append("oi_insufficient")
+                
+                self._log_signal('BTC', 'SHORT', 0.0, candle, regime,
+                                f"FILTER: {' | '.join(reason_parts)}", executed=False)
         
+        # Nenhum sinal
         return None
     
     def _check_exit_signals(self, candle: Dict, prices: list) -> Optional[str]:
@@ -1065,6 +1064,10 @@ class PaperTrader:
                    f"Margin: ${margin:,.2f} | Vol: {candle.get('volume', 0):,.0f} | "
                    f"OI: {candle.get('oi_change', 0)*100:.2f}% | Regime: {regime}")
         
+        # Log signal de entrada executada
+        self._log_signal(asset, side.upper(), 1.0, candle, regime,
+                        f"EXECUTED: size=${position_size:.0f} | lev={self.current_leverage}x", executed=True)
+        
         # Guardar na DB
         conn = self.db._get_conn()
         cursor = conn.cursor()
@@ -1079,6 +1082,84 @@ class PaperTrader:
         conn.commit()
         conn.close()
     
+    def _log_signal(self, asset: str, signal_type: str, confidence: float,
+                    candle: Dict, regime: str, reason: str,
+                    executed: bool = False):
+        """
+        Guarda SINAL na base de dados — inclui os que NÃO entraram!
+        Isto é OURO para análise posterior: porquê rejeitámos entradas?
+        """
+        try:
+            now = int(datetime.now().timestamp() * 1000)
+            signal = {
+                'timestamp': now,
+                'asset': asset,
+                'signal_type': signal_type,
+                'confidence': confidence,
+                'strategy': 'momentum_v2',
+                'entry_price': candle.get('close'),
+                'stop_loss': candle.get('close') * (1 - self.stop_loss_pct) if signal_type == 'LONG' else candle.get('close') * (1 + self.short_stop_loss) if signal_type == 'SHORT' else None,
+                'take_profit': None,
+                'executed': executed,
+                'execution_time': now if executed else None,
+                'reason': reason,
+                'market_regime': regime,
+                'volume_ratio': candle.get('volume_ratio'),
+                'oi_change': candle.get('oi_change'),
+                'funding_rate': candle.get('funding'),
+                'price_above_sma': candle.get('price_above_sma'),
+                'bullish_count': self.bullish_count,
+                'bearish_count': self.bearish_count
+            }
+            self.db.save_signal(signal)
+        except Exception as e:
+            logger.warning(f"Erro a guardar sinal: {e}")
+
+    def _log_market_regime(self, asset: str, regime: str, prices: list):
+        """Guarda regime de mercado na DB"""
+        try:
+            if len(prices) >= 200:
+                sma_200 = self._calculate_sma(prices, 200)
+            elif len(prices) >= 60:
+                sma_200 = self._calculate_sma(prices, 60)
+            else:
+                sma_200 = sum(prices) / len(prices) if prices else 0
+
+            current_price = prices[-1] if prices else 0
+            price_vs_sma = ((current_price - sma_200) / sma_200) if sma_200 > 0 else 0
+
+            # Volatilidade simples (ATR-like)
+            volatility = 0
+            if len(prices) >= 14:
+                diffs = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
+                avg_diff = sum(diffs[-14:]) / 14
+                volatility = (avg_diff / current_price) * 100 if current_price > 0 else 0
+
+            # Volume profile baseado nos últimos candles
+            volume_profile = 'NORMAL'
+            if len(self.candles) >= 20:
+                recent_volumes = [c['volume'] for c in list(self.candles)[-20:]]
+                avg_vol = sum(recent_volumes) / len(recent_volumes)
+                current_vol = self.candles[-1]['volume'] if self.candles else 0
+                if current_vol > avg_vol * 1.5:
+                    volume_profile = 'HIGH'
+                elif current_vol < avg_vol * 0.5:
+                    volume_profile = 'LOW'
+
+            regime_data = {
+                'timestamp': int(datetime.now().timestamp() * 1000),
+                'asset': asset,
+                'regime': regime,
+                'volatility_24h': volatility,
+                'trend_strength': abs(price_vs_sma) * 100,
+                'volume_profile': volume_profile,
+                'sma_200': sma_200,
+                'price_vs_sma_pct': price_vs_sma * 100
+            }
+            self.db.save_market_regime(regime_data)
+        except Exception as e:
+            logger.warning(f"Erro a guardar regime: {e}")
+
     def _exit_position(self, asset: str, price: float, reason: str, candle: Dict):
         """Fecha posição virtual"""
         if self.current_position == 'long':
@@ -1099,6 +1180,9 @@ class PaperTrader:
         logger.info(f"[{emoji} EXIT {asset}] {exit_time.strftime('%H:%M')} @ ${price:,.2f} | "
                    f"PnL: ${pnl_usd:+.2f} ({pnl_pct*100:+.2f}%) | Reason: {reason} | "
                    f"Capital: ${self.capital:,.2f}")
+        
+        # Log signal de saída
+        self._log_signal(asset, 'EXIT', 1.0, candle, 'active_trade', reason, executed=True)
         
         # Atualizar trade na DB
         conn = self.db._get_conn()
@@ -1152,15 +1236,66 @@ class PaperTrader:
             # Detetar regime e guardar direção do TF alto (15m)
             regime = self._detect_market_regime(prices)
             
+            # LOG: Regime de mercado
+            self._log_market_regime(asset, regime, prices)
+            
             # Atualizar direção do TF alto para a thread MTF
             self._htf_sma = self._calculate_sma(prices, self.price_sma_period)
             self._htf_price = candle['close']
-            if price > self._htf_sma * 1.005:
+            if candle['close'] > self._htf_sma * 1.005:
                 self._htf_direction = 'bull'
-            elif price < self._htf_sma * 0.995:
+            elif candle['close'] < self._htf_sma * 0.995:
                 self._htf_direction = 'bear'
             else:
                 self._htf_direction = 'neutral'
+            
+            # ============================================================
+            # Calcular métricas UMA VEZ para passar ao signal checker
+            # ============================================================
+            sma = self._calculate_sma(prices, self.price_sma_period)
+            price_above_sma = candle['close'] > sma
+            
+            # Funding
+            funding = candle.get('funding', 0)
+            max_funding = self.config.get('strategy', {}).get('max_funding_rate', 0.01)
+            min_funding = self.config.get('strategy', {}).get('min_funding_rate', -0.01)
+            funding_extreme = funding > max_funding or funding < min_funding
+            
+            # Volume ratio
+            if len(self.candles) >= 20:
+                avg_volume = sum(c['volume'] for c in list(self.candles)[-20:]) / 20
+                volume_ratio = candle['volume'] / max(avg_volume, 1)
+            else:
+                volume_ratio = 1.0
+            
+            # Atualizar contadores de candles bullish/bearish
+            if candle['close'] > candle['open']:
+                self.bullish_count += 1
+                self.bearish_count = 0
+            elif candle['close'] < candle['open']:
+                self.bearish_count += 1
+                self.bullish_count = 0
+            else:
+                self.bullish_count = 0
+                self.bearish_count = 0
+            
+            # OI checks
+            oi = candle.get('oi', 0)
+            oi_change = candle.get('oi_change', 0)
+            thresholds_long = self._get_thresholds_for_regime(regime, 'long')
+            thresholds_short = self._get_thresholds_for_regime(regime, 'short')
+            oi_ok_long = (oi > 0 and oi_change >= thresholds_long['oi']) or oi == 0
+            oi_ok_short = (oi > 0 and oi_change <= -thresholds_short['oi']) or oi == 0
+            
+            # Log de status
+            logger.info(f"{datetime.now().strftime('%H:%M')} "
+                       f"${candle['close']:,.0f} | Vol: {volume_ratio:.1f}x | SMA: {sma:,.0f} | "
+                       f"{'ABOVE' if price_above_sma else 'BELOW'} | Bullish: {self.bullish_count}x | "
+                       f"Regime: {regime}")
+            
+            # Adicionar métricas ao candle para logging
+            candle['volume_ratio'] = volume_ratio
+            candle['price_above_sma'] = price_above_sma
             
             # Verificar saída
             if self.current_position:
@@ -1176,8 +1311,12 @@ class PaperTrader:
                                 logger.info("Auto-Tune ajustou thresholds!")
                         return
             
-            # Verificar entrada
-            signal = self._check_entry_signals(candle, prices, regime)
+            # Verificar entrada (agora com métricas pré-calculadas)
+            signal = self._check_entry_signals(
+                candle, prices, regime,
+                volume_ratio, price_above_sma, funding_extreme,
+                oi_ok_long, oi_ok_short
+            )
             if signal:
                 with self._lock:
                     self._enter_position(asset, signal, candle['close'], candle, regime)
