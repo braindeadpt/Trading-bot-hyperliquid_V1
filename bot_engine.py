@@ -98,15 +98,29 @@ class BotEngine:
         """Loop principal do motor"""
         last_oi_time = 0
         last_price_time = 0
+        last_cycle_time = 0  # ⚡ FIX: Controla quando chamar run_cycle()
+        cycle_interval = 900  # 15 minutos = 900 segundos
         
         # Iniciar monitorização rápida
         if self.assets:
             self.trader._start_monitor_thread(self.assets[0])
         
+        logger.info(f"[BotEngine] Ciclo de trading a cada {cycle_interval//60}min")
+        
         while self.running and not self._stop_event.is_set():
             current_time = time.time()
             
             try:
+                # ⚡ FIX 1: Chamar run_cycle() a cada 15 minutos para gerar sinais!
+                if current_time - last_cycle_time >= cycle_interval:
+                    for asset in self.assets:
+                        try:
+                            self.trader.run_cycle(asset)
+                            logger.info(f"[CYCLE] Trading cycle completo para {asset}")
+                        except Exception as e:
+                            logger.error(f"Erro no ciclo de trading para {asset}: {e}")
+                    last_cycle_time = current_time
+                
                 # Buscar preço rápido a cada 5 segundos
                 if current_time - last_price_time >= self.price_interval:
                     for asset in self.assets:

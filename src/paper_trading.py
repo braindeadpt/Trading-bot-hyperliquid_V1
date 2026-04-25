@@ -361,6 +361,7 @@ class PaperTrader:
             daemon=True,
             name="MultiTimeframe"
         )
+        self._mtf_thread.start()  # ⚡ FIX: Thread agora inicia!
     def _setup_signal_handlers(self):
         """⚡ GRACEFUL SHUTDOWN — handlers para SIGINT e SIGTERM"""
         def _handle_shutdown(signum, frame):
@@ -776,15 +777,26 @@ class PaperTrader:
                 last_close = current_price
                 last_volume = 0
             
+            # ⚡ FIX: Volume INTRADAY real (não 24h/288!)
+            # Buscar volume real do candle de 15m via Binance klines
+            intraday = self.aggregator.get_intraday_volume(asset, self.primary_tf)
+            if intraday:
+                candle_volume = intraday['volume']
+                volume_ratio_hint = intraday.get('volume_ratio', 1.0)
+                logger.info(f"  [VOLUME] Intraday: {candle_volume:,.0f} | Ratio: {volume_ratio_hint:.1f}x")
+            else:
+                # Fallback: volume 24h (menos preciso)
+                candle_volume = data.get('volume_total', 0) / 288
+                logger.warning(f"  [VOLUME] Fallback 24h/288: {candle_volume:,.0f}")
+            
             # Simular candle com dados atuais
-            # Em produção real, usaríamos websocket para dados tick-by-tick
             candle = {
                 'timestamp': int(current_time.timestamp() * 1000),
                 'open': last_close,
                 'high': max(last_close, current_price),
                 'low': min(last_close, current_price),
                 'close': current_price,
-                'volume': data.get('volume_total', 0) / 288,  # Divide por 288 candles de 5m num dia
+                'volume': candle_volume,  # ⚡ FIX: Volume real intraday!
                 'oi': data.get('oi_total', 0),
                 'funding': data.get('funding_avg', 0),
                 'oi_change': data.get('oi_change_pct', 0)
@@ -1273,7 +1285,21 @@ class PaperTrader:
         self.entry_time = None
         self.position_size = 0
     
-    def run_cycle(self, asset: str = 'BTC'):
+    def _calculate_daily_pnl(self) -> float:
+        """Calcula PnL acumulado do dia atual (paper trades)"""
+        try:
+            today = datetime.now().date().isoformat()
+            conn = self.db._get_conn()
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT COALESCE(SUM(pnl_usd), 0) FROM paper_trades
+                WHERE DATE(entry_time) = ? AND exit_time IS NOT NULL
+            ''', (today,))
+            result = cursor.fetchone()
+            conn.close()
+            return result[0] if result else 0.0
+        except Exception:
+            return 0.0
         """Executa um ciclo completo de trading"""
         try:
             # Verificar limite diário
@@ -1285,6 +1311,20 @@ class PaperTrader:
             max_daily = self.config.get('risk', {}).get('max_daily_trades', 5)
             if self.daily_trades >= max_daily:
                 logger.info(f"Limite diário atingido: {self.daily_trades}/{max_daily}")
+                return
+            
+            # ⚡ CIRCUIT BREAKER — Para se perder demasiado num dia
+            daily_pnl = self._calculate_daily_pnl()
+            daily_loss_limit = self.config.get('risk', {}).get('daily_loss_limit_pct', 0.05)
+            daily_loss_hard = self.config.get('risk', {}).get('daily_loss_hard_stop_pct', 0.10)
+            
+            if daily_pnl <= -self.initial_capital * daily_loss_hard:
+                logger.error(f"🚨 CIRCUIT BREAKER HARD STOP! Perda: ${daily_pnl:,.2f} ({daily_pnl/self.initial_capital*100:.1f}%) — Bot PARADO")
+                self.shutdown()
+                return
+            
+            if daily_pnl <= -self.initial_capital * daily_loss_limit:
+                logger.warning(f"⚠️  CIRCUIT BREAKER SOFT STOP! Perda: ${daily_pnl:,.2f} ({daily_pnl/self.initial_capital*100:.1f}%) — Trading suspenso")
                 return
             
             # Buscar dados
@@ -1347,13 +1387,13 @@ class PaperTrader:
                 self.bullish_count = 0
                 self.bearish_count = 0
             
-            # OI checks
+            # OI checks — STRICT (não entra se OI=0 ou API falhou)
             oi = candle.get('oi', 0)
             oi_change = candle.get('oi_change', 0)
             thresholds_long = self._get_thresholds_for_regime(regime, 'long')
             thresholds_short = self._get_thresholds_for_regime(regime, 'short')
-            oi_ok_long = (oi > 0 and oi_change >= thresholds_long['oi']) or oi == 0
-            oi_ok_short = (oi > 0 and oi_change <= -thresholds_short['oi']) or oi == 0
+            oi_ok_long = oi > 0 and oi_change >= thresholds_long['oi']
+            oi_ok_short = oi > 0 and oi_change <= -thresholds_short['oi']
             
             # Log de status
             logger.info(f"{datetime.now().strftime('%H:%M')} "

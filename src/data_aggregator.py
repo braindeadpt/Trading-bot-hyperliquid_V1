@@ -408,7 +408,67 @@ class DataAggregator:
         }
         return ranges.get(asset, (0.01, 100000.0))
     
-    def _is_price_sane(self, asset: str, price: float) -> bool:
+    def _fetch_binance_candles(self, asset: str, interval: str = '15m', limit: int = 20) -> Optional[List[Dict]]:
+        """
+        Busca candles reais de 15m da Binance para volume INTRADAY.
+        Retorna lista de candles com OHLCV real (não volume 24h).
+        """
+        try:
+            symbol = f"{asset}USDT"
+            # Binance /klines: candles de X minutos com volume real
+            resp = self.session.get(
+                "https://fapi.binance.com/fapi/v1/klines",
+                params={
+                    "symbol": symbol,
+                    "interval": interval,
+                    "limit": limit
+                },
+                timeout=10
+            )
+            
+            data = self._safe_json(resp, 'binance_candles')
+            if not data or not isinstance(data, list):
+                return None
+            
+            candles = []
+            for kline in data:
+                # Binance kline format: [open_time, open, high, low, close, volume, close_time, ...]
+                if len(kline) >= 6:
+                    candles.append({
+                        'timestamp': kline[0],
+                        'open': float(kline[1]),
+                        'high': float(kline[2]),
+                        'low': float(kline[3]),
+                        'close': float(kline[4]),
+                        'volume': float(kline[5]),  # Volume REAL deste candle
+                        'interval': interval
+                    })
+            
+            return candles
+            
+        except Exception as e:
+            logger.warning(f"Erro a buscar candles da Binance: {e}")
+            return None
+
+    def get_intraday_volume(self, asset: str, interval: str = '15m') -> Optional[Dict]:
+        """
+        Busca volume INTRADAY real (não 24h acumulado).
+        Retorna o último candle com volume real.
+        """
+        candles = self._fetch_binance_candles(asset, interval, limit=2)
+        if candles and len(candles) >= 1:
+            latest = candles[-1]
+            # Calcular média dos últimos 20 para ratio
+            avg_volume = sum(c['volume'] for c in candles) / len(candles)
+            volume_ratio = latest['volume'] / max(avg_volume, 1)
+            
+            return {
+                'volume': latest['volume'],
+                'volume_ratio': volume_ratio,
+                'close': latest['close'],
+                'source': 'binance_klines'
+            }
+        return None
         """Valida se o preço está num range realista"""
         min_val, max_val = self._get_sanity_range(asset)
         sane = min_val <= price <= max_val
