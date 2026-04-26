@@ -28,6 +28,12 @@ logs/
 # NÃO ignorar refactored/data/ (código do bot)
 !/refactored/data/
 
+# Config com tokens/sensíveis
+config/hypertracker.yaml
+*.env
+.env.local
+.env.production
+
 # IDE
 .vscode/
 .idea/

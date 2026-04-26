@@ -34,14 +34,12 @@ class MomentumStrategy:
         self.position_direction = None  # 'long' ou 'short'
         self.entry_price = 0
     
-    def analyze(self, data: Dict, price: float) -> Optional[str]:
+    def analyze(self, data: Dict, price: float, hypertracker_confirmation: Optional[Dict] = None) -> Optional[str]:
         """
-        Analisa dados agregados e retorna sinal:
-        - 'LONG': entrar posição comprada
-        - 'SHORT': entrar posição vendida
-        - 'CLOSE_LONG': fechar posição comprada
-        - 'CLOSE_SHORT': fechar posição vendida
-        - None: nenhuma ação
+        Analisa dados agregados e retorna sinal.
+        
+        NOVO: hypertracker_confirmation — layer externa de confirmacao (opcional).
+        Se HyperTracker contradiz o sinal, baixa confianca ou skip.
         """
         
         oi_total = data.get('oi_total', 0)
@@ -64,6 +62,18 @@ class MomentumStrategy:
         volume_avg = sum(self.volume_history) / len(self.volume_history)
         volume_ratio = volume_total / volume_avg if volume_avg > 0 else 0
         
+        # === HYPERTRACKER CONFIRMATION LAYER ===
+        ht_boost = 0
+        ht_rec = 'neutral'
+        if hypertracker_confirmation:
+            ht_boost = hypertracker_confirmation.get('total_boost', 0)
+            ht_rec = hypertracker_confirmation.get('recommendation', 'neutral')
+            logger.info(
+                f"[HT] Sentiment: {hypertracker_confirmation.get('sentiment_boost', 0):+d} | "
+                f"SmartMoney: {hypertracker_confirmation.get('smart_money_boost', 0):+d} | "
+                f"Total: {ht_boost:+d} | Rec: {ht_rec}"
+            )
+        
         logger.info(
             f"OI: ${oi_total:,.0f} | OI Δ: {oi_change*100:.2f}% | "
             f"Vol: {volume_ratio:.1f}x média | Funding: {funding_avg*100:.4f}% | "
@@ -71,26 +81,53 @@ class MomentumStrategy:
         )
         
         # Verificar se funding está extremo (evitar overcrowding)
+        funding_extreme = False
         if funding_avg > self.max_funding:
             logger.warning(f"Funding extremamente positivo ({funding_avg*100:.4f}%) — possível squeeze de baixo")
-            # Podemos considerar SHORT aqui, mas por agora só evitamos LONG
+            funding_extreme = True
         
         if funding_avg < self.min_funding:
             logger.warning(f"Funding extremamente negativo ({funding_avg*100:.4f}%) — possível squeeze de cima")
+            funding_extreme = True
         
-        # SINAL DE ENTRADA LONG
+        # === SINAL DE ENTRADA LONG ===
         if not self.in_position:
-            if (volume_ratio > self.volume_threshold and 
-                oi_change > self.oi_threshold and
-                self.max_funding > funding_avg > self.min_funding):
-                
-                logger.info(f"[LAUNCH] SINAL LONG! Volume {volume_ratio:.1f}x, OI +{oi_change*100:.2f}%, Funding {funding_avg*100:.4f}%")
-                self.in_position = True
-                self.position_direction = 'long'
-                self.entry_price = price
-                return 'LONG'
+            ghost_score = 0
+            
+            # Ghost Method checks
+            volume_ok = volume_ratio > self.volume_threshold
+            oi_ok = oi_change > self.oi_threshold
+            funding_ok = self.max_funding > funding_avg > self.min_funding
+            
+            if volume_ok:
+                ghost_score += 40
+            if oi_ok:
+                ghost_score += 30
+            if funding_ok:
+                ghost_score += 30
+            
+            # Aplicar HyperTracker boost
+            final_score = ghost_score + ht_boost
+            final_score = max(0, min(100, final_score))  # Clamp 0-100
+            
+            logger.info(f"[SCORE] Ghost: {ghost_score} | HT boost: {ht_boost:+d} | FINAL: {final_score}")
+            
+            # Se HyperTracker contradiz fortemente, skip
+            if ht_rec in ('strong_contradict', 'contradict') and ghost_score < 80:
+                logger.warning(f"[HT] Sinal CONTRADITO pelo HyperTracker ({ht_rec}). Ghost score {ghost_score} < 80. SKIP.")
+                return None
+            
+            # Entrada se score >= 70 (ajustável)
+            if final_score >= 70:
+                side = 'LONG' if final_score >= 70 else None
+                if side:
+                    logger.info(f"[LAUNCH] SINAL {side}! Score={final_score} | Vol {volume_ratio:.1f}x, OI +{oi_change*100:.2f}%, Funding {funding_avg*100:.4f}%")
+                    self.in_position = True
+                    self.position_direction = side.lower()
+                    self.entry_price = price
+                    return side
         
-        # SINAL DE SAÍDA (trailing stop / exaustão)
+        # === SINAL DE SAÍDA (trailing stop / exaustão) ===
         if self.in_position:
             # TODO: Implementar trailing stop e deteção de exaustão
             pass

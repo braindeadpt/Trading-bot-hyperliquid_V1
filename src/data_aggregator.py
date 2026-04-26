@@ -45,6 +45,10 @@ class DataAggregator:
         self._price_cache = {}  # Cache do último preço válido
         self._cache_timestamp = 0
         
+        # HyperTracker API — layer de confirmacao (opcional)
+        self.hypertracker = HyperTrackerClient()
+        self._last_hypertracker_check = 0
+        
         # Headers padrão para evitar bloqueios
         self.session = requests.Session()
         self.session.headers.update({
@@ -197,6 +201,28 @@ class DataAggregator:
         
         self.last_update = time.time()
         return results
+    
+    def get_hypertracker_confirmation(self) -> Optional[Dict]:
+        """
+        Busca confirmacao da HyperTracker API (layer externa).
+        Chamado a cada 1h — respeita rate limit de 100 requests/dia.
+        
+        Retorna None se API falha ou limite atingido (bot continua com estrategia base).
+        """
+        now = time.time()
+        
+        # So chama a cada 1h (3600s)
+        if now - self._last_hypertracker_check < 3600:
+            return None
+        
+        self._last_hypertracker_check = now
+        
+        try:
+            confirmation = self.hypertracker.get_combined_confirmation()
+            return confirmation
+        except Exception as e:
+            logger.warning(f"[HyperTracker] Erro a buscar confirmacao: {e}")
+            return None
     
     def get_cached_price(self, asset: str, max_age_seconds: int = 300) -> float:
         """Retorna preço do cache se for recente"""

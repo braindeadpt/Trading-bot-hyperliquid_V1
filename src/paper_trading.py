@@ -33,6 +33,10 @@ class AutoTuner:
         self.db = db
         self.strat_config = config.get('strategy', {})
         
+        # HyperTracker layer de confirmacao (opcional)
+        self._last_hypertracker_confirmation = None
+        self._last_hypertracker_time = 0
+        
         # Janela de lookback para análise (últimos N trades)
         self.lookback_trades = 50
         
@@ -818,6 +822,21 @@ class PaperTrader:
                 'oi_change': data.get('oi_change_pct', 0)
             }
             
+            # ⚡ HYPERTRACKER CONFIRMATION LAYER
+            # Buscar a cada 1h (~48 requests/dia, limite gratuito 100/dia)
+            now_ts = time.time()
+            if now_ts - self._last_hypertracker_time >= 3600:
+                try:
+                    ht_conf = self.aggregator.get_hypertracker_confirmation()
+                    self._last_hypertracker_confirmation = ht_conf
+                    self._last_hypertracker_time = now_ts
+                    if ht_conf:
+                        logger.info(f"[HT] Confirmacao: {ht_conf.get('recommendation', 'neutral')} | "
+                                  f"Boost: {ht_conf.get('total_boost', 0):+d} | "
+                                  f"Calls: {ht_conf.get('calls_today', 0)}/100")
+                except Exception as e:
+                    logger.warning(f"[HT] Erro a buscar confirmacao: {e}")
+            
             # Guardar na DB
             self.db.save_candles(asset, self.primary_tf, [candle])
             
@@ -882,7 +901,8 @@ class PaperTrader:
     def _check_entry_signals(self, candle: Dict, prices: list, regime: str,
                               volume_ratio: float, price_above_sma: bool,
                               funding_extreme: bool, oi_ok_long: bool,
-                              oi_ok_short: bool) -> Optional[str]:
+                              oi_ok_short: bool,
+                              hypertracker_conf: Optional[Dict] = None) -> Optional[str]:
         """Verifica se há sinal de entrada e GUARDA na DB (mesmo os que não entram)"""
         price = candle['close']
         
@@ -911,12 +931,31 @@ class PaperTrader:
                 vp_info = f" | {self.volume_profile.format_profile(self.last_vp)}"
         
         # ============================================================
+        # HYPERTRACKER CONFIRMATION LAYER
+        # ============================================================
+        ht_boost = 0
+        ht_rec = 'neutral'
+        if hypertracker_conf:
+            ht_boost = hypertracker_conf.get('total_boost', 0)
+            ht_rec = hypertracker_conf.get('recommendation', 'neutral')
+            logger.info(f"[HT] Boost: {ht_boost:+d} | Rec: {ht_rec}")
+        
+        # ============================================================
         # LONG Signal Analysis
         # ============================================================
         if price_above_sma and self.bullish_count >= self.min_bullish:
             thresholds = self._get_thresholds_for_regime(regime, 'long')
             
-            if volume_ratio >= thresholds['volume'] and not funding_extreme and oi_ok_long:
+            # Aplicar HyperTracker boost aos thresholds
+            # Se HT confirma LONG, baixar threshold (mais fácil entrar)
+            # Se HT contradiz, subir threshold (mais difícil entrar)
+            adjusted_volume_threshold = thresholds['volume']
+            if ht_rec in ('confirm', 'strong_confirm'):
+                adjusted_volume_threshold *= 0.85  # 15% mais fácil
+            elif ht_rec in ('contradict', 'strong_contradict'):
+                adjusted_volume_threshold *= 1.3  # 30% mais difícil
+            
+            if volume_ratio >= adjusted_volume_threshold and not funding_extreme and oi_ok_long:
                 # Filtro Volume Profile
                 if self.vp_enabled and self.last_vp:
                     vp_allowed, vp_reason = self.volume_profile.filter_entry(price, 'long', self.last_vp)
@@ -927,19 +966,29 @@ class PaperTrader:
                         return None
                     logger.info(f"  [VP OK] LONG aprovado: {vp_reason}")
                 
+                # Se HyperTracker contradiz fortemente, skip mesmo com VP ok
+                if ht_rec == 'strong_contradict' and ht_boost < -20:
+                    logger.warning(f"[HT BLOCK] LONG bloqueado: HyperTracker contradiz fortemente ({ht_rec}, {ht_boost:+d})")
+                    self._log_signal('BTC', 'LONG', 0.0, candle, regime,
+                                    f"HT_BLOCK: {ht_rec}", executed=False)
+                    return None
+                
                 # LOG: Sinal aceite!
+                ht_info = f" | HT:{ht_rec}" if hypertracker_conf else ""
                 self._log_signal('BTC', 'LONG', 1.0, candle, regime,
-                                f"ENTRY: vol={volume_ratio:.1f}x | {vp_reason}", executed=True)
+                                f"ENTRY: vol={volume_ratio:.1f}x | {vp_reason}{ht_info}", executed=True)
                 return 'long'
             else:
                 # LOG: Sinal rejeitado (volume, funding, OI)
                 reason_parts = []
-                if volume_ratio < thresholds['volume']:
-                    reason_parts.append(f"vol_low({volume_ratio:.1f}x<{thresholds['volume']})")
+                if volume_ratio < adjusted_volume_threshold:
+                    reason_parts.append(f"vol_low({volume_ratio:.1f}x<{adjusted_volume_threshold:.1f})")
                 if funding_extreme:
                     reason_parts.append("funding_extreme")
                 if not oi_ok_long:
                     reason_parts.append("oi_insufficient")
+                if ht_rec in ('contradict', 'strong_contradict'):
+                    reason_parts.append(f"ht_{ht_rec}")
                 
                 self._log_signal('BTC', 'LONG', 0.0, candle, regime,
                                 f"FILTER: {' | '.join(reason_parts)}", executed=False)
@@ -950,7 +999,14 @@ class PaperTrader:
         if self.short_enabled and not price_above_sma and self.bearish_count >= self.min_bearish:
             thresholds = self._get_thresholds_for_regime(regime, 'short')
             
-            if volume_ratio >= thresholds['volume'] and not funding_extreme and oi_ok_short:
+            # Aplicar HyperTracker boost aos thresholds
+            adjusted_volume_threshold = thresholds['volume']
+            if ht_rec in ('confirm', 'strong_confirm'):
+                adjusted_volume_threshold *= 0.85
+            elif ht_rec in ('contradict', 'strong_contradict'):
+                adjusted_volume_threshold *= 1.3
+            
+            if volume_ratio >= adjusted_volume_threshold and not funding_extreme and oi_ok_short:
                 if self.vp_enabled and self.last_vp:
                     vp_allowed, vp_reason = self.volume_profile.filter_entry(price, 'short', self.last_vp)
                     if not vp_allowed:
@@ -960,17 +1016,27 @@ class PaperTrader:
                         return None
                     logger.info(f"  [VP OK] SHORT aprovado: {vp_reason}")
                 
+                # Se HyperTracker contradiz fortemente, skip
+                if ht_rec == 'strong_contradict' and ht_boost > 20:
+                    logger.warning(f"[HT BLOCK] SHORT bloqueado: HyperTracker contradiz fortemente ({ht_rec}, {ht_boost:+d})")
+                    self._log_signal('BTC', 'SHORT', 0.0, candle, regime,
+                                    f"HT_BLOCK: {ht_rec}", executed=False)
+                    return None
+                
+                ht_info = f" | HT:{ht_rec}" if hypertracker_conf else ""
                 self._log_signal('BTC', 'SHORT', 1.0, candle, regime,
-                                f"ENTRY: vol={volume_ratio:.1f}x | {vp_reason}", executed=True)
+                                f"ENTRY: vol={volume_ratio:.1f}x | {vp_reason}{ht_info}", executed=True)
                 return 'short'
             else:
                 reason_parts = []
-                if volume_ratio < thresholds['volume']:
-                    reason_parts.append(f"vol_low({volume_ratio:.1f}x<{thresholds['volume']})")
+                if volume_ratio < adjusted_volume_threshold:
+                    reason_parts.append(f"vol_low({volume_ratio:.1f}x<{adjusted_volume_threshold:.1f})")
                 if funding_extreme:
                     reason_parts.append("funding_extreme")
                 if not oi_ok_short:
                     reason_parts.append("oi_insufficient")
+                if ht_rec in ('contradict', 'strong_contradict'):
+                    reason_parts.append(f"ht_{ht_rec}")
                 
                 self._log_signal('BTC', 'SHORT', 0.0, candle, regime,
                                 f"FILTER: {' | '.join(reason_parts)}", executed=False)
@@ -1435,11 +1501,12 @@ class PaperTrader:
                                 logger.info("Auto-Tune ajustou thresholds!")
                         return
             
-            # Verificar entrada (agora com métricas pré-calculadas)
+            # Verificar entrada (agora com métricas pré-calculadas + HyperTracker)
             signal = self._check_entry_signals(
                 candle, prices, regime,
                 volume_ratio, price_above_sma, funding_extreme,
-                oi_ok_long, oi_ok_short
+                oi_ok_long, oi_ok_short,
+                self._last_hypertracker_confirmation
             )
             if signal:
                 with self._lock:
