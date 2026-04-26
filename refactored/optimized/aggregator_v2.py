@@ -33,9 +33,13 @@ class DataAggregator:
         
         self._fetch_count = 0
         self._error_count = 0
-        self._last_price = {}       # Deduplicação de preço
-        self._last_publish_time = {}  # Throttling de eventos
-        self._publish_interval = 5    # Segundos mínimos entre eventos
+        self._last_price = {}
+        self._last_publish_time = {}
+        self._publish_interval = 5
+        
+        # ✅ Histórico de OI para calcular variação
+        self._last_oi = {}
+        self._last_oi_time = {}
     
     def _cache_key(self, asset: str, data_type: str) -> str:
         """Cache key eficiente — sem time.time() dinâmico."""
@@ -114,14 +118,22 @@ class DataAggregator:
         if not md:
             return {}
         
+        # ✅ Calcular variação de OI
+        last_oi = self._last_oi.get(asset, 0)
+        current_oi = md.oi_usd
+        oi_change_pct = 0.0
+        if last_oi > 0 and current_oi > 0:
+            oi_change_pct = (current_oi - last_oi) / last_oi
+        self._last_oi[asset] = current_oi
+        
         result = {
             'price': md.mark_price,
             'mark_price': md.mark_price,
             'oracle_price': md.oracle_price,
             'bid': md.bid,
             'ask': md.ask,
-            'oi_total': md.oi_usd,
-            'oi_change_pct': 0.0,
+            'oi_total': current_oi,
+            'oi_change_pct': oi_change_pct,
             'funding_avg': md.funding_rate,
             'volume_24h': md.volume_24h,
             'timestamp': md.timestamp,
