@@ -20,10 +20,13 @@ ENV/
 logs/
 
 # Data
-data/
+/data/
 *.csv
 *.db
 *.sqlite
+
+# NÃO ignorar refactored/data/ (código do bot)
+!/refactored/data/
 
 # IDE
 .vscode/
