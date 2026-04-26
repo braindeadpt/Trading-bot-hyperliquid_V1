@@ -42,39 +42,15 @@ if errorlevel 1 (
 for /f "tokens=*" %%a in ('python --version 2^>^&1') do set "PYTHON_VERSION=%%a"
 echo [Start] %PYTHON_VERSION%
 
-:: ─── Verificar dependências ────────────────────────────────────────────
+:: ─── Verificar e instalar dependências ─────────────────────────────────
 echo [Start] A verificar dependencias...
-python -c "import flask" >nul 2>&1
+python -c "import flask, rich, yaml, requests" >nul 2>&1
 if errorlevel 1 (
-    echo [AVISO] Flask nao instalado. A instalar...
-    python -m pip install flask
-)
-
-python -c "import rich" >nul 2>&1
-if errorlevel 1 (
-    echo [AVISO] Rich nao instalado. A instalar...
-    python -m pip install rich
-)
-
-python -c "import pyyaml" >nul 2>&1
-if errorlevel 1 (
-    echo [AVISO] PyYAML nao instalado. A instalar...
-    python -m pip install pyyaml
-)
-
-python -c "import requests" >nul 2>&1
-if errorlevel 1 (
-    echo [AVISO] requests nao instalado. A instalar...
-    python -m pip install requests
-)
-
-:: ─── Ativar venv se existir ─────────────────────────────────────────────
-if exist "%PROJECT_DIR%\.venv\Scripts\activate.bat" (
-    echo [Start] A ativar ambiente virtual...
-    call "%PROJECT_DIR%\.venv\Scripts\activate.bat"
-) else if exist "%PROJECT_DIR%\venv\Scripts\activate.bat" (
-    echo [Start] A ativar ambiente virtual...
-    call "%PROJECT_DIR%\venv\Scripts\activate.bat"
+    echo [AVISO] Dependencias em falta. A instalar...
+    python -m pip install flask rich pyyaml requests
+    echo [OK] Dependencias instaladas.
+) else (
+    echo [OK] Flask, Rich, PyYAML, requests — todos OK.
 )
 
 :: ─── Configurar UTF-8 ──────────────────────────────────────────────────
