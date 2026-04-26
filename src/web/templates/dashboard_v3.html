@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hyperliquid Bot — Dashboard</title>
+    <link rel="stylesheet" href="/static/css/cyberpunk.css">
+    <link rel="stylesheet" href="/static/css/components.css">
+</head>
+<body>
+    <div id="app" role="main" aria-label="Dashboard do Bot Hyperliquid">
+        <!-- Header -->
+        <header class="app-header" role="banner">
+            <h1>🤖 Hyperliquid Bot</h1>
+            <status-indicator id="bot-status" status="running"></status-indicator>
+        </header>
+
+        <!-- Grid Principal -->
+        <div class="dashboard-grid">
+            
+            <!-- Preços em Tempo Real -->
+            <section class="card" aria-labelledby="precos-titulo">
+                <h2 id="precos-titulo">📊 Preços de Mercado</h2>
+                <div class="ticker-grid">
+                    <price-ticker asset="BTC" price="77320.50" change="+1.2%"></price-ticker>
+                    <price-ticker asset="ETH" price="4231.10" change="-0.5%"></price-ticker>
+                </div>
+            </section>
+
+            <!-- Sinal Atual -->
+            <section class="card" aria-labelledby="sinal-titulo">
+                <h2 id="sinal-titulo">🎯 Sinal Atual</h2>
+                <signal-card 
+                    asset="BTC"
+                    direction="LONG"
+                    confidence="0.85"
+                    entry="77320"
+                    stop="75000"
+                    target="82000"
+                    reason="Volume spike + OI increase"
+                    timestamp="2026-04-26T09:30:00Z">
+                </signal-card>
+            </section>
+
+            <!-- Posição Aberta -->
+            <section class="card" aria-labelledby="posicao-titulo">
+                <h2 id="posicao-titulo">💼 Posição Aberta</h2>
+                <position-panel
+                    asset="BTC"
+                    direction="LONG"
+                    entry="76500"
+                    current="77320"
+                    size="100"
+                    leverage="2"
+                    pnl="+820"
+                    pnl-pct="+1.07">
+                </position-panel>
+            </section>
+
+            <!-- Performance -->
+            <section class="card card-wide" aria-labelledby="perf-titulo">
+                <h2 id="perf-titulo">📈 Performance</h2>
+                <performance-chart 
+                    data='[{"date":"2026-04-20","value":10000},{"date":"2026-04-21","value":10200},{"date":"2026-04-22","value":10100},{"date":"2026-04-23","value":10450},{"date":"2026-04-24","value":10800},{"date":"2026-04-25","value":10720},{"date":"2026-04-26","value":10820}]'
+                    initial="10000">
+                </performance-chart>
+            </section>
+
+            <!-- Histórico de Trades -->
+            <section class="card card-wide" aria-labelledby="trades-titulo">
+                <h2 id="trades-titulo">📋 Histórico de Trades</h2>
+                <trade-history-table
+                    trades='[{"asset":"BTC","direction":"LONG","entry":"75000","exit":"78000","pnl":"+1200","pnl_pct":"+1.6","exit_reason":"TP","time":"2026-04-25 14:30"},{"asset":"ETH","direction":"SHORT","entry":"4300","exit":"4200","pnl":"-500","pnl_pct":"-1.2","exit_reason":"SL","time":"2026-04-24 09:15"}]'>
+                </trade-history-table>
+            </section>
+
+        </div>
+    </div>
+
+    <script src="/static/js/components.js" type="module"></script>
+</body>
+</html>

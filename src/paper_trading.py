@@ -739,6 +739,22 @@ class PaperTrader:
         else:  # ranging
             return {'volume': base_volume * 1.1, 'oi': base_oi, 'candles': max(self.min_bullish, self.min_bearish)}
     
+    def run_cycle(self, asset: str) -> Optional[Dict]:
+        """
+        Ciclo completo de trading — chamado pelo BotEngine.
+        Wrapper para fetch_and_process_candle com logging.
+        """
+        try:
+            result = self.fetch_and_process_candle(asset)
+            if result:
+                logger.info(f"[CYCLE] {asset} | Price: {result.get('close', 0):,.2f} | "
+                          f"Volume: {result.get('volume', 0):,.0f} | "
+                          f"Signal: {result.get('signal', 'NONE')}")
+            return result
+        except Exception as e:
+            logger.error(f"[CYCLE] Erro no ciclo para {asset}: {e}")
+            return None
+    
     def fetch_and_process_candle(self, asset: str) -> Optional[Dict]:
         """Busca dados de mercado e forma um candle de 5m"""
         try:

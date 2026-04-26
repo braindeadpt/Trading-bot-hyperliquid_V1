@@ -1,0 +1,159 @@
+"""
+GhostMethodStrategy — Estratégia validada (PF 2.50, WR 72%).
+Versão refatorada: herda de BaseStrategy, usa event bus.
+"""
+import logging
+from typing import Dict, Optional, List
+
+from .base import BaseStrategy, Signal
+
+logger = logging.getLogger(__name__)
+
+
+class GhostMethodStrategy(BaseStrategy):
+    """
+    Estratégia Momentum + OI + Funding + Volume Profile.
+    
+    Parâmetros ótimos (grid search v4):
+    - timeframe: 15m
+    - volume_spike: 4.0x
+    - oi_change: 1.0%
+    - stop_loss: 3.5%
+    - PF: 2.50 | WR: 72.2% | DD: 0.29%
+    """
+    
+    def __init__(self, config: Dict, event_bus=None):
+        super().__init__(config, event_bus)
+        sc = self.strategy_config
+        
+        self.volume_threshold = sc.get('volume_spike_threshold', 4.0)
+        self.oi_threshold = sc.get('oi_change_threshold', 0.01)
+        self.max_funding = sc.get('max_funding_rate', 0.01)
+        self.min_funding = sc.get('min_funding_rate', -0.01)
+        self.sma_period = sc.get('price_sma_period', 100)
+        self.min_bullish = sc.get('min_bullish_candles', 2)
+        self.min_bearish = sc.get('min_bearish_candles', 2)
+        
+        # Volume Profile
+        self.vp_enabled = sc.get('vp_enabled', True)
+        self.vp_lookback = sc.get('vp_lookback', 96)
+        
+        # Estado
+        self._last_signal_time = 0
+        self._cooldown = sc.get('entry_cooldown_seconds', 300)
+    
+    def analyze(self, market_data: Dict, price: float) -> Optional[Signal]:
+        """
+        Analisa dados de mercado e retorna sinal.
+        """
+        if not self.validate_data(market_data):
+            return None
+        
+        oi = market_data.get('oi_total', 0)
+        oi_change = market_data.get('oi_change_pct', 0)
+        funding = market_data.get('funding_avg', 0)
+        volume_ratio = market_data.get('volume_ratio', 1.0)
+        
+        # ─── Filtros de regime ─────────────────────────────────
+        
+        # Funding extremo = overcrowding
+        if abs(funding) > self.max_funding:
+            return Signal.hold(reason=f"funding_extreme:{funding:.4f}")
+        
+        # ─── Análise de direção ────────────────────────────────
+        
+        # LONG: volume spike + OI aumenta + preço acima de média
+        if volume_ratio > self.volume_threshold and oi_change > self.oi_threshold:
+            if self._check_bullish_alignment(market_data):
+                signal = Signal(
+                    signal_type="LONG",
+                    confidence=min(volume_ratio / 10, 1.0),
+                    entry_price=price,
+                    stop_loss=price * 0.965,  # 3.5% SL
+                    take_profit=price * 1.06,  # 6% TP
+                    reason=f"momentum+oi|vol:{volume_ratio:.1f}x|oi:{oi_change*100:.2f}%",
+                    metadata={'oi': oi, 'funding': funding, 'volume_ratio': volume_ratio}
+                )
+                self._notify('signal.generated', signal.to_dict())
+                return signal
+        
+        # SHORT: volume spike + OI aumenta (divergência de pressão)
+        if volume_ratio > self.volume_threshold and oi_change < -self.oi_threshold:
+            if self._check_bearish_alignment(market_data):
+                signal = Signal(
+                    signal_type="SHORT",
+                    confidence=min(volume_ratio / 10, 1.0),
+                    entry_price=price,
+                    stop_loss=price * 1.035,  # 3.5% SL
+                    take_profit=price * 0.94,  # 6% TP
+                    reason=f"momentum_short|vol:{volume_ratio:.1f}x|oi:{oi_change*100:.2f}%",
+                    metadata={'oi': oi, 'funding': funding, 'volume_ratio': volume_ratio}
+                )
+                self._notify('signal.generated', signal.to_dict())
+                return signal
+        
+        return None
+    
+    def _check_bullish_alignment(self, data: Dict) -> bool:
+        """Verifica se condições de mercado favorecem LONG."""
+        # Preço acima de média móvel (tendência)
+        price = data.get('price', 0)
+        sma = data.get('sma_200', price)
+        return price >= sma * 0.98  # Pequena margem
+    
+    def _check_bearish_alignment(self, data: Dict) -> bool:
+        """Verifica se condições de mercado favorecem SHORT."""
+        price = data.get('price', 0)
+        sma = data.get('sma_200', price)
+        return price <= sma * 1.02
+    
+    def calculate_volume_profile(self, candles: List[Dict]) -> Optional[Dict]:
+        """Calcula POC, VWAP, VAH, VAL a partir de candles."""
+        if len(candles) < 20:
+            return None
+        
+        recent = candles[-self.vp_lookback:]
+        data = []
+        for c in recent:
+            typical = (c.get('high', 0) + c.get('low', 0) + c.get('close', 0)) / 3
+            vol = c.get('volume', 0)
+            if vol > 0 and typical > 0:
+                data.append((typical, vol))
+        
+        if len(data) < 10:
+            return None
+        
+        total_vol = sum(v for _, v in data)
+        vwap = sum(p * v for p, v in data) / total_vol
+        poc = max(data, key=lambda x: x[1])[0]
+        
+        variance = sum(v * (p - vwap) ** 2 for p, v in data) / total_vol
+        std = variance ** 0.5
+        
+        return {
+            'poc': poc, 'vwap': vwap,
+            'vah': vwap + std, 'val': vwap - std,
+            'std': std, 'range_pct': ((vwap + std) - (vwap - std)) / vwap * 100
+        }
+    
+    def filter_with_vp(self, price: float, side: str, vp: Dict) -> tuple:
+        """Filtra entrada usando Volume Profile. Retorna (allowed, reason)."""
+        if not vp:
+            return True, "no_vp_data"
+        
+        vah, val = vp['vah'], vp['val']
+        
+        if side == 'LONG':
+            if price < val:
+                return True, f"below_val|${val:,.0f}"
+            elif price > vah:
+                return True, f"above_vah|${vah:,.0f}"
+            else:
+                return False, f"inside_va|${val:,.0f}-${vah:,.0f}"
+        else:
+            if price > vah:
+                return True, f"above_vah|${vah:,.0f}"
+            elif price < val:
+                return True, f"below_val|${val:,.0f}"
+            else:
+                return False, f"inside_va|${val:,.0f}-${vah:,.0f}"

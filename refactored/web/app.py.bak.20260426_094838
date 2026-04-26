@@ -1,0 +1,144 @@
+"""
+WebApp — Flask API + Dashboard Web.
+Serve dados do event bus em vez de instanciar o seu próprio aggregator.
+"""
+import json
+import logging
+import threading
+from datetime import datetime
+from typing import Dict, Any
+
+from flask import Flask, jsonify, request
+
+try:
+    from flask_cors import CORS
+    HAS_CORS = True
+except ImportError:
+    HAS_CORS = False
+
+from ..core.event_bus import EventBus
+from ..data.database import BotDatabase
+
+logger = logging.getLogger(__name__)
+
+
+class WebApp:
+    """
+    Servidor Flask que serve o dashboard e API.
+    
+    Diferença do legado: NÃO instancia DataAggregator próprio.
+    Todos os dados vêm do EventBus (publicados pelo BotEngine).
+    """
+    
+    def __init__(self, config: Dict, event_bus: EventBus, database: BotDatabase, port: int = 5000):
+        self.config = config
+        self.event_bus = event_bus
+        self.db = database
+        self.port = port
+        
+        self.app = Flask(__name__)
+        if HAS_CORS:
+            CORS(self.app)
+        
+        # Estado em memória (recebido via eventos)
+        self._market_data = {}
+        self._bot_status = {'running': False, 'state': 'IDLE'}
+        self._trades = []
+        self._logs = []
+        self._last_update = None
+        
+        self._setup_routes()
+        self._subscribe_to_events()
+    
+    def _subscribe_to_events(self):
+        """Subscreve a eventos do bus para manter estado atualizado."""
+        self.event_bus.subscribe('market.data', self._on_market_data)
+        self.event_bus.subscribe('state.changed', self._on_state_change)
+        self.event_bus.subscribe('trade.entered', self._on_trade)
+        self.event_bus.subscribe('trade.exited', self._on_trade)
+        self.event_bus.subscribe('bot.status', self._on_bot_status)
+    
+    def _on_market_data(self, event):
+        """Recebe atualizações de mercado."""
+        payload = event.payload
+        self._market_data[payload.get('asset', 'BTC')] = payload
+        self._last_update = datetime.now().isoformat()
+    
+    def _on_state_change(self, event):
+        self._bot_status['state'] = event.payload.get('to', 'IDLE')
+    
+    def _on_trade(self, event):
+        self._trades.append({
+            'time': datetime.now().isoformat(),
+            'type': event.type,
+            'data': event.payload
+        })
+        if len(self._trades) > 1000:
+            self._trades = self._trades[-500:]
+    
+    def _on_bot_status(self, event):
+        self._bot_status.update(event.payload)
+    
+    def _setup_routes(self):
+        """Configura rotas da API."""
+        
+        @self.app.route('/api/status')
+        def api_status():
+            return jsonify({
+                'running': self._bot_status.get('running', False),
+                'state': self._bot_status.get('state', 'IDLE'),
+                'last_update': self._last_update,
+                'assets': self._market_data
+            })
+        
+        @self.app.route('/api/market/<asset>')
+        def api_market(asset):
+            data = self._market_data.get(asset.upper(), {})
+            return jsonify(data)
+        
+        @self.app.route('/api/trades')
+        def api_trades():
+            limit = request.args.get('limit', 50, type=int)
+            return jsonify(self._trades[-limit:])
+        
+        @self.app.route('/api/db/trades')
+        def api_db_trades():
+            """Trades reais da base de dados."""
+            limit = request.args.get('limit', 50, type=int)
+            symbol = request.args.get('symbol')
+            return jsonify(self.db.get_trades(symbol=symbol, limit=limit))
+        
+        @self.app.route('/api/db/stats')
+        def api_db_stats():
+            return jsonify(self.db.get_stats())
+        
+        @self.app.route('/api/db/signals')
+        def api_db_signals():
+            # TODO: Implementar query de sinais
+            return jsonify([])
+        
+        @self.app.route('/api/bot/start', methods=['POST'])
+        def api_start():
+            self.event_bus.publish('bot.command', {'action': 'start'})
+            return jsonify({'success': True})
+        
+        @self.app.route('/api/bot/stop', methods=['POST'])
+        def api_stop():
+            self.event_bus.publish('bot.command', {'action': 'stop'})
+            return jsonify({'success': True})
+        
+        @self.app.route('/api/bot/emergency', methods=['POST'])
+        def api_emergency():
+            self.event_bus.publish('bot.command', {'action': 'emergency_close'})
+            return jsonify({'success': True})
+    
+    def run(self):
+        """Inicia servidor Flask."""
+        logger.info(f"[WebApp] Iniciando em http://127.0.0.1:{self.port}")
+        self.app.run(host='127.0.0.1', port=self.port, debug=False, use_reloader=False)
+    
+    def start_thread(self):
+        """Inicia em thread separada."""
+        thread = threading.Thread(target=self.run, daemon=True)
+        thread.start()
+        return thread
