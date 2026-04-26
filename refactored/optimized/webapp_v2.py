@@ -6,9 +6,11 @@ import json
 import logging
 import threading
 import time
+import os
 from datetime import datetime
 from typing import Dict, Any
 from collections import deque
+from pathlib import Path
 
 from flask import Flask, jsonify, request, render_template
 
@@ -40,7 +42,10 @@ class WebApp:
         self.db = database
         self.port = port
         
-        self.app = Flask(__name__)
+        # Path absoluto para templates (funciona em Linux e Windows)
+        template_dir = Path(__file__).parent.parent.parent / 'src' / 'web' / 'templates'
+        static_dir = Path(__file__).parent.parent.parent / 'src' / 'web' / 'static'
+        self.app = Flask(__name__, template_folder=str(template_dir), static_folder=str(static_dir))
         if HAS_CORS:
             CORS(self.app)
         
