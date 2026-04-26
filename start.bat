@@ -135,9 +135,9 @@ echo [Start] A arrancar bot em modo %MODE%...
 echo.
 
 if defined ASSETS (
-    python -m src.v3.main --mode %MODE% --assets %ASSETS%
+    python src\v3\main.py --mode %MODE% --assets %ASSETS%
 ) else (
-    python -m src.v3.main --mode %MODE%
+    python src\v3\main.py --mode %MODE%
 )
 
 :: ─── Cleanup ───────────────────────────────────────────────────────────
