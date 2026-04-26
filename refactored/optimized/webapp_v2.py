@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Dict, Any
 from collections import deque
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, render_template
 
 try:
     from flask_cors import CORS
@@ -110,6 +110,10 @@ class WebApp:
             limit = request.args.get('limit', 50, type=int)
             symbol = request.args.get('symbol')
             return jsonify(self.db.get_trades(symbol=symbol, limit=limit))
+        
+        @self.app.route('/')
+        def index():
+            return render_template('dashboard_v3.html')
         
         @self.app.route('/api/db/stats')
         def api_db_stats():
