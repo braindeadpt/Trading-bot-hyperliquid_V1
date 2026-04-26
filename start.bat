@@ -26,7 +26,7 @@ echo.
 
 :: ─── Determinar diretório do projeto ──────────────────────────────────────
 set "SCRIPT_DIR=%~dp0"
-set "PROJECT_DIR=%SCRIPT_DIR%.."
+set "PROJECT_DIR=%SCRIPT_DIR%"
 cd /d "%PROJECT_DIR%"
 
 echo [Start] Diretorio do projeto: %PROJECT_DIR%
