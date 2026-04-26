@@ -1,0 +1,119 @@
+"""
+DataAggregator — Agregador único de dados de mercado.
+Com cache partilhado e event bus. Resolve duplicação do legado.
+"""
+import time
+import logging
+from typing import Dict, Optional, Any
+
+from ..api.hyperliquid_client import HyperliquidClient, MarketData
+from .cache import DataCache
+
+logger = logging.getLogger(__name__)
+
+
+class DataAggregator:
+    """
+    Agregador central de dados de mercado.
+    
+    Features:
+    - Cache partilhado (evita N instâncias)
+    - Publica eventos para subscribers (dashboard, strategy, etc)
+    - Fallback entre múltiplas fontes de dados
+    """
+    
+    def __init__(self, config: Dict, cache: DataCache = None, event_bus=None):
+        self.config = config
+        self.cache = cache or DataCache()
+        self.event_bus = event_bus
+        self.api = HyperliquidClient(config, paper_trading=True)
+        
+        self.assets = config.get('assets', ['BTC'])
+        self.primary_interval = config.get('timeframes', {}).get('primary', '15m')
+        
+        # Métricas
+        self._fetch_count = 0
+        self._error_count = 0
+    
+    def fetch_market_data(self, asset: str) -> Optional[MarketData]:
+        """
+        Busca dados de mercado para um asset (com cache).
+        Retorna MarketData normalizado ou None.
+        """
+        cache_key = f"market:{asset}:{int(time.time()) // 10}"  # Cache 10s
+        
+        cached = self.cache.get(cache_key)
+        if cached:
+            return cached
+        
+        self._fetch_count += 1
+        
+        try:
+            data = self.api.get_asset_ctx(asset)
+            if data:
+                self.cache.set(cache_key, data, ttl=10)
+                
+                # Publicar evento
+                if self.event_bus:
+                    self.event_bus.publish('market.data', {
+                        'asset': asset,
+                        'price': data.mark_price,
+                        'oi': data.oi_usd,
+                        'funding': data.funding_rate,
+                        'volume': data.volume_24h
+                    })
+                
+                return data
+        except Exception as e:
+            self._error_count += 1
+            logger.error(f"[Aggregator] Erro a buscar {asset}: {e}")
+        
+        return None
+    
+    def fetch_candles(self, asset: str, interval: str = None, limit: int = 100) -> list:
+        """Busca candles com cache mais longo."""
+        interval = interval or self.primary_interval
+        cache_key = f"candles:{asset}:{interval}:{limit}"
+        
+        cached = self.cache.get(cache_key)
+        if cached:
+            return cached
+        
+        candles = self.api.get_candles(asset, interval, limit)
+        if candles:
+            self.cache.set(cache_key, candles, ttl=60)  # Cache 1 minuto
+        return candles
+    
+    def get_latest_price(self, asset: str) -> float:
+        """Preço mais recente (rápido, com cache)."""
+        data = self.fetch_market_data(asset)
+        return data.mark_price if data else 0.0
+    
+    def get_all_data(self, asset: str) -> Dict[str, Any]:
+        """Retorna dict completo compatível com estratégia legada."""
+        md = self.fetch_market_data(asset)
+        if not md:
+            return {}
+        
+        return {
+            'price': md.mark_price,
+            'mark_price': md.mark_price,
+            'oracle_price': md.oracle_price,
+            'bid': md.bid,
+            'ask': md.ask,
+            'oi_total': md.oi_usd,
+            'oi_change_pct': 0.0,  # Requer candles anteriores
+            'funding_avg': md.funding_rate,
+            'volume_24h': md.volume_24h,
+            'timestamp': md.timestamp,
+            'source': md.source,
+            'raw': md.raw
+        }
+    
+    def get_stats(self) -> Dict[str, Any]:
+        return {
+            'fetches': self._fetch_count,
+            'errors': self._error_count,
+            'error_rate': round(self._error_count / max(self._fetch_count, 1) * 100, 1),
+            'cache': self.cache.stats
+        }

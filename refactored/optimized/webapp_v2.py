@@ -113,7 +113,7 @@ class WebApp:
         
         @self.app.route('/')
         def index():
-            return render_template('dashboard_v3.html')
+            return render_template('dashboard_simple.html')
         
         @self.app.route('/api/db/stats')
         def api_db_stats():
