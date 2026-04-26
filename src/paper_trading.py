@@ -238,6 +238,10 @@ class PaperTrader:
         self.stop_loss_pct = risk.get('stop_loss_pct', 0.02)
         self.short_stop_loss = risk.get('short_stop_loss_pct', 0.025)
         
+        # ⚡ TAKE PROFIT
+        strat = config.get('strategy', {})
+        self.take_profit_pct = strat.get('take_profit_pct', 0.10)  # 10% default
+        
         # Estratégia adaptativa
         strat = config.get('strategy', {})
         self.market_regime_enabled = strat.get('market_regime_enabled', True)
@@ -1075,6 +1079,10 @@ class PaperTrader:
                 if loss_pct >= self.stop_loss_pct:
                     return 'STOP_LOSS'
             
+            # ⚡ CHECK TAKE PROFIT
+            if gain_pct >= self.take_profit_pct:
+                return 'TAKE_PROFIT'
+            
             # Check trailing stop
             if self.trailing_active and price <= self.trailing_stop:
                 return 'TRAILING_STOP'
@@ -1108,6 +1116,10 @@ class PaperTrader:
                 loss_pct = (price - self.entry_price) / self.entry_price
                 if loss_pct >= self.short_stop_loss:
                     return 'STOP_LOSS'
+            
+            # ⚡ CHECK TAKE PROFIT SHORT
+            if gain_pct >= self.take_profit_pct:
+                return 'TAKE_PROFIT'
             
             if self.trailing_active and price >= self.trailing_stop:
                 return 'TRAILING_STOP'

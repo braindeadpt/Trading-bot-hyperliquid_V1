@@ -70,6 +70,9 @@ strategy:
   # ⚡ COOLDOWN — Evita entradas repetidas no mesmo candle
   entry_cooldown_seconds: 300  # 5 minutos entre trades
 
+  # ⚡ TAKE PROFIT — Target de lucro (ratio 1:2 vs stop loss 5%)
+  take_profit_pct: 0.10        # 10% — ratio 1:2 (risco 5%, recompensa 10%)
+
   # ⚡ FILTRO DE REGIME — Não tradar em condições extremas
   regime_filter_enabled: true
   max_volatility_pct: 5.0      # Vol > 5% = no trade (whipsaw)
@@ -81,6 +84,14 @@ strategy:
   # Volume Profile (Fase A — filtro de qualidade para entradas)
   vp_enabled: true           # Ativar filtro Volume Profile
   vp_lookback: 96            # Candles para calcular VP (96 de 15m = 24h)
+
+# ⚡ PARÂMETROS DE BACKTEST REALISTA
+backtest_costs:
+  taker_fee: 0.00045        # 0.045% Hyperliquid taker
+  maker_fee: 0.00015        # 0.015% Hyperliquid maker
+  slippage_btc: 0.0002      # 0.02% BTC slippage
+  slippage_eth: 0.0021     # 0.21% ETH slippage
+  funding_hourly_avg: 0.00001  # 0.001% média por hora de hold
 
 risk:
   max_position_size_usd: 100
@@ -95,8 +106,8 @@ risk:
       funding_threshold: -0.0002  # Funding < -0.02% → 5x (get paid to hold)
       volatility_threshold: 0.03  # ATR14 < 3% → 5x (calm market)
       regime_boost: true  # Bull regime + long / Bear regime + short → +1x boost
-  stop_loss_pct: 0.035          # FIX: 2% → 3.5% (mais respiro para volatilidade)
-  short_stop_loss_pct: 0.035    # FIX: 2% → 3.5% (igual ao long)
+  stop_loss_pct: 0.05          # AUMENTADO: 3.5% → 5% (mais respiro para volatilidade)
+  short_stop_loss_pct: 0.05    # AUMENTADO: 3.5% → 5% (igual ao long)
   # Trailing stop ativa SÓ depois de atingir este lucro mínimo
   trailing_activation_pct: 0.02  # FIX: 1.5% → 2%
   # ÓTIMO: 2% abaixo do máximo

@@ -8,6 +8,8 @@ from functools import wraps
 from typing import Dict, Optional, List
 import logging
 
+from hypertracker_client import HyperTrackerClient
+
 logger = logging.getLogger(__name__)
 
 

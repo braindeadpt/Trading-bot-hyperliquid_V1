@@ -30,23 +30,45 @@ class BacktestEngine:
         self.max_position_usd = config['risk']['max_position_size_usd']
         self.max_leverage = config['risk']['max_leverage']
         
+        # ⚡ CONFIGURAÇÃO DE CUSTOS (realismo)
+        self.taker_fee = config.get('backtest_costs', {}).get('taker_fee', 0.00045)  # 0.045%
+        self.maker_fee = config.get('backtest_costs', {}).get('maker_fee', 0.00015)  # 0.015%
+        self.slippage = config.get('backtest_costs', {}).get('slippage_btc', 0.0002)  # 0.02%
+        self.funding_hourly = config.get('backtest_costs', {}).get('funding_hourly_avg', 0.00001)  # 0.001%/h
+        
+        # ⚡ TAKE PROFIT E TRAILING STOP
+        self.take_profit_pct = config.get('strategy', {}).get('take_profit_pct', 0.10)  # 10% default
+        self.trailing_activation_pct = config['risk']['trailing_activation_pct']
+        self.trailing_stop_pct = config['risk']['trailing_stop_pct']
+        
         # Estado do backtest
         self.trades = []
         self.equity = []  # Equity curve
-        self.current_position = None  # None ou 'long'
+        self.current_position = None
         self.entry_price = 0
         self.entry_time = None
+        self.highest_price = 0  # Para trailing stop
+        self.trailing_active = False
         self.volume_history = deque(maxlen=self.volume_lookback)
         self.last_oi = 0
         
         # Métricas
-        self.initial_capital = 10000.0  # Capital inicial simulado
+        self.initial_capital = 10000.0
         self.current_capital = self.initial_capital
         self.max_drawdown = 0
         self.peak_equity = self.initial_capital
         self.total_trades = 0
         self.winning_trades = 0
         self.losing_trades = 0
+        
+        # Custos totais acumulados
+        self.total_fees_paid = 0
+        self.total_slippage_paid = 0
+        self.total_funding_paid = 0
+        
+        # PnL tracking
+        self.pnl_gross_total = 0
+        self.pnl_net_total = 0
         
     def load_data(self, data_dir: str, symbol: str, interval: str = "5m") -> List[Dict]:
         """
@@ -185,21 +207,35 @@ class BacktestEngine:
             
             # SINAL DE SAÍDA
             elif self.current_position == 'long':
+                # Atualizar highest price para trailing stop
+                if price > self.highest_price:
+                    self.highest_price = price
+                
                 # Check stop loss
                 loss_pct = (self.entry_price - price) / self.entry_price
                 if loss_pct >= self.stop_loss_pct:
                     self._exit_position(price, timestamp, 'STOP_LOSS')
                     continue
                 
-                # Check exaustão de momentum (OI a descer)
-                if oi_change < -0.005 and oi > 0:
-                    self._exit_position(price, timestamp, 'OI_EXHAUSTION')
+                # Check take profit (10%)
+                gain_pct = (price - self.entry_price) / self.entry_price
+                if gain_pct >= self.take_profit_pct:
+                    self._exit_position(price, timestamp, 'TAKE_PROFIT')
                     continue
                 
-                # Check take profit simples (2x risk)
-                gain_pct = (price - self.entry_price) / self.entry_price
-                if gain_pct >= 0.04:  # 4% take profit
-                    self._exit_position(price, timestamp, 'TAKE_PROFIT')
+                # ⚡ TRAILING STOP
+                # Ativa quando lucro > trailing_activation_pct (2%)
+                if gain_pct >= self.trailing_activation_pct:
+                    self.trailing_active = True
+                    # Trailing stop = highest_price - trailing_stop_pct (2%)
+                    trailing_level = self.highest_price * (1 - self.trailing_stop_pct)
+                    if price <= trailing_level:
+                        self._exit_position(price, timestamp, 'TRAILING_STOP')
+                        continue
+                
+                # Check exaustão de momentum (OI a descer) — menos agressivo
+                if oi_change < -0.01 and oi > 0:  # Mudado de -0.005 para -0.01
+                    self._exit_position(price, timestamp, 'OI_EXHAUSTION')
                     continue
         
         # Fechar posição aberta no final
@@ -211,17 +247,30 @@ class BacktestEngine:
     
     def _enter_long(self, price: float, timestamp: int, volume_ratio: float, 
                     oi_change: float, funding: float):
-        """Simula entrada em posição LONG"""
+        """Simula entrada em posição LONG com custos"""
         self.current_position = 'long'
         self.entry_price = price
         self.entry_time = timestamp
+        self.highest_price = price  # Reset highest price
+        self.trailing_active = False
         
         # Tamanho da posição
         position_size = min(self.max_position_usd, self.current_capital * 0.1)
+        self.position_size = position_size
+        
+        # ⚡ CUSTOS DE ENTRADA (taker + slippage)
+        entry_fee = position_size * self.taker_fee
+        entry_slippage = position_size * self.slippage
+        total_entry_cost = entry_fee + entry_slippage
+        
+        self.current_capital -= total_entry_cost
+        self.total_fees_paid += entry_fee
+        self.total_slippage_paid += entry_slippage
         
         logger.info(
             f"[ENTER LONG] @ ${price:,.2f} | Size: ${position_size:.2f} | "
-            f"Vol: {volume_ratio:.2f}x | OI: +{oi_change*100:.3f}% | Funding: {funding*100:.4f}%"
+            f"Vol: {volume_ratio:.2f}x | OI: +{oi_change*100:.3f}% | Funding: {funding*100:.4f}% | "
+            f"Custo entrada: ${total_entry_cost:.2f}"
         )
         
         self.trades.append({
@@ -229,25 +278,46 @@ class BacktestEngine:
             'direction': 'long',
             'price': price,
             'timestamp': timestamp,
-            'size': position_size
+            'size': position_size,
+            'entry_cost': total_entry_cost
         })
     
     def _exit_position(self, price: float, timestamp: int, reason: str):
-        """Simula saída da posição"""
+        """Simula saída da posição com custos reais"""
         if not self.current_position:
             return
         
-        # Calcular PnL
+        # Calcular PnL bruto
         if self.current_position == 'long':
             pnl_pct = (price - self.entry_price) / self.entry_price
         else:
             pnl_pct = (self.entry_price - price) / self.entry_price
         
-        position_size = self.trades[-1]['size'] if self.trades else self.max_position_usd
-        pnl_usd = position_size * pnl_pct
+        position_size = getattr(self, 'position_size', self.max_position_usd)
+        pnl_gross = position_size * pnl_pct
+        
+        # ⚡ CUSTOS DE SAÍDA (maker + slippage)
+        exit_fee = position_size * self.maker_fee  # Assume maker na saída
+        exit_slippage = position_size * self.slippage
+        
+        # ⚡ CUSTOS DE FUNDING durante o hold
+        hold_hours = (timestamp - self.entry_time) / (1000 * 3600)  # ms para horas
+        funding_cost = position_size * self.funding_hourly * hold_hours
+        
+        total_exit_cost = exit_fee + exit_slippage + funding_cost
+        
+        # PnL LÍQUIDO
+        pnl_net = pnl_gross - total_exit_cost
+        
+        # Atualizar acumuladores
+        self.total_fees_paid += exit_fee
+        self.total_slippage_paid += exit_slippage
+        self.total_funding_paid += funding_cost
+        self.pnl_gross_total += pnl_gross
+        self.pnl_net_total += pnl_net
         
         # Atualizar capital
-        self.current_capital += pnl_usd
+        self.current_capital += pnl_net
         
         # Atualizar equity
         self.equity.append({
@@ -264,14 +334,15 @@ class BacktestEngine:
         
         # Contabilizar trade
         self.total_trades += 1
-        if pnl_usd > 0:
+        if pnl_net > 0:
             self.winning_trades += 1
         else:
             self.losing_trades += 1
         
         dt = datetime.fromtimestamp(timestamp / 1000)
         logger.info(
-            f"[EXIT] @ ${price:,.2f} | PnL: ${pnl_usd:+.2f} ({pnl_pct*100:+.2f}%) | "
+            f"[EXIT] @ ${price:,.2f} | PnL Bruto: ${pnl_gross:+.2f} | "
+            f"Custos: ${total_exit_cost:.2f} | PnL Líquido: ${pnl_net:+.2f} ({pnl_pct*100:+.2f}%) | "
             f"Reason: {reason} | Capital: ${self.current_capital:,.2f}"
         )
         
@@ -279,27 +350,34 @@ class BacktestEngine:
             'type': 'exit',
             'price': price,
             'timestamp': timestamp,
-            'pnl_usd': pnl_usd,
+            'pnl_gross': pnl_gross,
+            'pnl_net': pnl_net,
             'pnl_pct': pnl_pct,
+            'exit_cost': total_exit_cost,
             'reason': reason
         })
         
         self.current_position = None
         self.entry_price = 0
+        self.position_size = 0
     
     def _calculate_metrics(self) -> Dict:
-        """Calcula métricas finais de performance"""
+        """Calcula métricas finais de performance com PnL líquido"""
         if self.total_trades == 0:
             return {
                 'total_trades': 0,
                 'message': 'Nenhum trade executado - dados insuficientes ou estratégia não disparou'
             }
         
-        total_pnl = self.current_capital - self.initial_capital
-        total_return = (total_pnl / self.initial_capital) * 100
+        total_pnl_gross = self.pnl_gross_total
+        total_pnl_net = self.pnl_net_total
+        total_costs = self.total_fees_paid + self.total_slippage_paid + self.total_funding_paid
         
-        wins = [t['pnl_usd'] for t in self.trades if t.get('type') == 'exit' and t['pnl_usd'] > 0]
-        losses = [t['pnl_usd'] for t in self.trades if t.get('type') == 'exit' and t['pnl_usd'] <= 0]
+        total_return_gross = (total_pnl_gross / self.initial_capital) * 100
+        total_return_net = (total_pnl_net / self.initial_capital) * 100
+        
+        wins = [t['pnl_net'] for t in self.trades if t.get('type') == 'exit' and t['pnl_net'] > 0]
+        losses = [t['pnl_net'] for t in self.trades if t.get('type') == 'exit' and t['pnl_net'] <= 0]
         
         avg_win = sum(wins) / len(wins) if wins else 0
         avg_loss = sum(losses) / len(losses) if losses else 0
@@ -308,56 +386,74 @@ class BacktestEngine:
         
         win_rate = (self.winning_trades / self.total_trades) * 100
         
+        # Breakeven win rate
+        avg_win_abs = abs(avg_win) if avg_win != 0 else 0.01
+        avg_loss_abs = abs(avg_loss) if avg_loss != 0 else 0.01
+        breakeven_wr = avg_loss_abs / (avg_win_abs + avg_loss_abs) * 100
+        
+        # Razões de saída
+        from collections import Counter
+        exit_reasons = Counter(t['reason'] for t in self.trades if t.get('type') == 'exit')
+        
         metrics = {
             'initial_capital': self.initial_capital,
             'final_capital': self.current_capital,
-            'total_pnl': total_pnl,
-            'total_return_pct': total_return,
+            'total_pnl_gross': total_pnl_gross,
+            'total_pnl_net': total_pnl_net,
+            'total_costs': total_costs,
+            'total_fees': self.total_fees_paid,
+            'total_slippage': self.total_slippage_paid,
+            'total_funding_costs': self.total_funding_paid,
+            'total_return_gross_pct': total_return_gross,
+            'total_return_net_pct': total_return_net,
             'total_trades': self.total_trades,
             'winning_trades': self.winning_trades,
             'losing_trades': self.losing_trades,
             'win_rate': win_rate,
+            'breakeven_wr': breakeven_wr,
             'avg_win': avg_win,
             'avg_loss': avg_loss,
             'profit_factor': profit_factor,
             'max_drawdown_pct': self.max_drawdown * 100,
+            'exit_reasons': dict(exit_reasons),
             'trades': self.trades
         }
         
         return metrics
     
     def print_report(self, metrics: Dict):
-        """Imprime relatório formatado"""
-        print("\n" + "="*60)
-        print("          BACKTEST REPORT")
-        print("="*60)
+        """Imprime relatório formatado com PnL líquido e custos"""
+        print("\n" + "="*70)
+        print("          BACKTEST REPORT — PnL LÍQUIDO")
+        print("="*70)
         
         if metrics.get('total_trades', 0) == 0:
             print(metrics.get('message', 'Sem resultados'))
-            print("="*60)
+            print("="*70)
             return
         
-        print(f"Capital Inicial:     ${metrics['initial_capital']:>12,.2f}")
-        print(f"Capital Final:       ${metrics['final_capital']:>12,.2f}")
-        print(f"PnL Total:           ${metrics['total_pnl']:>12,.2f} ({metrics['total_return_pct']:+.2f}%)")
-        print(f"-"*60)
-        print(f"Total Trades:        {metrics['total_trades']:>12}")
-        print(f"Win Rate:            {metrics['win_rate']:>11.1f}%")
-        print(f"Profit Factor:       {metrics['profit_factor']:>12.2f}")
-        print(f"Avg Win:             ${metrics['avg_win']:>12,.2f}")
-        print(f"Avg Loss:            ${metrics['avg_loss']:>12,.2f}")
-        print(f"Max Drawdown:        {metrics['max_drawdown_pct']:>11.2f}%")
-        print("="*60)
-        
-        # Veredito
-        if metrics['profit_factor'] > 1.5 and metrics['max_drawdown_pct'] < 20:
-            print("[PASS] Estratégia parece VÁLIDA para testes adicionais")
-        elif metrics['profit_factor'] > 1.0:
-            print("[WARNING] Estratégia tem edge positivo mas precisa de refinamento")
-        else:
-            print("[FAIL] Estratégia PERDE DINHEIRO - NÃO usar em live trading")
-        
-        print("="*60)
+        print(f"Capital Inicial:       ${metrics['initial_capital']:>12,.2f}")
+        print(f"Capital Final:         ${metrics['final_capital']:>12,.2f}")
+        print(f"-"*70)
+        print(f"PnL BRUTO:             ${metrics['total_pnl_gross']:>12,.2f} ({metrics['total_return_gross_pct']:+.2f}%)")
+        print(f"  Total Fees:          ${metrics['total_fees']:>12,.2f}")
+        print(f"  Total Slippage:      ${metrics['total_slippage']:>12,.2f}")
+        print(f"  Total Funding:       ${metrics['total_funding_costs']:>12,.2f}")
+        print(f"CUSTOS TOTAIS:         ${metrics['total_costs']:>12,.2f}")
+        print(f"PnL LÍQUIDO:           ${metrics['total_pnl_net']:>12,.2f} ({metrics['total_return_net_pct']:+.2f}%)")
+        print(f"-"*70)
+        print(f"Total Trades:          {metrics['total_trades']:>12}")
+        print(f"Win Rate:              {metrics['win_rate']:>11.1f}%")
+        print(f"Breakeven WR:          {metrics['breakeven_wr']:>11.1f}%")
+        print(f"Profit Factor:         {metrics['profit_factor']:>12.2f}")
+        print(f"Avg Win:               ${metrics['avg_win']:>12,.2f}")
+        print(f"Avg Loss:              ${metrics['avg_loss']:>12,.2f}")
+        print(f"Max Drawdown:          {metrics['max_drawdown_pct']:>11.2f}%")
+        print(f"-"*70)
+        print("Razões de Saída:")
+        for reason, count in metrics.get('exit_reasons', {}).items():
+            print(f"  {reason:20s}: {count:>3}")
+        print("="*70)
 
 
 def run_backtest(config: Dict, symbol: str = "BTCUSDT", interval: str = "5m", 
