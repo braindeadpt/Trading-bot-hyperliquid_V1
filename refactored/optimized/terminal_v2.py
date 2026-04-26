@@ -13,7 +13,7 @@ from rich.layout import Layout
 from rich.console import Console
 from rich.text import Text
 
-from ..core.event_bus import EventBus
+from refactored.core.event_bus import EventBus
 
 logger = logging.getLogger(__name__)
 

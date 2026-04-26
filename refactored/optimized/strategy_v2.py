@@ -6,8 +6,8 @@ import time
 import logging
 from typing import Dict, Optional, List
 
-from ..data.cache import DataCache
-from ..strategy.base import BaseStrategy, Signal
+from refactored.data.cache import DataCache
+from refactored.strategy.base import BaseStrategy, Signal
 
 logger = logging.getLogger(__name__)
 

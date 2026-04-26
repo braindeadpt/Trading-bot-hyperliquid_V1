@@ -18,8 +18,8 @@ try:
 except ImportError:
     HAS_CORS = False
 
-from ..core.event_bus import EventBus
-from ..data.database import BotDatabase
+from refactored.core.event_bus import EventBus
+from refactored.data.database import BotDatabase
 
 logger = logging.getLogger(__name__)
 

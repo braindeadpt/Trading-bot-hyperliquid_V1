@@ -7,9 +7,9 @@ import logging
 import threading
 from typing import Dict
 
-from ..core.state_machine import BotState, StateMachine
-from ..core.container import ServiceContainer
-from ..core.event_bus import EventBus
+from refactored.core.state_machine import BotState, StateMachine
+from refactored.core.container import ServiceContainer
+from refactored.core.event_bus import EventBus
 
 logger = logging.getLogger(__name__)
 
