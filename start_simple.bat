@@ -23,6 +23,6 @@ echo.
 cd /d "%~dp0"
 set PYTHONIOENCODING=utf-8
 
-python app_flask.py
+python bot_engine.py
 
 pause

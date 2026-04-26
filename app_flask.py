@@ -35,8 +35,9 @@ except ImportError:
     HAS_TRAY = False
     print("⚠️ pystray/pillow não instalado — system tray desativado")
 
-# Adicionar src/ ao path
+# Adicionar src/ e raiz ao path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent))
 
 from bot_engine import BotEngine, get_bot_status, start_bot_engine, stop_bot_engine, app_state
 from utils import load_config, setup_logging
