@@ -181,7 +181,7 @@ def api_mtf_debug():
         
         # Ler últimas 200 linhas
         lines = []
-        with open(log_file, 'r', encoding='utf-8') as f:
+        with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
             all_lines = f.readlines()
             # Pegar últimas 200 linhas
             lines = all_lines[-200:] if len(all_lines) > 200 else all_lines
