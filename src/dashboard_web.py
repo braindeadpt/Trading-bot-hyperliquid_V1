@@ -181,22 +181,22 @@ DASHBOARD_TEMPLATE = """
         <div class="stats-grid">
             <div class="stat-card">
                 <div class="stat-label">Capital Inicial</div>
-                <div class="stat-value">$10,000</div>
+                <div class="stat-value">${{ "%.2f"|format(initial_capital) }}</div>
                 <div class="stat-change neutral">Simulação</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">Capital Atual</div>
                 <div class="stat-value {{ 'positive' if current_pnl > 0 else 'negative' if current_pnl < 0 else 'neutral' }}">
-                    ${{ "%.2f"|format(10000 + current_pnl) }}
+                    ${{ "%.2f"|format(current_capital) }}
                 </div>
                 <div class="stat-change {{ 'positive' if current_pnl > 0 else 'negative' if current_pnl < 0 else 'neutral' }}">
                     {{ "+%.2f"|format(current_pnl) if current_pnl > 0 else "%.2f"|format(current_pnl) }} USD
                 </div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Sinais Hoje</div>
-                <div class="stat-value">{{ total_signals }}</div>
-                <div class="stat-change neutral">{{ assets|length }} assets monitorizados</div>
+                <div class="stat-label">Trades Hoje</div>
+                <div class="stat-value">{{ trades_today }}</div>
+                <div class="stat-change neutral">{{ total_signals }} sinais detetados</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">Último Trade</div>
@@ -206,6 +206,36 @@ DASHBOARD_TEMPLATE = """
                 </div>
             </div>
         </div>
+        
+        {% if open_position %}
+        <div class="position-section" style="margin: 20px 0; padding: 20px; background: rgba(255,165,0,0.1); border: 2px solid #ffa500; border-radius: 12px;">
+            <h2 class="section-title" style="color: #ffa500;">🔥 POSIÇÃO ABERTA</h2>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                <div>
+                    <div class="stat-label">Direção</div>
+                    <div class="stat-value" style="color: {{ '#00ff88' if open_position[1] == 'long' else '#ff4757' }};">
+                        {{ open_position[1].upper() }}
+                    </div>
+                </div>
+                <div>
+                    <div class="stat-label">Entry Price</div>
+                    <div class="stat-value">${{ "%.2f"|format(open_position[2]) }}</div>
+                </div>
+                <div>
+                    <div class="stat-label">Position Size</div>
+                    <div class="stat-value">${{ "%.2f"|format(open_position[3]) }}</div>
+                </div>
+                <div>
+                    <div class="stat-label">Leverage</div>
+                    <div class="stat-value">{{ open_position[4] }}x</div>
+                </div>
+                <div>
+                    <div class="stat-label">Entry Time</div>
+                    <div class="stat-value">{{ open_position[5][:16] }}</div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
         
         <div class="assets-section">
             <h2 class="section-title">📊 Assets em Monitorização</h2>
@@ -289,9 +319,10 @@ def _format_pct(value: float) -> str:
 class WebDashboard:
     """Dashboard web que abre no browser"""
     
-    def __init__(self, config: Dict, db: Optional[BotDatabase] = None):
+    def __init__(self, config: Dict, db: Optional[BotDatabase] = None, trader=None):
         self.config = config
         self.db = db or BotDatabase()
+        self.trader = trader  # ← Referência ao PaperTrader (opcional)
         self.app = Flask(__name__)
         if HAS_CORS:
             CORS(self.app, origins=["http://127.0.0.1:5000", "http://localhost:5000"])
@@ -305,16 +336,19 @@ class WebDashboard:
         # Estado
         self.current_data = {}
         self.total_signals = 0
-        self._signals_date = datetime.now().date()  # Para reset diário
+        self._signals_date = datetime.now().date()
         self.current_pnl = 0
+        self.current_capital = 10000
+        self.trades_today = 0
         self.last_trade_pnl = 0
         self.last_trade_time = "Sem trades"
         self.last_update = "Nunca"
+        self.open_position = None
         
-        # Cache de API (evitar rate limits)
+        # Cache de API
         self._cache = {}
         self._cache_timestamp = 0
-        self._cache_ttl = 10  # segundos
+        self._cache_ttl = 10
         
         self._setup_routes()
     
@@ -330,8 +364,12 @@ class WebDashboard:
                 assets=self.current_data,
                 total_signals=self.total_signals,
                 current_pnl=self.current_pnl,
+                current_capital=self.current_capital,
+                trades_today=self.trades_today,
                 last_trade_pnl=self.last_trade_pnl,
                 last_trade_time=self.last_trade_time,
+                open_position=self.open_position,
+                initial_capital=self.config.get('risk', {}).get('initial_capital', 10000),
                 last_update=self.last_update,
                 poll_interval=self.poll_interval,
                 min=min,
@@ -354,9 +392,84 @@ class WebDashboard:
         def api_stats():
             return jsonify(self.db.get_stats())
     
+    def _get_paper_trading_stats(self) -> Dict:
+        """Busca estatísticas reais do paper trading da base de dados"""
+        try:
+            conn = self.db._get_conn()
+            cursor = conn.cursor()
+            
+            # Capital atual (último trade ou capital inicial)
+            cursor.execute('''
+                SELECT COALESCE(SUM(pnl_usd), 0) FROM paper_trades 
+                WHERE exit_time IS NOT NULL
+            ''')
+            total_pnl = cursor.fetchone()[0] or 0
+            initial_capital = self.config.get('risk', {}).get('initial_capital', 10000)
+            current_capital = initial_capital + total_pnl
+            
+            # Posição aberta (se houver)
+            cursor.execute('''
+                SELECT symbol, side, entry_price, position_size, leverage, entry_time
+                FROM paper_trades 
+                WHERE exit_time IS NULL 
+                ORDER BY entry_time DESC LIMIT 1
+            ''')
+            open_position = cursor.fetchone()
+            
+            # Último trade fechado
+            cursor.execute('''
+                SELECT exit_time, pnl_usd, exit_reason 
+                FROM paper_trades 
+                WHERE exit_time IS NOT NULL 
+                ORDER BY exit_time DESC LIMIT 1
+            ''')
+            last_trade = cursor.fetchone()
+            
+            # Trades hoje
+            today = datetime.now().date().isoformat()
+            cursor.execute('''
+                SELECT COUNT(*) FROM paper_trades 
+                WHERE DATE(entry_time) = ? AND exit_time IS NOT NULL
+            ''', (today,))
+            trades_today = cursor.fetchone()[0]
+            
+            conn.close()
+            
+            return {
+                'current_capital': current_capital,
+                'total_pnl': total_pnl,
+                'open_position': open_position,  # (symbol, side, entry_price, position_size, leverage, entry_time)
+                'last_trade': last_trade,  # (exit_time, pnl_usd, exit_reason)
+                'trades_today': trades_today,
+                'initial_capital': initial_capital
+            }
+        except Exception as e:
+            logger.warning(f"Erro a buscar stats do paper trading: {e}")
+            return {
+                'current_capital': 10000,
+                'total_pnl': 0,
+                'open_position': None,
+                'last_trade': None,
+                'trades_today': 0,
+                'initial_capital': 10000
+            }
+    
     def _update_data(self):
-        """Atualiza dados das APIs (com cache para evitar rate limits)"""
+        """Atualiza dados das APIs e do paper trading"""
         now = time.time()
+        
+        # Buscar stats do paper trading
+        pt_stats = self._get_paper_trading_stats()
+        self.current_pnl = pt_stats['total_pnl']
+        self.current_capital = pt_stats['current_capital']
+        self.trades_today = pt_stats['trades_today']
+        
+        if pt_stats['last_trade']:
+            self.last_trade_pnl = pt_stats['last_trade'][1]
+            self.last_trade_time = pt_stats['last_trade'][0][:16]
+        
+        # Guardar posição aberta para o template
+        self.open_position = pt_stats['open_position']
         
         # Verificar se cache ainda é válido
         if now - self._cache_timestamp < self._cache_ttl:
@@ -438,12 +551,12 @@ class WebDashboard:
         self.app.run(host=host, port=port, debug=debug, use_reloader=False)
 
 
-def create_dashboard_app(config: Dict, db: Optional[BotDatabase] = None):
+def create_dashboard_app(config: Dict, db: Optional[BotDatabase] = None, trader=None):
     """
     ⚡ Factory para criar dashboard Flask
     Retorna objecto com atributo .app (Flask app)
     """
-    dashboard = WebDashboard(config, db)
+    dashboard = WebDashboard(config, db, trader)
     # Expõe a app Flask para compatibilidade
     dashboard.app = dashboard.app
     return dashboard

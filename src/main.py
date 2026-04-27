@@ -48,8 +48,8 @@ def main():
     # Paper Trader (com crash recovery automatico)
     trader = PaperTrader(config)
     
-    # Dashboard Web
-    dashboard = create_dashboard_app(config)
+    # Dashboard Web — PASSAR O TRADER para mostrar dados reais!
+    dashboard = create_dashboard_app(config, trader=trader)
     dashboard_thread = threading.Thread(
         target=lambda: dashboard.run(host='0.0.0.0', port=5000, debug=False),
         daemon=True,
