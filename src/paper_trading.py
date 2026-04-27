@@ -304,7 +304,10 @@ class PaperTrader:
         self._load_historical_candles()
     
     def _load_historical_candles(self):
-        """Carrega últimos candles da base de dados no arranque"""
+        """Carrega últimos candles da base de dados no arranque
+        
+        ⚡ Se a DB estiver vazia, busca da Binance via API.
+        """
         try:
             conn = self.db._get_conn()
             cursor = conn.cursor()
@@ -338,29 +341,78 @@ class PaperTrader:
                     })
                 
                 logger.info(f"📚 {len(rows)} candles históricos carregados da DB")
-                
-                # Se temos candles suficientes, calcular htf_direction imediatamente
-                if len(self.candles) >= 20:
-                    prices = [c['close'] for c in self.candles]
-                    sma = self._calculate_sma(prices, self.price_sma_period)
-                    last_price = prices[-1]
-                    
-                    if last_price > sma * 1.005:
-                        self._htf_direction = 'bull'
-                    elif last_price < sma * 0.995:
-                        self._htf_direction = 'bear'
-                    else:
-                        self._htf_direction = 'neutral'
-                    
-                    self._htf_sma = sma
-                    self._htf_price = last_price
-                    
-                    logger.info(f"🎯 HTF direção inicial: {self._htf_direction} | SMA: ${sma:,.0f} | Price: ${last_price:,.0f}")
-            else:
-                logger.warning("⚠️ Sem candles históricos na DB — aguardando novos dados (15m/candle)")
-                
+                self._set_htf_direction_from_candles()
+                return  # Sucesso — não precisamos de buscar da API
+            
         except Exception as e:
-            logger.warning(f"Erro a carregar candles históricos: {e}")
+            logger.warning(f"Erro a carregar candles da DB: {e}")
+        
+        # ⚡ FALLBACK: Se a DB está vazia, buscar da Binance via API
+        logger.info("🌐 DB vazia — a buscar candles históricos da Binance...")
+        self._fetch_historical_candles_from_binance()
+    
+    def _fetch_historical_candles_from_binance(self):
+        """Busca 100 candles de 15m da Binance para inicializar o bot"""
+        try:
+            import requests
+            
+            symbol = "BTCUSDT"
+            url = "https://fapi.binance.com/fapi/v1/klines"
+            
+            resp = requests.get(url, params={
+                "symbol": symbol,
+                "interval": self.primary_tf,  # '15m'
+                "limit": 100
+            }, timeout=15)
+            
+            data = resp.json()
+            if not isinstance(data, list) or len(data) < 20:
+                logger.warning(f"⚠️ Binance devolveu {len(data) if isinstance(data, list) else 'erro'} candles")
+                return
+            
+            for kline in data:
+                if len(kline) >= 6:
+                    self.candles.append({
+                        'timestamp': kline[0],
+                        'open': float(kline[1]),
+                        'high': float(kline[2]),
+                        'low': float(kline[3]),
+                        'close': float(kline[4]),
+                        'volume': float(kline[5]),
+                        'oi': 0,  # Não disponível em klines
+                        'funding': 0
+                    })
+            
+            logger.info(f"📚 {len(self.candles)} candles carregados da Binance API")
+            self._set_htf_direction_from_candles()
+            
+            # Guardar na DB para futuros arranques
+            self.db.save_candles(self.assets[0], self.primary_tf, list(self.candles))
+            
+        except Exception as e:
+            logger.error(f"❌ Erro a buscar candles da Binance: {e}")
+    
+    def _set_htf_direction_from_candles(self):
+        """Calcula htf_direction a partir dos candles carregados"""
+        if len(self.candles) < 20:
+            logger.warning(f"⚠️ Apenas {len(self.candles)} candles disponíveis — precisa de 20")
+            return
+        
+        prices = [c['close'] for c in self.candles]
+        sma = self._calculate_sma(prices, self.price_sma_period)
+        last_price = prices[-1]
+        
+        if last_price > sma * 1.005:
+            self._htf_direction = 'bull'
+        elif last_price < sma * 0.995:
+            self._htf_direction = 'bear'
+        else:
+            self._htf_direction = 'neutral'
+        
+        self._htf_sma = sma
+        self._htf_price = last_price
+        
+        logger.info(f"🎯 HTF direção inicial: {self._htf_direction} | SMA: ${sma:,.0f} | Price: ${last_price:,.0f}")
     
     def _init_paper_trades_table(self):
         """Cria tabela para guardar trades de paper trading"""
