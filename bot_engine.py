@@ -170,6 +170,10 @@ class BotEngine:
                         app_state["update_count"] = self.update_count
                     last_oi_time = current_time
                 
+                # 🔄 SINCRONIZAR ESTADO COM DASHBOARD (a cada 5 segundos)
+                if int(current_time) % 5 == 0:
+                    self._sync_dashboard_state()
+                
                 # Pequeno sleep para não esgotar CPU
                 time.sleep(1)
                 
@@ -192,6 +196,63 @@ class BotEngine:
                 
         except Exception as e:
             logger.warning(f"Erro a guardar dados: {e}")
+    
+    def _sync_dashboard_state(self):
+        """Sincroniza estado do PaperTrader com app_state (para dashboard)"""
+        try:
+            with app_state_lock:
+                # Sincronizar posição aberta
+                if self.trader.current_position:
+                    app_state["current_position"] = {
+                        "side": self.trader.current_position,
+                        "entry_price": self.trader.entry_price,
+                        "position_size": getattr(self.trader, 'position_size', 100),
+                        "leverage": getattr(self.trader, 'current_leverage', 1),
+                        "unrealized_pnl": self._calculate_unrealized_pnl()
+                    }
+                else:
+                    app_state["current_position"] = None
+                
+                # Sincronizar capital
+                app_state["capital"] = self.trader.capital
+                
+                # Sincronizar equity history
+                if not app_state.get("equity_history"):
+                    app_state["equity_history"] = [app_state["capital"]]
+                app_state["equity_history"].append(self.trader.capital)
+                # Manter só últimos 1000 pontos
+                if len(app_state["equity_history"]) > 1000:
+                    app_state["equity_history"] = app_state["equity_history"][-1000:]
+                
+                # Sincronizar trades
+                recent_trades = self.db.get_recent_trades(limit=50) if self.db else []
+                app_state["trades"] = recent_trades
+                
+        except Exception as e:
+            logger.warning(f"Erro a sincronizar estado da dashboard: {e}")
+    
+    def _calculate_unrealized_pnl(self) -> float:
+        """Calcula PnL não realizado da posição aberta"""
+        try:
+            if not self.trader.current_position or not self.trader.entry_price:
+                return 0.0
+            
+            # Usar último preço conhecido
+            current_price = self.last_price or app_state.get("last_price", 0)
+            if current_price <= 0:
+                return 0.0
+            
+            position_size = getattr(self.trader, 'position_size', 100)
+            
+            if self.trader.current_position == 'long':
+                pnl = (current_price - self.trader.entry_price) / self.trader.entry_price * position_size
+            else:  # short
+                pnl = (self.trader.entry_price - current_price) / self.trader.entry_price * position_size
+            
+            return pnl
+        except Exception as e:
+            logger.warning(f"Erro a calcular unrealized PnL: {e}")
+            return 0.0
     
     @property
     def is_running(self):
