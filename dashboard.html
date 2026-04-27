@@ -426,6 +426,7 @@ let logs = [];
 let trades = [];
 let equityHistory = [10000];
 let pollInterval = null;
+let botStatusInterval = null;
 let updateCount = 0;
 let currentPosition = null;
 let paperCapital = 10000;
@@ -613,6 +614,84 @@ async function testConnection() {
   }
 }
 
+// ===== BOT STATUS FETCHING (REAL DATA FROM BACKEND) =====
+async function fetchBotStatus() {
+  try {
+    const resp = await fetch('/api/status');
+    if (!resp.ok) return;
+    
+    const data = await resp.json();
+    
+    // Atualizar posição real do PaperTrader
+    if (data.position) {
+      const p = data.position;
+      const direction = p.direction.toUpperCase();
+      const pnlPct = p.pnl_pct || 0;
+      const pnlUsd = p.pnl || 0;
+      
+      $('pos-direction').textContent = direction;
+      $('pos-direction').className = 'value ' + (direction === 'LONG' ? 'up' : 'down');
+      $('pos-entry').textContent = fmt$(p.entry_price || 0);
+      $('pos-size').textContent = fmt$(p.size_usd || 0);
+      $('pos-pnl').textContent = (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(2) + '%';
+      $('pos-pnl').className = 'value ' + (pnlPct >= 0 ? 'up' : 'down');
+      $('pos-pnl-usd').textContent = (pnlUsd >= 0 ? '+' : '') + fmt$(pnlUsd);
+      $('pos-pnl-usd').className = 'value ' + (pnlUsd >= 0 ? 'up' : 'down');
+      $('pos-sl').textContent = fmt$(p.stop_loss || 0);
+      $('pos-time').textContent = formatElapsed(p.entry_time || Date.now()/1000);
+      
+      $('pos-dot').className = 'status-dot ' + (pnlPct >= 0 ? 'on' : 'warn');
+      $('pos-text').textContent = direction + ' ' + (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(1) + '%';
+      $('btn-close').disabled = false;
+      
+      currentPosition = {
+        direction: direction,
+        entryPrice: p.entry_price,
+        size: p.size_usd,
+        stopLoss: p.stop_loss,
+        trailingStop: p.trailing_stop,
+        openTime: p.entry_time
+      };
+    } else {
+      // Sem posição aberta
+      clearPositionUI();
+      currentPosition = null;
+    }
+    
+    // Atualizar capital
+    if (data.equity !== undefined) {
+      $('capital-display').textContent = fmt$(data.equity);
+    }
+    
+    // Atualizar estado do bot
+    if (data.running) {
+      $('bot-dot').className = 'status-dot on';
+      $('bot-text').textContent = 'RUNNING';
+      $('bot-text').style.color = 'var(--accent)';
+      $('btn-start').disabled = true;
+      $('btn-stop').disabled = false;
+    }
+  } catch (e) {
+    console.warn('Bot status fetch failed:', e);
+  }
+}
+
+function clearPositionUI() {
+  $('pos-direction').textContent = 'FLAT';
+  $('pos-direction').className = 'value';
+  $('pos-entry').textContent = '--';
+  $('pos-size').textContent = '--';
+  $('pos-pnl').textContent = '--';
+  $('pos-pnl').className = 'value';
+  $('pos-pnl-usd').textContent = '--';
+  $('pos-pnl-usd').className = 'value';
+  $('pos-sl').textContent = '--';
+  $('pos-time').textContent = '--';
+  $('pos-dot').className = 'status-dot off';
+  $('pos-text').textContent = 'FLAT';
+  $('btn-close').disabled = true;
+}
+
 // ===== REAL DATA FETCHING =====
 let lastPrice = 0;
 
@@ -719,22 +798,9 @@ async function fetchRealData() {
       $('btn-close').disabled = false;
     }
 
-    // Verificar sinais (simplificado)
-    if (price > 0 && lastPrice > 0) {
-      const change = (price - lastPrice) / lastPrice * 100;
-      if (Math.abs(change) > 0.5 && !currentPosition) {
-        // Simular um sinal para testnet
-        const direction = change > 0 ? 'LONG' : 'SHORT';
-        const size = parseFloat($('position-size').value) || 100;
-        const leverage = parseInt($('leverage').value) || 2;
-        const entry = price;
-        const sl = entry * (1 - (parseFloat($('sl-pct').value) || 2) / 100 * (direction === 'LONG' ? 1 : -1));
-        const trail = entry * (1 + (parseFloat($('trail-pct').value) || 1.5) / 100 * (direction === 'LONG' ? 1 : -1));
-
-        openPosition(direction, entry, size, sl, trail);
-        log(`🚀 SINAL ${direction}! Entry: ${fmt$(entry)} | Size: ${fmt$(size)} | SL: ${fmt$(sl)}`, 'signal');
-      }
-    }
+    // ⚡ FIX: Buscar dados REAIS do backend Flask (não simular no frontend!)
+    // O bot real (paper_trading.py) é a única fonte de verdade
+    fetchBotStatus();
 
     lastPrice = price;
 
@@ -941,7 +1007,9 @@ function startBot() {
   log('📡 Buscando dados reais da Hyperliquid...', 'info');
 
   fetchRealData();
+  fetchBotStatus(); // ⚡ Buscar posição real do backend
   pollInterval = setInterval(fetchRealData, 3000);
+  botStatusInterval = setInterval(fetchBotStatus, 5000); // ⚡ Atualizar posição a cada 5s
 }
 
 function stopBot() {
@@ -957,6 +1025,7 @@ function stopBot() {
   $('monitor-status').textContent = 'OFF';
 
   if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+  if (botStatusInterval) { clearInterval(botStatusInterval); botStatusInterval = null; }
   if (currentPosition) closePosition('BOT_STOPPED');
   log('⏹ BOT PARADO', 'warn');
 }
