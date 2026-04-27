@@ -1610,6 +1610,8 @@ class PaperTrader:
             return result[0] if result else 0.0
         except Exception:
             return 0.0
+    
+    def run_cycle(self, asset: str = 'BTC'):
         """Executa um ciclo completo de trading"""
         try:
             # Verificar limite diário
