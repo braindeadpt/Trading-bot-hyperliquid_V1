@@ -590,19 +590,77 @@ class PaperTrader:
             logger.warning(f"Erro no processamento MTF: {e}")
     
     def _fetch_low_tf_candle(self, asset: str) -> Optional[Dict]:
-        """Busca candle do timeframe baixo (1m ou 5m)"""
+        """Busca candle REAL do timeframe baixo (5m) da Binance
+        
+        ⚡ FIX: Antes simulávamos o candle (open=price*0.999, volume=estimativa).
+        Agora buscamos candles reais de 5m da Binance com OHLCV real.
+        """
         try:
-            # Usar data_aggregator para buscar preço atual
+            # Buscar candles reais de 5m da Binance (20 candles = 100 minutos de histórico)
+            candles_5m = self.aggregator._fetch_binance_candles(asset, '5m', limit=20)
+            
+            if not candles_5m or len(candles_5m) < 2:
+                logger.debug(f"MTF: Sem candles 5m reais disponíveis")
+                return None
+            
+            # Pegar no último candle fechado (penúltimo se o último estiver em formação)
+            # O último candle pode estar incompleto, usar o penúltimo para ter dados fechados
+            latest_candle = candles_5m[-2] if len(candles_5m) >= 2 else candles_5m[-1]
+            
+            # Buscar dados adicionais (OI, funding) do aggregator
+            data = self.aggregator.fetch_all_data(asset)
+            
+            # Construir candle no formato esperado pelo MTF
+            candle = {
+                'timestamp': latest_candle['timestamp'],
+                'time': datetime.fromtimestamp(latest_candle['timestamp'] / 1000).strftime('%H:%M:%S'),
+                'open': latest_candle['open'],
+                'high': latest_candle['high'],
+                'low': latest_candle['low'],
+                'close': latest_candle['close'],
+                'volume': latest_candle['volume'],  # Volume REAL deste candle 5m
+                'oi': data.get('oi_total', 0) if data else 0,
+                'funding': data.get('funding_avg', 0) if data else 0
+            }
+            
+            # Guardar candles para cálculo de média de volume
+            if not hasattr(self, '_real_5m_candles'):
+                self._real_5m_candles = []
+            self._real_5m_candles.append(candle)
+            if len(self._real_5m_candles) > 50:
+                self._real_5m_candles = self._real_5m_candles[-50:]
+            
+            # ⚡ FIX: Inicializar _low_tf_candles com histórico real se estiver vazio
+            # Assim temos 20 candles imediatamente para calcular média de volume
+            if len(self._low_tf_candles) < 20 and len(candles_5m) >= 20:
+                for c in candles_5m[-20:]:
+                    self._low_tf_candles.append({
+                        'timestamp': c['timestamp'],
+                        'open': c['open'],
+                        'high': c['high'],
+                        'low': c['low'],
+                        'close': c['close'],
+                        'volume': c['volume']
+                    })
+            
+            return {'candle': candle, 'data': data}
+            
+        except Exception as e:
+            logger.warning(f"Erro a buscar candle MTF real: {e}")
+            # Fallback: tentar o método antigo (simulado) como último recurso
+            return self._fetch_low_tf_candle_fallback(asset)
+    
+    def _fetch_low_tf_candle_fallback(self, asset: str) -> Optional[Dict]:
+        """Fallback: candle simulado (método antigo)"""
+        try:
             data = self.aggregator.fetch_all_data(asset)
             if not data:
                 return None
             
-            # O preço está em exchanges_data, não em 'price' directo
             exchanges = data.get('exchanges_data', {})
             hl_data = exchanges.get('hyperliquid', {})
             current_price = hl_data.get('mark_price', 0)
             
-            # Fallback: média de todos os preços disponíveis
             if current_price <= 0:
                 prices = [ex.get('mark_price', 0) for ex in exchanges.values() if ex.get('mark_price', 0) > 0]
                 if prices:
@@ -611,20 +669,15 @@ class PaperTrader:
             if current_price <= 0:
                 return None
             
-            # Simular candle do TF baixo com dados atuais
-            # Em produção real, deveria buscar candles históricos do TF baixo
             now = datetime.now()
-            
-            # Estimar OHLC do último período do TF baixo
-            # Na prática, precisaríamos de dados reais de 1m/5m
             candle = {
                 'timestamp': int(now.timestamp() * 1000),
                 'time': now.strftime('%H:%M:%S'),
-                'open': current_price * 0.999,  # Simulado
+                'open': current_price * 0.999,
                 'high': current_price * 1.001,
                 'low': current_price * 0.998,
                 'close': current_price,
-                'volume': data.get('volume_total', 0) / (1440 if self.secondary_tf == '1m' else 288),  # Estimativa
+                'volume': data.get('volume_total', 0) / 288,
                 'oi': data.get('oi_total', 0),
                 'funding': data.get('funding_avg', 0)
             }
@@ -632,7 +685,7 @@ class PaperTrader:
             return {'candle': candle, 'data': data}
             
         except Exception as e:
-            logger.warning(f"Erro a buscar candle MTF: {e}")
+            logger.warning(f"Erro no fallback MTF: {e}")
             return None
     
     def _monitor_loop(self, asset: str):
