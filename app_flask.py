@@ -168,6 +168,50 @@ def api_emergency():
 
 
 # =============================================================================
+# API DE DEBUG — Logs MTF em tempo real
+# =============================================================================
+
+@flask_app.route('/api/mtf-debug')
+def api_mtf_debug():
+    """Retorna últimos logs MTF do ficheiro de logs para debug remoto"""
+    try:
+        log_file = Path(__file__).parent / "logs" / "bot.log"
+        if not log_file.exists():
+            return jsonify({"error": "Ficheiro de logs não encontrado"})
+        
+        # Ler últimas 200 linhas
+        lines = []
+        with open(log_file, 'r', encoding='utf-8') as f:
+            all_lines = f.readlines()
+            # Pegar últimas 200 linhas
+            lines = all_lines[-200:] if len(all_lines) > 200 else all_lines
+        
+        # Filtrar linhas relevantes (MTF, signal, entry, skip, HTF, position)
+        keywords = ['MTF', 'SIGNAL', 'ENTRY', 'EXIT', 'skip', 'HTF', 'Position', 
+                    'OPENED', 'CLOSED', 'entry', 'cooldown', 'momentum',
+                    'volume_ratio', 'bull', 'bear', 'long', 'short']
+        
+        filtered = []
+        for line in lines:
+            line = line.strip()
+            if line and any(kw in line for kw in keywords):
+                filtered.append(line)
+        
+        # Limitar a 100 linhas filtradas
+        filtered = filtered[-100:] if len(filtered) > 100 else filtered
+        
+        return jsonify({
+            "mtf_logs": filtered,
+            "total_lines_read": len(lines),
+            "filtered_lines": len(filtered),
+            "timestamp": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+# =============================================================================
 # NOVOS ENDPOINTS v2.0 — DADOS REAIS DA BASE DE DADOS
 # =============================================================================
 
