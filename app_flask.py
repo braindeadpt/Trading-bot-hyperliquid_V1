@@ -142,6 +142,35 @@ def api_config():
         # Retorna config actual
         return jsonify(config or {})
 
+
+# =============================================================================
+# API DE ESTADO MTF — Debug remoto
+# =============================================================================
+
+@flask_app.route('/api/mtf-state')
+def api_mtf_state():
+    """Retorna estado interno do MTF para debug"""
+    trader = app_state.get("trader")
+    mtf = {}
+    if trader:
+        mtf = {
+            "htf_direction": getattr(trader, '_htf_direction', None),
+            "low_tf_candles_count": len(getattr(trader, '_low_tf_candles', [])),
+            "real_5m_candles_count": len(getattr(trader, '_real_5m_candles', [])),
+            "mtf_cooldown_active": time.time() < getattr(trader, '_mtf_cooldown', 0),
+            "mtf_cooldown_remaining": max(0, getattr(trader, '_mtf_cooldown', 0) - time.time()),
+            "has_position": trader.current_position is not None,
+            "position": trader.current_position,
+            "entry_price": getattr(trader, 'entry_price', None),
+            "capital": getattr(trader, 'capital', None),
+            "volume_threshold": getattr(trader, 'volume_threshold', None),
+        }
+    return jsonify({
+        "running": app_state.get("bot_running", False),
+        "mtf": mtf,
+        "update_count": app_state.get("update_count", 0),
+        "timestamp": datetime.now().isoformat()
+    })
 @flask_app.route('/api/force/long', methods=['POST'])
 def api_force_long():
     """Força posição long"""
