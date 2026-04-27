@@ -298,6 +298,69 @@ class PaperTrader:
         
         # Criar tabela de paper trades se não existir
         self._init_paper_trades_table()
+        
+        # ⚡ FIX: Carregar candles históricos da DB no arranque
+        # para ter htf_direction imediatamente (não esperar 5 horas!)
+        self._load_historical_candles()
+    
+    def _load_historical_candles(self):
+        """Carrega últimos candles da base de dados no arranque"""
+        try:
+            conn = self.db._get_conn()
+            cursor = conn.cursor()
+            
+            # Buscar últimos 100 candles de 15m da DB
+            cursor.execute('''
+                SELECT timestamp, open, high, low, close, volume, oi, funding
+                FROM candles
+                WHERE interval = ?
+                ORDER BY timestamp DESC
+                LIMIT 100
+            ''', (self.primary_tf,))
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            if rows:
+                # Inverter para ordem cronológica (mais antigo primeiro)
+                rows.reverse()
+                
+                for row in rows:
+                    self.candles.append({
+                        'timestamp': row[0],
+                        'open': row[1],
+                        'high': row[2],
+                        'low': row[3],
+                        'close': row[4],
+                        'volume': row[5],
+                        'oi': row[6] or 0,
+                        'funding': row[7] or 0
+                    })
+                
+                logger.info(f"📚 {len(rows)} candles históricos carregados da DB")
+                
+                # Se temos candles suficientes, calcular htf_direction imediatamente
+                if len(self.candles) >= 20:
+                    prices = [c['close'] for c in self.candles]
+                    sma = self._calculate_sma(prices, self.price_sma_period)
+                    last_price = prices[-1]
+                    
+                    if last_price > sma * 1.005:
+                        self._htf_direction = 'bull'
+                    elif last_price < sma * 0.995:
+                        self._htf_direction = 'bear'
+                    else:
+                        self._htf_direction = 'neutral'
+                    
+                    self._htf_sma = sma
+                    self._htf_price = last_price
+                    
+                    logger.info(f"🎯 HTF direção inicial: {self._htf_direction} | SMA: ${sma:,.0f} | Price: ${last_price:,.0f}")
+            else:
+                logger.warning("⚠️ Sem candles históricos na DB — aguardando novos dados (15m/candle)")
+                
+        except Exception as e:
+            logger.warning(f"Erro a carregar candles históricos: {e}")
     
     def _init_paper_trades_table(self):
         """Cria tabela para guardar trades de paper trading"""
