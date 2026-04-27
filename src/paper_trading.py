@@ -291,10 +291,10 @@ class PaperTrader:
         self._last_mtf_signal = None  # Último sinal do TF baixo
         self._mtf_cooldown = 0  # Evitar entradas duplicadas
         
-        # Direção do TF alto (15m) — atualizada a cada 15min
-        self._htf_direction = None  # 'bull', 'bear', 'neutral'
-        self._htf_sma = 0
-        self._htf_price = 0
+        # Estado de confirmação de momentum
+        self._pending_signal = None  # {'side': 'long'|'short', 'candle': {...}, 'timestamp': ...}
+        self._confirmation_window = 300  # 5 minutos = próxima vela
+        self._min_confirmation_volume = 1.5  # 1.5x média na 2ª vela
         
         # Criar tabela de paper trades se não existir
         self._init_paper_trades_table()
@@ -625,49 +625,94 @@ class PaperTrader:
                     return
                 
                 # =====================================================================
-                # REGRAS DE ENTRADA VOLUME-ONLY (Simplificado — sem SMA/HTF)
+                # ESTRATÉGIA: Confirmação de Momentum (2 velas consecutivas)
                 # =====================================================================
                 
-                # Funding check (opcional — evita pagar funding extremo)
-                funding = candle.get('funding', 0)
-                max_funding = self.config.get('strategy', {}).get('max_funding_rate', 0.01)
-                min_funding = self.config.get('strategy', {}).get('min_funding_rate', -0.01)
-                funding_extreme = funding > max_funding or funding < min_funding
-                
-                if funding_extreme:
-                    logger.debug(f"MTF: Funding extremo ({funding*100:.3f}%), skipping")
-                    return
-                
-                # Requisito: Volume spike >= threshold
-                volume_spike = volume_ratio >= self.tuner.volume_threshold
-                
-                if not volume_spike:
-                    logger.debug(f"MTF skip: volume {volume_ratio:.1f}x < {self.tuner.volume_threshold}x")
-                    return
-                
-                # Direção segue o candle:
-                # - Candle bullish (close > open) → LONG
-                # - Candle bearish (close < open) → SHORT
+                # Fase 1: Detetar sinal inicial (1ª vela com volume spike)
+                # Fase 2: Confirmar na próxima vela (volume continua + preço continua)
+                # Só entra se a 2ª vela confirmar o momentum!
                 
                 candle_bullish = price > candle['open']
                 candle_bearish = price < candle['open']
+                volume_spike = volume_ratio >= self.tuner.volume_threshold
                 
-                if candle_bullish:
-                    logger.info(f"⚡ MTF SIGNAL LONG! Volume spike: {volume_ratio:.1f}x | "
-                               f"Candle bullish | Price Δ: +{price_change_pct*100:.2f}% | Entry: ${price:,.0f}")
+                # --- CHECK CONFIRMAÇÃO (se há sinal pendente) ---
+                if self._pending_signal:
+                    pending = self._pending_signal
+                    time_since_signal = current_time - pending['timestamp']
                     
-                    self._enter_position(asset, 'long', price, candle, 'volume_long')
-                    self._mtf_cooldown = current_time + 300
+                    # Verificar se ainda dentro da janela de confirmação (5 min)
+                    if time_since_signal > self._confirmation_window:
+                        logger.info(f"🔴 Sinal {pending['side'].upper()} EXPIROU — sem confirmação em 5min")
+                        self._pending_signal = None
+                        return
                     
-                elif candle_bearish:
-                    logger.info(f"⚡ MTF SIGNAL SHORT! Volume spike: {volume_ratio:.1f}x | "
-                               f"Candle bearish | Price Δ: {price_change_pct*100:.2f}% | Entry: ${price:,.0f}")
+                    # Verificar confirmação: volume continua + preço continua na direção
+                    volume_confirmed = volume_ratio >= self._min_confirmation_volume
                     
-                    self._enter_position(asset, 'short', price, candle, 'volume_short')
-                    self._mtf_cooldown = current_time + 300
+                    if pending['side'] == 'long':
+                        price_continued = price > pending['price']  # Preço subiu mais
+                        if volume_confirmed and price_continued:
+                            logger.info(f"🟢 CONFIRMAÇÃO LONG! Momentum confirmado | "
+                                       f"Vela 1: {pending['volume_ratio']:.1f}x | "
+                                       f"Vela 2: {volume_ratio:.1f}x | "
+                                       f"Preço: ${pending['price']:,.0f} → ${price:,.0f}")
+                            self._enter_position(asset, 'long', price, candle, 'momentum_confirmed')
+                            self._mtf_cooldown = current_time + 300
+                            self._pending_signal = None
+                        else:
+                            logger.info(f"🔴 LONG CANCELADO — Momentum não confirmado | "
+                                       f"Volume: {volume_ratio:.1f}x (min: {self._min_confirmation_volume}x) | "
+                                       f"Preço: ${pending['price']:,.0f} → ${price:,.0f}")
+                            self._pending_signal = None
+                    
+                    elif pending['side'] == 'short':
+                        price_continued = price < pending['price']  # Preço desceu mais
+                        if volume_confirmed and price_continued:
+                            logger.info(f"🟢 CONFIRMAÇÃO SHORT! Momentum confirmado | "
+                                       f"Vela 1: {pending['volume_ratio']:.1f}x | "
+                                       f"Vela 2: {volume_ratio:.1f}x | "
+                                       f"Preço: ${pending['price']:,.0f} → ${price:,.0f}")
+                            self._enter_position(asset, 'short', price, candle, 'momentum_confirmed')
+                            self._mtf_cooldown = current_time + 300
+                            self._pending_signal = None
+                        else:
+                            logger.info(f"🔴 SHORT CANCELADO — Momentum não confirmado | "
+                                       f"Volume: {volume_ratio:.1f}x (min: {self._min_confirmation_volume}x) | "
+                                       f"Preço: ${pending['price']:,.0f} → ${price:,.0f}")
+                            self._pending_signal = None
+                    
+                    return
+                
+                # --- DETETAR SINAL INICIAL (1ª vela) ---
+                if volume_spike and candle_bullish:
+                    self._pending_signal = {
+                        'side': 'long',
+                        'price': price,
+                        'volume_ratio': volume_ratio,
+                        'timestamp': current_time,
+                        'candle': candle
+                    }
+                    logger.info(f"🟡 SINAL LONG detetado — aguardando confirmação na próxima vela 5m | "
+                               f"Volume: {volume_ratio:.1f}x | Price: ${price:,.0f}")
+                    
+                elif volume_spike and candle_bearish:
+                    self._pending_signal = {
+                        'side': 'short',
+                        'price': price,
+                        'volume_ratio': volume_ratio,
+                        'timestamp': current_time,
+                        'candle': candle
+                    }
+                    logger.info(f"🟡 SINAL SHORT detetado — aguardando confirmação na próxima vela 5m | "
+                               f"Volume: {volume_ratio:.1f}x | Price: ${price:,.0f}")
                     
                 else:
-                    logger.debug(f"MTF skip: candle doji (open==close), sem direção")
+                    # Sem volume spike suficiente
+                    if not volume_spike:
+                        logger.debug(f"MTF: volume {volume_ratio:.1f}x < threshold {self.tuner.volume_threshold}x")
+                    else:
+                        logger.debug(f"MTF: candle doji (open≈close), sem direção clara")
                     
         except Exception as e:
             logger.warning(f"Erro no processamento MTF: {e}")
