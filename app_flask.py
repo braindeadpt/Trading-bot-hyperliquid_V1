@@ -39,7 +39,7 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from bot_engine import BotEngine, get_bot_status, start_bot_engine, stop_bot_engine, app_state
+from bot_engine import BotEngine, get_bot_status, start_bot_engine, stop_bot_engine, app_state, app_state_lock
 from utils import load_config, setup_logging
 from database import BotDatabase
 from performance_tracker import PerformanceTracker
@@ -408,44 +408,46 @@ def setup_tray():
 # =============================================================================
 
 def monitor_loop():
-    """Actualiza estado global a cada 2 segundos"""
+    """Actualiza estado global a cada 2 segundos (com lock para thread safety)"""
     while True:
         try:
             if app_state.get("bot_running") and app_state.get("trader"):
                 trader = app_state["trader"]
                 
-                # Actualizar posição
-                if trader.current_position:
-                    app_state["current_position"] = {
-                        "direction": trader.current_position.upper(),
-                        "entryPrice": trader.entry_price,
-                        "size": trader.position_size,
-                        "stopLoss": trader.entry_price * (1 - trader.stop_loss_pct),
-                        "trailingStop": trader.trailing_stop,
-                        "openTime": trader.entry_time,
-                    }
-                else:
-                    app_state["current_position"] = None
-                
-                # Actualizar capital
-                app_state["capital"] = trader.capital
-                
-                # Equity history
-                if not app_state.get("equity_history"):
-                    app_state["equity_history"] = [trader.capital]
-                elif app_state["equity_history"][-1] != trader.capital:
-                    app_state["equity_history"].append(trader.capital)
-                    if len(app_state["equity_history"]) > 500:
-                        app_state["equity_history"] = app_state["equity_history"][-500:]
-                
-                # Actualizar trades
-                db = app_state.get("db")
-                if db:
-                    try:
-                        recent_trades = db.get_recent_trades(limit=50)
-                        app_state["trades"] = recent_trades
-                    except:
-                        pass
+                # 🔒 LOCK: Ler estado do trader
+                with app_state_lock:
+                    # Actualizar posição
+                    if trader.current_position:
+                        app_state["current_position"] = {
+                            "direction": trader.current_position.upper(),
+                            "entryPrice": trader.entry_price,
+                            "size": trader.position_size,
+                            "stopLoss": trader.entry_price * (1 - trader.stop_loss_pct),
+                            "trailingStop": trader.trailing_stop,
+                            "openTime": trader.entry_time,
+                        }
+                    else:
+                        app_state["current_position"] = None
+                    
+                    # Actualizar capital
+                    app_state["capital"] = trader.capital
+                    
+                    # Equity history
+                    if not app_state.get("equity_history"):
+                        app_state["equity_history"] = [trader.capital]
+                    elif app_state["equity_history"][-1] != trader.capital:
+                        app_state["equity_history"].append(trader.capital)
+                        if len(app_state["equity_history"]) > 500:
+                            app_state["equity_history"] = app_state["equity_history"][-500:]
+                    
+                    # Actualizar trades
+                    db = app_state.get("db")
+                    if db:
+                        try:
+                            recent_trades = db.get_recent_trades(limit=50)
+                            app_state["trades"] = recent_trades
+                        except:
+                            pass
             
             time.sleep(2)
         except Exception as e:
