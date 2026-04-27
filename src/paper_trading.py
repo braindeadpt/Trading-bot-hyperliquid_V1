@@ -216,6 +216,10 @@ class PaperTrader:
         self.vp_enabled = config.get('strategy', {}).get('vp_enabled', True)
         self.last_vp = None  # Cache do último VP calculado
         
+        # ⚡ HYPERTRACKER — timestamps para throttling
+        self._last_hypertracker_time = 0
+        self._last_hypertracker_confirmation = None
+        
         # Estado
         self.current_position = None  # None, 'long', 'short'
         self.entry_price = 0
