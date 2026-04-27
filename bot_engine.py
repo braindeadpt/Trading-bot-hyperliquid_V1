@@ -263,14 +263,20 @@ def start_bot_engine(config):
     """Inicia o motor do bot e actualiza estado global"""
     global app_state
     
+    logger.info("[start_bot_engine] A iniciar...")
+    
     if app_state.get("bot_running"):
         logger.warning("Bot ja esta a correr!")
         return False
     
     try:
+        logger.info("[start_bot_engine] A criar BotEngine...")
         engine = BotEngine(config)
+        
+        logger.info("[start_bot_engine] A chamar engine.start()...")
         engine.start()
         
+        logger.info("[start_bot_engine] A actualizar app_state...")
         with app_state_lock:
             app_state["bot_running"] = True
             app_state["engine"] = engine          # Guardar BotEngine para poder parar
@@ -281,9 +287,12 @@ def start_bot_engine(config):
             app_state["capital"] = config.get('risk', {}).get('initial_capital', 10000)
             app_state["equity_history"] = [app_state["capital"]]
         
+        logger.info("✅ [start_bot_engine] Bot iniciado com sucesso!")
         return True
     except Exception as e:
-        logger.error(f"Erro a iniciar bot: {e}")
+        logger.error(f"❌ [start_bot_engine] Erro a iniciar bot: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 
