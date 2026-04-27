@@ -67,6 +67,12 @@ strategy:
   short_min_bearish_candles: 2
   short_enabled: true
 
+  # ⚡ DYNAMIC SL/TP — SL apertado, folga dinâmica em lucro
+  dynamic_sl_pct: 0.03         # SL inicial 3% (mais apertado que 5%)
+  breakeven_pct: 0.01         # Breakeven @ +1% de lucro
+  trailing_dynamic: true      # Trailing baseado em ATR (não fixo)
+  atr_period: 14              # Período para cálculo de ATR
+  
   # ⚡ COOLDOWN — Evita entradas repetidas no mesmo candle
   entry_cooldown_seconds: 300  # 5 minutos entre trades
 

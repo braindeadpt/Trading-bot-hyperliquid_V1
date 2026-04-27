@@ -18,6 +18,7 @@ from database import BotDatabase
 from strategy import MomentumStrategy
 from utils import load_config
 from volume_profile import VolumeProfile
+from dynamic_risk import DynamicRiskManager
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,10 @@ class PaperTrader:
         self.db = BotDatabase()
         self.strategy = MomentumStrategy(config)
         self.tuner = AutoTuner(config, self.db)
+        
+        # ⚡ Dynamic Risk Manager (substitui risk_manager.py inline)
+        self.risk_manager = DynamicRiskManager(config)
+        self.position = None  # DynamicPosition instance
         
         # Volume Profile (Fase A do roadmap)
         vp_lookback = config.get('strategy', {}).get('vp_lookback', 96)  # 96 candles de 15m = 24h
@@ -868,61 +873,17 @@ class PaperTrader:
             logger.warning(f"Erro no fast check: {e}")
     
     def _check_exit_signals_fast(self, price: float) -> Optional[str]:
-        """Versão rápida de verificação de saída (sem candles, só preço)"""
-        if self.current_position == 'long':
-            gain_pct = (price - self.entry_price) / self.entry_price
-            
-            # Atualizar máximo
-            if price > self.max_price:
-                self.max_price = price
-            
-            # Ativar trailing?
-            if gain_pct >= self.trailing_activation and not self.trailing_active:
-                self.trailing_active = True
-                self.trailing_stop = self.max_price * (1 - self.trailing_pct)
-                logger.info(f"🚀 TRAIL ATIVADO! +{gain_pct*100:.1f}% | Stop: ${self.trailing_stop:,.0f} | Price: ${price:,.0f}")
-            
-            # Atualizar trailing stop
-            if self.trailing_active:
-                new_stop = self.max_price * (1 - self.trailing_pct)
-                if new_stop > self.trailing_stop:
-                    self.trailing_stop = new_stop
-                    if self.last_check_time % 60 < self._monitor_interval:  # Log a cada ~minuto
-                        logger.info(f"📈 Trail UP: ${self.trailing_stop:,.0f} | Max: ${self.max_price:,.0f} | Price: ${price:,.0f}")
-            
-            # Check stop loss (antes de trailing ativar)
-            if not self.trailing_active:
-                loss_pct = (self.entry_price - price) / self.entry_price
-                if loss_pct >= self.stop_loss_pct:
-                    return 'STOP_LOSS'
-            
-            # Check trailing stop
-            if self.trailing_active and price <= self.trailing_stop:
-                return 'TRAILING_STOP'
+        """Versão rápida de verificação de saída usando DynamicRiskManager"""
+        if not self.current_position or not self.position:
+            return None
         
-        elif self.current_position == 'short':
-            gain_pct = (self.entry_price - price) / self.entry_price
-            
-            if price < self.min_price:
-                self.min_price = price
-            
-            if gain_pct >= self.trailing_activation and not self.trailing_active:
-                self.trailing_active = True
-                self.trailing_stop = self.min_price * (1 + self.trailing_pct)
-                logger.info(f"🚀 TRAIL SHORT ATIVADO! +{gain_pct*100:.1f}% | Stop: ${self.trailing_stop:,.0f}")
-            
-            if self.trailing_active:
-                new_stop = self.min_price * (1 + self.trailing_pct)
-                if new_stop < self.trailing_stop:
-                    self.trailing_stop = new_stop
-            
-            if not self.trailing_active:
-                loss_pct = (price - self.entry_price) / self.entry_price
-                if loss_pct >= self.short_stop_loss:
-                    return 'STOP_LOSS'
-            
-            if self.trailing_active and price >= self.trailing_stop:
-                return 'TRAILING_STOP'
+        # Atualizar candles no risk manager
+        self.risk_manager.update_candles(list(self.candles))
+        
+        # Verificar saída
+        result = self.risk_manager.check_exit(price)
+        if result:
+            return result['reason']
         
         return None
     
@@ -1427,7 +1388,7 @@ class PaperTrader:
         return base  # 3x default
     
     def _enter_position(self, asset: str, side: str, price: float, candle: Dict, regime: str):
-        """Abre posicao virtual"""
+        """Abre posicao virtual usando DynamicRiskManager"""
         # Leverage adaptativa
         self.current_leverage = self._calculate_adaptive_leverage(side, candle, regime)
         
@@ -1441,6 +1402,17 @@ class PaperTrader:
                           f"margin=${margin:.2f} + fee=${fee:.2f} > capital=${self.capital:.2f}")
             return
         
+        # ⚡ Dynamic Risk Manager — gestão de risco profissional
+        self.risk_manager.update_candles(list(self.candles))
+        self.position = self.risk_manager.enter_position(
+            asset=asset,
+            side=side,
+            price=price,
+            size_usd=position_size,
+            leverage=self.current_leverage
+        )
+        
+        # Manter compatibilidade com estado antigo
         self.current_position = side
         self.entry_price = price
         self.entry_time = datetime.now()
@@ -1450,11 +1422,6 @@ class PaperTrader:
         self.trailing_active = False
         self.trailing_stop = 0
         
-        if side == 'long':
-            self.trailing_stop = price * (1 - self.stop_loss_pct)
-        else:
-            self.trailing_stop = price * (1 + self.short_stop_loss)
-        
         self.trade_count += 1
         self.daily_trades += 1
         
@@ -1463,8 +1430,9 @@ class PaperTrader:
         
         logger.info(f"[ENTER {side.upper()} {asset}] {self.entry_time.strftime('%H:%M')} @ ${price:,.2f} | "
                    f"Size: ${position_size:,.2f} | Leverage: {self.current_leverage}x | "
-                   f"Margin: ${margin:,.2f} | Vol: {candle.get('volume', 0):,.0f} | "
-                   f"OI: {candle.get('oi_change', 0)*100:.2f}% | Regime: {regime}")
+                   f"Margin: ${margin:,.2f} | SL dyn: {self.risk_manager.initial_sl_pct*100:.1f}% | "
+                   f"Breakeven @ +{self.risk_manager.breakeven_pct*100:.1f}% | "
+                   f"ATR: ${self.risk_manager.get_atr():,.2f}")
         
         # Log signal de entrada executada
         self._log_signal(asset, side.upper(), 1.0, candle, regime,
@@ -1563,14 +1531,33 @@ class PaperTrader:
             logger.warning(f"Erro a guardar regime: {e}")
 
     def _exit_position(self, asset: str, price: float, reason: str, candle: Dict):
-        """Fecha posição virtual"""
-        if self.current_position == 'long':
-            pnl_pct = (price - self.entry_price) / self.entry_price
+        """Fecha posição virtual usando DynamicRiskManager"""
+        # ⚡ Usar PnL do DynamicRiskManager (mais preciso, inclui ATR-based exits)
+        if self.position:
+            # Forçar check_exit para obter resultado final
+            self.risk_manager.update_candles(list(self.candles))
+            result = self.risk_manager.check_exit(price)
+            if result:
+                pnl_pct = result['pnl_pct']
+                pnl_usd = result.get('pnl_usd', self.position_size * pnl_pct)
+                # Sincronizar capital
+                self.capital = result.get('capital', self.capital + pnl_usd)
+            else:
+                # Fallback: calcular manualmente
+                if self.current_position == 'long':
+                    pnl_pct = (price - self.entry_price) / self.entry_price
+                else:
+                    pnl_pct = (self.entry_price - price) / self.entry_price
+                pnl_usd = self.position_size * pnl_pct
+                self.capital += pnl_usd
         else:
-            pnl_pct = (self.entry_price - price) / self.entry_price
-        
-        pnl_usd = self.position_size * pnl_pct
-        self.capital += pnl_usd
+            # Fallback: calcular manualmente
+            if self.current_position == 'long':
+                pnl_pct = (price - self.entry_price) / self.entry_price
+            else:
+                pnl_pct = (self.entry_price - price) / self.entry_price
+            pnl_usd = self.position_size * pnl_pct
+            self.capital += pnl_usd
         
         # Aplicar fees
         fee = self.position_size * self.fee_pct * 2
@@ -1606,6 +1593,7 @@ class PaperTrader:
         self.entry_price = 0
         self.entry_time = None
         self.position_size = 0
+        self.position = None  # Reset DynamicPosition
     
     def _calculate_daily_pnl(self) -> float:
         """Calcula PnL acumulado do dia atual (paper trades)"""
