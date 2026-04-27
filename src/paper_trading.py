@@ -283,10 +283,10 @@ class PaperTrader:
         # ==================================================================
         # MULTI-TIMEFRAME — TF Baixo para deteção rápida de spikes
         # ==================================================================
-        self.secondary_tf = self.timeframes.get('secondary', '5m')  # 5m para confirmação rápida
+        self.secondary_tf = self.timeframes.get('secondary', '5m')  # 5m para gatilho de entrada
         self._mtf_thread = None
         self._mtf_running = False
-        self._mtf_interval = 60  # segundos — busca candle 1m a cada minuto
+        self._mtf_interval = 300  # 5 minutos = sincronizado com candles 5m
         self._low_tf_candles = deque(maxlen=100)  # Buffer de candles do TF baixo
         self._last_mtf_signal = None  # Último sinal do TF baixo
         self._mtf_cooldown = 0  # Evitar entradas duplicadas
@@ -459,7 +459,13 @@ class PaperTrader:
                 time.sleep(self._mtf_interval)
     
     def _process_low_tf_candle(self, asset: str):
-        """Processa candle do TF baixo (1m ou 5m) para detetar spikes em tempo real"""
+        """Processa candle do TF baixo (5m) para detetar spikes em tempo real
+        
+        ESTRATÉGIA MTF:
+        - 15m (HTF): Define a direção/tendência (bull/bear/neutral)
+        - 5m (LTF): Gatilho de entrada quando deteta volume spike na direção do HTF
+        - Só entra se AMBOS concordam — 5m confirma, 15m filtra
+        """
         try:
             # Buscar candle do TF baixo
             result = self._fetch_low_tf_candle(asset)
@@ -473,16 +479,20 @@ class PaperTrader:
             if len(self._low_tf_candles) < 20:
                 return
             
-            # Calcular volume ratio no TF baixo
+            # Calcular métricas no TF baixo
             volumes = [c['volume'] for c in self._low_tf_candles]
             avg_volume = sum(volumes[-20:]) / 20
             current_volume = candle['volume']
             volume_ratio = current_volume / max(avg_volume, 1)
             
+            # Calcular variação de preço no candle 5m atual
+            price_change_pct = (candle['close'] - candle['open']) / candle['open'] if candle['open'] > 0 else 0
+            
             price = candle['close']
             
             # Verificar se há direção do TF alto (15m)
             if self._htf_direction is None:
+                logger.debug(f"MTF: Aguardando direção HTF...")
                 return  # Ainda não temos direção do TF alto
             
             # Verificar cooldown (evitar entradas duplicadas)
@@ -490,54 +500,91 @@ class PaperTrader:
             if current_time < self._mtf_cooldown:
                 return
             
+            # Log de status MTF a cada 5 candles
+            if len(self._low_tf_candles) % 5 == 0:
+                logger.info(f"📊 MTF Status | {self.secondary_tf} | Price: ${price:,.0f} | "
+                           f"Vol: {volume_ratio:.1f}x | Price Δ: {price_change_pct*100:+.2f}% | "
+                           f"HTF: {self._htf_direction}")
+            
             # ⚡ FIX RACE: Verificar posição DENTRO do lock para evitar double-entry
             with self._lock:
                 if self.current_position is not None:
                     return
                 
-                # DETETAR SPIKE NO TF BAIXO + CONFIRMAÇÃO TF ALTO
+                # =====================================================================
+                # REGRAS DE ENTRADA MTF
+                # =====================================================================
                 
-                # LONG: TF alto bullish + TF baixo volume spike + candle bullish
-                if self._htf_direction == 'bull' and volume_ratio >= self.tuner.volume_threshold:
-                    # Verificar se candle é bullish
-                    if price > candle['open']:
-                        # Verificar funding
-                        funding = candle.get('funding', 0)
-                        max_funding = self.config.get('strategy', {}).get('max_funding_rate', 0.01)
-                        min_funding = self.config.get('strategy', {}).get('min_funding_rate', -0.01)
-                        
-                        if not (funding > max_funding or funding < min_funding):
-                            logger.info(f"⚡ MTF SIGNAL: LONG spike no {self.secondary_tf}! "
-                                       f"Vol: {volume_ratio:.1f}x | Price: ${price:,.0f} | "
-                                       f"HTF: {self._htf_direction}")
-                            
-                            # ENTRAR IMEDIATAMENTE!
-                            self._enter_position(asset, 'long', price, candle, self._htf_direction)
-                            
-                            # Cooldown de 5 minutos para evitar re-entrada
-                            self._mtf_cooldown = current_time + 300
+                # Funding check (evita pagar funding extremo)
+                funding = candle.get('funding', 0)
+                max_funding = self.config.get('strategy', {}).get('max_funding_rate', 0.01)
+                min_funding = self.config.get('strategy', {}).get('min_funding_rate', -0.01)
+                funding_extreme = funding > max_funding or funding < min_funding
                 
-                # SHORT: TF alto bearish + TF baixo volume spike + candle bearish
-                elif self._htf_direction == 'bear' and volume_ratio >= self.tuner.volume_threshold:
-                    if price < candle['open']:
-                        funding = candle.get('funding', 0)
-                        max_funding = self.config.get('strategy', {}).get('max_funding_rate', 0.01)
-                        min_funding = self.config.get('strategy', {}).get('min_funding_rate', -0.01)
+                if funding_extreme:
+                    logger.debug(f"MTF: Funding extremo ({funding*100:.3f}%), skipping")
+                    return
+                
+                # --- LONG: TF alto bullish + TF baixo volume spike + candle bullish ---
+                if self._htf_direction == 'bull':
+                    # Requisitos para entrada LONG:
+                    # 1. Volume no 5m > threshold (spike confirmado)
+                    # 2. Candle 5m bullish (close > open)
+                    # 3. Preço já subiu pelo menos 0.2% no 5m (confirma momentum)
+                    
+                    volume_spike = volume_ratio >= self.tuner.volume_threshold
+                    candle_bullish = price > candle['open']
+                    momentum_confirmed = price_change_pct >= 0.002  # 0.2% mínimo
+                    
+                    if volume_spike and candle_bullish and momentum_confirmed:
+                        logger.info(f"⚡ MTF SIGNAL LONG! {self.secondary_tf} confirmado | "
+                                   f"Vol: {volume_ratio:.1f}x | Price Δ: +{price_change_pct*100:.2f}% | "
+                                   f"HTF: {self._htf_direction} | Entry: ${price:,.0f}")
                         
-                        if not (funding > max_funding or funding < min_funding):
-                            logger.info(f"⚡ MTF SIGNAL: SHORT spike no {self.secondary_tf}! "
-                                       f"Vol: {volume_ratio:.1f}x | Price: ${price:,.0f} | "
-                                       f"HTF: {self._htf_direction}")
-                            
-                            self._enter_position(asset, 'short', price, candle, self._htf_direction)
-                            
-                            self._mtf_cooldown = current_time + 300
-            
-            # Log periódico do TF baixo
-            if len(self._low_tf_candles) % 10 == 0:
-                logger.info(f"📈 {self.secondary_tf} | Price: ${price:,.0f} | "
-                           f"Vol: {volume_ratio:.1f}x | HTF: {self._htf_direction} | "
-                           f"Candles: {len(self._low_tf_candles)}")
+                        # ENTRAR!
+                        self._enter_position(asset, 'long', price, candle, self._htf_direction)
+                        
+                        # Cooldown de 5 minutos para evitar re-entrada
+                        self._mtf_cooldown = current_time + 300
+                    else:
+                        # Log porquê não entrou
+                        if not volume_spike:
+                            logger.debug(f"MTF LONG skip: volume {volume_ratio:.1f}x < {self.tuner.volume_threshold}x")
+                        elif not candle_bullish:
+                            logger.debug(f"MTF LONG skip: candle bearish ({price:,.0f} < {candle['open']:,.0f})")
+                        elif not momentum_confirmed:
+                            logger.debug(f"MTF LONG skip: momentum fraco ({price_change_pct*100:.2f}% < 0.2%)")
+                
+                # --- SHORT: TF alto bearish + TF baixo volume spike + candle bearish ---
+                elif self._htf_direction == 'bear':
+                    # Requisitos para entrada SHORT:
+                    # 1. Volume no 5m > threshold
+                    # 2. Candle 5m bearish (close < open)
+                    # 3. Preço já desceu pelo menos 0.2% no 5m
+                    
+                    volume_spike = volume_ratio >= self.tuner.volume_threshold
+                    candle_bearish = price < candle['open']
+                    momentum_confirmed = price_change_pct <= -0.002  # -0.2% mínimo
+                    
+                    if volume_spike and candle_bearish and momentum_confirmed:
+                        logger.info(f"⚡ MTF SIGNAL SHORT! {self.secondary_tf} confirmado | "
+                                   f"Vol: {volume_ratio:.1f}x | Price Δ: {price_change_pct*100:.2f}% | "
+                                   f"HTF: {self._htf_direction} | Entry: ${price:,.0f}")
+                        
+                        self._enter_position(asset, 'short', price, candle, self._htf_direction)
+                        
+                        self._mtf_cooldown = current_time + 300
+                    else:
+                        if not volume_spike:
+                            logger.debug(f"MTF SHORT skip: volume {volume_ratio:.1f}x < {self.tuner.volume_threshold}x")
+                        elif not candle_bearish:
+                            logger.debug(f"MTF SHORT skip: candle bullish ({price:,.0f} > {candle['open']:,.0f})")
+                        elif not momentum_confirmed:
+                            logger.debug(f"MTF SHORT skip: momentum fraco ({price_change_pct*100:.2f}% > -0.2%)")
+                
+                else:
+                    # HTF neutral — não entra em nenhuma direção
+                    logger.debug(f"MTF: HTF neutral, aguardando direção clara")
                     
         except Exception as e:
             logger.warning(f"Erro no processamento MTF: {e}")
