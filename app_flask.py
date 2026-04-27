@@ -163,7 +163,9 @@ def api_mtf_state():
             "position": trader.current_position,
             "entry_price": getattr(trader, 'entry_price', None),
             "capital": getattr(trader, 'capital', None),
-            "volume_threshold": getattr(trader, 'volume_threshold', None),
+            "volume_threshold": getattr(getattr(trader, 'tuner', None), 'volume_threshold', None),
+            "oi_threshold": getattr(getattr(trader, 'tuner', None), 'oi_threshold', None),
+            "strategy_config": getattr(trader, 'strat_config', {}),
         }
     return jsonify({
         "running": app_state.get("bot_running", False),

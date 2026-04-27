@@ -105,6 +105,16 @@ class BotEngine:
         if self.assets:
             self.trader._start_monitor_thread(self.assets[0])
         
+        # ⚡ FIX: Correr run_cycle IMEDIATAMENTE no arranque
+        # para definir htf_direction sem esperar 15 minutos
+        logger.info("[BotEngine] Ciclo inicial de trading (run_cycle)...")
+        for asset in self.assets:
+            try:
+                self.trader.run_cycle(asset)
+                logger.info(f"[CYCLE] Ciclo inicial completo para {asset}")
+            except Exception as e:
+                logger.error(f"Erro no ciclo inicial para {asset}: {e}")
+        
         logger.info(f"[BotEngine] Ciclo de trading a cada {cycle_interval//60}min")
         
         while self.running and not self._stop_event.is_set():
