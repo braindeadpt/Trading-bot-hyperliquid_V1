@@ -351,6 +351,21 @@ class WebDashboard:
         self._cache_ttl = 10
         
         self._setup_routes()
+        
+        # Register remote analysis endpoints (para diagnóstico remoto via ngrok)
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("api_extensions", os.path.join(os.path.dirname(__file__), "api_extensions.py"))
+            if spec and spec.loader:
+                api_ext = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(api_ext)
+                project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                api_ext.register_analysis_routes(self.app, project_dir)
+                print("✅ Remote Analysis API ativada — endpoints disponíveis via /api/*")
+            else:
+                print("⚠️  api_extensions.py não encontrado — análise remota desativada")
+        except Exception as e:
+            print(f"⚠️  Falha a carregar api_extensions: {e}")
     
     def _setup_routes(self):
         """Configura rotas do Flask"""
