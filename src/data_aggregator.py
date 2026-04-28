@@ -500,26 +500,95 @@ class DataAggregator:
             logger.warning(f"Erro a buscar candles da Binance: {e}")
             return None
 
-    def get_intraday_volume(self, asset: str, interval: str = '15m') -> Optional[Dict]:
+    def get_intraday_volume(self, asset: str, interval: str = '5m', lookback: int = 20) -> Optional[Dict]:
         """
-        Busca volume INTRADAY real (não 24h acumulado).
-        Retorna o último candle com volume real.
-        """
-        candles = self._fetch_binance_candles(asset, interval, limit=2)
-        if candles and len(candles) >= 1:
-            latest = candles[-1]
-            # Calcular média dos últimos 20 para ratio
-            avg_volume = sum(c['volume'] for c in candles) / len(candles)
-            volume_ratio = latest['volume'] / max(avg_volume, 1)
+        Busca volume INTRADAY real com Z-Score (estatisticamente superior a MA simples).
+        
+        Args:
+            asset: BTC, ETH, etc.
+            interval: Timeframe dos candles (default '5m' para detetar spikes rápidos)
+            lookback: Quantos candles para cálculo estatístico (default 20)
+        
+        Retorna:
+            volume, z_score, volume_ratio, direction, avg, std
             
-            return {
-                'volume': latest['volume'],
-                'volume_ratio': volume_ratio,
-                'close': latest['close'],
-                'source': 'binance_klines'
-            }
-        return None
-        """Valida se o preço está num range realista"""
+        Z-Score = (Volume Atual - Média) / Desvio Padrão
+            Z > 2.0  → 95% confiança (spike)
+            Z > 2.5  → 98% confiança (spike forte) ✅
+            Z > 3.0  → 99.7% confiança (extremamente raro)
+        """
+        import math
+        
+        # Buscar lookback + 1 candles (N para estatísticas + 1 atual)
+        candles = self._fetch_binance_candles(asset, interval, limit=lookback + 1)
+        
+        if not candles or len(candles) < 8:
+            logger.warning(f"Volume: apenas {len(candles) if candles else 0} candles disponíveis (min 8)")
+            return None
+        
+        # Último candle (atual/incompleto)
+        latest = candles[-1]
+        latest_volume = latest['volume']
+        latest_close = latest['close']
+        latest_open = latest['open']
+        
+        # Candles anteriores para estatísticas (excluindo o último)
+        previous_volumes = [c['volume'] for c in candles[:-1]]
+        
+        if len(previous_volumes) < 5:
+            logger.warning(f"Volume: apenas {len(previous_volumes)} candles anteriores (min 5)")
+            return None
+        
+        # Estatísticas
+        n = len(previous_volumes)
+        avg_volume = sum(previous_volumes) / n
+        
+        # Desvio padrão amostral (ddof=1 para amostra, não população)
+        if n > 1:
+            variance = sum((v - avg_volume) ** 2 for v in previous_volumes) / (n - 1)
+            std_volume = math.sqrt(variance) if variance > 0 else 0.001  # Evitar divisão por zero
+        else:
+            std_volume = 0.001
+        
+        # Z-Score
+        z_score = (latest_volume - avg_volume) / std_volume
+        
+        # Volume ratio (para compatibilidade)
+        volume_ratio = latest_volume / max(avg_volume, 1.0)
+        
+        # Proxy de direção baseado na cor do candle
+        if latest_close < latest_open:
+            direction = 'SELL'
+            delta = -0.2
+        elif latest_close > latest_open:
+            direction = 'BUY'
+            delta = 0.2
+        else:
+            direction = 'NEUTRAL'
+            delta = 0.0
+        
+        logger.info(
+            f"📊 Volume {asset} | "
+            f"Atual: {latest_volume:,.0f} | "
+            f"μ={avg_volume:,.0f} σ={std_volume:,.0f} | "
+            f"Z-Score: {z_score:.2f} | "
+            f"Ratio: {volume_ratio:.2f}x | "
+            f"Dir: {direction}"
+        )
+        
+        return {
+            'volume': latest_volume,
+            'z_score': z_score,
+            'volume_ratio': volume_ratio,
+            'avg_volume': avg_volume,
+            'std_volume': std_volume,
+            'close': latest_close,
+            'open': latest_open,
+            'direction': direction,
+            'delta': delta,
+            'samples': n,
+            'source': f'binance_klines_{interval}'
+        }
         min_val, max_val = self._get_sanity_range(asset)
         sane = min_val <= price <= max_val
         if not sane and price > 0:

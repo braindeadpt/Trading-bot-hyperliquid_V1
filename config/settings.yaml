@@ -38,9 +38,22 @@ strategy:
   # vs sem OI: PF 1.98 | WR: 69.4% — OI melhorou 26%!
   # vs 5m: PF 1.45 | Longs PF: 0.73 (perdem dinheiro)
   
+  # Volume configuration (Z-Score based)
+  volume:
+    interval: "5m"              # Candles de 5m para deteção rápida
+    lookback: 20                # 20 candles para estatísticas = 100 min
+    zscore_threshold: 2.5       # Z > 2.5 = 98% confiança (spike real)
+    min_zscore: 0.0             # Z < 0 = abaixo da média (sem interesse)
+    # Nota: Z-Score = (Volume - Média) / Desvio Padrão
+    #   Z > 2.5 → 98% confiança (apenas 2% falsos positivos)
+    #   Z > 3.0 → 99.7% confiança (extremamente raro)
+    #   Z < 0   → Volume abaixo da média (sem interesse)
+    # EMA20 + threshold 3.0x é alternativa, mas Z-Score é superior
+
   # Volume spike threshold
-  # FIX: Baixado de 4.0x para 2.0x (MA real de 5m, não 24h teórico)
-  volume_spike_threshold: 2.0
+  # FIX: Substituído por Z-Score acima (mais robusto estatisticamente)
+  # volume_spike_threshold: 2.5  # LEGADO — usar zscore_threshold
+  volume_spike_threshold: 2.5   # Compatibilidade com código existente
 
   # OI change threshold — AGORA FUNCIONA com dados CCXT reais!
   # ÓTIMO: 1.0% de aumento no OI para confirmar entrada
