@@ -39,8 +39,8 @@ strategy:
   # vs 5m: PF 1.45 | Longs PF: 0.73 (perdem dinheiro)
   
   # Volume spike threshold
-  # ÓTIMO: 4.0x (filtro muito apertado = apenas os MELHORES spikes)
-  volume_spike_threshold: 4.0
+  # FIX: Baixado de 4.0x para 2.0x (MA real de 5m, não 24h teórico)
+  volume_spike_threshold: 2.0
 
   # OI change threshold — AGORA FUNCIONA com dados CCXT reais!
   # ÓTIMO: 1.0% de aumento no OI para confirmar entrada
@@ -63,7 +63,7 @@ strategy:
   min_bearish_candles: 2
 
   # Short settings — IGUAL ao long (fix bias)
-  short_volume_threshold: 4.0
+  short_volume_threshold: 2.0  # FIX: Igual ao long, 4.0x era impossível
   short_min_bearish_candles: 2
   short_enabled: true
 
