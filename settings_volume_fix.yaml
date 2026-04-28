@@ -1,0 +1,158 @@
+# settings.yaml - Configuração Corrigida de Volume
+# ================================================
+# MUDANÇAS PRINCIPAIS:
+# - volume_spike_threshold: 4.4 → 2.0 (threshold realista)
+# - volume_ma_period: 20 (média móvel real, não 24h/288)
+# - oi_required: false (OI é informativo, não bloqueante)
+# - volume_calculation: "ma_real" em vez de "24h_divided"
+
+app:
+  name: "Hyperliquid Trading Bot"
+  version: "1.1.0-volume-fix"
+  mode: "paper"  # paper | live
+  debug: false
+
+assets:
+  - BTC
+  # - ETH  # descomenta para adicionar
+
+timeframes:
+  primary: "15m"      # Candle principal para sinais
+  confirmation: "5m"  # Candle para confirmação MTF
+  fast_check: "1m"    # Para monitorização rápida
+
+# ============================================================
+# 🔥 CONFIGURAÇÃO DE VOLUME CORRIGIDA
+# ============================================================
+volume:
+  # Cálculo: "ma_real" usa média móvel dos últimos N candles
+  #          "24h_divided" usa volume_24h / 288 (ANTIGO, QUEBRADO)
+  calculation_method: "ma_real"
+  
+  # Período da média móvel (em candles do timeframe primary)
+  # 20 candles de 15m = 5 horas de histórico
+  ma_period: 20
+  
+  # Threshold para considerar volume spike
+  # 2.0x = volume 2x acima da média recente
+  # Valores testados: 1.5 (sensível) | 2.0 (equilibrado) | 3.0 (conservador)
+  spike_threshold: 2.0
+  
+  # Delta mínimo para considerar direcional (buy/sell pressure)
+  # 0.3 = 30% diferença entre buy e sell
+  delta_threshold: 0.3
+  
+  # Cooldown entre spikes (evita múltiplos sinais no mesmo evento)
+  spike_cooldown_seconds: 300  # 5 minutos
+
+# ============================================================
+# 🔥 CONFIGURAÇÃO DE OI CORRIGIDA (NÃO BLOQUEANTE)
+# ============================================================
+open_interest:
+  # Se true, OI bloqueia trades. Se false, OI só informa (reduz confiança)
+  required: false
+  
+  # Thresholds para sinalização (não bloqueio)
+  warning_threshold_long: 0.03   # 3% aumento = warning
+  warning_threshold_short: -0.03 # 3% diminuição = warning
+  
+  # Se required=false, quanto reduzir a confiança quando OI não confirma
+  confidence_penalty: 0.2  # Reduz confiança em 20%
+
+# ============================================================
+# CONFIGURAÇÃO DE FUNDING (mantém-se)
+# ============================================================
+funding:
+  enabled: true
+  threshold_extreme: 0.01      # 1% = funding extremo
+  threshold_warning: 0.005     # 0.5% = warning
+  
+  # Em modo paper, funding afeta PnL simulado
+  cost_per_8h: true
+
+# ============================================================
+# RISCO E POSITION SIZING
+# ============================================================
+risk:
+  initial_capital: 10000
+  max_position_size_usd: 1000  # 10% do capital por trade
+  leverage_max: 5
+  leverage_default: 3
+  
+  # Dynamic SL/TP
+  dynamic_sl_pct: 0.03       # 3% SL inicial
+  breakeven_pct: 0.01        # Move SL para breakeven a +1%
+  take_profit_pct: 0.10      # 10% TP
+  
+  # Circuit breakers
+  daily_loss_limit_pct: 0.05   # Para trading se perder 5% no dia
+  daily_loss_hard_stop_pct: 0.10  # Shutdown se perder 10%
+
+# ============================================================
+# ESTRATÉGIA (Ghost Method ajustada)
+# ============================================================
+strategy:
+  name: "ghost_method_v2"
+  
+  # MTF (Multi-Timeframe)
+  mtf:
+    enabled: true
+    trigger_timeframe: "5m"   # Gera sinal
+    filter_timeframe: "15m"   # Confirma sinal
+  
+  # Filtros (aplicados APÓS deteção de spike de volume)
+  filters:
+    # Volume: deve passar threshold acima
+    volume_min_ratio: 2.0
+    
+    # OI: não bloqueia (required=false), mas penaliza confiança
+    oi_penalty_if_wrong_direction: 0.2
+    
+    # Funding: bloqueia se extremo (>1%)
+    funding_max_extreme: 0.01
+  
+  # Confiança mínima para entrar
+  min_confidence: 0.6  # 60%
+
+# ============================================================
+# API E CONEXÕES
+# ============================================================
+api:
+  hyperliquid:
+    base_url: "https://api.hyperliquid.xyz"
+    ws_url: "wss://api.hyperliquid.xyz/ws"
+    timeout: 30
+    retries: 3
+  
+  binance:
+    enabled: true  # Usa para candles de fallback
+    base_url: "https://fapi.binance.com"
+  
+  # Rate limits (requests por minuto)
+  rate_limits:
+    hyperliquid: 1200
+    binance: 1200
+
+# ============================================================
+# LOGGING E DATABASE
+# ============================================================
+logging:
+  level: "INFO"  # DEBUG | INFO | WARNING | ERROR
+  file: "logs/bot.log"
+  max_size_mb: 10
+  backup_count: 5
+
+database:
+  path: "data/trading_bot.db"
+  backup_interval_hours: 24
+
+# ============================================================
+# DASHBOARD
+# ============================================================
+dashboard:
+  enabled: true
+  host: "127.0.0.1"
+  port: 5000
+  refresh_seconds: 5
+  ngrok_enabled: true
+  ngrok_region: "eu"
