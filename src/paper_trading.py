@@ -42,7 +42,7 @@ class AutoTuner:
         self.lookback_trades = 50
         
         # Thresholds atuais (começam com os do config)
-        self.volume_threshold = self.strat_config.get('volume_spike_threshold', 2.5)
+        self.volume_threshold = self.strat_config.get('volume_spike_threshold', 2.0)
         self.oi_threshold = self.strat_config.get('oi_change_threshold', 0.015)
         self.stop_loss = config.get('risk', {}).get('stop_loss_pct', 0.02)
         
