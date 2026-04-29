@@ -25,7 +25,7 @@ logs/
 *.db
 *.sqlite
 
-# NÃO ignorar refactored/data/ (código do bot)
+# Do not ignore refactored/data/ (bot source code)
 !/refactored/data/
 
 # Config com tokens/sensíveis
