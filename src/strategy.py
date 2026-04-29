@@ -119,13 +119,11 @@ class MomentumStrategy:
             
             # Entrada se score >= 70 (ajustável)
             if final_score >= 70:
-                side = 'LONG' if final_score >= 70 else None
-                if side:
-                    logger.info(f"[LAUNCH] SINAL {side}! Score={final_score} | Vol {volume_ratio:.1f}x, OI +{oi_change*100:.2f}%, Funding {funding_avg*100:.4f}%")
-                    self.in_position = True
-                    self.position_direction = side.lower()
-                    self.entry_price = price
-                    return side
+                logger.info(f"[LAUNCH] SINAL LONG! Score={final_score} | Vol {volume_ratio:.1f}x, OI +{oi_change*100:.2f}%, Funding {funding_avg*100:.4f}%")
+                self.in_position = True
+                self.position_direction = 'long'
+                self.entry_price = price
+                return 'LONG'
         
         # === SINAL DE SAÍDA (trailing stop / exaustão) ===
         if self.in_position:

@@ -15,7 +15,6 @@ from collections import deque
 
 from data_aggregator import DataAggregator
 from database import BotDatabase
-from strategy import MomentumStrategy
 from utils import load_config
 from volume_profile import VolumeProfile
 from dynamic_risk import DynamicRiskManager
@@ -203,10 +202,8 @@ class PaperTrader:
         # Componentes
         self.aggregator = DataAggregator(config)
         self.db = BotDatabase()
-        self.strategy = MomentumStrategy(config)
         self.tuner = AutoTuner(config, self.db)
         
-        # ⚡ Dynamic Risk Manager (substitui risk_manager.py inline)
         self.risk_manager = DynamicRiskManager(config)
         self.position = None  # DynamicPosition instance
         
@@ -305,9 +302,15 @@ class PaperTrader:
         self._confirmation_window = 300  # 5 minutos = próxima vela
         self._min_confirmation_volume = 1.5  # 1.5x média na 2ª vela
         
+        # HTF direction — inicializado por _load_historical_candles, defaults seguros
+        self._htf_direction = 'neutral'
+        self._htf_sma = 0.0
+        self._htf_price = 0.0
+        self._real_5m_candles = []
+
         # Criar tabela de paper trades se não existir
         self._init_paper_trades_table()
-        
+
         # ⚡ FIX: Carregar candles históricos da DB no arranque
         # para ter htf_direction imediatamente (não esperar 5 horas!)
         self._load_historical_candles()
@@ -761,8 +764,6 @@ class PaperTrader:
             }
             
             # Guardar candles para cálculo de média de volume
-            if not hasattr(self, '_real_5m_candles'):
-                self._real_5m_candles = []
             self._real_5m_candles.append(candle)
             if len(self._real_5m_candles) > 50:
                 self._real_5m_candles = self._real_5m_candles[-50:]
@@ -939,22 +940,6 @@ class PaperTrader:
                 }
         else:  # ranging
             return {'volume': base_volume * 1.1, 'oi': base_oi, 'candles': max(self.min_bullish, self.min_bearish)}
-    
-    def run_cycle(self, asset: str) -> Optional[Dict]:
-        """
-        Ciclo completo de trading — chamado pelo BotEngine.
-        Wrapper para fetch_and_process_candle com logging.
-        """
-        try:
-            result = self.fetch_and_process_candle(asset)
-            if result:
-                logger.info(f"[CYCLE] {asset} | Price: {result.get('close', 0):,.2f} | "
-                          f"Volume: {result.get('volume', 0):,.0f} | "
-                          f"Signal: {result.get('signal', 'NONE')}")
-            return result
-        except Exception as e:
-            logger.error(f"[CYCLE] Erro no ciclo para {asset}: {e}")
-            return None
     
     def fetch_and_process_candle(self, asset: str) -> Optional[Dict]:
         """Busca dados de mercado e forma um candle de 5m"""
@@ -1581,10 +1566,13 @@ class PaperTrader:
         conn = self.db._get_conn()
         cursor = conn.cursor()
         cursor.execute('''
-            UPDATE paper_trades 
+            UPDATE paper_trades
             SET exit_time=?, exit_price=?, pnl_usd=?, pnl_pct=?, exit_reason=?
-            WHERE symbol=? AND side=? AND exit_time IS NULL
-            ORDER BY entry_time DESC LIMIT 1
+            WHERE id = (
+                SELECT id FROM paper_trades
+                WHERE symbol=? AND side=? AND exit_time IS NULL
+                ORDER BY entry_time DESC LIMIT 1
+            )
         ''', (exit_time.isoformat(), price, pnl_usd, pnl_pct, reason, asset, self.current_position))
         conn.commit()
         conn.close()
