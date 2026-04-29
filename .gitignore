@@ -42,3 +42,17 @@ config/hypertracker.yaml
 # OS
 .DS_Store
 Thumbs.db
+
+# Backtest artifacts
+backtest_log.txt
+backtest_results/*.json
+backtest_results/*.csv
+
+# Backup files
+*.backup
+*.bak
+*.old
+
+# Reports temporários
+report_*.txt
+temp_*.txt
