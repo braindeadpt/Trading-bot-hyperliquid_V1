@@ -1,0 +1,127 @@
+PROJECTO: Implementar 3 estratégias de Volume Profile / Anchored VWAP, validar em backtest histórico, depois correr em paralelo no testnet Hyperliquid com paper trading e visualização de cada trade.
+
+CONTEXTO IMPORTANTE:
+- Os v1 e v2 anteriores (Z-score puro, confluência 4/6) falharam em validação. Resultados em docs/VALIDATION_HISTORY.md.
+- Esta abordagem é diferente: Volume Profile e Anchored VWAP são níveis estruturais, não condições paramétricas.
+- NÃO tocar em paper_trading.py, strategy.py ou ficheiros do bot live actual.
+- Branch novo: "vp-strategies"
+- Trabalho deve ser em fases sequenciais com confirmação entre elas.
+
+==================================================
+FASE A — BACKTEST COMPARATIVO (rápido, sem visualização)
+==================================================
+
+Criar tests/validate_vp_strategies.py com as 3 estratégias e correr backtest comparativo em BTC 1h, 6 meses de dados.
+
+DADOS:
+- Verificar candles 1h em data/. Se só temos 5m, fazer resample para 1h (volume = sum, high = max, low = min, open = primeira, close = última).
+- Se faltam dados, descarregar 6 meses de Binance Futures BTC 1h.
+- Mínimo 4000 candles 1h (~5.5 meses) para backtest válido.
+
+ESTRUTURA DE CADA TRADE:
+class Trade:
+    engine: 'A' | 'B' | 'C'
+    entry_ts, exit_ts (unix ms)
+    side: 'long' | 'short'
+    entry_price, exit_price
+    sl_price, tp_price (preço absoluto)
+    exit_reason: 'TP' | 'SL' | 'TIME' | 'TRAIL_BE'
+    raw_pct (movimento puro)
+    net_pct (após custos: 0.045% taker entry + 0.015% maker exit + 0.02%×2 slip = 0.11% RT)
+    setup_context: dict com snapshot de levels VP/AVWAP, ATR, etc.
+
+ESTRATÉGIA A — VOLUME PROFILE PURO
+- Calcular Volume Profile da sessão diária (00:00 UTC reset)
+  - Discretizar preço em buckets (ex: 100 buckets entre low e high da sessão)
+  - Acumular volume por bucket
+  - VAH/VAL = limites do range que contém 70% do volume central
+  - POC = bucket com maior volume
+- Long quando: na sessão, preço atinge VAL E vela seguinte forma rejeição:
+  - wick inferior > 50% do range da vela
+  - close > VAL
+  - vela é verde (close > open) ou doji ligeiro
+- Short quando: simétrico no VAH
+- Entry: open da vela após a rejeição
+- SL: 0.5 × ATR(14) além do extremo da vela de rejeição
+- TP: POC da sessão actual (ou anterior se sessão actual ainda muito jovem)
+- Trail: quando ganho >= 50% da distância entry→TP, mover SL para entry (BE)
+- Time exit: se em 24 candles (24h) não atingiu TP nem trail, fecha em market à open seguinte
+- Skip: se gap entre vela de rejeição e vela seguinte ultrapassa SL ou TP no open
+
+ESTRATÉGIA B — ANCHORED VWAP PURO
+- Identificar swing highs/lows com confirmação left=5, right=5 candles
+- Considerar apenas swings dos últimos 7 dias (168 candles 1h)
+- Calcular AVWAP a partir de cada swing até ao candle actual: (Σ price × volume) / Σ volume
+- Manter activos os 4 AVWAPs mais recentes: 2 de swing highs (resistências), 2 de swing lows (suportes)
+- Long quando: preço cai até tocar um AVWAP de swing low E forma rejeição (mesma lógica de wick que A)
+- Short quando: simétrico no AVWAP de swing high
+- Entry: open da vela após rejeição
+- SL: 0.5 × ATR(14) além do extremo da rejeição
+- TP: próximo AVWAP na direcção do trade. Se não houver, usar 2× distância do SL (capped). Se essa distância for < 1× SL, skip trade (RR mau).
+- Trail: igual a A
+- Time exit: igual a A
+- Skip: igual a A
+
+ESTRATÉGIA C — CONFLUÊNCIA (A + B simultâneas)
+- Só entra quando A E B disparam no mesmo momento (mesma vela de rejeição, mesma direcção)
+- Tolerância: AVWAP relevante e VAH/VAL devem estar a < 0.3% de distância
+- Entry: open da vela após rejeição
+- SL: usa o mais conservador entre A e B
+- TP: usa o mais próximo entre POC e AVWAP oposto
+- Trail/Time/Skip: igual a A
+
+REGRAS COMUNS RIGOROSAS:
+- ZERO look-ahead. Cada decisão usa apenas dados de candles fechadas anteriores ou actuais. Nunca usa close da vela actual para decidir entrar nessa vela.
+- Custos 0.11% RT aplicados sempre.
+- Se preço gap-saltar SL ou TP no open, fill ao open (não ao SL/TP exacto) — modelar honestamente.
+- ATR(14) recalculado em cada candle, sem look-ahead.
+
+BACKTEST:
+1. Backtest completo em todas as candles
+2. Walk-forward: janelas 90 dias treino + 30 dias teste, slide 30 dias
+   - Em 6 meses dá ~3 janelas
+   - Reportar PF de cada janela treino vs teste
+
+MÉTRICAS POR ESTRATÉGIA:
+- N trades, WR, PF, Sharpe anualizado, Sortino, expectancy em R, max DD, avg/median hold time em horas
+- Distribuição de exit reasons (% TP / SL / TIME / TRAIL)
+- Top 5 winners, top 5 losers (com timestamps)
+- WR e PF condicionados a regime de mercado (trending vs ranging — usar ADX simples como proxy)
+
+CRITÉRIOS DE EDGE (transparência total):
+- PF OOS médio >= 1.3 → potencial edge
+- Desvio padrão PF entre janelas < 0.5 → consistente
+- N trades >= 30 → significância estatística mínima
+- Reportar honestamente por estratégia: PASS / MARGINAL / FAIL com base nestes critérios
+
+OUTPUT FASE A:
+1. Tabela comparativa das 3 estratégias lado a lado em terminal
+2. tests/data/vp_v1_results.json com todas as métricas
+3. NÃO sugerir ajustes paramétricos. NÃO tentar otimizar para forçar edge. Reportar como está.
+
+PAUSA AQUI: Mostra-me os resultados. Aguarda confirmação para avançar para Fase B.
+
+==================================================
+FASE B — TESTNET COM PAPER TRADING + VISUALIZAÇÃO
+==================================================
+
+Independentemente dos resultados da Fase A, implementar as 3 estratégias para correrem em paralelo no testnet Hyperliquid.
+
+ARQUITECTURA:
+- Criar src/vp_engines/ (não mexer em paper_trading.py)
+- Cada estratégia (A, B, C) é uma classe independente que herda de uma BaseStrategy comum
+- Cada estratégia mantém a sua própria virtual equity de $10,000 (capital separado, não partilhado)
+- As 3 correm em paralelo, cada uma decide independentemente
+- Posições não bloqueiam entre estratégias (cada uma pode ter a sua aberta simultaneamente)
+
+ESTRUTURA DE CÓDIGO:
+src/vp_engines/
+├── base.py              # BaseStrategy com lógica comum (data, indicators, fills, fees)
+├── strategy_a.py        # Volume Profile puro
+├── strategy_b.py        # Anchored VWAP puro
+├── strategy_c.py        # Confluência
+├── volume_profile.py    # Cálculo VP (POC/VAH/VAL/HVN/LVN)
+├── anchored_vwap.py     # Cálculo AVWAP + detecção de swings
+├── visualizer.py        # Geração de PNG por trade
+├── runner.py            # Loop principal que orquestra as 3 estratégias
+└── state.py             # Persistência (S

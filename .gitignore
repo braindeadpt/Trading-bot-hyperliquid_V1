@@ -48,6 +48,12 @@ backtest_log.txt
 backtest_results/*.json
 backtest_results/*.csv
 
+# Test data (large downloaded candle files, regenerable)
+tests/data/
+
+# Claude internal state
+.claude/
+
 # Backup files
 *.backup
 *.bak
