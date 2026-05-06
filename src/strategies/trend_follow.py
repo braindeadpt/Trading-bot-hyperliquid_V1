@@ -5,12 +5,12 @@ microstructure. Avoids entering when funding is extreme (crowded).
 """
 
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 import collections
 import time
 
-from base import MarketEvent, Signal, ExitSignal, Position, Strategy
-from indicators import (
+from strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
+from strategies.indicators import (
     Candle,
     calculate_vwap,
     calculate_ema,
@@ -41,17 +41,19 @@ class TrendFollow(Strategy):
     Risk: 1% per trade, sized by ATR.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         self._state: Dict[str, _TrendState] = {}
-        # Constants
-        self.MAX_HOLD_HOURS = 4
-        self.STOP_ATR_MULT = 2.0
-        self.VOLUME_SURGE = 1.5
-        self.VOLUME_LOOKBACK = 20
-        self.EMA_PERIOD = 20
-        self.ATR_PERIOD = 14
-        self.FUNDING_EXTREME = 0.008  # ±0.8%
-        self.IMBALANCE_THRESHOLD = 0.02  # 2% bid/ask imbalance
+        cfg = config or {}
+        # Constants (overridable via config)
+        self.MAX_HOLD_HOURS = cfg.get("max_hold_hours", 4)
+        self.STOP_ATR_MULT = cfg.get("stop_loss_atr_multiplier", 2.0)
+        self.VOLUME_SURGE = cfg.get("volume_surge_multiplier", 1.5)
+        self.VOLUME_LOOKBACK = cfg.get("volume_lookback", 20)
+        self.EMA_PERIOD = cfg.get("ema_period", 20)
+        self.ATR_PERIOD = cfg.get("atr_period", 14)
+        self.FUNDING_EXTREME = cfg.get("extreme_threshold", 0.008)
+        self.IMBALANCE_THRESHOLD = cfg.get("imbalance_threshold", 0.02)
+        self.OVERCROWDED_PENALTY = cfg.get("overcrowded_penalty", 0.2)
 
     @property
     def name(self) -> str:

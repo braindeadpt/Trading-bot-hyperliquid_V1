@@ -49,8 +49,8 @@ from exchanges.hyperliquid_rest import HyperliquidRESTClient
 from exchanges.binance_api import BinanceRESTClient, BinanceWSClient
 from data.candle_builder import CandleBuilder
 
-from strategies.trend_follow import TrendFollowStrategy
-from strategies.mean_reversion import MeanReversionStrategy
+from strategies.trend_follow import TrendFollow
+from strategies.mean_reversion import MeanReversion
 
 from core.portfolio import PortfolioState
 from core.risk_manager import RiskManager
@@ -101,8 +101,8 @@ async def _run_backtest(cfg: Config, db: Database, logger: Any) -> Dict[str, Any
 
     # Build strategies
     strategies = [
-        TrendFollowStrategy(cfg.get("strategy.trend_follow", {})),
-        MeanReversionStrategy(cfg.get("strategy.mean_reversion", {})),
+        TrendFollow(cfg.get("strategy.trend_follow", {})),
+        MeanReversion(cfg.get("strategy.mean_reversion", {})),
     ]
 
     bt = BacktestEngine(
@@ -145,8 +145,8 @@ async def main() -> None:
     # 0. Security audit (optional standalone)
     # -----------------------------------------------------------------------
     if args.audit:
-        from security.audit import run_audit
-        exit_code = run_audit(project_root=str(PROJECT_ROOT / "src"))
+        from security.audit import main as audit_main
+        exit_code = audit_main(["--src-dir", str(PROJECT_ROOT / "src")])
         sys.exit(exit_code)
 
     # -----------------------------------------------------------------------
@@ -154,7 +154,8 @@ async def main() -> None:
     # -----------------------------------------------------------------------
     config_path = _resolve_path(args.config)
     try:
-        cfg = Config(str(config_path))
+        from utils.config import load_config
+        cfg = load_config(str(config_path))
     except ConfigError as e:
         print(f"[FATAL] Config error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -172,7 +173,7 @@ async def main() -> None:
         "Main",
         level=cfg.get("logging.level", "INFO"),
         log_file=str(log_dir / "bot.log"),
-        json=cfg.get("logging.json", False),
+        json_format=cfg.get("logging.json", False),
     )
     global _logger
     _logger = logger
@@ -211,13 +212,14 @@ async def main() -> None:
     data_bus = DataBus()
 
     hl_ws = HyperliquidWSClient(
-        url=cfg.get("exchange.hyperliquid.ws_url", "wss://api.hyperliquid.xyz/ws"),
-        data_bus=data_bus,
+        bus=data_bus,
         symbols=cfg.get("assets", ["BTC", "ETH", "SOL"]),
+        ws_url=cfg.get("exchange.hyperliquid.ws_url", "wss://api.hyperliquid.xyz/ws"),
     )
 
     hl_rest = HyperliquidRESTClient(
-        base_url=cfg.get("exchange.hyperliquid.rest_url", "https://api.hyperliquid.xyz"),
+        use_testnet=cfg.get("exchange.hyperliquid.testnet", False),
+        max_requests_per_second=cfg.get("exchange.hyperliquid.max_requests_per_second", 5.0),
     )
 
     binance_rest = BinanceRESTClient(
@@ -228,19 +230,18 @@ async def main() -> None:
     binance_ws: Optional[BinanceWSClient] = None
     if cfg.get("exchange.binance.ws_enabled", True):
         binance_ws = BinanceWSClient(
-            url=cfg.get("exchange.binance.ws_url", "wss://stream.binance.com:9443/ws"),
-            data_bus=data_bus,
             symbols=cfg.get("assets", ["BTC", "ETH", "SOL"]),
+            ws_base=cfg.get("exchange.binance.ws_url", "wss://stream.binance.com:9443/ws"),
         )
 
-    candle_builder = CandleBuilder(data_bus=data_bus, timeframes=["1m", "5m", "15m", "1h"])
+    candle_builder = CandleBuilder(bus=data_bus, symbols=cfg.get("assets", ["BTC", "ETH", "SOL"]), timeframes=["1m", "5m", "15m", "1h"])
 
     # -----------------------------------------------------------------------
     # 6. Initialize strategies
     # -----------------------------------------------------------------------
     strategies = [
-        TrendFollowStrategy(cfg.get("strategy.trend_follow", {})),
-        MeanReversionStrategy(cfg.get("strategy.mean_reversion", {})),
+        TrendFollow(cfg.get("strategy.trend_follow", {})),
+        MeanReversion(cfg.get("strategy.mean_reversion", {})),
     ]
     logger.info(f"Loaded {len(strategies)} strategies: {[s.name for s in strategies]}")
 
@@ -257,16 +258,14 @@ async def main() -> None:
         logger.info(f"Recovered portfolio from DB: capital={portfolio.capital:.2f}")
 
     risk_mgr = RiskManager(
-        config=cfg.raw,
+        config=cfg,
         db=db,
-        portfolio=portfolio,
     )
 
     executor = ExecutionEngine(
-        config=cfg.raw,
+        config=cfg,
         db=db,
         mode=mode,
-        hl_rest=hl_rest if mode in ("testnet", "mainnet") else None,
     )
 
     # Load open trades from DB into executor + portfolio
@@ -279,14 +278,12 @@ async def main() -> None:
     # 8. Start TradingEngine
     # -----------------------------------------------------------------------
     engine = TradingEngine(
-        config=cfg.raw,
+        config=cfg,
         db=db,
         data_bus=data_bus,
         strategies=strategies,
         risk_manager=risk_mgr,
         executor=executor,
-        portfolio=portfolio,
-        candle_builder=candle_builder,
     )
     global _engine
     _engine = engine
@@ -349,5 +346,7 @@ if __name__ == "__main__":
         print("\nInterrupted by user.")
         sys.exit(0)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"\n[FATAL] {e}", file=sys.stderr)
         sys.exit(1)

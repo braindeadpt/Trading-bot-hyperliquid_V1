@@ -6,11 +6,11 @@ the majority is already positioned that way — reversion is likely.
 """
 
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 import collections
 
-from base import MarketEvent, Signal, ExitSignal, Position, Strategy
-from indicators import (
+from strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
+from strategies.indicators import (
     Candle,
     detect_support_resistance,
     calculate_oi_concentration,
@@ -34,17 +34,19 @@ class MeanReversion(Strategy):
     Max hold: 60 minutes (before next funding payment).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         self._state: Dict[str, _MeanRevState] = {}
-        # Thresholds
-        self.FUNDING_EXTREME = 0.008     # ±0.8%
-        self.FUNDING_STRONG = 0.005      # ±0.5% (lower confidence entry)
-        self.FUNDING_REVERTED = 0.003    # ±0.3% (exit when below this)
-        self.OI_CONCENTRATION = 0.65     # 65%+ on one side = overcrowded
-        self.MAX_HOLD_MINUTES = 60
-        self.STOP_PCT = 0.02             # 2% price move against position
-        # Minimum lookback for support/resistance
-        self.SR_LOOKBACK = 30
+        cfg = config or {}
+        # Thresholds (overridable via config)
+        self.FUNDING_EXTREME = cfg.get("extreme_threshold", 0.008)
+        self.FUNDING_STRONG = cfg.get("strong_threshold", 0.005)
+        self.FUNDING_REVERTED = cfg.get("funding_reverted", 0.003)
+        self.OI_CONCENTRATION = cfg.get("overcrowded_oi_pct", 65) / 100.0
+        self.MAX_HOLD_MINUTES = cfg.get("max_hold_minutes", 60)
+        self.STOP_PCT = cfg.get("stop_loss_pct", 2.0) / 100.0
+        self.SR_LOOKBACK = cfg.get("sr_lookback", 30)
+        self.MIN_CONFIDENCE_EXTREME = cfg.get("min_confidence_extreme", 0.85)
+        self.MIN_CONFIDENCE_STRONG = cfg.get("min_confidence_strong", 0.65)
 
     @property
     def name(self) -> str:

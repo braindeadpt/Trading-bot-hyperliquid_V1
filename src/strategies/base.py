@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from indicators import Candle
+from strategies.indicators import Candle
 
 
 @dataclass(frozen=True)

@@ -95,6 +95,15 @@ class Config:
     def __init__(self, data: Dict[str, Any]) -> None:
         self._data = data
 
+    @property
+    def raw(self) -> Dict[str, Any]:
+        """Return the underlying configuration dictionary.
+
+        Useful for passing the entire config tree to subsystems that
+        expect a plain dict (e.g. RiskManager, ExecutionEngine).
+        """
+        return self._data
+
     def get(self, dot_path: str, default: Any = None) -> Any:
         """Dot-notation lookup, e.g. config.get('risk.max_positions')."""
         keys = dot_path.split(".")

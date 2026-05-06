@@ -529,6 +529,16 @@ class Database:
             rows = cur.fetchall()
         return [dict(row) for row in rows]
 
+    def get_latest_portfolio_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent portfolio snapshot, or None if none exists."""
+        history = self.get_portfolio_history(limit=1)
+        return history[0] if history else None
+
+    def get_latest_portfolio_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent portfolio snapshot, or None if none exists."""
+        history = self.get_portfolio_history(limit=1)
+        return history[0] if history else None
+
     # ------------------------------------------------------------------
     # Maintenance
     # ------------------------------------------------------------------
