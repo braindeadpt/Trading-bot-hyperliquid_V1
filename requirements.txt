@@ -1,1 +1,25 @@
-Flask-CORS>=4.0.0
+# Hyperliquid Premium Bot — Python Dependencies
+# 
+# Install: pip install -r requirements.txt
+
+# Core async & networking
+websockets>=12.0
+aiohttp>=3.9.0
+requests>=2.31.0
+
+# Web framework & real-time dashboard
+flask>=3.0.0
+flask-socketio>=5.3.0
+
+# Data & calculation
+pandas>=2.1.0
+numpy>=1.26.0
+
+# Configuration
+pyyaml>=6.0.1
+
+# Security & encryption
+cryptography>=42.0.0
+
+# Type hints (dev)
+# typing-extensions>=4.9.0  # only needed for Python < 3.11

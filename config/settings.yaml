@@ -1,156 +1,115 @@
-bot:
-  name: "Hyperliquid Momentum Bot"
-  version: "0.1.0"
-  paper_trading: true
+# Hyperliquid Premium Bot — Configuration
+# 
+# All paths are relative to the project root unless absolute.
 
+version: "1.0.0"
+
+# ═══════════════════════════════════════════════════════════
+# Trading mode
+# ═══════════════════════════════════════════════════════════
+mode: "paper"    # paper | testnet | mainnet
+
+# ═══════════════════════════════════════════════════════════
+# Assets & timeframes
+# ═══════════════════════════════════════════════════════════
 assets:
   - "BTC"
+  - "ETH"
+  - "SOL"
 
 timeframes:
-  primary: "15m"    # VENCEDOR com OI real: PF 2.50, WR 72.2%, 36 trades
-  secondary: "5m"   # Testado: PF 1.45, Longs PF 0.73 (perdem!)
+  - "1m"
+  - "5m"
+  - "15m"
+  - "1h"
 
-data_sources:
-  binance:
-    enabled: true
-    base_url: "https://fapi.binance.com"
-    weight: 0.4
-
-  bybit:
-    enabled: true
-    base_url: "https://api.bybit.com"
-    weight: 0.3
-
-  okx:
-    enabled: true
-    base_url: "https://www.okx.com"
-    weight: 0.2
-
+# ═══════════════════════════════════════════════════════════
+# Exchange configuration
+# ═══════════════════════════════════════════════════════════
+exchange:
   hyperliquid:
-    enabled: true
-    base_url: "https://api.hyperliquid.xyz"
-    weight: 0.1
-
-strategy:
-  # PARÂMETROS ÓTIMOS (Grid Search v4 — OI Real CCXT, 30 dias)
-  # Timeframe vencedor: 15m | PF: 2.50 | WR: 72.2% | DD: 0.29%
-  #   36 trades (L:18 S:18) | Long PF: 1.75 | Short PF: 3.61
-  # vs sem OI: PF 1.98 | WR: 69.4% — OI melhorou 26%!
-  # vs 5m: PF 1.45 | Longs PF: 0.73 (perdem dinheiro)
+    ws_url: "wss://api.hyperliquid.xyz/ws"
+    rest_url: "https://api.hyperliquid.xyz"
+    testnet: false
   
-  # Volume configuration (Z-Score based)
-  volume:
-    interval: "5m"              # Candles de 5m para deteção rápida
-    lookback: 20                # 20 candles para estatísticas = 100 min
-    zscore_threshold: 2.5       # Z > 2.5 = 98% confiança (spike real)
-    min_zscore: 0.0             # Z < 0 = abaixo da média (sem interesse)
-    # Nota: Z-Score = (Volume - Média) / Desvio Padrão
-    #   Z > 2.5 → 98% confiança (apenas 2% falsos positivos)
-    #   Z > 3.0 → 99.7% confiança (extremamente raro)
-    #   Z < 0   → Volume abaixo da média (sem interesse)
-    # EMA20 + threshold 3.0x é alternativa, mas Z-Score é superior
+  binance:
+    rest_url: "https://api.binance.com"
+    ws_url: "wss://stream.binance.com:9443/ws"
+    ws_enabled: true
 
-  # Volume spike threshold
-  # FIX: Substituído por Z-Score acima (mais robusto estatisticamente)
-  # volume_spike_threshold: 2.5  # LEGADO — usar zscore_threshold
-  volume_spike_threshold: 2.5   # Compatibilidade com código existente
-
-  # OI change threshold — AGORA FUNCIONA com dados CCXT reais!
-  # ÓTIMO: 1.0% de aumento no OI para confirmar entrada
-  oi_change_threshold: 0.01  # 1.0%
-
-  # Funding rate extremes para evitar overcrowding
-  max_funding_rate: 0.01
-  min_funding_rate: -0.01
-
-  # Volume lookback
-  volume_lookback: 100
-
-  # SMA período
-  # ÓTIMO: 100 períodos em 15m = ~25h (média estável)
-  price_sma_period: 100
-
-  # Confirmação de candles — EQUILIBRADO (fix bias long)
-  # Ambos iguais para evitar bias de direção
-  min_bullish_candles: 2
-  min_bearish_candles: 2
-
-  # Short settings — IGUAL ao long (fix bias)
-  short_volume_threshold: 2.0  # FIX: Igual ao long, 4.0x era impossível
-  short_min_bearish_candles: 2
-  short_enabled: true
-
-  # ⚡ DYNAMIC SL/TP — SL apertado, folga dinâmica em lucro
-  dynamic_sl_pct: 0.03         # SL inicial 3% (mais apertado que 5%)
-  breakeven_pct: 0.01         # Breakeven @ +1% de lucro
-  trailing_dynamic: true      # Trailing baseado em ATR (não fixo)
-  atr_period: 14              # Período para cálculo de ATR
-  
-  # ⚡ COOLDOWN — Evita entradas repetidas no mesmo candle
-  entry_cooldown_seconds: 300  # 5 minutos entre trades
-
-  # ⚡ TAKE PROFIT — Target de lucro (ratio 1:2 vs stop loss 5%)
-  take_profit_pct: 0.10        # 10% — ratio 1:2 (risco 5%, recompensa 10%)
-
-  # ⚡ FILTRO DE REGIME — Não tradar em condições extremas
-  regime_filter_enabled: true
-  max_volatility_pct: 5.0      # Vol > 5% = no trade (whipsaw)
-  max_price_vs_sma_pct: 5.0   # Preço > 5% da SMA200 = no trade (extended)
-
-  # Regime detection
-  market_regime_enabled: true
-
-  # Volume Profile (Fase A — filtro de qualidade para entradas)
-  vp_enabled: true           # Ativar filtro Volume Profile
-  vp_lookback: 96            # Candles para calcular VP (96 de 15m = 24h)
-
-# ⚡ PARÂMETROS DE BACKTEST REALISTA
-backtest_costs:
-  taker_fee: 0.00045        # 0.045% Hyperliquid taker
-  maker_fee: 0.00015        # 0.015% Hyperliquid maker
-  slippage_btc: 0.0002      # 0.02% BTC slippage
-  slippage_eth: 0.0021     # 0.21% ETH slippage
-  funding_hourly_avg: 0.00001  # 0.001% média por hora de hold
-
+# ═══════════════════════════════════════════════════════════
+# Risk management
+# ═══════════════════════════════════════════════════════════
 risk:
-  max_position_size_usd: 100
-  max_leverage: 3  # Upgrade from 2x → 3x after Swarm V3 leverage optimization
-  adaptive_leverage: true  # Auto-adjust: 2x (risky) / 3x (normal) / 5x (optimal)
-  adaptive_conditions:
-    low_leverage:
-      funding_threshold: 0.0005  # Funding > 0.05% → 2x (expensive to hold)
-      volatility_threshold: 0.06  # ATR14 > 6% → 2x (too volatile)
-      streak_threshold: 3  # 3+ consecutive losses → 2x (bad run)
-    high_leverage:
-      funding_threshold: -0.0002  # Funding < -0.02% → 5x (get paid to hold)
-      volatility_threshold: 0.03  # ATR14 < 3% → 5x (calm market)
-      regime_boost: true  # Bull regime + long / Bear regime + short → +1x boost
-  stop_loss_pct: 0.05          # AUMENTADO: 3.5% → 5% (mais respiro para volatilidade)
-  short_stop_loss_pct: 0.05    # AUMENTADO: 3.5% → 5% (igual ao long)
-  # Trailing stop ativa SÓ depois de atingir este lucro mínimo
-  trailing_activation_pct: 0.02  # FIX: 1.5% → 2%
-  # ÓTIMO: 2% abaixo do máximo
-  trailing_stop_pct: 0.02       # FIX: 1.5% → 2%
+  initial_capital: 10_000.0
+  max_positions: 5
   max_daily_trades: 5
-  
-  # ⚡ CIRCUIT BREAKER — Perda diária máxima
-  # SOFT STOP: Para trading se perder 5% num dia
-  daily_loss_limit_pct: 0.05
-  # HARD STOP: Para IMEDIATAMENTE se perder 10% num dia
-  daily_loss_hard_stop_pct: 0.10
-  
-  # ⚡ MAINNET SAFETY
-  # Confirmar antes de mudar para mainnet (evitar acidentes)
-  mainnet_confirm_required: true
-  # Tamanho máximo em mainnet (limita exposição inicial)
-  mainnet_max_position_usd: 50
-  # Primeiro trade em mainnet com tamanho mínimo ($10)
-  mainnet_first_trade_size: 10
+  max_daily_loss_pct: 3.0           # circuit breaker trigger
+  circuit_breaker_drawdown_pct: 10.0 # from peak
+  per_trade_risk_pct: 1.0           # % of capital at risk per trade
+  max_position_size_pct: 20.0       # % of capital in one position
+  leverage_max: 10.0
 
-polling:
-  oi_interval: 30
-  price_interval: 5
+# ═══════════════════════════════════════════════════════════
+# Strategy: Trend Follow (Smart Money Flow)
+# ═══════════════════════════════════════════════════════════
+strategy:
+  trend_follow:
+    enabled: true
+    timeframe: "15m"
+    confirmation_timeframe: "5m"
+    volume_surge_multiplier: 1.5
+    ema_period: 20
+    atr_period: 14
+    max_hold_hours: 4
+    stop_loss_atr_multiplier: 2.0
+    overcrowded_penalty: 0.2        # reduce confidence by 20%
+    min_confidence: 0.5
 
+  # ═══════════════════════════════════════════════════════════
+  # Strategy: Mean Reversion (Funding Extreme)
+  # ═══════════════════════════════════════════════════════════
+  mean_reversion:
+    enabled: true
+    timeframe: "15m"
+    context_timeframe: "1h"
+    extreme_threshold: 0.008        # 0.8% predicted funding
+    strong_threshold: 0.005         # 0.5% predicted funding
+    overcrowded_oi_pct: 65.0        # OI concentration on one side
+    max_hold_minutes: 60
+    stop_loss_pct: 2.0
+    min_confidence: 0.65
+
+# ═══════════════════════════════════════════════════════════
+# Backtest
+# ═══════════════════════════════════════════════════════════
+backtest:
+  initial_capital: 100_000.0
+  commission_pct: 0.04            # 4 bps (Hyperliquid taker)
+  slippage_bps: 2.0               # 2 bps slippage
+
+# ═══════════════════════════════════════════════════════════
+# Data & database
+# ═══════════════════════════════════════════════════════════
+database:
+  path: "data/live/bot.db"
+  prune_days: 30                  # keep last 30 days of tick data
+
+# ═══════════════════════════════════════════════════════════
+# Dashboard
+# ═══════════════════════════════════════════════════════════
+dashboard:
+  enabled: true
+  host: "0.0.0.0"
+  port: 5000
+  push_interval_sec: 2.0
+
+# ═══════════════════════════════════════════════════════════
+# Logging
+# ═══════════════════════════════════════════════════════════
 logging:
   level: "INFO"
+  json: false
   file: "logs/bot.log"
+  max_bytes: 10_485_760            # 10 MB
+  backup_count: 5

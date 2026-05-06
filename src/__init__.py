@@ -1,1 +1,1 @@
-"""Hyperliquid Trading Bot"""
+"""Hyperliquid Bot Premium — Source package."""
