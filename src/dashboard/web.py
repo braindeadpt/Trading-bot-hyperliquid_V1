@@ -78,10 +78,19 @@ class DashboardEmitter:
         except Exception as e:
             logger.warning("emit_all error: %s", e)
 
-    # ── Emitters ──
+    def _safe_emit(self, event: str, data: dict) -> None:
+        """Emit to all connected Socket.IO clients."""
+        if self.socketio is None:
+            return
+        try:
+            self.socketio.emit(event, data, broadcast=True)
+        except Exception as e:
+            logger.warning("emit %s error: %s", event, e)
+
+    # -- Emitters --
 
     def _emit_status(self) -> None:
-        self.socketio.emit("status", {
+        self._safe_emit("status", {
             "mode": getattr(_engine, "_config", {}).get("mode", "paper") if hasattr(_engine, "_config") else "paper",
             "uptime_sec": getattr(_engine, "uptime_sec", 0),
             "memory_mb": getattr(_engine, "memory_mb", 0),
@@ -124,7 +133,7 @@ class DashboardEmitter:
                 "rvol": evt.get("last_realized_vol"),
                 "last_update": evt.get("processed_at", 0),
             })
-        self.socketio.emit("live_data", rows)
+        self._safe_emit("live_data", rows)
 
     def _emit_engine_monitor(self) -> None:
         """Engine health — ticks/sec, total ticks, last error."""
@@ -141,7 +150,7 @@ class DashboardEmitter:
                 "age_ms": int((time.time() - evt.get("processed_at", 0)) * 1000),
             })
 
-        self.socketio.emit("engine_monitor", {
+        self._safe_emit("engine_monitor", {
             "ticks_per_second": stats.get("per_second", 0),
             "total_ticks": stats.get("total", 0),
             "last_error": last_err,
@@ -174,7 +183,7 @@ class DashboardEmitter:
                         "vwap": getattr(c, "vwap", None),
                         "timestamp_ms": getattr(c, "timestamp_ms", None),
                     })
-        self.socketio.emit("candles", result)
+        self._safe_emit("candles", result)
 
     def _emit_strategies(self) -> None:
         """Strategy state — params, last signal, signals today."""
@@ -203,24 +212,24 @@ class DashboardEmitter:
                 "last_signal_status": last.get("status") if last else None,
                 "signals_today": today_count,
             })
-        self.socketio.emit("strategies", result)
+        self._safe_emit("strategies", result)
 
     def _emit_signals(self) -> None:
         """Last 20 signals with full detail."""
         sig_hist = getattr(_engine, "_signal_history", [])[:20]
-        self.socketio.emit("signals", sig_hist)
+        self._safe_emit("signals", sig_hist)
 
     def _emit_decisions(self) -> None:
         """Risk + execution decisions."""
         decisions = getattr(_engine, "_decision_history", [])[:20]
-        self.socketio.emit("decisions", decisions)
+        self._safe_emit("decisions", decisions)
 
     def _emit_portfolio(self) -> None:
         portfolio = getattr(_engine, "portfolio", None)
         if portfolio is None:
             return
         try:
-            self.socketio.emit("portfolio", {
+            self._safe_emit("portfolio", {
                 "capital": getattr(portfolio, "sync_capital", lambda: 0)(),
                 "daily_pnl": getattr(portfolio, "sync_daily_pnl", lambda: 0)(),
                 "max_drawdown_pct": getattr(portfolio, "sync_max_drawdown_pct", lambda: 0)(),
@@ -255,7 +264,7 @@ class DashboardEmitter:
                     "take_profit": getattr(pos, "take_profit_price", None),
                     "strategy": getattr(pos, "metadata", {}).get("strategy", "unknown"),
                 })
-            self.socketio.emit("positions", result)
+            self._safe_emit("positions", result)
         except Exception:
             pass
 
@@ -282,7 +291,7 @@ class DashboardEmitter:
                         entries.append({"time": "", "level": "INFO", "module": "", "message": line})
         except Exception:
             pass
-        self.socketio.emit("logs", entries)
+        self._safe_emit("logs", entries)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
