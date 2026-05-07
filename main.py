@@ -28,6 +28,7 @@ import os
 import signal
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -390,6 +391,15 @@ if __name__ == "__main__":
         sys.exit(0)
     except Exception as e:
         import traceback
+        tb = traceback.format_exc()
+        # Log to file for post-mortem analysis
+        with open("logs/fatal_errors.log", "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"FATAL ERROR at {datetime.now().isoformat()}\n")
+            f.write(f"{'='*60}\n")
+            f.write(tb)
+            f.write(f"\nError: {e}\n")
         traceback.print_exc()
         print(f"\n[FATAL] {e}", file=sys.stderr)
+        print(f"\n[DEBUG] Full traceback saved to logs/fatal_errors.log", file=sys.stderr)
         sys.exit(1)
