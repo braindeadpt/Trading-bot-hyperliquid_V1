@@ -54,6 +54,28 @@ class HlTrade:
     hash: str
 
 
+@dataclass(frozen=True, slots=True)
+class HlPriceLevel:
+    """Single price level in L2 orderbook."""
+
+    price: float
+    size: float
+
+
+@dataclass(frozen=True, slots=True)
+class HlOrderbook:
+    """L2 orderbook snapshot from Hyperliquid.
+
+    Bids are sorted descending by price.
+    Asks are sorted ascending by price.
+    """
+
+    symbol: str
+    bids: List[HlPriceLevel]
+    asks: List[HlPriceLevel]
+    timestamp_ms: int
+
+
 # ────────────────────────────────
 # DataBus
 # ────────────────────────────────
@@ -246,6 +268,10 @@ class HyperliquidWSClient:
         for sym in self.symbols:
             await self._ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "trades", "coin": sym}}))
             logger.info("Subscribed to trades for %s", sym)
+        # Subscribe to L2 orderbook per symbol
+        for sym in self.symbols:
+            await self._ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "l2Book", "coin": sym}}))
+            logger.info("Subscribed to l2Book for %s", sym)
 
     async def _read_loop(self) -> None:
         """Read messages, heartbeat, and parse until disconnect."""
@@ -289,6 +315,8 @@ class HyperliquidWSClient:
             self._parse_active_asset_ctx(data)
         elif channel == "trades":
             self._parse_trades(data)
+        elif channel == "l2Book":
+            self._parse_l2_book(data)
         else:
             logger.debug("Ignored unknown channel: %s", channel)
 
@@ -349,6 +377,32 @@ class HyperliquidWSClient:
                 logger.debug("Skipping malformed trade for %s: %s", sym, exc)
                 continue
             asyncio.create_task(self.bus.publish(f"trade:{sym}", trade))
+
+    def _parse_l2_book(self, data: Dict[str, Any]) -> None:
+        """Emit ``orderbook:<symbol>`` topics."""
+        sym = data.get("coin")
+        levels = data.get("levels")
+        if sym is None or levels is None:
+            return
+        ts = int(time.time() * 1000)
+        try:
+            # levels[0] = bids, levels[1] = asks
+            # Each level is [price, size]
+            raw_bids = levels[0] if len(levels) > 0 else []
+            raw_asks = levels[1] if len(levels) > 1 else []
+            bids = [HlPriceLevel(price=float(p), size=float(s)) for p, s in raw_bids]
+            asks = [HlPriceLevel(price=float(p), size=float(s)) for p, s in raw_asks]
+            book = HlOrderbook(
+                symbol=sym,
+                bids=bids,
+                asks=asks,
+                timestamp_ms=ts,
+            )
+        except (ValueError, TypeError, IndexError) as exc:
+            logger.debug("Skipping malformed l2Book for %s: %s", sym, exc)
+            return
+        asyncio.create_task(self.bus.publish(f"orderbook:{sym}", book))
+        logger.info("orderbook:%s bids=%d asks=%d", sym, len(bids), len(asks))
 
 
 # ────────────────────────────────

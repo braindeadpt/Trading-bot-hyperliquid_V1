@@ -40,6 +40,14 @@ class MarketEvent:
     oi_total_aggregated: Optional[float] = None   # Sum of OI across exchanges
     oi_exchange_count: int = 0
 
+    # Orderbook microstructure (L2 Hyperliquid)
+    orderbook_spread_pct: Optional[float] = None   # Bid-ask spread as % of mid
+    orderbook_oir: Optional[float] = None        # Orderbook Imbalance Ratio (-1 to +1)
+    orderbook_depth_quality: Optional[float] = None  # 0-1, bid depth / total depth
+    orderbook_bid_ask_ratio: Optional[float] = None  # bid_depth / ask_depth
+    orderbook_largest_bid_wall: Optional[float] = None  # Price of largest bid wall
+    orderbook_largest_ask_wall: Optional[float] = None  # Price of largest ask wall
+
     # Optional pre-computed indicator values from upstream
     ema_20: Optional[float] = None
     atr_14: Optional[float] = None

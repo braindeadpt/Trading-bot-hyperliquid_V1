@@ -101,6 +101,7 @@ class DashboardEmitter:
             price = prices.get(sym)
             ctx = ctxs.get(sym)
             evt = events.get(sym, {})
+            ob = getattr(_engine, "_latest_orderbook", {}).get(sym)
 
             rows.append({
                 "symbol": sym,
@@ -114,6 +115,12 @@ class DashboardEmitter:
                 "volume_1m": evt.get("volume_1m"),
                 "imbalance": evt.get("bid_ask_imbalance"),
                 "vwap": evt.get("vwap_15m"),
+                # Orderbook
+                "ob_spread": evt.get("orderbook_spread_pct"),
+                "ob_oir": evt.get("orderbook_oir"),
+                "ob_depth": evt.get("orderbook_depth_quality"),
+                "ob_bid_wall": evt.get("orderbook_largest_bid_wall"),
+                "ob_ask_wall": evt.get("orderbook_largest_ask_wall"),
                 "last_update": evt.get("processed_at", 0),
             })
         self.socketio.emit("live_data", rows)
@@ -511,6 +518,8 @@ def create_app(config: Dict[str, Any]) -> tuple:
                                 <th class="num">OI (M)</th>
                                 <th class="num">Vol 1m</th>
                                 <th class="num">Imbal</th>
+                                <th class="num">OIR</th>
+                                <th class="num">Depth</th>
                                 <th class="num">Age</th>
                             </tr>
                         </thead>
@@ -745,7 +754,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
         socket.on("live_data", (rows) => {
             const tbody = document.getElementById("live-data-tbody");
             if (!rows || rows.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="10" class="muted" style="text-align:center;">Waiting for data...</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="12" class="muted" style="text-align:center;">Waiting for data...</td></tr>`;
                 return;
             }
             const now = Date.now() / 1000;
@@ -753,6 +762,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 const priceClass = r.price > r.vwap ? "up" : r.price < r.vwap ? "down" : "";
                 const age = r.last_update ? now - r.last_update : null;
                 const ageClass = age && age > 5 ? "yellow" : age && age > 30 ? "red" : "";
+                const oirClass = r.ob_oir > 0.5 ? "up" : r.ob_oir < -0.5 ? "down" : "";
                 return `<tr>
                     <td><span class="highlight">${r.symbol}</span></td>
                     <td class="num ${priceClass}">${fmtNum(r.price)}</td>
@@ -763,6 +773,8 @@ def create_app(config: Dict[str, Any]) -> tuple:
                     <td class="num">${fmtM(r.oi)}</td>
                     <td class="num">${fmtNum(r.volume_1m)}</td>
                     <td class="num ${r.imbalance > 0 ? 'up' : r.imbalance < 0 ? 'down' : ''}">${fmtNum(r.imbalance, 3)}</td>
+                    <td class="num ${oirClass}">${r.ob_oir != null ? r.ob_oir.toFixed(2) : "--"}</td>
+                    <td class="num">${r.ob_depth != null ? (r.ob_depth * 100).toFixed(0) + "%" : "--"}</td>
                     <td class="num tiny ${ageClass}">${fmtAge(age)}</td>
                 </tr>`;
             }).join("");

@@ -19,6 +19,12 @@ from src.data.database import (
     PortfolioSnapshot,
     SignalRecord,
 )
+from src.data.orderbook_metrics import (
+    OrderbookMetrics,
+    PriceLevel,
+    calculate_metrics,
+    estimate_slippage,
+)
 from src.exchanges.funding_aggregator import (
     AggregatedFundingOI,
     FundingOIAggregator,
@@ -26,6 +32,7 @@ from src.exchanges.funding_aggregator import (
 from src.exchanges.hyperliquid_ws import (
     DataBus,
     HlAssetCtx,
+    HlOrderbook,
     HlPriceTick,
 )
 from src.strategies.base import (
@@ -97,6 +104,9 @@ class TradingEngine:
 
         # Track which topics we subscribed to so we can unsubscribe on stop
         self._subscribed_callbacks: Dict[str, Any] = {}
+
+        # ── Latest orderbook per symbol ──
+        self._latest_orderbook: Dict[str, OrderbookMetrics] = {}
 
         # ── Cross-exchange funding + OI aggregator ──
         self._funding_aggregator = FundingOIAggregator()
@@ -187,6 +197,12 @@ class TradingEngine:
             cb_ctx = self._make_ctx_callback(symbol)
             await self._bus.subscribe(f"ctx:{symbol}", cb_ctx)
             self._subscribed_callbacks[f"ctx:{symbol}"] = cb_ctx
+
+            # L2 Orderbook
+            cb_ob = self._make_orderbook_callback(symbol)
+            await self._bus.subscribe(f"orderbook:{symbol}", cb_ob)
+            self._subscribed_callbacks[f"orderbook:{symbol}"] = cb_ob
+            logger.info("Subscribed to orderbook:%s", symbol)
 
             # Completed candles per timeframe
             for tf in (60, 300, 900, 3600):
@@ -295,7 +311,29 @@ class TradingEngine:
             self._latest_ctx[symbol] = ctx
         return _on_ctx
 
-    def _make_candle_callback(self, symbol: str, timeframe: str):
+    def _make_orderbook_callback(self, symbol: str):
+        """Factory: returns an async callback for orderbook:* topics."""
+        async def _on_orderbook(book: HlOrderbook) -> None:
+            # Convert to our PriceLevel format and calculate metrics
+            bids = [PriceLevel(price=b.price, size=b.size) for b in book.bids]
+            asks = [PriceLevel(price=a.price, size=a.size) for a in book.asks]
+            metrics = calculate_metrics(
+                bids=bids,
+                asks=asks,
+                symbol=symbol,
+                timestamp_ms=book.timestamp_ms,
+            )
+            self._latest_orderbook[symbol] = metrics
+            logger.debug(
+                "Orderbook %s: spread=%.4f%% OIR=%.3f depth_quality=%.3f",
+                symbol,
+                metrics.spread_pct * 100,
+                metrics.oir_10levels,
+                metrics.depth_quality,
+            )
+        return _on_orderbook
+
+    def _make_candle_callback(self, symbol: str, timeframe: int):
         """Factory: returns an async callback for candle_complete:* topics."""
         async def _on_candle(candle: Candle) -> None:
             self._latest_candles[symbol][timeframe] = candle
@@ -350,6 +388,12 @@ class TradingEngine:
                 "predicted_funding_avg": event.predicted_funding_avg,
                 "oi_total_aggregated": event.oi_total_aggregated,
                 "oi_exchange_count": event.oi_exchange_count,
+                "orderbook_spread_pct": event.orderbook_spread_pct,
+                "orderbook_oir": event.orderbook_oir,
+                "orderbook_depth_quality": event.orderbook_depth_quality,
+                "orderbook_bid_ask_ratio": event.orderbook_bid_ask_ratio,
+                "orderbook_largest_bid_wall": event.orderbook_largest_bid_wall,
+                "orderbook_largest_ask_wall": event.orderbook_largest_ask_wall,
                 "candles": {
                     "1m": event.candle_1m is not None,
                     "5m": event.candle_5m is not None,
@@ -438,6 +482,9 @@ class TradingEngine:
         # Cross-exchange aggregated funding + OI (if available)
         agg = self._latest_agg_funding.get(symbol)
 
+        # Orderbook metrics (if available)
+        ob = self._latest_orderbook.get(symbol)
+
         # Build the MarketEvent
         event = MarketEvent(
             symbol=symbol,
@@ -460,12 +507,20 @@ class TradingEngine:
             predicted_funding_avg=agg.predicted_funding_avg if agg else None,
             oi_total_aggregated=agg.oi_total if agg else None,
             oi_exchange_count=agg.exchange_count if agg else 0,
+            # Orderbook microstructure
+            orderbook_spread_pct=ob.spread_pct if ob else None,
+            orderbook_oir=ob.oir_10levels if ob else None,
+            orderbook_depth_quality=ob.depth_quality if ob else None,
+            orderbook_bid_ask_ratio=ob.bid_ask_ratio if ob else None,
+            orderbook_largest_bid_wall=ob.largest_bid_wall_price if ob else None,
+            orderbook_largest_ask_wall=ob.largest_ask_wall_price if ob else None,
         )
 
         # Log orderflow metrics for debugging
         logger.info(
             "MarketEvent %s: price=%.2f, funding=%.6f, predicted=%s, oi=%.2f, "
-            "agg_funding=%s, agg_oi=%s, exchanges=%d, imbalance=%s",
+            "agg_funding=%s, agg_oi=%s, exchanges=%d, "
+            "spread=%s, oir=%s, depth=%s, imbalance=%s",
             symbol, event.price,
             event.funding or 0,
             f"{event.predicted_funding:.6f}" if event.predicted_funding else "N/A",
@@ -473,6 +528,9 @@ class TradingEngine:
             f"{event.funding_avg:.6f}" if event.funding_avg else "N/A",
             f"{event.oi_total_aggregated:,.0f}" if event.oi_total_aggregated else "N/A",
             event.oi_exchange_count,
+            f"{event.orderbook_spread_pct*100:.4f}%" if event.orderbook_spread_pct else "N/A",
+            f"{event.orderbook_oir:.3f}" if event.orderbook_oir else "N/A",
+            f"{event.orderbook_depth_quality:.3f}" if event.orderbook_depth_quality else "N/A",
             event.bid_ask_imbalance,
         )
 

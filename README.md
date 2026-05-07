@@ -9,9 +9,11 @@ Bot de trading automatizado para Hyperliquid com arquitetura modular, dashboard 
 | Componente | Estado |
 |---|---|
 | Bot paper trading | ✅ Funcional — `python main.py --mode paper` |
-| Dashboard web | ✅ Funcional — http://localhost:5000 |
-| WebSocket Hyperliquid | ✅ Ligado (tickers + allMids + assetCtxs) |
+| Dashboard web v2 | ✅ Funcional — http://localhost:5000 |
+| WebSocket Hyperliquid | ✅ Ligado (tickers + allMids + assetCtxs + **l2Book**) |
 | CandleBuilder | ✅ 1m / 5m / 15m / 1h |
+| Orderbook L2 + métricas | ✅ OIR, wall detection, depth quality, spread analysis |
+| Funding cross-exchange | ✅ Agregado Binance + Bybit + OKX + Coinalyze |
 | Orderflow (bid/ask imbalance) | ✅ Integrado na TrendFollow |
 | Crash recovery + graceful shutdown | ✅ Implementado |
 | Paper trader | ✅ Simula execução com slippage |
@@ -47,6 +49,7 @@ trading-bot-hyperliquid/
 │   ├── data/
 │   │   ├── candle_builder.py   # Constrói candles OHLCV + OI + funding + buy/sell volume
 │   │   ├── data_bus.py         # Pub/sub assíncrono entre módulos
+│   │   ├── orderbook_metrics.py # OIR, wall detection, depth quality, slippage estimation
 │   │   └── hyperliquid_candles.py # REST candles REST
 │   ├── dashboard/
 │   │   ├── web.py           # Flask + Socket.IO server
@@ -82,6 +85,37 @@ pip install -r requirements.txt
 ```
 
 Copia `.env.example` para `.env` e configura as chaves da Hyperliquid (só necessário para modo live).
+
+---
+
+## Features Premium
+
+### 1. Dashboard Real-Time v2
+- **Live Data Stream** — preços, funding, OI, volume, imbalance, spread, OIR (Orderbook Imbalance Ratio), depth quality
+- **Candle Watch** — OHLCV + buy% + VWAP por timeframe (1m, 5m, 15m, 1h)
+- **Engine Monitor** — ticks/sec, total ticks, memória, último erro, eventos recentes
+- **Strategies Detail** — parâmetros, último sinal, confiança, status, sinais hoje
+- **Signal Stream** — últimos 20 sinais com side colorido + status (pending/approved/rejected/executed)
+- **Decision Log** — risk approvals/rejections + executions + exits
+- **Portfolio** — capital, PnL diário, drawdown, trades
+- **Open Positions** — posições com PnL%, entry, current, estratégia
+- **Live Logs** — últimas 50 linhas do ficheiro de log
+
+### 2. Funding Cross-Exchange
+Agregador de funding + OI de múltiplas exchanges (Binance, Bybit, OKX, Coinalyze):
+- `funding_avg` — média simples
+- `funding_weighted` — média ponderada por OI
+- `predicted_funding_avg` — predicted funding médio
+- `oi_total_aggregated` — OI total cross-exchange
+- `oi_exchange_count` — número de exchanges com dados
+
+### 3. Orderbook L2 Hyperliquid
+Métricas de microestrutura em tempo real:
+- **OIR** (Orderbook Imbalance Ratio) — (bid_vol - ask_vol) / total_vol nas primeiras 10 camadas
+- **Spread analysis** — spread absoluto + percentual + weighted mid price
+- **Depth quality** — bid_depth / total_depth (0-1), bid_ask_ratio
+- **Wall detection** — maior parede de bids e asks
+- **Slippage estimation** — estimativa de slippage para ordens de mercado
 
 ---
 
