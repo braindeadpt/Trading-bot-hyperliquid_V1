@@ -59,7 +59,7 @@ from core.risk_manager import RiskManager
 from core.execution import ExecutionEngine
 from core.engine import TradingEngine
 
-from dashboard.web import create_dashboard
+from dashboard.web import create_app as create_dashboard
 
 # ---------------------------------------------------------------------------
 # Globals for signal handling
@@ -337,7 +337,11 @@ async def main() -> None:
             "host": cfg.get("dashboard.host", "0.0.0.0"),
             "port": cfg.get("dashboard.port", 5000),
         }
-        app, socketio = create_dashboard(engine=engine, config=dashboard_cfg)
+        from dashboard.web import create_app as create_dashboard, set_engine
+        app, socketio, emit_fn = create_dashboard(config=dashboard_cfg)
+        set_engine(engine)
+        engine._on_dashboard_tick = emit_fn  # force emit on important events
+
         global _dashboard_socketio
         _dashboard_socketio = socketio
 

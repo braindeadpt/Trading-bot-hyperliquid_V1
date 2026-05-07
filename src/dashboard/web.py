@@ -1,15 +1,16 @@
 """
-Hyperliquid Premium — Real-Time Operations Dashboard
-Simple, dense, informative. Shows what the bot is actually doing.
+Hyperliquid Premium — Real-Time Operations Dashboard v2
+Complete rewrite for maximum visibility into bot internals.
 """
 
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from flask_socketio import SocketIO, emit
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 # Globals set by main.py
 _engine: Optional[Any] = None
 _socketio: Optional[SocketIO] = None
+_emit_fn: Optional[Callable] = None
 
 
 def set_engine(engine: Any) -> None:
@@ -28,34 +30,307 @@ def get_engine() -> Optional[Any]:
     return _engine
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Background emitter — pushes real-time data every second
+# ═════════════════════════════════════════════════════════════════════════════
+
+class DashboardEmitter:
+    """Emits real-time dashboard updates every second via Socket.IO."""
+
+    def __init__(self, socketio: SocketIO, interval: float = 1.0):
+        self.socketio = socketio
+        self.interval = interval
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        logger.info("Dashboard emitter started (interval=%ss)", self.interval)
+
+    def stop(self) -> None:
+        self._running = False
+
+    def _loop(self) -> None:
+        while self._running:
+            try:
+                self._emit_all()
+            except Exception as e:
+                logger.warning("Dashboard emitter error: %s", e)
+            time.sleep(self.interval)
+
+    def _emit_all(self) -> None:
+        if _engine is None or self.socketio is None:
+            return
+
+        try:
+            self._emit_status()
+            self._emit_live_data()
+            self._emit_engine_monitor()
+            self._emit_candles()
+            self._emit_strategies()
+            self._emit_signals()
+            self._emit_decisions()
+            self._emit_portfolio()
+            self._emit_positions()
+            self._emit_logs()
+        except Exception as e:
+            logger.warning("emit_all error: %s", e)
+
+    # ── Emitters ──
+
+    def _emit_status(self) -> None:
+        self.socketio.emit("status", {
+            "mode": getattr(_engine, "_config", {}).get("mode", "paper") if hasattr(_engine, "_config") else "paper",
+            "uptime_sec": getattr(_engine, "uptime_sec", 0),
+            "memory_mb": getattr(_engine, "memory_mb", 0),
+            "circuit_breaker": "ON" if getattr(getattr(_engine, "_risk", None), "circuit_breaker_tripped", False) else "OFF",
+            "running": getattr(_engine, "_running", False),
+        })
+
+    def _emit_live_data(self) -> None:
+        """Raw market data feed — prices, funding, OI, volume, imbalance."""
+        rows = []
+        symbols = getattr(_engine, "_symbols", [])
+        prices = getattr(_engine, "_latest_price", {})
+        ctxs = getattr(_engine, "_latest_ctx", {})
+        events = getattr(_engine, "_last_market_events", {})
+
+        for sym in symbols:
+            price = prices.get(sym)
+            ctx = ctxs.get(sym)
+            evt = events.get(sym, {})
+
+            rows.append({
+                "symbol": sym,
+                "price": getattr(price, "mid", None) if price else None,
+                "bid": getattr(price, "bid", None) if price else None,
+                "ask": getattr(price, "ask", None) if price else None,
+                "spread_pct": round((getattr(price, "ask", 0) - getattr(price, "bid", 0)) / getattr(price, "mid", 1) * 100, 4) if price else None,
+                "funding": getattr(ctx, "funding_rate", None) if ctx else None,
+                "predicted": getattr(ctx, "predicted_funding", None) if ctx else None,
+                "oi": getattr(ctx, "open_interest", None) if ctx else None,
+                "volume_1m": evt.get("volume_1m"),
+                "imbalance": evt.get("bid_ask_imbalance"),
+                "vwap": evt.get("vwap_15m"),
+                "last_update": evt.get("processed_at", 0),
+            })
+        self.socketio.emit("live_data", rows)
+
+    def _emit_engine_monitor(self) -> None:
+        """Engine health — ticks/sec, total ticks, last error."""
+        stats = getattr(_engine, "_tick_stats", {})
+        last_err = getattr(_engine, "_last_error", None)
+        last_events = getattr(_engine, "_last_market_events", {})
+
+        # Last 3 events with timestamps
+        recent = []
+        for sym, evt in sorted(last_events.items(), key=lambda x: x[1].get("processed_at", 0), reverse=True)[:3]:
+            recent.append({
+                "symbol": sym,
+                "price": evt.get("price"),
+                "age_ms": int((time.time() - evt.get("processed_at", 0)) * 1000),
+            })
+
+        self.socketio.emit("engine_monitor", {
+            "ticks_per_second": stats.get("per_second", 0),
+            "total_ticks": stats.get("total", 0),
+            "last_error": last_err,
+            "recent_events": recent,
+            "symbols": getattr(_engine, "_symbols", []),
+            "strategies": [getattr(s, "name", "unknown") for s in getattr(_engine, "_strategies", [])],
+        })
+
+    def _emit_candles(self) -> None:
+        """Candle status — which timeframes have data, OHLCV if available."""
+        symbols = getattr(_engine, "_symbols", [])
+        candles = getattr(_engine, "_latest_candles", {})
+        result = []
+        for sym in symbols:
+            sym_candles = candles.get(sym, {})
+            for tf, label in [(60, "1m"), (300, "5m"), (900, "15m"), (3600, "1h")]:
+                c = sym_candles.get(tf)
+                if c:
+                    result.append({
+                        "symbol": sym,
+                        "timeframe": label,
+                        "open": getattr(c, "open", None),
+                        "high": getattr(c, "high", None),
+                        "low": getattr(c, "low", None),
+                        "close": getattr(c, "close", None),
+                        "volume": getattr(c, "volume", None),
+                        "oi_delta": getattr(c, "oi_delta", None),
+                        "buy_volume": getattr(c, "buy_volume", None),
+                        "sell_volume": getattr(c, "sell_volume", None),
+                        "vwap": getattr(c, "vwap", None),
+                        "timestamp_ms": getattr(c, "timestamp_ms", None),
+                    })
+        self.socketio.emit("candles", result)
+
+    def _emit_strategies(self) -> None:
+        """Strategy state — params, last signal, signals today."""
+        strategies = getattr(_engine, "_strategies", [])
+        sig_hist = getattr(_engine, "_signal_history", [])
+
+        result = []
+        for s in strategies:
+            name = getattr(s, "name", "unknown")
+            # Count signals today for this strategy
+            today_count = sum(
+                1 for sig in sig_hist
+                if sig.get("strategy") == name and sig.get("time", "").startswith(datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+            )
+            # Last signal
+            last = next((sig for sig in sig_hist if sig.get("strategy") == name), None)
+
+            result.append({
+                "name": name,
+                "enabled": getattr(s, "enabled", True),
+                "description": (getattr(s, "__doc__", "") or "No description").split("\n")[0][:80],
+                "params": str(getattr(s, "params", {})),
+                "last_signal_time": last.get("time") if last else None,
+                "last_signal_side": last.get("side") if last else None,
+                "last_signal_confidence": last.get("confidence") if last else None,
+                "last_signal_status": last.get("status") if last else None,
+                "signals_today": today_count,
+            })
+        self.socketio.emit("strategies", result)
+
+    def _emit_signals(self) -> None:
+        """Last 20 signals with full detail."""
+        sig_hist = getattr(_engine, "_signal_history", [])[:20]
+        self.socketio.emit("signals", sig_hist)
+
+    def _emit_decisions(self) -> None:
+        """Risk + execution decisions."""
+        decisions = getattr(_engine, "_decision_history", [])[:20]
+        self.socketio.emit("decisions", decisions)
+
+    def _emit_portfolio(self) -> None:
+        portfolio = getattr(_engine, "portfolio", None)
+        if portfolio is None:
+            return
+        try:
+            self.socketio.emit("portfolio", {
+                "capital": getattr(portfolio, "sync_capital", lambda: 0)(),
+                "daily_pnl": getattr(portfolio, "sync_daily_pnl", lambda: 0)(),
+                "max_drawdown_pct": getattr(portfolio, "sync_max_drawdown_pct", lambda: 0)(),
+                "open_positions": len(getattr(portfolio, "get_positions_sync", lambda: {})()),
+                "daily_trades": getattr(portfolio, "sync_daily_trades", lambda: 0)(),
+                "total_trades": getattr(portfolio, "sync_total_trades", lambda: 0)(),
+            })
+        except Exception:
+            pass
+
+    def _emit_positions(self) -> None:
+        portfolio = getattr(_engine, "portfolio", None)
+        if portfolio is None:
+            return
+        try:
+            positions = getattr(portfolio, "get_positions_sync", lambda: {})()
+            result = []
+            for sym, pos in positions.items():
+                entry = getattr(pos, "entry_price", 0)
+                current = getattr(pos, "current_price", entry)
+                unrealized = getattr(pos, "unrealized_pnl", 0)
+                pnl_pct = (unrealized / (entry * getattr(pos, "size", 0)) * 100) if entry and getattr(pos, "size", 0) else 0
+                result.append({
+                    "symbol": sym,
+                    "side": getattr(pos, "side", "--"),
+                    "size": getattr(pos, "size", 0),
+                    "entry_price": entry,
+                    "current_price": current,
+                    "unrealized_pnl": unrealized,
+                    "pnl_pct": pnl_pct,
+                    "stop_loss": getattr(pos, "stop_loss_price", None),
+                    "take_profit": getattr(pos, "take_profit_price", None),
+                    "strategy": getattr(pos, "metadata", {}).get("strategy", "unknown"),
+                })
+            self.socketio.emit("positions", result)
+        except Exception:
+            pass
+
+    def _emit_logs(self) -> None:
+        log_path = os.path.join(os.path.dirname(__file__), "..", "..", "logs", "bot.log")
+        log_path = os.path.abspath(log_path)
+        entries = []
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+                for line in lines[-50:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split(" | ")
+                    if len(parts) >= 4:
+                        entries.append({
+                            "time": parts[0],
+                            "level": parts[1].strip(),
+                            "module": parts[2].strip(),
+                            "message": " | ".join(parts[3:]),
+                        })
+                    else:
+                        entries.append({"time": "", "level": "INFO", "module": "", "message": line})
+        except Exception:
+            pass
+        self.socketio.emit("logs", entries)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Flask app + Socket.IO
+# ═════════════════════════════════════════════════════════════════════════════
+
 def create_app(config: Dict[str, Any]) -> tuple:
     app = Flask(__name__)
     app.config["SECRET_KEY"] = config.get("secret_key", "dev-secret-123")
     socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+
     global _socketio
     _socketio = socketio
 
-    # ── HTML Template — clean, dense, informative ──
+    # Start background emitter
+    emitter = DashboardEmitter(socketio)
+    emitter.start()
+
+    # ── HTML Template ──
     INDEX_HTML = '''
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Hyperliquid Bot — Operations</title>
+    <title>Hyperliquid Bot — Live Ops</title>
     <style>
+        :root {
+            --bg: #0a0a0a;
+            --panel: #111;
+            --panel-hover: #161616;
+            --border: #222;
+            --text: #e0e0e0;
+            --muted: #666;
+            --dim: #888;
+            --green: #4ade80;
+            --red: #f87171;
+            --yellow: #fbbf24;
+            --blue: #60a5fa;
+            --purple: #c084fc;
+            --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "SF Mono", Consolas, monospace;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
-            background: #0a0a0a;
-            color: #e0e0e0;
-            font-size: 13px;
+            font-family: var(--font);
+            background: var(--bg);
+            color: var(--text);
+            font-size: 12px;
             line-height: 1.4;
         }
+
+        /* Header */
         .header {
-            background: #111;
-            border-bottom: 1px solid #333;
-            padding: 12px 20px;
+            background: var(--panel);
+            border-bottom: 1px solid var(--border);
+            padding: 10px 16px;
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -63,377 +338,618 @@ def create_app(config: Dict[str, Any]) -> tuple:
             top: 0;
             z-index: 100;
         }
-        .header h1 { font-size: 16px; font-weight: 600; color: #fff; }
-        .status-badge {
-            padding: 4px 12px;
+        .header h1 { font-size: 14px; font-weight: 600; }
+        .header .badges { display: flex; gap: 8px; align-items: center; }
+        .badge {
+            padding: 3px 10px;
             border-radius: 4px;
-            font-size: 11px;
-            font-weight: 600;
+            font-size: 10px;
+            font-weight: 700;
             text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
-        .status-ok { background: #1a472a; color: #4ade80; }
-        .status-warn { background: #451a03; color: #fbbf24; }
-        .status-err { background: #450a0a; color: #f87171; }
+        .badge-green { background: #1a472a; color: var(--green); }
+        .badge-yellow { background: #451a03; color: var(--yellow); }
+        .badge-red { background: #450a0a; color: var(--red); }
+        .badge-blue { background: #1e3a5f; color: var(--blue); }
 
-        .grid {
+        /* Layout */
+        .layout {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
-            gap: 16px;
-            padding: 16px;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 12px;
+            padding: 12px;
         }
+        @media (max-width: 1200px) { .layout { grid-template-columns: 1fr 1fr; } }
+        @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } }
+
         .panel {
-            background: #111;
-            border: 1px solid #222;
-            border-radius: 8px;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 6px;
             overflow: hidden;
         }
         .panel-header {
-            background: #161616;
-            padding: 10px 14px;
-            border-bottom: 1px solid #222;
-            font-size: 12px;
-            font-weight: 600;
+            background: var(--panel-hover);
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border);
+            font-size: 11px;
+            font-weight: 700;
             text-transform: uppercase;
-            color: #888;
+            letter-spacing: 0.8px;
+            color: var(--dim);
             display: flex;
             justify-content: space-between;
             align-items: center;
         }
-        .panel-body { padding: 12px 14px; }
-
-        table { width: 100%; border-collapse: collapse; font-size: 12px; }
-        th { text-align: left; padding: 6px 8px; color: #666; font-weight: 500; border-bottom: 1px solid #222; }
-        td { padding: 5px 8px; border-bottom: 1px solid #1a1a1a; }
-        tr:hover td { background: #1a1a1a; }
-        .num { font-family: "SF Mono", "Consolas", monospace; text-align: right; }
-        .up { color: #4ade80; }
-        .down { color: #f87171; }
-        .muted { color: #666; }
-        .highlight { color: #60a5fa; font-weight: 600; }
-
-        .metric-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 6px 0;
-            border-bottom: 1px solid #1a1a1a;
+        .panel-header .live-dot {
+            width: 6px; height: 6px; border-radius: 50%; background: var(--green);
+            animation: blink 1s infinite;
         }
-        .metric-label { color: #888; }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+        .panel-body { padding: 10px 12px; max-height: 320px; overflow-y: auto; }
+        .panel-body::-webkit-scrollbar { width: 4px; }
+        .panel-body::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+        /* Tables */
+        table { width: 100%; border-collapse: collapse; font-size: 11px; }
+        th { text-align: left; padding: 5px 6px; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border); font-size: 10px; text-transform: uppercase; }
+        td { padding: 4px 6px; border-bottom: 1px solid #1a1a1a; vertical-align: top; }
+        tr:hover td { background: var(--panel-hover); }
+        .num { font-family: "SF Mono", Consolas, monospace; text-align: right; }
+        .up { color: var(--green); }
+        .down { color: var(--red); }
+        .yellow { color: var(--yellow); }
+        .blue { color: var(--blue); }
+        .purple { color: var(--purple); }
+        .muted { color: var(--muted); }
+        .dim { color: var(--dim); }
+        .highlight { color: var(--blue); font-weight: 600; }
+        .tiny { font-size: 10px; }
+        .mono { font-family: "SF Mono", Consolas, monospace; }
+
+        /* Metrics */
+        .metric-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #1a1a1a; }
+        .metric-label { color: var(--dim); }
         .metric-value { font-family: monospace; }
 
+        /* Signal status pills */
+        .pill {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .pill-pending { background: #1e3a5f; color: var(--blue); }
+        .pill-approved { background: #1a472a; color: var(--green); }
+        .pill-rejected { background: #450a0a; color: var(--red); }
+        .pill-executed { background: #365314; color: #a3e635; }
+
+        /* Strategy card */
+        .strategy-card {
+            padding: 8px;
+            margin-bottom: 6px;
+            background: var(--panel-hover);
+            border-radius: 4px;
+            border-left: 3px solid var(--border);
+        }
+        .strategy-card.active { border-left-color: var(--green); }
+        .strategy-card.inactive { border-left-color: var(--muted); opacity: 0.6; }
+        .strategy-name { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
+        .strategy-desc { color: var(--dim); font-size: 10px; }
+        .strategy-params { margin-top: 4px; font-family: monospace; font-size: 10px; color: var(--muted); }
+
+        /* Log box */
         .log-box {
             max-height: 200px;
             overflow-y: auto;
             font-family: monospace;
-            font-size: 11px;
+            font-size: 10px;
             line-height: 1.5;
-            color: #aaa;
+            color: var(--dim);
         }
-        .log-box .log-time { color: #666; }
-        .log-box .log-info { color: #60a5fa; }
-        .log-box .log-warn { color: #fbbf24; }
-        .log-box .log-err { color: #f87171; }
+        .log-time { color: var(--muted); }
+        .log-info { color: var(--blue); }
+        .log-warn { color: var(--yellow); }
+        .log-err { color: var(--red); }
 
-        .bar {
-            height: 4px;
-            background: #222;
+        /* Engine tick indicator */
+        .tick-bar {
+            display: flex;
+            gap: 2px;
+            margin-top: 6px;
+        }
+        .tick-cell {
+            flex: 1;
+            height: 12px;
+            background: #1a1a1a;
             border-radius: 2px;
-            margin-top: 4px;
-            overflow: hidden;
+            transition: background 0.3s;
         }
-        .bar-fill {
-            height: 100%;
-            border-radius: 2px;
-            transition: width 0.5s;
-        }
-        .bar-green { background: #4ade80; }
-        .bar-yellow { background: #fbbf24; }
-        .bar-red { background: #f87171; }
+        .tick-cell.active { background: var(--green); }
+        .tick-cell.recent { background: #365314; }
 
-        .strategy-card {
-            padding: 10px;
-            margin-bottom: 8px;
-            background: #161616;
-            border-radius: 6px;
-            border-left: 3px solid #333;
-        }
-        .strategy-active { border-left-color: #4ade80; }
-        .strategy-inactive { border-left-color: #666; }
-        .strategy-name { font-weight: 600; color: #fff; margin-bottom: 4px; }
-        .strategy-desc { color: #888; font-size: 11px; }
-        .strategy-params { margin-top: 6px; font-family: monospace; font-size: 11px; color: #aaa; }
-
-        .pulse {
-            display: inline-block;
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            margin-right: 6px;
-            animation: pulse 1.5s infinite;
-        }
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.3; }
-            100% { opacity: 1; }
-        }
-        .pulse-green { background: #4ade80; }
-        .pulse-yellow { background: #fbbf24; }
-        .pulse-red { background: #f87171; }
+        /* Sparkline placeholder */
+        .spark { height: 20px; background: linear-gradient(90deg, var(--green) 0%, var(--green) 60%, var(--red) 100%); border-radius: 2px; margin-top: 4px; opacity: 0.5; }
     </style>
 </head>
 <body>
     <div class="header">
-        <div>
-            <span id="conn-indicator" class="pulse pulse-green"></span>
+        <div style="display:flex;align-items:center;gap:10px;">
+            <span class="badge badge-green" id="conn-badge">LIVE</span>
             <h1>Hyperliquid Bot — Operations Dashboard</h1>
         </div>
-        <span id="status-badge" class="status-badge status-ok">Running</span>
+        <div class="badges">
+            <span class="badge badge-blue" id="mode-badge">PAPER</span>
+            <span class="badge badge-green" id="status-badge">RUNNING</span>
+            <span class="badge badge-yellow" id="circuit-badge">CB: OFF</span>
+            <span class="badge badge-blue" id="uptime-badge">00:00:00</span>
+        </div>
     </div>
 
-    <div class="grid">
-        <!-- Bot Status -->
-        <div class="panel">
-            <div class="panel-header">Bot Status <span id="uptime" class="muted">--</span></div>
-            <div class="panel-body">
-                <div class="metric-row"><span class="metric-label">Mode</span><span id="mode" class="metric-value">--</span></div>
-                <div class="metric-row"><span class="metric-label">Uptime</span><span id="uptime2" class="metric-value">--</span></div>
-                <div class="metric-row"><span class="metric-label">Memory</span><span id="memory" class="metric-value">--</span></div>
-                <div class="metric-row"><span class="metric-label">Last Event</span><span id="last-event" class="metric-value">--</span></div>
-                <div class="metric-row"><span class="metric-label">Events/sec</span><span id="eps" class="metric-value">--</span></div>
-                <div class="metric-row"><span class="metric-label">Circuit Breaker</span><span id="circuit" class="metric-value">--</span></div>
+    <div class="layout">
+        <!-- Column 1: Live Data -->
+        <div>
+            <!-- Live Data Stream -->
+            <div class="panel">
+                <div class="panel-header">
+                    <span>Live Data Stream</span>
+                    <span class="live-dot"></span>
+                </div>
+                <div class="panel-body">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Asset</th>
+                                <th class="num">Price</th>
+                                <th class="num">Bid/Ask</th>
+                                <th class="num">Sprd%</th>
+                                <th class="num">Funding</th>
+                                <th class="num">Pred</th>
+                                <th class="num">OI (M)</th>
+                                <th class="num">Vol 1m</th>
+                                <th class="num">Imbal</th>
+                                <th class="num">Age</th>
+                            </tr>
+                        </thead>
+                        <tbody id="live-data-tbody">
+                            <tr><td colspan="10" class="muted" style="text-align:center;">Waiting for data...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Candle Watch -->
+            <div class="panel">
+                <div class="panel-header">Candle Watch <span class="dim">OHLCV</span></div>
+                <div class="panel-body">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Sym</th>
+                                <th>TF</th>
+                                <th class="num">Open</th>
+                                <th class="num">High</th>
+                                <th class="num">Low</th>
+                                <th class="num">Close</th>
+                                <th class="num">Volume</th>
+                                <th class="num">Buy%</th>
+                                <th class="num">VWAP</th>
+                            </tr>
+                        </thead>
+                        <tbody id="candles-tbody">
+                            <tr><td colspan="9" class="muted" style="text-align:center;">No candles yet</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
-        <!-- Market Data Feed -->
-        <div class="panel">
-            <div class="panel-header">Market Data Feed <span class="muted">Real-time</span></div>
-            <div class="panel-body">
-                <table>
-                    <thead><tr><th>Asset</th><th class="num">Price</th><th class="num">Funding</th><th class="num">Pred</th><th class="num">OI (M)</th><th>Candles</th><th>Last Tick</th></tr></thead>
-                    <tbody id="market-data"></tr><td colspan="7" class="muted" style="text-align:center;">Waiting for data...</td></tr></tbody>
-                </table>
+        <!-- Column 2: Engine & Strategies -->
+        <div>
+            <!-- Engine Monitor -->
+            <div class="panel">
+                <div class="panel-header">Engine Monitor</div>
+                <div class="panel-body">
+                    <div class="metric-row">
+                        <span class="metric-label">Ticks / second</span>
+                        <span class="metric-value" id="ticks-per-sec">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Total ticks</span>
+                        <span class="metric-value" id="total-ticks">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Memory</span>
+                        <span class="metric-value" id="mem-mb">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Last error</span>
+                        <span class="metric-value" id="last-error" style="color:var(--red);">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Assets</span>
+                        <span class="metric-value" id="assets-list">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Strategies</span>
+                        <span class="metric-value" id="strat-list">--</span>
+                    </div>
+                    <div style="margin-top:8px; font-size:10px; color:var(--dim);">Recent events:</div>
+                    <div id="recent-events" style="font-size:10px; color:var(--muted); margin-top:4px;">--</div>
+                </div>
+            </div>
+
+            <!-- Strategies Detail -->
+            <div class="panel">
+                <div class="panel-header">Strategies <span class="dim">Active</span></div>
+                <div class="panel-body" id="strategies-container">
+                    <div class="muted" style="text-align:center;">Loading...</div>
+                </div>
+            </div>
+
+            <!-- Decision Log -->
+            <div class="panel">
+                <div class="panel-header">Decision Log <span class="dim">Risk + Execution</span></div>
+                <div class="panel-body">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Type</th>
+                                <th>Sym</th>
+                                <th>Side</th>
+                                <th>Result</th>
+                                <th>Reason</th>
+                            </tr>
+                        </thead>
+                        <tbody id="decisions-tbody">
+                            <tr><td colspan="6" class="muted" style="text-align:center;">No decisions yet</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
-        <!-- Strategies -->
-        <div class="panel">
-            <div class="panel-header">Strategies <span class="muted">Active</span></div>
-            <div class="panel-body" id="strategies">
-                <div class="muted" style="text-align:center;">Loading...</div>
+        <!-- Column 3: Signals, Portfolio, Logs -->
+        <div>
+            <!-- Signal Stream -->
+            <div class="panel">
+                <div class="panel-header">Signal Stream <span class="dim">Last 20</span></div>
+                <div class="panel-body">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Strat</th>
+                                <th>Sym</th>
+                                <th>Side</th>
+                                <th class="num">Conf</th>
+                                <th>Status</th>
+                                <th>Reason</th>
+                            </tr>
+                        </thead>
+                        <tbody id="signals-tbody">
+                            <tr><td colspan="7" class="muted" style="text-align:center;">No signals yet</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Portfolio -->
+            <div class="panel">
+                <div class="panel-header">Portfolio</div>
+                <div class="panel-body">
+                    <div class="metric-row">
+                        <span class="metric-label">Capital</span>
+                        <span class="metric-value" id="capital">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Daily PnL</span>
+                        <span class="metric-value" id="daily-pnl">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Max Drawdown</span>
+                        <span class="metric-value" id="drawdown">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Open Positions</span>
+                        <span class="metric-value" id="open-pos">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Daily Trades</span>
+                        <span class="metric-value" id="daily-trades">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Open Positions -->
+            <div class="panel">
+                <div class="panel-header">Open Positions</div>
+                <div class="panel-body">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Sym</th>
+                                <th>Side</th>
+                                <th class="num">Size</th>
+                                <th class="num">Entry</th>
+                                <th class="num">Current</th>
+                                <th class="num">PnL%</th>
+                                <th>Strat</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-tbody">
+                            <tr><td colspan="7" class="muted" style="text-align:center;">No positions</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Live Logs -->
+            <div class="panel">
+                <div class="panel-header">Live Logs <span class="dim">Last 50</span></div>
+                <div class="panel-body">
+                    <div id="logs-container" class="log-box">Waiting for logs...</div>
+                </div>
             </div>
         </div>
-
-        <!-- Signals -->
-        <div class="panel">
-            <div class="panel-header">Signals <span class="muted">Last 10</span></div>
-            <div class="panel-body">
-                <table>
-                    <thead><tr><th>Time</th><th>Strat</th><th>Sym</th><th>Side</th><th class="num">Conf</th><th>Reason</th></tr></thead>
-                    <tbody id="signals"><tr><td colspan="6" class="muted" style="text-align:center;">No signals yet</td></tr></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- Portfolio -->
-        <div class="panel">
-            <div class="panel-header">Portfolio</div>
-            <div class="panel-body">
-                <div class="metric-row"><span class="metric-label">Capital</span><span id="capital" class="metric-value">--</span></div>
-                <div class="metric-row"><span class="metric-label">Daily PnL</span><span id="daily-pnl" class="metric-value">--</span></div>
-                <div class="metric-row"><span class="metric-label">Max Drawdown</span><span id="drawdown" class="metric-value">--</span></div>
-                <div class="metric-row"><span class="metric-label">Open Positions</span><span id="positions-count" class="metric-value">--</span></div>
-                <div class="metric-row"><span class="metric-label">Daily Trades</span><span id="daily-trades" class="metric-value">--</span></div>
-            </div>
-        </div>
-
-        <!-- Open Positions -->
-        <div class="panel">
-            <div class="panel-header">Open Positions</div>
-            <div class="panel-body">
-                <table>
-                    <thead><tr><th>Symbol</th><th>Side</th><th class="num">Size</th><th class="num">Entry</th><th class="num">Current</th><th class="num">PnL%</th><th class="num">Duration</th></tr></thead>
-                    <tbody id="positions"><tr><td colspan="7" class="muted" style="text-align:center;">No open positions</td></tr></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- Funding Comparison -->
-        <div class="panel">
-            <div class="panel-header">Funding Comparison <span class="muted">HL vs Aggregated</span></div>
-            <div class="panel-body">
-                <table>
-                    <thead><tr><th>Asset</th><th class="num">HL Funding</th><th class="num">Agg Funding</th><th class="num">HL OI</th><th class="num">Agg OI</th><th>Exchanges</th></tr></thead>
-                    <tbody id="funding-comp"><tr><td colspan="6" class="muted" style="text-align:center;">No data</td></tr></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- Recent Logs -->
-        <div class="panel">
-            <div class="panel-header">Recent Logs <span class="muted">Last 20</span></div>
-            <div class="panel-body">
-                <div id="logs" class="log-box">Waiting for logs...</div>
-            </div㹬/div>
     </div>
 
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <script>
         const socket = io();
-        let lastUpdate = Date.now();
-        let eventCount = 0;
-        let eventHistory = [];
 
-        // Track events per second
-        setInterval(() => {
-            const now = Date.now();
-            eventHistory = eventHistory.filter(t => now - t < 1000);
-            document.getElementById("eps").textContent = eventHistory.length.toString();
-        }, 1000);
+        function fmtNum(v, d=2) {
+            if (v == null || isNaN(v)) return "--";
+            return v.toLocaleString("en-US", {minimumFractionDigits:d, maximumFractionDigits:d});
+        }
+        function fmtPct(v, d=4) {
+            if (v == null || isNaN(v)) return "--";
+            return (v * 100).toFixed(d) + "%";
+        }
+        function fmtM(v) {
+            if (v == null || isNaN(v)) return "--";
+            return (v / 1e6).toFixed(2) + "M";
+        }
+        function fmtAge(seconds) {
+            if (!seconds) return "--";
+            if (seconds < 1) return (seconds * 1000).toFixed(0) + "ms";
+            if (seconds < 60) return seconds.toFixed(1) + "s";
+            return (seconds / 60).toFixed(1) + "m";
+        }
+        function timeNow() {
+            const d = new Date();
+            return d.toTimeString().split(" ")[0];
+        }
 
-        socket.on("connect", () => {
-            document.getElementById("conn-indicator").className = "pulse pulse-green";
-            document.getElementById("status-badge").textContent = "Connected";
-            document.getElementById("status-badge").className = "status-badge status-ok";
+        // ── Status ──
+        socket.on("status", (d) => {
+            document.getElementById("mode-badge").textContent = (d.mode || "PAPER").toUpperCase();
+            const statusEl = document.getElementById("status-badge");
+            statusEl.textContent = d.running ? "RUNNING" : "STOPPED";
+            statusEl.className = "badge " + (d.running ? "badge-green" : "badge-red");
+            const cbEl = document.getElementById("circuit-badge");
+            cbEl.textContent = "CB: " + d.circuit_breaker;
+            cbEl.className = "badge " + (d.circuit_breaker === "ON" ? "badge-red" : "badge-yellow");
+            const uptime = d.uptime_sec || 0;
+            const h = Math.floor(uptime / 3600).toString().padStart(2, "0");
+            const m = Math.floor((uptime % 3600) / 60).toString().padStart(2, "0");
+            const s = (uptime % 60).toString().padStart(2, "0");
+            document.getElementById("uptime-badge").textContent = `${h}:${m}:${s}`;
         });
 
-        socket.on("disconnect", () => {
-            document.getElementById("conn-indicator").className = "pulse pulse-red";
-            document.getElementById("status-badge").textContent = "DISCONNECTED";
-            document.getElementById("status-badge").className = "status-badge status-err";
-        });
-
-        socket.on("status_update", (data) => {
-            document.getElementById("mode").textContent = data.mode || "--";
-            document.getElementById("uptime2").textContent = data.uptime || "--";
-            document.getElementById("uptime").textContent = data.uptime || "--";
-            document.getElementById("memory").textContent = data.memory || "--";
-            document.getElementById("circuit").textContent = data.circuit_breaker || "OFF";
-            if (data.circuit_breaker === "ON") {
-                document.getElementById("circuit").style.color = "#f87171";
+        // ── Live Data Stream ──
+        socket.on("live_data", (rows) => {
+            const tbody = document.getElementById("live-data-tbody");
+            if (!rows || rows.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="10" class="muted" style="text-align:center;">Waiting for data...</td></tr>`;
+                return;
             }
-        });
-
-        socket.on("market_data", (data) => {
-            eventHistory.push(Date.now());
-            const tbody = document.getElementById("market-data");
-            if (!data || data.length === 0) return;
-            tbody.innerHTML = data.map(row => {
-                const priceClass = row.price_change > 0 ? "up" : row.price_change < 0 ? "down" : "";
+            const now = Date.now() / 1000;
+            tbody.innerHTML = rows.map(r => {
+                const priceClass = r.price > r.vwap ? "up" : r.price < r.vwap ? "down" : "";
+                const age = r.last_update ? now - r.last_update : null;
+                const ageClass = age && age > 5 ? "yellow" : age && age > 30 ? "red" : "";
                 return `<tr>
-                    <td><span class="highlight">${row.symbol}</span></td>
-                    <td class="num ${priceClass}">${row.price ? row.price.toLocaleString("en-US", {minimumFractionDigits: 2}) : "--"}</td>
-                    <td class="num">${row.funding != null ? (row.funding * 100).toFixed(4) + "%" : "--"}</td>
-                    <td class="num">${row.predicted != null ? (row.predicted * 100).toFixed(4) + "%" : "--"}</td>
-                    <td class="num">${row.oi != null ? (row.oi / 1e6).toFixed(1) + "M" : "--"}</td>
-                    <td>${row.candles || "--"}</td>
-                    <td class="muted">${row.last_tick || "--"}</td>
+                    <td><span class="highlight">${r.symbol}</span></td>
+                    <td class="num ${priceClass}">${fmtNum(r.price)}</td>
+                    <td class="num tiny muted">${fmtNum(r.bid, 2)} / ${fmtNum(r.ask, 2)}</td>
+                    <td class="num tiny">${fmtNum(r.spread_pct, 4)}</td>
+                    <td class="num">${fmtPct(r.funding, 4)}</td>
+                    <td class="num">${fmtPct(r.predicted, 4)}</td>
+                    <td class="num">${fmtM(r.oi)}</td>
+                    <td class="num">${fmtNum(r.volume_1m)}</td>
+                    <td class="num ${r.imbalance > 0 ? 'up' : r.imbalance < 0 ? 'down' : ''}">${fmtNum(r.imbalance, 3)}</td>
+                    <td class="num tiny ${ageClass}">${fmtAge(age)}</td>
                 </tr>`;
             }).join("");
         });
 
+        // ── Engine Monitor ──
+        socket.on("engine_monitor", (d) => {
+            document.getElementById("ticks-per-sec").textContent = d.ticks_per_second != null ? d.ticks_per_second.toFixed(1) : "--";
+            document.getElementById("total-ticks").textContent = d.total_ticks != null ? d.total_ticks.toLocaleString() : "--";
+            document.getElementById("mem-mb").textContent = d.memory_mb != null ? d.memory_mb.toFixed(1) + " MB" : "--";
+            const errEl = document.getElementById("last-error");
+            if (d.last_error) {
+                errEl.textContent = d.last_error.substring(0, 60);
+                errEl.style.display = "inline";
+            } else {
+                errEl.textContent = "None";
+                errEl.style.color = "var(--green)";
+            }
+            document.getElementById("assets-list").textContent = (d.symbols || []).join(", ");
+            document.getElementById("strat-list").textContent = (d.strategies || []).join(", ");
+
+            const recentEl = document.getElementById("recent-events");
+            if (d.recent_events && d.recent_events.length > 0) {
+                recentEl.innerHTML = d.recent_events.map(e =>
+                    `<span class="highlight">${e.symbol}</span> @ ${fmtNum(e.price)} (${e.age_ms}ms ago)`
+                ).join("<br>");
+            } else {
+                recentEl.textContent = "No events yet";
+            }
+        });
+
+        // ── Candles ──
+        socket.on("candles", (rows) => {
+            const tbody = document.getElementById("candles-tbody");
+            if (!rows || rows.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="9" class="muted" style="text-align:center;">No candles yet</td></tr>`;
+                return;
+            }
+            tbody.innerHTML = rows.map(r => {
+                const chg = r.close != null && r.open != null ? r.close - r.open : 0;
+                const chgClass = chg > 0 ? "up" : chg < 0 ? "down" : "";
+                const buyPct = r.buy_volume != null && r.volume > 0 ? (r.buy_volume / r.volume * 100) : null;
+                return `<tr>
+                    <td><span class="highlight">${r.symbol}</span></td>
+                    <td class="mono">${r.timeframe}</td>
+                    <td class="num">${fmtNum(r.open)}</td>
+                    <td class="num">${fmtNum(r.high)}</td>
+                    <td class="num">${fmtNum(r.low)}</td>
+                    <td class="num ${chgClass}">${fmtNum(r.close)}</td>
+                    <td class="num">${fmtNum(r.volume)}</td>
+                    <td class="num ${buyPct > 60 ? 'up' : buyPct < 40 ? 'down' : ''}">${buyPct != null ? buyPct.toFixed(0) + "%" : "--"}</td>
+                    <td class="num">${fmtNum(r.vwap)}</td>
+                </tr>`;
+            }).join("");
+        });
+
+        // ── Strategies ──
         socket.on("strategies", (data) => {
-            const container = document.getElementById("strategies");
+            const container = document.getElementById("strategies-container");
+            if (!data || data.length === 0) {
+                container.innerHTML = `<div class="muted" style="text-align:center;">No strategies</div>`;
+                return;
+            }
             container.innerHTML = data.map(s => `
-                <div class="strategy-card ${s.active ? "strategy-active" : "strategy-inactive"}">
-                    <div class="strategy-name">${s.name} ${s.active ? "●" : "○"}</div>
-                    <div class="strategy-desc">${s.description}</div>
+                <div class="strategy-card ${s.enabled ? 'active' : 'inactive'}">
+                    <div class="strategy-name">${s.name} ${s.enabled ? "●" : "○"}</div>
+                    <div class="strategy-desc">${s.description || "No description"}</div>
                     <div class="strategy-params">${s.params || ""}</div>
-                    <div style="margin-top:6px; font-size:11px;">
-                        Last signal: ${s.last_signal || "never"} | 
-                        Signals today: ${s.signals_today || 0}
+                    <div style="margin-top:4px; font-size:10px; color:var(--dim);">
+                        Last signal: <span class="${s.last_signal_side === 'long' ? 'up' : s.last_signal_side === 'short' ? 'down' : ''}">
+                            ${s.last_signal_side ? s.last_signal_side.toUpperCase() : "never"}
+                        </span>
+                        ${s.last_signal_confidence != null ? `(${Math.round(s.last_signal_confidence * 100)}%)` : ""}
+                        <span class="pill pill-${s.last_signal_status || 'pending'}">${s.last_signal_status || "PENDING"}</span>
+                        | Today: ${s.signals_today || 0}
                     </div>
                 </div>
             `).join("");
         });
 
+        // ── Signals ──
         socket.on("signals", (data) => {
-            const tbody = document.getElementById("signals");
+            const tbody = document.getElementById("signals-tbody");
             if (!data || data.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="6" class="muted" style="text-align:center;">No signals yet</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" class="muted" style="text-align:center;">No signals yet</td></tr>`;
                 return;
             }
-            tbody.innerHTML = data.map(s => {
+            tbody.innerHTML = data.slice(0, 20).map(s => {
                 const sideClass = s.side === "long" ? "up" : s.side === "short" ? "down" : "";
+                const statusClass = s.status === "executed" ? "pill-executed" : s.status === "approved" ? "pill-approved" : s.status === "rejected" ? "pill-rejected" : "pill-pending";
                 return `<tr>
-                    <td class="muted">${s.time || "--"}</td>
+                    <td class="muted tiny">${s.time || "--"}</td>
                     <td>${s.strategy}</td>
-                    <td>${s.symbol}</td>
+                    <td><span class="highlight">${s.symbol}</span></td>
                     <td class="${sideClass}">${s.side ? s.side.toUpperCase() : "--"}</td>
                     <td class="num">${s.confidence != null ? (s.confidence * 100).toFixed(0) + "%" : "--"}</td>
-                    <td class="muted">${s.reason || ""}</td>
+                    <td><span class="pill ${statusClass}">${s.status || "PENDING"}</span></td>
+                    <td class="muted tiny">${s.reason ? s.reason.substring(0, 40) : ""}</td>
                 </tr>`;
             }).join("");
         });
 
-        socket.on("portfolio", (data) => {
-            document.getElementById("capital").textContent = data.capital != null
-                ? "$" + data.capital.toLocaleString("en-US", {minimumFractionDigits: 2})
-                : "--";
-            const pnlEl = document.getElementById("daily-pnl");
-            pnlEl.textContent = data.daily_pnl != null
-                ? (data.daily_pnl >= 0 ? "+" : "") + "$" + data.daily_pnl.toFixed(2)
-                : "--";
-            pnlEl.className = "metric-value " + (data.daily_pnl >= 0 ? "up" : data.daily_pnl < 0 ? "down" : "");
-            document.getElementById("drawdown").textContent = data.max_drawdown != null
-                ? data.max_drawdown.toFixed(2) + "%"
-                : "--";
-            document.getElementById("positions-count").textContent = data.open_positions != null
-                ? data.open_positions.toString()
-                : "--";
-            document.getElementById("daily-trades").textContent = data.daily_trades != null
-                ? data.daily_trades.toString()
-                : "--";
+        // ── Decisions ──
+        socket.on("decisions", (data) => {
+            const tbody = document.getElementById("decisions-tbody");
+            if (!data || data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="6" class="muted" style="text-align:center;">No decisions yet</td></tr>`;
+                return;
+            }
+            tbody.innerHTML = data.slice(0, 20).map(d => {
+                const resultClass = d.result === "approved" || d.result === "executed" ? "up" : d.result === "rejected" ? "down" : "";
+                return `<tr>
+                    <td class="muted tiny">${d.time || "--"}</td>
+                    <td>${d.type || "--"}</td>
+                    <td><span class="highlight">${d.symbol}</span></td>
+                    <td class="${d.side === 'long' ? 'up' : d.side === 'short' ? 'down' : ''}">${d.side ? d.side.toUpperCase() : "--"}</td>
+                    <td class="${resultClass}">${d.result || "--"}</td>
+                    <td class="muted tiny">${d.reason ? d.reason.substring(0, 50) : ""}</td>
+                </tr>`;
+            }).join("");
         });
 
+        // ── Portfolio ──
+        socket.on("portfolio", (d) => {
+            document.getElementById("capital").textContent = d.capital != null ? "$" + fmtNum(d.capital) : "--";
+            const pnlEl = document.getElementById("daily-pnl");
+            if (d.daily_pnl != null) {
+                pnlEl.textContent = (d.daily_pnl >= 0 ? "+" : "") + "$" + fmtNum(d.daily_pnl);
+                pnlEl.style.color = d.daily_pnl >= 0 ? "var(--green)" : "var(--red)";
+            } else {
+                pnlEl.textContent = "--";
+            }
+            document.getElementById("drawdown").textContent = d.max_drawdown_pct != null ? d.max_drawdown_pct.toFixed(2) + "%" : "--";
+            document.getElementById("open-pos").textContent = d.open_positions != null ? d.open_positions.toString() : "--";
+            document.getElementById("daily-trades").textContent = d.daily_trades != null ? d.daily_trades.toString() : "--";
+        });
+
+        // ── Positions ──
         socket.on("positions", (data) => {
-            const tbody = document.getElementById("positions");
+            const tbody = document.getElementById("positions-tbody");
             if (!data || data.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="7" class="muted" style="text-align:center;">No open positions</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" class="muted" style="text-align:center;">No positions</td></tr>`;
                 return;
             }
             tbody.innerHTML = data.map(p => {
                 const pnlClass = p.pnl_pct > 0 ? "up" : p.pnl_pct < 0 ? "down" : "";
                 return `<tr>
-                    <td>${p.symbol}</td>
-                    <td class="${p.side === "long" ? "up" : "down"}">${p.side ? p.side.toUpperCase() : "--"}</td>
-                    <td class="num">${p.size != null ? p.size.toFixed(4) : "--"}</td>
-                    <td class="num">${p.entry_price != null ? p.entry_price.toFixed(2) : "--"}</td>
-                    <td class="num">${p.current_price != null ? p.current_price.toFixed(2) : "--"}</td>
+                    <td><span class="highlight">${p.symbol}</span></td>
+                    <td class="${p.side === 'long' ? 'up' : 'down'}">${p.side ? p.side.toUpperCase() : "--"}</td>
+                    <td class="num">${fmtNum(p.size, 6)}</td>
+                    <td class="num">${fmtNum(p.entry_price)}</td>
+                    <td class="num">${fmtNum(p.current_price)}</td>
                     <td class="num ${pnlClass}">${p.pnl_pct != null ? p.pnl_pct.toFixed(2) + "%" : "--"}</td>
-                    <td class="num muted">${p.duration || "--"}</td>
+                    <td class="muted tiny">${p.strategy || "--"}</td>
                 </tr>`;
             }).join("");
         });
 
-        socket.on("funding_comp", (data) => {
-            const tbody = document.getElementById("funding-comp");
-            if (!data || data.length === 0) return;
-            tbody.innerHTML = data.map(row => `
-                <tr>
-                    <td>${row.symbol}</td>
-                    <td class="num">${row.hl_funding != null ? (row.hl_funding * 100).toFixed(4) + "%" : "--"}</td>
-                    <td class="num">${row.agg_funding != null ? (row.agg_funding * 100).toFixed(4) + "%" : "--"}</td>
-                    <td class="num">${row.hl_oi != null ? (row.hl_oi / 1e6).toFixed(1) + "M" : "--"}</td>
-                    <td class="num">${row.agg_oi != null ? (row.agg_oi / 1e6).toFixed(1) + "M" : "--"}</td>
-                    <td class="muted">${row.exchanges || "--"}</td>
-                </tr>
-            `).join("");
-        });
-
+        // ── Logs ──
         socket.on("logs", (data) => {
-            const container = document.getElementById("logs");
-            const entries = data.map(l => {
+            const container = document.getElementById("logs-container");
+            if (!data || data.length === 0) {
+                container.innerHTML = "Waiting for logs...";
+                return;
+            }
+            container.innerHTML = data.map(l => {
                 let cls = "log-info";
                 if (l.level === "WARNING" || l.level === "WARN") cls = "log-warn";
                 if (l.level === "ERROR") cls = "log-err";
                 return `<div><span class="log-time">${l.time}</span> <span class="${cls}">[${l.level}]</span> ${l.message}</div>`;
             }).join("");
-            container.innerHTML = entries;
             container.scrollTop = container.scrollHeight;
         });
 
-        // Initial load
-        fetch("/api/status").then(r => r.json()).then(data => {
-            if (data.mode) document.getElementById("mode").textContent = data.mode;
+        // ── Connection ──
+        socket.on("connect", () => {
+            document.getElementById("conn-badge").textContent = "LIVE";
+            document.getElementById("conn-badge").className = "badge badge-green";
+        });
+        socket.on("disconnect", () => {
+            document.getElementById("conn-badge").textContent = "OFFLINE";
+            document.getElementById("conn-badge").className = "badge badge-red";
+        });
+
+        // Initial load via REST fallback
+        fetch("/api/status").then(r => r.json()).then(d => {
+            if (d.mode) document.getElementById("mode-badge").textContent = d.mode.toUpperCase();
         });
     </script>
 </body>
@@ -444,7 +960,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
     def index():
         return INDEX_HTML
 
-    # ── REST API ──
+    # ── REST API (fallback + initial load) ──
 
     @app.route("/api/status")
     def api_status():
@@ -453,73 +969,41 @@ def create_app(config: Dict[str, Any]) -> tuple:
         return jsonify({
             "status": "ok",
             "online": True,
-            "mode": "paper",  # TODO: pass from main
-            "uptime": _engine.uptime_sec if hasattr(_engine, "uptime_sec") else 0,
-            "memory_mb": _engine.memory_mb if hasattr(_engine, "memory_mb") else 0,
-            "circuit_breaker": "ON" if (_engine.risk_manager.circuit_breaker_tripped if hasattr(_engine, "risk_manager") else False) else "OFF",
+            "mode": getattr(_engine, "_config", {}).get("mode", "paper") if hasattr(_engine, "_config") else "paper",
+            "uptime": getattr(_engine, "uptime_sec", 0),
+            "memory_mb": getattr(_engine, "memory_mb", 0),
+            "circuit_breaker": "ON" if getattr(getattr(_engine, "_risk", None), "circuit_breaker_tripped", False) else "OFF",
+            "running": getattr(_engine, "_running", False),
         })
 
-    @app.route("/api/market")
-    def api_market():
-        """Return current market data for all tracked assets."""
+    @app.route("/api/live_data")
+    def api_live_data():
         if _engine is None:
             return jsonify([])
-        
-        result = []
+        rows = []
         for sym in getattr(_engine, "_symbols", []):
-            price = getattr(_engine, "_latest_prices", {}).get(sym)
+            price = getattr(_engine, "_latest_price", {}).get(sym)
             ctx = getattr(_engine, "_latest_ctx", {}).get(sym)
-            agg = getattr(_engine, "_latest_aggregated_funding", {}).get(sym)
-            candles = getattr(_engine, "_latest_candles", {}).get(sym, {})
-            
-            candle_status = []
-            for tf, label in [(60, "1m"), (300, "5m"), (900, "15m"), (3600, "1h")]:
-                c = candles.get(tf)
-                if c:
-                    candle_status.append(label)
-            
-            result.append({
+            evt = getattr(_engine, "_last_market_events", {}).get(sym, {})
+            rows.append({
                 "symbol": sym,
-                "price": price,
+                "price": getattr(price, "mid", None) if price else None,
                 "funding": getattr(ctx, "funding_rate", None) if ctx else None,
-                "predicted": getattr(ctx, "predicted_funding", None) if ctx else None,
                 "oi": getattr(ctx, "open_interest", None) if ctx else None,
-                "agg_funding": getattr(agg, "funding_weighted", None) if agg else None,
-                "agg_oi": getattr(agg, "oi_total", None) if agg else None,
-                "candles": ", ".join(candle_status) if candle_status else "none",
-                "last_tick": datetime.now(timezone.utc).strftime("%H:%M:%S"),
             })
-        return jsonify(result)
+        return jsonify(rows)
 
     @app.route("/api/strategies")
     def api_strategies():
         if _engine is None:
             return jsonify([])
-        strategies = getattr(_engine, "_strategies", [])
-        result = []
-        for s in strategies:
-            result.append({
+        return jsonify([
+            {
                 "name": getattr(s, "name", "unknown"),
-                "active": True,
-                "description": getattr(s, "__doc__", "No description"),
-                "params": str(getattr(s, "params", {})),
-                "last_signal": "--",
-                "signals_today": 0,
-            })
-        return jsonify(result)
-
-    @app.route("/api/signals")
-    def api_signals():
-        if _engine is None:
-            return jsonify([])
-        db = getattr(_engine, "_db", None)
-        if db is None:
-            return jsonify([])
-        try:
-            rows = db.get_signals(limit=10)
-            return jsonify(rows)
-        except Exception:
-            return jsonify([])
+                "enabled": getattr(s, "enabled", True),
+            }
+            for s in getattr(_engine, "_strategies", [])
+        ])
 
     @app.route("/api/portfolio")
     def api_portfolio():
@@ -531,66 +1015,21 @@ def create_app(config: Dict[str, Any]) -> tuple:
         return jsonify({
             "capital": getattr(portfolio, "sync_capital", lambda: 0)(),
             "daily_pnl": getattr(portfolio, "sync_daily_pnl", lambda: 0)(),
-            "max_drawdown": getattr(portfolio, "sync_max_drawdown_pct", lambda: 0)(),
             "open_positions": len(getattr(portfolio, "get_positions_sync", lambda: {})()),
-            "daily_trades": getattr(portfolio, "sync_daily_trades", lambda: 0)(),
         })
-
-    @app.route("/api/positions")
-    def api_positions():
-        if _engine is None:
-            return jsonify([])
-        portfolio = getattr(_engine, "portfolio", None)
-        if portfolio is None:
-            return jsonify([])
-        positions = getattr(portfolio, "get_positions_sync", lambda: {})()
-        result = []
-        for sym, pos in positions.items():
-            result.append({
-                "symbol": sym,
-                "side": getattr(pos, "side", "--"),
-                "size": getattr(pos, "size", 0),
-                "entry_price": getattr(pos, "entry_price", 0),
-                "current_price": getattr(pos, "current_price", getattr(pos, "entry_price", 0)),
-                "pnl_pct": getattr(pos, "unrealized_pnl", 0) / getattr(pos, "entry_price", 1) * 100 if getattr(pos, "entry_price", 0) else 0,
-                "duration": "--",
-            })
-        return jsonify(result)
-
-    @app.route("/api/funding")
-    def api_funding():
-        """Return funding comparison: Hyperliquid vs Aggregated."""
-        if _engine is None:
-            return jsonify([])
-        result = []
-        for sym in getattr(_engine, "_symbols", []):
-            ctx = getattr(_engine, "_latest_ctx", {}).get(sym)
-            agg = getattr(_engine, "_latest_aggregated_funding", {}).get(sym)
-            result.append({
-                "symbol": sym,
-                "hl_funding": getattr(ctx, "funding_rate", None) if ctx else None,
-                "agg_funding": getattr(agg, "funding_weighted", None) if agg else None,
-                "hl_oi": getattr(ctx, "open_interest", None) if ctx else None,
-                "agg_oi": getattr(agg, "oi_total", None) if agg else None,
-                "exchanges": getattr(agg, "exchange_count", 0) if agg else 0,
-            })
-        return jsonify(result)
 
     @app.route("/api/logs")
     def api_logs():
-        """Return last N log entries."""
-        # Read from the log file
         log_path = os.path.join(os.path.dirname(__file__), "..", "..", "logs", "bot.log")
         log_path = os.path.abspath(log_path)
         entries = []
         try:
             with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
-                for line in lines[-20:]:
+                for line in lines[-50:]:
                     line = line.strip()
                     if not line:
                         continue
-                    # Parse log format: 2026-05-07 00:00:00 | LEVEL | module | message
                     parts = line.split(" | ")
                     if len(parts) >= 4:
                         entries.append({
@@ -599,150 +1038,20 @@ def create_app(config: Dict[str, Any]) -> tuple:
                             "module": parts[2].strip(),
                             "message": " | ".join(parts[3:]),
                         })
-                    else:
-                        entries.append({
-                            "time": "",
-                            "level": "INFO",
-                            "module": "",
-                            "message": line,
-                        })
         except Exception:
             pass
         return jsonify(entries)
-
-    # ── Socket.IO emitters ──
-
-    def emit_updates():
-        """Called by main.py to push real-time updates via Socket.IO."""
-        if _socketio is None or _engine is None:
-            return
-        try:
-            # Status
-            _socketio.emit("status_update", {
-                "mode": "paper",
-                "uptime": getattr(_engine, "uptime_sec", 0),
-                "memory": getattr(_engine, "memory_mb", 0),
-                "circuit_breaker": "ON" if getattr(getattr(_engine, "risk_manager", None), "circuit_breaker_tripped", False) else "OFF",
-            })
-
-            # Market data
-            market_data = []
-            for sym in getattr(_engine, "_symbols", []):
-                price = getattr(_engine, "_latest_prices", {}).get(sym)
-                ctx = getattr(_engine, "_latest_ctx", {}).get(sym)
-                agg = getattr(_engine, "_latest_aggregated_funding", {}).get(sym)
-                candles = getattr(_engine, "_latest_candles", {}).get(sym, {})
-                candle_status = []
-                for tf, label in [(60, "1m"), (300, "5m"), (900, "15m"), (3600, "1h")]:
-                    if candles.get(tf):
-                        candle_status.append(label)
-                market_data.append({
-                    "symbol": sym,
-                    "price": price,
-                    "funding": getattr(ctx, "funding_rate", None) if ctx else None,
-                    "predicted": getattr(ctx, "predicted_funding", None) if ctx else None,
-                    "oi": getattr(ctx, "open_interest", None) if ctx else None,
-                    "candles": ", ".join(candle_status) if candle_status else "none",
-                    "last_tick": datetime.now(timezone.utc).strftime("%H:%M:%S"),
-                })
-            _socketio.emit("market_data", market_data)
-
-            # Strategies
-            strategies = getattr(_engine, "_strategies", [])
-            strat_data = []
-            for s in strategies:
-                strat_data.append({
-                    "name": getattr(s, "name", "unknown"),
-                    "active": True,
-                    "description": getattr(s, "__doc__", "No description"),
-                    "params": str(getattr(s, "params", {})),
-                    "last_signal": "--",
-                    "signals_today": 0,
-                })
-            _socketio.emit("strategies", strat_data)
-
-            # Portfolio
-            portfolio = getattr(_engine, "portfolio", None)
-            if portfolio:
-                _socketio.emit("portfolio", {
-                    "capital": getattr(portfolio, "sync_capital", lambda: 0)(),
-                    "daily_pnl": getattr(portfolio, "sync_daily_pnl", lambda: 0)(),
-                    "max_drawdown": getattr(portfolio, "sync_max_drawdown_pct", lambda: 0)(),
-                    "open_positions": len(getattr(portfolio, "get_positions_sync", lambda: {})()),
-                    "daily_trades": getattr(portfolio, "sync_daily_trades", lambda: 0)(),
-                })
-
-            # Positions
-            positions = getattr(portfolio, "get_positions_sync", lambda: {})() if portfolio else {}
-            pos_data = []
-            for sym, pos in positions.items():
-                pos_data.append({
-                    "symbol": sym,
-                    "side": getattr(pos, "side", "--"),
-                    "size": getattr(pos, "size", 0),
-                    "entry_price": getattr(pos, "entry_price", 0),
-                    "current_price": getattr(pos, "current_price", getattr(pos, "entry_price", 0)),
-                    "pnl_pct": getattr(pos, "unrealized_pnl", 0) / getattr(pos, "entry_price", 1) * 100 if getattr(pos, "entry_price", 0) else 0,
-                    "duration": "--",
-                })
-            _socketio.emit("positions", pos_data)
-
-            # Funding comparison
-            funding_data = []
-            for sym in getattr(_engine, "_symbols", []):
-                ctx = getattr(_engine, "_latest_ctx", {}).get(sym)
-                agg = getattr(_engine, "_latest_aggregated_funding", {}).get(sym)
-                funding_data.append({
-                    "symbol": sym,
-                    "hl_funding": getattr(ctx, "funding_rate", None) if ctx else None,
-                    "agg_funding": getattr(agg, "funding_weighted", None) if agg else None,
-                    "hl_oi": getattr(ctx, "open_interest", None) if ctx else None,
-                    "agg_oi": getattr(agg, "oi_total", None) if agg else None,
-                    "exchanges": getattr(agg, "exchange_count", 0) if agg else 0,
-                })
-            _socketio.emit("funding_comp", funding_data)
-
-            # Logs
-            log_path = os.path.join(os.path.dirname(__file__), "..", "..", "logs", "bot.log")
-            log_path = os.path.abspath(log_path)
-            log_entries = []
-            try:
-                with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = f.readlines()
-                    for line in lines[-20:]:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        parts = line.split(" | ")
-                        if len(parts) >= 4:
-                            log_entries.append({
-                                "time": parts[0],
-                                "level": parts[1].strip(),
-                                "message": " | ".join(parts[3:]),
-                            })
-            except Exception:
-                pass
-            _socketio.emit("logs", log_entries)
-
-        except Exception as e:
-            logger.warning("emit_updates failed: %s", e)
 
     # ── Socket.IO events ──
 
     @socketio.on("connect")
     def on_connect(auth=None):
         logger.info("Dashboard client connected")
-        emit("status_update", {
-            "mode": "paper",
-            "uptime": getattr(_engine, "uptime_sec", 0) if _engine else 0,
-            "memory": getattr(_engine, "memory_mb", 0) if _engine else 0,
-            "circuit_breaker": "OFF",
-        })
-        # Push immediate data
-        emit_updates()
+        # Push everything immediately
+        emitter._emit_all()
 
     @socketio.on("disconnect")
     def on_disconnect(reason=None):
         logger.info("Dashboard client disconnected: %s", reason)
 
-    return app, socketio, emit_updates
+    return app, socketio, emitter._emit_all

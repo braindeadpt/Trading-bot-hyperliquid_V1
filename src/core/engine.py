@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from src.data.database import (
@@ -92,6 +93,14 @@ class TradingEngine:
 
         # Track which topics we subscribed to so we can unsubscribe on stop
         self._subscribed_callbacks: Dict[str, Any] = {}
+
+        # ── Dashboard tracking (real-time introspection) ──
+        self._last_market_events: Dict[str, Dict] = {}
+        self._signal_history: List[Dict] = []
+        self._decision_history: List[Dict] = []
+        self._tick_stats = {"total": 0, "per_second": 0.0, "last_tick_time": 0.0, "tick_times": []}
+        self._last_error: Optional[str] = None
+        self._on_dashboard_tick: Optional[Any] = None  # callback set by main.py
 
     # ── Public properties for dashboard / external access ──
     @property
@@ -264,6 +273,46 @@ class TradingEngine:
             if event is None:
                 return
 
+            # --- Dashboard tracking ---
+            now = time.time()
+            self._tick_stats["total"] += 1
+            self._tick_stats["last_tick_time"] = now
+            # Keep last 60 tick timestamps for per-second calculation
+            self._tick_stats["tick_times"].append(now)
+            self._tick_stats["tick_times"] = [t for t in self._tick_stats["tick_times"] if now - t <= 1.0]
+            self._tick_stats["per_second"] = len(self._tick_stats["tick_times"])
+
+            self._last_market_events[symbol] = {
+                "symbol": symbol,
+                "price": event.price,
+                "timestamp_ms": event.timestamp_ms,
+                "funding": event.funding,
+                "predicted_funding": event.predicted_funding,
+                "oi_total": event.oi_total,
+                "oi_delta": event.oi_delta,
+                "volume_1m": event.volume_1m,
+                "bid_ask_imbalance": event.bid_ask_imbalance,
+                "vwap_15m": event.vwap_15m,
+                "candles": {
+                    "1m": event.candle_1m is not None,
+                    "5m": event.candle_5m is not None,
+                    "15m": event.candle_15m is not None,
+                    "1h": event.candle_1h is not None,
+                },
+                "processed_at": now,
+            }
+
+            # --- Dashboard callback (fire-and-forget, don't block) ---
+            if self._on_dashboard_tick:
+                try:
+                    cb = self._on_dashboard_tick
+                    if asyncio.iscoroutinefunction(cb):
+                        asyncio.create_task(cb())
+                    else:
+                        cb()
+                except Exception:
+                    pass
+
             # --- Update portfolio prices (triggers unrealized PnL) ---
             await self._portfolio.update_price(symbol, event.price)
 
@@ -345,29 +394,16 @@ class TradingEngine:
             volume_1m=getattr(candles.get(60), 'volume', None) if candles.get(60) else None,
             bid_ask_imbalance=self._calc_imbalance(candles.get(900)),
             vwap_15m=getattr(candles.get(900), 'vwap', None) if candles.get(900) else None,
-            # Aggregated cross-exchange data
-            funding_aggregated=agg_data.funding_weighted if agg_data else None,
-            funding_avg=agg_data.funding_avg if agg_data else None,
-            predicted_funding_aggregated=agg_data.predicted_funding_avg if agg_data else None,
-            oi_aggregated=agg_data.oi_total if agg_data else None,
-            oi_exchange_count=agg_data.exchange_count if agg_data else 0,
-            # Hyperliquid-specific data
-            funding_hl=safe_float(ctx.funding_rate) if ctx else None,
-            predicted_funding_hl=safe_float(ctx.predicted_funding) if ctx else None,
-            oi_hl=safe_float(ctx.open_interest) if ctx else None,
         )
 
         # Log orderflow metrics for debugging
         logger.info(
-            "MarketEvent %s: price=%.2f, funding_hl=%.6f, funding_agg=%s, predicted_agg=%s, oi_hl=%.2f, oi_agg=%s, imbalance=%s, exchanges=%d",
+            "MarketEvent %s: price=%.2f, funding=%.6f, predicted=%s, oi=%.2f, imbalance=%s",
             symbol, event.price,
-            event.funding_hl or 0,
-            f"{event.funding_aggregated:.6f}" if event.funding_aggregated else "N/A",
-            f"{event.predicted_funding_aggregated:.6f}" if event.predicted_funding_aggregated else "N/A",
-            event.oi_hl or 0,
-            f"{event.oi_aggregated:,.0f}" if event.oi_aggregated else "N/A",
+            event.funding or 0,
+            f"{event.predicted_funding:.6f}" if event.predicted_funding else "N/A",
+            event.oi_total or 0,
             event.bid_ask_imbalance,
-            event.oi_exchange_count,
         )
 
         return event
@@ -402,16 +438,29 @@ class TradingEngine:
             )
         )
 
+        # --- Signal tracking for dashboard ---
+        sig_time = datetime.fromtimestamp(event.timestamp_ms / 1000, tz=timezone.utc).strftime("%H:%M:%S")
+        sig_record = {
+            "time": sig_time,
+            "strategy": signal.strategy,
+            "symbol": signal.symbol,
+            "side": signal.side,
+            "confidence": signal.confidence,
+            "price": event.price,
+            "reason": signal.reason,
+            "status": "pending",
+            "risk_reason": "",
+            "size": 0,
+        }
+        self._signal_history.insert(0, sig_record)
+        self._signal_history = self._signal_history[:100]
+
         # --- Risk check ---
-        # PortfolioState properties are async, so we need to await them.
-        # RiskManager.can_enter expects the portfolio object directly; it
-        # accesses properties synchronously.  We gather the values first.
         capital = await self._portfolio.current_capital
         positions = await self._portfolio.positions
         daily_pnl = await self._portfolio.daily_pnl
         daily_trades = await self._portfolio.daily_trades
 
-        # Build a lightweight sync-read proxy for the risk manager
         portfolio_proxy = _PortfolioProxy(
             capital=capital,
             positions=positions,
@@ -429,6 +478,17 @@ class TradingEngine:
                 signal.confidence,
                 reason,
             )
+            sig_record["status"] = "rejected"
+            sig_record["risk_reason"] = reason
+            self._decision_history.insert(0, {
+                "time": sig_time,
+                "type": "risk",
+                "symbol": signal.symbol,
+                "side": signal.side,
+                "result": "rejected",
+                "reason": reason,
+            })
+            self._decision_history = self._decision_history[:100]
             return
 
         # --- Position sizing ---
@@ -480,7 +540,30 @@ class TradingEngine:
             result = await self._executor.enter_position(signal, self._portfolio)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Execution failed for %s: %s", signal.symbol, exc)
+            sig_record["status"] = "failed"
+            sig_record["risk_reason"] = str(exc)[:80]
+            self._decision_history.insert(0, {
+                "time": sig_time,
+                "type": "execution",
+                "symbol": signal.symbol,
+                "side": signal.side,
+                "result": "failed",
+                "reason": str(exc)[:80],
+            })
+            self._decision_history = self._decision_history[:100]
             return
+
+        sig_record["status"] = "executed"
+        sig_record["size"] = result.size
+        self._decision_history.insert(0, {
+            "time": sig_time,
+            "type": "execution",
+            "symbol": signal.symbol,
+            "side": signal.side,
+            "result": "executed",
+            "reason": f"size={result.size:.6f} @ {result.entry_price:.2f}",
+        })
+        self._decision_history = self._decision_history[:100]
 
         # --- Update portfolio ---
         notional = result.entry_price * result.size
@@ -544,6 +627,15 @@ class TradingEngine:
             result = await self._executor.close_position(position, exit_price, reason)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Exit execution failed for %s: %s", position.symbol, exc)
+            self._decision_history.insert(0, {
+                "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                "type": "exit",
+                "symbol": position.symbol,
+                "side": position.side,
+                "result": "failed",
+                "reason": str(exc)[:80],
+            })
+            self._decision_history = self._decision_history[:100]
             return
 
         # Update portfolio
@@ -557,6 +649,16 @@ class TradingEngine:
 
         # Update risk manager metrics
         self._risk.on_trade_closed(result)
+
+        self._decision_history.insert(0, {
+            "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            "type": "exit",
+            "symbol": position.symbol,
+            "side": position.side,
+            "result": "closed",
+            "reason": f"{reason} pnl={result.pnl_usd:.2f} ({result.pnl_pct*100:.2f}%)",
+        })
+        self._decision_history = self._decision_history[:100]
 
         logger.info(
             "Position CLOSED %s pnl=%.2f (%.2f%%) reason=%s",
