@@ -93,12 +93,21 @@ strategy:
     enabled: true
     timeframe: "15m"
     context_timeframe: "1h"
-    extreme_threshold: 0.008        # 0.8% predicted funding
-    strong_threshold: 0.005         # 0.5% predicted funding
+    extreme_threshold: 0.008        # 0.8% predicted funding (fallback if dynamic off)
+    strong_threshold: 0.005         # 0.5% predicted funding (fallback if dynamic off)
     overcrowded_oi_pct: 65.0        # OI concentration on one side
     max_hold_minutes: 60
     stop_loss_pct: 2.0
     min_confidence: 0.65
+    # ── Task 2.3: Dynamic upgrades ──
+    use_dynamic_percentile: true    # use rolling p90 instead of fixed thresholds
+    funding_percentile_lookback: 90 # ~90 funding observations (30 days of 8h funding)
+    funding_percentile: 90          # 90th percentile = "extreme"
+    use_cross_exchange_confirm: true  # confirm funding is extreme across exchanges
+    cross_exchange_deviation_max: 0.003  # HL funding can't deviate >0.3% from avg
+    require_oi_decreasing: true     # only enter when OI is decreasing
+    oi_delta_threshold: 0.0         # OI_delta must be < 0 (decreasing)
+    use_predicted_primary: true     # use predicted funding as primary signal
 
 # ═══════════════════════════════════════════════════════════
 # Backtest

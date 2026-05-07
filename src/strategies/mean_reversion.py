@@ -8,6 +8,7 @@ the majority is already positioned that way — reversion is likely.
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 import collections
+import logging
 
 from src.strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
 from src.strategies.indicators import (
@@ -20,12 +21,17 @@ from src.strategies.indicators import (
     calculate_overcrowded_score,
 )
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class _MeanRevState:
     """Internal state for mean reversion strategy."""
     candles_1h: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=60))
     candles_15m: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=40))
+    # Rolling funding history for dynamic percentile calculation
+    funding_history: Deque[float] = field(default_factory=lambda: collections.deque(maxlen=500))
+    predicted_funding_history: Deque[float] = field(default_factory=lambda: collections.deque(maxlen=500))
     last_atr: Optional[float] = None
     last_signal_side: Optional[str] = None
     last_signal_ts: int = 0
@@ -60,6 +66,15 @@ class MeanReversion(Strategy):
         self.SR_LOOKBACK = cfg.get("sr_lookback", 30)
         self.MIN_CONFIDENCE_EXTREME = cfg.get("min_confidence_extreme", 0.85)
         self.MIN_CONFIDENCE_STRONG = cfg.get("min_confidence_strong", 0.65)
+        # ── Task 2.3: Dynamic upgrades ──
+        self.USE_DYNAMIC_PERCENTILE = cfg.get("use_dynamic_percentile", True)
+        self.FUNDING_PERCENTILE_LOOKBACK = cfg.get("funding_percentile_lookback", 90)  # 90 obs ~ 30 days
+        self.FUNDING_PERCENTILE = cfg.get("funding_percentile", 90)  # p90
+        self.USE_CROSS_EXCHANGE_CONFIRM = cfg.get("use_cross_exchange_confirm", True)
+        self.CROSS_EXCHANGE_DEVIATION_MAX = cfg.get("cross_exchange_deviation_max", 0.003)  # 0.3%
+        self.REQUIRE_OI_DECREASING = cfg.get("require_oi_decreasing", True)
+        self.OI_DELTA_THRESHOLD = cfg.get("oi_delta_threshold", 0.0)  # OI must be decreasing
+        self.USE_PREDICTED_PRIMARY = cfg.get("use_predicted_primary", True)
 
     @property
     def name(self) -> str:
@@ -69,6 +84,81 @@ class MeanReversion(Strategy):
         if symbol not in self._state:
             self._state[symbol] = _MeanRevState()
         return self._state[symbol]
+
+    def _compute_dynamic_thresholds(
+        self,
+        state: _MeanRevState,
+    ) -> Tuple[float, float]:
+        """Compute dynamic funding thresholds from rolling history.
+
+        Returns (extreme_threshold, strong_threshold) based on historical
+        funding percentiles. Falls back to fixed config if insufficient history.
+        """
+        hist = list(state.funding_history)
+        if len(hist) < self.FUNDING_PERCENTILE_LOOKBACK // 2:
+            # Not enough history — use fixed thresholds
+            return self.FUNDING_EXTREME, self.FUNDING_STRONG
+
+        # Use the last N observations for percentile calculation
+        sample = hist[-self.FUNDING_PERCENTILE_LOOKBACK:]
+        sample_abs = sorted([abs(v) for v in sample])
+        n = len(sample_abs)
+        # Linear interpolation for percentile
+        idx = int((self.FUNDING_PERCENTILE / 100.0) * (n - 1))
+        p90 = sample_abs[idx]
+        # Strong threshold = 70th percentile of the same sample
+        idx70 = int(0.70 * (n - 1))
+        p70 = sample_abs[idx70]
+
+        # Sanity caps: don't let dynamic thresholds go crazy
+        p90 = min(max(p90, 0.001), 0.02)   # 0.1% to 2.0%
+        p70 = min(max(p70, 0.0005), 0.01)  # 0.05% to 1.0%
+
+        return p90, p70
+
+    def _cross_exchange_confirms(
+        self,
+        event: MarketEvent,
+        funding: float,
+    ) -> bool:
+        """Confirm that funding extremity is not just a HL outlier.
+
+        Checks that cross-exchange average funding is also extreme
+        and that HL funding isn't wildly divergent from others.
+        """
+        if not self.USE_CROSS_EXCHANGE_CONFIRM:
+            return True  # skip check
+
+        # Need cross-exchange aggregated data
+        avg_funding = event.funding_avg
+        if avg_funding is None:
+            return True  # no data, pass through
+
+        # HL funding and average should point in the same direction
+        if (funding > 0 and avg_funding <= 0) or (funding < 0 and avg_funding >= 0):
+            logger.debug(
+                "Cross-exchange mismatch: HL funding=%.6f vs avg=%.6f",
+                funding, avg_funding,
+            )
+            return False
+
+        # HL funding shouldn't be more than 0.3% away from cross-exchange average
+        deviation = abs(funding - avg_funding)
+        if deviation > self.CROSS_EXCHANGE_DEVIATION_MAX:
+            logger.debug(
+                "HL funding outlier: %.6f vs avg %.6f (deviation %.4f%%)",
+                funding, avg_funding, deviation * 100,
+            )
+            return False
+
+        # Average funding should also be "strong" (same sign, reasonable magnitude)
+        if abs(avg_funding) < self.FUNDING_STRONG * 0.5:
+            logger.debug(
+                "Cross-exchange funding too mild: avg=%.6f", avg_funding,
+            )
+            return False
+
+        return True
 
     def on_data(self, event: MarketEvent) -> Optional[Signal]:
         """Evaluate contrarian entry on extreme funding + overcrowded OI."""
@@ -94,20 +184,43 @@ class MeanReversion(Strategy):
         else:
             rv = None
 
-        # We need predicted funding (primary) or current funding
-        funding = event.predicted_funding
-        if funding is None:
-            funding = event.funding
-        if funding is None:
+        # ── Task 2.3: Predicted funding check with cross-validation ──
+        # Primary: predicted funding. Fallback: current funding.
+        # Both are stored in history for percentile calculation.
+        pred_funding = event.predicted_funding
+        curr_funding = event.funding
+
+        if self.USE_PREDICTED_PRIMARY and pred_funding is not None:
+            funding = pred_funding
+        elif curr_funding is not None:
+            funding = curr_funding
+        else:
             return None  # Can't trade without funding data
+
+        # Store in rolling history for dynamic percentile
+        if curr_funding is not None:
+            state.funding_history.append(curr_funding)
+        if pred_funding is not None:
+            state.predicted_funding_history.append(pred_funding)
+
+        # Compute dynamic thresholds from history
+        extreme_threshold, strong_threshold = self._compute_dynamic_thresholds(state)
 
         # --- Check funding extremity ---
         funding_abs = abs(funding)
-        is_extreme = funding_abs >= self.FUNDING_EXTREME
-        is_strong = funding_abs >= self.FUNDING_STRONG
+        is_extreme = funding_abs >= extreme_threshold
+        is_strong = funding_abs >= strong_threshold
 
         if not is_strong:
             return None  # Not extreme enough for contrarian play
+
+        # Cross-exchange confirmation (not just a HL outlier)
+        if not self._cross_exchange_confirms(event, funding):
+            logger.info(
+                "FundingExtreme SKIP %s — cross-exchange not confirming (funding=%.6f)",
+                event.symbol, funding,
+            )
+            return None
 
         # Determine expected contrarian side
         # Extreme negative funding → shorts pay longs → overcrowded shorts → go LONG
@@ -131,6 +244,25 @@ class MeanReversion(Strategy):
         if not oi_overcrowded:
             return None  # OI doesn't confirm overcrowding
 
+        # ── Task 2.3: OI decreasing filter ──
+        # Only enter if the crowd is already starting to leave (OI_delta < 0).
+        # This means the overheated market is beginning to cool off — better
+        # timing for mean reversion than entering while OI is still surging.
+        if self.REQUIRE_OI_DECREASING:
+            oi_delta = event.oi_delta
+            if oi_delta is None:
+                logger.debug(
+                    "FundingExtreme SKIP %s — no OI_delta available", event.symbol,
+                )
+                return None
+            if oi_delta >= self.OI_DELTA_THRESHOLD:
+                logger.info(
+                    "FundingExtreme SKIP %s — OI_delta=%.0f not decreasing "
+                    "(crowd still entering)",
+                    event.symbol, oi_delta,
+                )
+                return None
+
         # --- Price context: not in freefall / not parabolic ---
         # Need 1h candles for support/resistance
         candles_1h = list(state.candles_1h)
@@ -151,9 +283,9 @@ class MeanReversion(Strategy):
 
         # --- Calculate confidence ---
         if is_extreme:
-            base_confidence = 0.85
+            base_confidence = self.MIN_CONFIDENCE_EXTREME
         elif is_strong:
-            base_confidence = 0.65
+            base_confidence = self.MIN_CONFIDENCE_STRONG
         else:
             base_confidence = 0.5
 
@@ -163,6 +295,12 @@ class MeanReversion(Strategy):
             confidence = min(base_confidence + 0.1, 0.95)
         else:
             confidence = base_confidence
+
+        # Boost if cross-exchange is strongly confirming
+        if self.USE_CROSS_EXCHANGE_CONFIRM and event.funding_avg is not None:
+            cross_strength = abs(event.funding_avg) / strong_threshold if strong_threshold > 0 else 0
+            if cross_strength > 1.2:
+                confidence = min(confidence + 0.05, 0.95)
 
         # Minimum confidence threshold
         if confidence < 0.6:
@@ -195,10 +333,12 @@ class MeanReversion(Strategy):
         overcrowded_score = calculate_overcrowded_score(funding, oi_ratio)
 
         logger.info(
-            "MeanReversion %s signal for %s (funding=%.4f, confidence=%.2f, size=%.4f%%, atr_stop=%.4f%%)",
-            target_side, event.symbol, funding, confidence,
-            risk_pct * 100,
-            stop_loss_pct * 100,
+            "MeanReversion %s signal for %s "
+            "(funding=%.4f, dyn_extreme=%.4f, dyn_strong=%.4f, "
+            "confidence=%.2f, size=%.4f%%, atr_stop=%.4f%%)",
+            target_side, event.symbol, funding,
+            extreme_threshold, strong_threshold,
+            confidence, risk_pct * 100, stop_loss_pct * 100,
         )
         return Signal(
             strategy=self.name,
@@ -213,12 +353,17 @@ class MeanReversion(Strategy):
             metadata={
                 "funding": event.funding,
                 "predicted_funding": event.predicted_funding,
+                "funding_avg": event.funding_avg,
+                "funding_weighted": event.funding_weighted,
                 "oi_ratio": oi_ratio,
+                "oi_delta": event.oi_delta,
                 "overcrowded_score": overcrowded_score,
                 "support": support,
                 "resistance": resistance,
                 "is_extreme": is_extreme,
                 "is_strong": is_strong,
+                "extreme_threshold": extreme_threshold,
+                "strong_threshold": strong_threshold,
                 "atr": atr,
                 "stop_loss_pct": stop_loss_pct,
                 "realized_vol_annual": rv,
