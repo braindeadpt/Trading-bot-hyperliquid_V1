@@ -121,6 +121,7 @@ class DashboardEmitter:
                 "ob_depth": evt.get("orderbook_depth_quality"),
                 "ob_bid_wall": evt.get("orderbook_largest_bid_wall"),
                 "ob_ask_wall": evt.get("orderbook_largest_ask_wall"),
+                "rvol": evt.get("last_realized_vol"),
                 "last_update": evt.get("processed_at", 0),
             })
         self.socketio.emit("live_data", rows)
@@ -520,6 +521,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
                                 <th class="num">Imbal</th>
                                 <th class="num">OIR</th>
                                 <th class="num">Depth</th>
+                                <th class="num">RVol</th>
                                 <th class="num">Age</th>
                             </tr>
                         </thead>
@@ -754,7 +756,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
         socket.on("live_data", (rows) => {
             const tbody = document.getElementById("live-data-tbody");
             if (!rows || rows.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="12" class="muted" style="text-align:center;">Waiting for data...</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="13" class="muted" style="text-align:center;">Waiting for data...</td></tr>`;
                 return;
             }
             const now = Date.now() / 1000;
@@ -763,6 +765,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 const age = r.last_update ? now - r.last_update : null;
                 const ageClass = age && age > 5 ? "yellow" : age && age > 30 ? "red" : "";
                 const oirClass = r.ob_oir > 0.5 ? "up" : r.ob_oir < -0.5 ? "down" : "";
+                const rvolClass = r.rvol != null ? (r.rvol > 0.40 ? "yellow" : r.rvol < 0.20 ? "up" : "") : "";
                 return `<tr>
                     <td><span class="highlight">${r.symbol}</span></td>
                     <td class="num ${priceClass}">${fmtNum(r.price)}</td>
@@ -775,6 +778,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
                     <td class="num ${r.imbalance > 0 ? 'up' : r.imbalance < 0 ? 'down' : ''}">${fmtNum(r.imbalance, 3)}</td>
                     <td class="num ${oirClass}">${r.ob_oir != null ? r.ob_oir.toFixed(2) : "--"}</td>
                     <td class="num">${r.ob_depth != null ? (r.ob_depth * 100).toFixed(0) + "%" : "--"}</td>
+                    <td class="num ${rvolClass}">${r.rvol != null ? (r.rvol * 100).toFixed(0) + "%" : "--"}</td>
                     <td class="num tiny ${ageClass}">${fmtAge(age)}</td>
                 </tr>`;
             }).join("");

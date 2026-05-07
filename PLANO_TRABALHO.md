@@ -6,23 +6,23 @@
 ## FASE 0: Fundações (estabilizar o que temos)
 **Tempo estimado: 3-4h | Impacto: 🔥🔥🔥 (crítico)**
 
-| # | Tarefa | Descrição | Tempo |
-|---|---|---|---|
-| 0.1 | Integrar FundingAggregator no engine | O código existe (`src/exchanges/funding_aggregator.py`). É só ligar ao `engine.py` — `_build_market_event` já tem placeholders. Adiciona funding cross-exchange (Binance, Bybit, OKX) e OI agregado ao MarketEvent. | 1.5h |
-| 0.2 | WebSocket L2 Orderbook Hyperliquid | Subscrever `l2Book` no WS da HL. Criar `Orderbook` dataclass com bids/asks. Emitir para o data_bus. | 1.5h |
-| 0.3 | Orderbook metrics engine | Calcular OIR (Orderbook Imbalance Ratio), wall detection, depth quality a cada tick. Guardar em `_last_orderbook`. | 1h |
+| # | Tarefa | Descrição | Tempo | Estado |
+|---|---|---|---|---|
+| 0.1 | Integrar FundingAggregator no engine | O código existe (`src/exchanges/funding_aggregator.py`). É só ligar ao `engine.py` — `_build_market_event` já tem placeholders. Adiciona funding cross-exchange (Binance, Bybit, OKX) e OI agregado ao MarketEvent. | 1.5h | ✅ DONE |
+| 0.2 | WebSocket L2 Orderbook Hyperliquid | Subscrever `l2Book` no WS da HL. Criar `Orderbook` dataclass com bids/asks. Emitir para o data_bus. | 1.5h | ✅ DONE |
+| 0.3 | Orderbook metrics engine | Calcular OIR (Orderbook Imbalance Ratio), wall detection, depth quality a cada tick. Guardar em `_last_orderbook`. | 1h | ✅ DONE |
 
 ---
 
 ## FASE 1: Risk & Execution (proteger capital)
 **Tempo estimado: 4-5h | Impacto: 🔥🔥🔥 (crítico)**
 
-| # | Tarefa | Descrição | Tempo |
-|---|---|---|---|
-| 1.1 | ATR-based stop loss | Substituir stops fixos (3.5% / 3%) por ATR(14) × 2.5. Stop dinâmico adapta-se à volatilidade real do asset. | 1h |
-| 1.2 | Volatility targeting sizing | Position size = base_size × (target_vol / realized_vol_20d). BTC com 25% vol → 1.6x. SOL com 60% vol → 0.5x. | 1.5h |
-| 1.3 | Trailing take-profit | Breakeven @ +1R. Trailing stop @ +2R (ATR × 1.5). Maximiza tendências que correm. | 1.5h |
-| 1.4 | Slippage estimation (realista) | Usar L2 book para estimar slippage antes de entrar. Se slippage > 0.2%, rejeita sinal. | 1h |
+| # | Tarefa | Descrição | Tempo | Estado |
+|---|---|---|---|---|
+| 1.1 | ATR-based stop loss | Substituir stops fixos (3.5% / 3%) por ATR(14) × 2.5. Stop dinâmico adapta-se à volatilidade real do asset. | 1h | ✅ DONE |
+| 1.2 | Volatility targeting sizing | Position size = base_size × (target_vol / realized_vol_20d). BTC com 25% vol → 1.6x. SOL com 60% vol → 0.5x. | 1.5h | 🔄 NEXT |
+| 1.3 | Trailing take-profit | Breakeven @ +1R. Trailing stop @ +2R (ATR × 1.5). Maximiza tendências que correm. | 1.5h | ⏳ |
+| 1.4 | Slippage estimation (realista) | Usar L2 book para estimar slippage antes de entrar. Se slippage > 0.2%, rejeita sinal. | 1h | ⏳ |
 
 ---
 

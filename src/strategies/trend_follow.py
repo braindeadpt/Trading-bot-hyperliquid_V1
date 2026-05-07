@@ -16,6 +16,8 @@ from strategies.indicators import (
     calculate_ema,
     calculate_atr,
     calculate_volume_profile,
+    calculate_realized_volatility,
+    volatility_target_size,
 )
 
 
@@ -24,11 +26,13 @@ class _TrendState:
     """Internal state for trend following calculations."""
     candles_15m: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=40))
     candles_5m: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=40))
+    candles_1h: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=500))  # 20+ days for vol
     last_vwap: Optional[float] = None
     last_ema20: Optional[float] = None
     last_volume_avg: Optional[float] = None
     last_atr: Optional[float] = None
     last_oi: Optional[float] = None
+    last_realized_vol: Optional[float] = None
     # Track if we already signaled long/short to avoid spam on same candle
     last_signal_side: Optional[str] = None
     last_signal_ts: int = 0
@@ -54,6 +58,12 @@ class TrendFollow(Strategy):
         self.FUNDING_EXTREME = cfg.get("extreme_threshold", 0.008)
         self.IMBALANCE_THRESHOLD = cfg.get("imbalance_threshold", 0.02)
         self.OVERCROWDED_PENALTY = cfg.get("overcrowded_penalty", 0.2)
+        # Volatility targeting
+        self.TARGET_VOL_ANNUAL = cfg.get("target_vol_annual", 0.20)  # 20% target volatility
+        self.VOLATILITY_PERIOD = cfg.get("volatility_period", 480)   # 480 1h candles = 20 days
+        self.VOL_MIN_MULT = cfg.get("vol_min_mult", 0.25)            # min 0.25x base size
+        self.VOL_MAX_MULT = cfg.get("vol_max_mult", 3.0)             # max 3.0x base size
+        self.BASE_SIZE_PCT = cfg.get("base_size_pct", 0.01)          # 1% base
 
     @property
     def name(self) -> str:
@@ -73,6 +83,13 @@ class TrendFollow(Strategy):
             state.candles_15m.append(event.candle_15m)
         if event.candle_5m:
             state.candles_5m.append(event.candle_5m)
+        if event.candle_1h:
+            state.candles_1h.append(event.candle_1h)
+
+        # Calculate realized volatility from 1h candles (20 days)
+        if len(state.candles_1h) >= self.VOLATILITY_PERIOD + 1:
+            rv = calculate_realized_volatility(list(state.candles_1h), self.VOLATILITY_PERIOD)
+            state.last_realized_vol = rv
 
         # Need at least enough 15m candles for indicators
         if len(state.candles_15m) < self.EMA_PERIOD:
@@ -308,12 +325,21 @@ class TrendFollow(Strategy):
         conditions: List[Tuple[str, bool]],
     ) -> Signal:
         """Construct a Signal with proper sizing and stop loss."""
-        # Risk 1% per trade, sized by ATR
-        # Simplification: size_pct represents risk amount as % of capital
-        # In a real system, risk_manager converts this to actual position size
-        # using: position_size = (capital * risk_pct) / (atr_mult * atr / price)
-        # Here we pass the risk % and let downstream handle sizing.
-        risk_pct = 0.01  # 1%
+        state = self._get_state(event.symbol)
+
+        # --- Volatility targeting sizing ---
+        # Base size adjusted by realized volatility
+        rv = state.last_realized_vol
+        if rv is not None and rv > 0:
+            risk_pct = volatility_target_size(
+                base_size_pct=self.BASE_SIZE_PCT,
+                realized_vol_annual=rv,
+                target_vol_annual=self.TARGET_VOL_ANNUAL,
+                min_size_mult=self.VOL_MIN_MULT,
+                max_size_mult=self.VOL_MAX_MULT,
+            )
+        else:
+            risk_pct = self.BASE_SIZE_PCT  # fallback to base size
 
         # Stop loss: 2x ATR from entry (as a percentage of price)
         if event.price > 0:
@@ -344,5 +370,7 @@ class TrendFollow(Strategy):
                 "predicted_funding": event.predicted_funding,
                 "oi_delta": event.oi_delta,
                 "imbalance": event.bid_ask_imbalance,
+                "realized_vol_annual": rv,
+                "size_pct": risk_pct,
             },
         )

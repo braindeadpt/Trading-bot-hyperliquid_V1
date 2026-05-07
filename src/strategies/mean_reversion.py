@@ -13,6 +13,8 @@ from strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
 from strategies.indicators import (
     Candle,
     calculate_atr,
+    calculate_realized_volatility,
+    volatility_target_size,
     detect_support_resistance,
     calculate_oi_concentration,
     calculate_overcrowded_score,
@@ -46,9 +48,15 @@ class MeanReversion(Strategy):
         self.FUNDING_REVERTED = cfg.get("funding_reverted", 0.003)
         self.OI_CONCENTRATION = cfg.get("overcrowded_oi_pct", 65) / 100.0
         self.MAX_HOLD_MINUTES = cfg.get("max_hold_minutes", 60)
-        # ATR-based stop loss (replaces fixed percentage)
+        # ATR-based stop loss
         self.ATR_PERIOD = cfg.get("atr_period", 14)
         self.STOP_ATR_MULT = cfg.get("stop_loss_atr_multiplier", 2.0)
+        # Volatility targeting
+        self.TARGET_VOL_ANNUAL = cfg.get("target_vol_annual", 0.20)  # 20% target
+        self.VOLATILITY_PERIOD = cfg.get("volatility_period", 480)   # 480 1h candles
+        self.VOL_MIN_MULT = cfg.get("vol_min_mult", 0.25)
+        self.VOL_MAX_MULT = cfg.get("vol_max_mult", 3.0)
+        self.BASE_SIZE_PCT = cfg.get("base_size_pct", 0.01)  # 1% base
         self.SR_LOOKBACK = cfg.get("sr_lookback", 30)
         self.MIN_CONFIDENCE_EXTREME = cfg.get("min_confidence_extreme", 0.85)
         self.MIN_CONFIDENCE_STRONG = cfg.get("min_confidence_strong", 0.65)
@@ -78,6 +86,13 @@ class MeanReversion(Strategy):
             state.last_atr = atr
         else:
             atr = None
+
+        # Calculate realized volatility from 1h candles (20 days)
+        if len(state.candles_1h) >= self.VOLATILITY_PERIOD + 1:
+            rv = calculate_realized_volatility(list(state.candles_1h), self.VOLATILITY_PERIOD)
+            # state doesn't track last_realized_vol, but we calculate it here
+        else:
+            rv = None
 
         # We need predicted funding (primary) or current funding
         funding = event.predicted_funding
@@ -153,11 +168,22 @@ class MeanReversion(Strategy):
         if confidence < 0.6:
             return None
 
-        # --- Position sizing: risk 1%, scaled by funding magnitude ---
-        # More extreme funding = slightly larger position (more conviction)
-        risk_pct = 0.01
+        # --- Position sizing: volatility targeting ---
+        # Base size adjusted by realized volatility
+        if rv is not None and rv > 0:
+            risk_pct = volatility_target_size(
+                base_size_pct=self.BASE_SIZE_PCT,
+                realized_vol_annual=rv,
+                target_vol_annual=self.TARGET_VOL_ANNUAL,
+                min_size_mult=self.VOL_MIN_MULT,
+                max_size_mult=self.VOL_MAX_MULT,
+            )
+        else:
+            risk_pct = self.BASE_SIZE_PCT  # fallback to base size
+
+        # More extreme funding = additional scaling (more conviction)
         if is_extreme:
-            risk_pct = 0.015  # 1.5% at extreme
+            risk_pct = min(risk_pct * 1.5, self.BASE_SIZE_PCT * self.VOL_MAX_MULT)
 
         # ATR-based stop loss (replaces fixed 2%)
         if current_price > 0 and atr is not None and atr > 0:
@@ -169,8 +195,9 @@ class MeanReversion(Strategy):
         overcrowded_score = calculate_overcrowded_score(funding, oi_ratio)
 
         logger.info(
-            "MeanReversion %s signal for %s (funding=%.4f, confidence=%.2f, atr_stop=%.4f%%)",
+            "MeanReversion %s signal for %s (funding=%.4f, confidence=%.2f, size=%.4f%%, atr_stop=%.4f%%)",
             target_side, event.symbol, funding, confidence,
+            risk_pct * 100,
             stop_loss_pct * 100,
         )
         return Signal(
@@ -194,6 +221,8 @@ class MeanReversion(Strategy):
                 "is_strong": is_strong,
                 "atr": atr,
                 "stop_loss_pct": stop_loss_pct,
+                "realized_vol_annual": rv,
+                "size_pct": risk_pct,
             },
         )
 

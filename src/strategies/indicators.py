@@ -276,3 +276,76 @@ def calculate_overcrowded_score(funding: Optional[float], oi_ratio: Optional[flo
 
     # Weighted combination — funding is stronger signal on Hyperliquid
     return min(0.6 * funding_score + 0.4 * oi_score, 1.0)
+
+
+def calculate_realized_volatility(
+    candles: List[Candle],
+    period: int = 480,  # 20 days of 1h candles
+) -> Optional[float]:
+    """Annualized realized volatility from log returns.
+
+    Uses 1h candles (period=480 for 20 days). Annualized with sqrt(365 * 24).
+    Returns None if insufficient data.
+    """
+    if len(candles) < period + 1:
+        return None
+
+    # Use the most recent `period` candles
+    recent = candles[-period:]
+
+    # Calculate log returns: ln(close_t / close_t-1)
+    returns: List[float] = []
+    for i in range(1, len(recent)):
+        prev_close = recent[i - 1].close
+        curr_close = recent[i].close
+        if prev_close <= 0 or curr_close <= 0:
+            continue
+        log_return = __import__("math").log(curr_close / prev_close)
+        returns.append(log_return)
+
+    if len(returns) < 2:
+        return None
+
+    # Sample standard deviation of returns
+    mean_return = sum(returns) / len(returns)
+    variance = sum((r - mean_return) ** 2 for r in returns) / (len(returns) - 1)
+    std = variance ** 0.5
+
+    # Annualize: std * sqrt(periods_per_year)
+    # For 1h candles: 365 days * 24 hours = 8760 periods per year
+    periods_per_year = 365.0 * 24.0
+    annualized_vol = std * (periods_per_year ** 0.5)
+
+    return annualized_vol
+
+
+def volatility_target_size(
+    base_size_pct: float,
+    realized_vol_annual: float,
+    target_vol_annual: float = 0.20,
+    min_size_mult: float = 0.25,
+    max_size_mult: float = 3.0,
+) -> float:
+    """Calculate position size using volatility targeting.
+
+    Formula: size = base_size * (target_vol / realized_vol)
+
+    Args:
+        base_size_pct: Base position size as % of capital (e.g., 0.02 = 2%)
+        realized_vol_annual: Annualized realized volatility (e.g., 0.60 for 60%)
+        target_vol_annual: Target portfolio volatility (default 20%)
+        min_size_mult: Minimum size multiplier (default 0.25x = 25% of base)
+        max_size_mult: Maximum size multiplier (default 3.0x = 300% of base)
+
+    Returns:
+        Adjusted position size as % of capital.
+    """
+    if realized_vol_annual <= 0 or target_vol_annual <= 0:
+        return base_size_pct
+
+    multiplier = target_vol_annual / realized_vol_annual
+
+    # Clamp to prevent extreme sizing
+    clamped = max(min_size_mult, min(multiplier, max_size_mult))
+
+    return base_size_pct * clamped
