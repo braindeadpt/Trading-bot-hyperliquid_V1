@@ -12,6 +12,7 @@ import collections
 from strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
 from strategies.indicators import (
     Candle,
+    calculate_atr,
     detect_support_resistance,
     calculate_oi_concentration,
     calculate_overcrowded_score,
@@ -22,6 +23,8 @@ from strategies.indicators import (
 class _MeanRevState:
     """Internal state for mean reversion strategy."""
     candles_1h: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=60))
+    candles_15m: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=40))
+    last_atr: Optional[float] = None
     last_signal_side: Optional[str] = None
     last_signal_ts: int = 0
 
@@ -43,7 +46,9 @@ class MeanReversion(Strategy):
         self.FUNDING_REVERTED = cfg.get("funding_reverted", 0.003)
         self.OI_CONCENTRATION = cfg.get("overcrowded_oi_pct", 65) / 100.0
         self.MAX_HOLD_MINUTES = cfg.get("max_hold_minutes", 60)
-        self.STOP_PCT = cfg.get("stop_loss_pct", 2.0) / 100.0
+        # ATR-based stop loss (replaces fixed percentage)
+        self.ATR_PERIOD = cfg.get("atr_period", 14)
+        self.STOP_ATR_MULT = cfg.get("stop_loss_atr_multiplier", 2.0)
         self.SR_LOOKBACK = cfg.get("sr_lookback", 30)
         self.MIN_CONFIDENCE_EXTREME = cfg.get("min_confidence_extreme", 0.85)
         self.MIN_CONFIDENCE_STRONG = cfg.get("min_confidence_strong", 0.65)
@@ -61,9 +66,18 @@ class MeanReversion(Strategy):
         """Evaluate contrarian entry on extreme funding + overcrowded OI."""
         state = self._get_state(event.symbol)
 
-        # Update 1h candle history for price context
+        # Update candle histories
         if event.candle_1h:
             state.candles_1h.append(event.candle_1h)
+        if event.candle_15m:
+            state.candles_15m.append(event.candle_15m)
+
+        # Calculate ATR from 15m candles for stop sizing
+        if len(state.candles_15m) >= self.ATR_PERIOD + 1:
+            atr = calculate_atr(list(state.candles_15m)[-self.ATR_PERIOD-1:], self.ATR_PERIOD)
+            state.last_atr = atr
+        else:
+            atr = None
 
         # We need predicted funding (primary) or current funding
         funding = event.predicted_funding
@@ -145,10 +159,20 @@ class MeanReversion(Strategy):
         if is_extreme:
             risk_pct = 0.015  # 1.5% at extreme
 
+        # ATR-based stop loss (replaces fixed 2%)
+        if current_price > 0 and atr is not None and atr > 0:
+            stop_loss_pct = (self.STOP_ATR_MULT * atr) / current_price
+        else:
+            stop_loss_pct = 0.02  # fallback 2% if ATR unavailable
+
         # Build metadata for transparency
         overcrowded_score = calculate_overcrowded_score(funding, oi_ratio)
 
-        logger.info("MeanReversion %s signal for %s (funding=%.4f, confidence=%.2f)", target_side, event.symbol, funding, confidence)
+        logger.info(
+            "MeanReversion %s signal for %s (funding=%.4f, confidence=%.2f, atr_stop=%.4f%%)",
+            target_side, event.symbol, funding, confidence,
+            stop_loss_pct * 100,
+        )
         return Signal(
             strategy=self.name,
             symbol=event.symbol,
@@ -156,7 +180,7 @@ class MeanReversion(Strategy):
             confidence=confidence,
             size_pct=risk_pct,
             entry_price=current_price,
-            stop_loss_pct=self.STOP_PCT,
+            stop_loss_pct=stop_loss_pct,
             take_profit_pct=None,  # Exit on funding reversion
             reason=f"funding_extreme_{target_side}_f{funding:.4f}",
             metadata={
@@ -168,6 +192,8 @@ class MeanReversion(Strategy):
                 "resistance": resistance,
                 "is_extreme": is_extreme,
                 "is_strong": is_strong,
+                "atr": atr,
+                "stop_loss_pct": stop_loss_pct,
             },
         )
 
@@ -189,26 +215,50 @@ class MeanReversion(Strategy):
                 metadata={"hold_minutes": hold_ms / (60 * 1000)},
             )
 
-        # 2. Stop loss: price moved 2% against position
-        if position.entry_price > 0:
-            move_pct = (current_price - position.entry_price) / position.entry_price
-            if position.side == "long" and move_pct <= -self.STOP_PCT:
+        # 2. Stop loss: ATR-based (replaces fixed 2%)
+        # Use the stop_loss_price set at entry (based on ATR), or recalculate from state
+        atr = state.last_atr
+        if position.stop_loss_price is not None:
+            # Entry-calculated ATR stop
+            if position.side == "long" and current_price <= position.stop_loss_price:
                 return ExitSignal(
                     strategy=self.name,
                     symbol=position.symbol,
                     side="close",
                     confidence=1.0,
-                    reason="stop_loss_price_2pct",
-                    metadata={"move_pct": move_pct},
+                    reason="stop_loss_atr",
+                    metadata={"stop_price": position.stop_loss_price},
                 )
-            if position.side == "short" and move_pct >= self.STOP_PCT:
+            if position.side == "short" and current_price >= position.stop_loss_price:
                 return ExitSignal(
                     strategy=self.name,
                     symbol=position.symbol,
                     side="close",
                     confidence=1.0,
-                    reason="stop_loss_price_2pct",
-                    metadata={"move_pct": move_pct},
+                    reason="stop_loss_atr",
+                    metadata={"stop_price": position.stop_loss_price},
+                )
+        elif atr is not None and position.entry_price > 0:
+            # Fallback: recalculate from current ATR
+            stop_pct = (self.STOP_ATR_MULT * atr) / position.entry_price
+            move_pct = (current_price - position.entry_price) / position.entry_price
+            if position.side == "long" and move_pct <= -stop_pct:
+                return ExitSignal(
+                    strategy=self.name,
+                    symbol=position.symbol,
+                    side="close",
+                    confidence=1.0,
+                    reason="stop_loss_atr_fallback",
+                    metadata={"move_pct": move_pct, "atr_stop_pct": stop_pct},
+                )
+            if position.side == "short" and move_pct >= stop_pct:
+                return ExitSignal(
+                    strategy=self.name,
+                    symbol=position.symbol,
+                    side="close",
+                    confidence=1.0,
+                    reason="stop_loss_atr_fallback",
+                    metadata={"move_pct": move_pct, "atr_stop_pct": stop_pct},
                 )
 
         # 3. Funding reverted to < ±0.3%

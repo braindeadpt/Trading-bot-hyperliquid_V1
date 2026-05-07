@@ -647,8 +647,12 @@ class TradingEngine:
             metadata={**signal.metadata, "calculated_size": size, "atr_pct": atr_pct},
         )
 
-        # --- Compute stop distance from ATR (same formula as RiskManager) ---
-        stop_distance_pct = max(2.0 * atr_pct, 0.005)
+        # --- Compute stop distance ---
+        # Use strategy's ATR-based stop if provided, else fall back to engine calc
+        if signal.stop_loss_pct is not None and signal.stop_loss_pct > 0:
+            stop_distance_pct = signal.stop_loss_pct
+        else:
+            stop_distance_pct = max(2.0 * atr_pct, 0.005)
 
         if signal.side == "long":
             stop_loss_price = signal.entry_price * (1.0 - stop_distance_pct)
