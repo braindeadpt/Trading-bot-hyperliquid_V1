@@ -25,6 +25,9 @@ echo.
 echo Press Ctrl+C to stop permanently.
 echo.
 
+:: Open dashboard in default browser after server is ready (non-blocking, 3s delay)
+start "" cmd /c "timeout /t 3 /nobreak >nul && start "" http://localhost:5000"
+
 :: Run with crash recovery wrapper
 python run_with_recovery.py --mode paper --max-restarts 3 --cooldown 30
 

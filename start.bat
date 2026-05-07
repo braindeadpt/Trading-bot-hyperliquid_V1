@@ -57,6 +57,10 @@ echo [MODE] Paper Trading
 echo Dashboard: http://localhost:5000
 echo Press Ctrl+C to stop.
 echo.
+
+:: Open dashboard in default browser after server is ready (non-blocking, 3s delay)
+start "" cmd /c "timeout /t 3 /nobreak >nul && start "" http://localhost:5000"
+
 python main.py --mode paper 2>logs\paper_errors.log
 if errorlevel 1 (
     echo [ERROR] Bot crashed. Check logs\paper_errors.log
@@ -139,6 +143,10 @@ echo Dashboard: http://localhost:5000
 echo.
 echo Press Ctrl+C to stop permanently.
 echo.
+
+:: Open dashboard in default browser after server is ready (non-blocking, 3s delay)
+start "" cmd /c "timeout /t 3 /nobreak >nul && start "" http://localhost:5000"
+
 python run_with_recovery.py --mode paper --max-restarts 3 --cooldown 30
 pause
 goto end

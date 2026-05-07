@@ -20,8 +20,8 @@ echo [TIP] For background operation with auto-restart, use service.bat instead.
 echo [TIP] For crash recovery with log analysis, use: python run_with_recovery.py --mode paper
 echo.
 
-:: Open dashboard in default browser (non-blocking)
-start "" "http://localhost:5000"
+:: Open dashboard in default browser after server is ready (non-blocking, 3s delay)
+start "" cmd /c "timeout /t 3 /nobreak >nul && start "" http://localhost:5000"
 
 :: Run bot - errors go to fatal_errors.log via main.py
 python main.py --mode paper
