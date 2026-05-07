@@ -20,7 +20,7 @@
 | # | Tarefa | Descrição | Tempo | Estado |
 |---|---|---|---|---|
 | 1.1 | ATR-based stop loss | Substituir stops fixos (3.5% / 3%) por ATR(14) × 2.5. Stop dinâmico adapta-se à volatilidade real do asset. | 1h | ✅ DONE |
-| 1.2 | Volatility targeting sizing | Position size = base_size × (target_vol / realized_vol_20d). BTC com 25% vol → 1.6x. SOL com 60% vol → 0.5x. | 1.5h | 🔄 NEXT |
+| 1.2 | Volatility targeting sizing | Position size = base_size × (target_vol / realized_vol_20d). BTC com 25% vol → 1.6x. SOL com 60% vol → 0.5x. | 1.5h | ✅ DONE |
 | 1.3 | Trailing take-profit | Breakeven @ +1R. Trailing stop @ +2R (ATR × 1.5). Maximiza tendências que correm. | 1.5h | ⏳ |
 | 1.4 | Slippage estimation (realista) | Usar L2 book para estimar slippage antes de entrar. Se slippage > 0.2%, rejeita sinal. | 1h | ⏳ |
 

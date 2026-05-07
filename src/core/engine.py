@@ -113,6 +113,9 @@ class TradingEngine:
         self._latest_agg_funding: Dict[str, AggregatedFundingOI] = {}
         self._funding_poll_task: Optional[asyncio.Task] = None
 
+        # ── Trailing stop management ──
+        self._trailing_data: Dict[str, Dict] = {}  # symbol -> trailing stop state
+
         # ── Dashboard tracking (real-time introspection) ──
         self._last_market_events: Dict[str, Dict] = {}
         self._signal_history: List[Dict] = []
@@ -755,6 +758,10 @@ class TradingEngine:
         reason: str,
     ) -> None:
         """Close a position and update all downstream state."""
+        # Clean up trailing stop data
+        if position.symbol in self._trailing_data:
+            del self._trailing_data[position.symbol]
+
         try:
             result = await self._executor.close_position(position, exit_price, reason)
         except Exception as exc:  # noqa: BLE001
