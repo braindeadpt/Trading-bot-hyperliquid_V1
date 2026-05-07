@@ -1,4 +1,4 @@
-"""Main trading engine — orchestrates data flow, strategies, risk, and execution.
+"""Main trading engine - orchestrates data flow, strategies, risk, and execution.
 
 The engine subscribes to the :class:`DataBus`, builds :class:`MarketEvent`s,
 feeds them to registered strategies, and gates every entry signal through
@@ -45,8 +45,8 @@ class TradingEngine:
     """Central orchestrator that wires data → strategies → risk → execution.
 
     Lifecycle:
-      1. ``start()`` — subscribe to DataBus, load DB state, begin event loop.
-      2. ``stop()``  — close positions, save state, unsubscribe.
+      1. ``start()`` - subscribe to DataBus, load DB state, begin event loop.
+      2. ``stop()``  - close positions, save state, unsubscribe.
 
     The engine is **async-safe**; all mutable state is guarded by locks.
     """
@@ -177,7 +177,7 @@ class TradingEngine:
                 self._subscribed_callbacks[f"candle_complete:{tf}:{symbol}"] = cb_candle
 
         logger.info(
-            "TradingEngine running — symbols=%s strategies=%s",
+            "TradingEngine running - symbols=%s strategies=%s",
             self._symbols,
             [s.name for s in self._strategies],
         )
@@ -207,7 +207,7 @@ class TradingEngine:
             if last_price is not None:
                 await self._execute_exit(position, last_price.mid, reason="engine_shutdown")
             else:
-                logger.warning("No last price for %s during shutdown — skipping close", symbol)
+                logger.warning("No last price for %s during shutdown - skipping close", symbol)
 
         # 3. Save final portfolio snapshot
         await self._save_portfolio_snapshot()
@@ -345,16 +345,31 @@ class TradingEngine:
             volume_1m=getattr(candles.get(60), 'volume', None) if candles.get(60) else None,
             bid_ask_imbalance=self._calc_imbalance(candles.get(900)),
             vwap_15m=getattr(candles.get(900), 'vwap', None) if candles.get(900) else None,
+            # Aggregated cross-exchange data
+            funding_aggregated=agg_data.funding_weighted if agg_data else None,
+            funding_avg=agg_data.funding_avg if agg_data else None,
+            predicted_funding_aggregated=agg_data.predicted_funding_avg if agg_data else None,
+            oi_aggregated=agg_data.oi_total if agg_data else None,
+            oi_exchange_count=agg_data.exchange_count if agg_data else 0,
+            # Hyperliquid-specific data
+            funding_hl=safe_float(ctx.funding_rate) if ctx else None,
+            predicted_funding_hl=safe_float(ctx.predicted_funding) if ctx else None,
+            oi_hl=safe_float(ctx.open_interest) if ctx else None,
         )
-        
+
         # Log orderflow metrics for debugging
         logger.info(
-            "MarketEvent %s: price=%.2f, funding=%.6f, oi=%.2f, oi_delta=%s, imbalance=%s, vwap=%s, candles=%s",
-            symbol, event.price, event.funding or 0, event.oi_total or 0,
-            event.oi_delta, event.bid_ask_imbalance, event.vwap_15m,
-            {k: "yes" if v else "no" for k, v in candles.items()}
+            "MarketEvent %s: price=%.2f, funding_hl=%.6f, funding_agg=%s, predicted_agg=%s, oi_hl=%.2f, oi_agg=%s, imbalance=%s, exchanges=%d",
+            symbol, event.price,
+            event.funding_hl or 0,
+            f"{event.funding_aggregated:.6f}" if event.funding_aggregated else "N/A",
+            f"{event.predicted_funding_aggregated:.6f}" if event.predicted_funding_aggregated else "N/A",
+            event.oi_hl or 0,
+            f"{event.oi_aggregated:,.0f}" if event.oi_aggregated else "N/A",
+            event.bid_ask_imbalance,
+            event.oi_exchange_count,
         )
-        
+
         return event
 
     def _calc_imbalance(self, candle_15m) -> Optional[float]:
@@ -408,7 +423,7 @@ class TradingEngine:
         approved, reason = self._risk.can_enter(signal, portfolio_proxy)
         if not approved:
             logger.info(
-                "Signal REJECTED %s %s (confidence=%.2f) — %s",
+                "Signal REJECTED %s %s (confidence=%.2f) - %s",
                 signal.symbol,
                 signal.side,
                 signal.confidence,
@@ -427,7 +442,7 @@ class TradingEngine:
 
         size = self._risk.calculate_position_size(signal, capital, atr_pct)
         if size <= 0.0:
-            logger.warning("Position size zero for %s — skipping", signal.symbol)
+            logger.warning("Position size zero for %s - skipping", signal.symbol)
             return
 
         # Enrich signal metadata with computed size
@@ -495,7 +510,7 @@ class TradingEngine:
         """Execute a strategy-driven exit."""
         last_price = self._latest_price.get(position.symbol)
         if last_price is None:
-            logger.warning("No price for %s — cannot execute exit", position.symbol)
+            logger.warning("No price for %s - cannot execute exit", position.symbol)
             return
 
         await self._execute_exit(position, last_price.mid, reason=exit_signal.reason)
@@ -577,7 +592,7 @@ class TradingEngine:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to restore portfolio snapshot: %s", exc)
         else:
-            logger.info("No prior portfolio snapshot found — starting fresh")
+            logger.info("No prior portfolio snapshot found - starting fresh")
 
     async def _save_portfolio_snapshot(self) -> None:
         """Persist the current portfolio state to the DB."""
