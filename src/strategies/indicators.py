@@ -4,6 +4,7 @@ All functions accept minimal data and return None when insufficient.
 Every indicator is implemented from first principles (no pandas)."""
 
 from dataclasses import dataclass
+import math
 from typing import List, Optional, Tuple
 
 
@@ -377,7 +378,7 @@ def calculate_realized_volatility(
         curr_close = recent[i].close
         if prev_close <= 0 or curr_close <= 0:
             continue
-        log_return = __import__("math").log(curr_close / prev_close)
+        log_return = math.log(curr_close / prev_close)
         returns.append(log_return)
 
     if len(returns) < 2:

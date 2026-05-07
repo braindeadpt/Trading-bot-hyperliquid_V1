@@ -120,7 +120,13 @@ class CrashRecovery:
     # ------------------------------------------------------------------
 
     def _run_once(self, cmd: tuple[str, ...]) -> int:
-        """Run a single instance of the bot."""
+        """Run a single instance of the bot.
+
+        SECURITY NOTE: subprocess.run is used intentionally to spawn the
+        bot process. The command is always `sys.executable` (the current
+        Python interpreter) and `main.py` — no user input reaches this
+        call. This is the core functionality of crash recovery.
+        """
         logger.info("Starting bot: %s", " ".join(cmd))
         try:
             result = subprocess.run(
