@@ -34,7 +34,7 @@
 | 2.1 | Regime filter (ADX) | ADX(14) > 25 = tendência → TrendFollow 70%, MeanReversion 30%. ADX < 20 = range → inverte pesos. | 1.5h | ✅ DONE |
 | 2.2 | SmartMoneyFlow upgrade | Adicionar: OIR filter (>0.6 confirma long), wall detection (evitar paredes), RSI(14) filter (40-70). | 2h | ✅ DONE |
 | 2.3 | FundingExtreme upgrade | Funding percentil(90) dinâmico. Cross-exchange confirmation. OI_delta < 0 filter. Predicted funding check. | 2h | ✅ DONE |
-| 2.4 | Cooldown inteligente | Cooldown aumenta após loss (1h → 2h → 4h). Reseta quando funding normaliza ou ADX muda regime. | 1h |
+| 2.4 | Cooldown inteligente | Cooldown aumenta após loss (1h → 2h → 4h). Reseta quando funding normaliza ou ADX muda regime. | 1h | ✅ DONE |
 
 ---
 

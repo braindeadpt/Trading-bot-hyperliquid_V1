@@ -109,6 +109,14 @@ strategy:
     oi_delta_threshold: 0.0         # OI_delta must be < 0 (decreasing)
     use_predicted_primary: true     # use predicted funding as primary signal
 
+  # ═══════════════════════════════════════════════════════════
+  # Cooldown Manager (Task 2.4)
+  # ═══════════════════════════════════════════════════════════
+  cooldown:
+    base_minutes: 60                # 1h base cooldown after any trade
+    max_minutes: 240                # 4h max cooldown after consecutive losses
+    multiplier: 2.0                 # double after each loss (1h → 2h → 4h)
+
 # ═══════════════════════════════════════════════════════════
 # Backtest
 # ═══════════════════════════════════════════════════════════

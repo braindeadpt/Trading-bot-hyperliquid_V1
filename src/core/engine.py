@@ -92,6 +92,13 @@ class TradingEngine:
             config.get("risk.min_fill_ratio", 0.8)
         )
 
+        # ── Cooldown manager (Task 2.4) ──
+        self._cooldown_base_ms = int(config.get("cooldown.base_minutes", 60) * 60_000)
+        self._cooldown_max_ms = int(config.get("cooldown.max_minutes", 240) * 60_000)
+        self._cooldown_multiplier = safe_float(config.get("cooldown.multiplier", 2.0))
+        # Per (strategy, symbol) cooldown state
+        self._cooldown_state: Dict[str, Dict[str, Any]] = {}
+
         # ── Regime filter (ADX-based strategy weighting) ──
         self._adx_period = int(config.get("strategy.adx_period", 14))
         self._adx_trend_threshold = safe_float(
@@ -697,6 +704,134 @@ class TradingEngine:
         return estimate_slippage(levels, size, side)
 
     # ------------------------------------------------------------------
+    # Cooldown manager (Task 2.4)
+    # ------------------------------------------------------------------
+
+    def _cooldown_key(self, strategy: str, symbol: str) -> str:
+        return f"{strategy}:{symbol}"
+
+    def _is_in_cooldown(
+        self,
+        strategy: str,
+        symbol: str,
+        event: MarketEvent,
+    ) -> Tuple[bool, Optional[str]]:
+        """Check if a (strategy, symbol) pair is in cooldown.
+
+        Returns (in_cooldown, reason_string). Cooldown resets when:
+          1. Time elapsed >= current cooldown duration
+          2. Funding normalizes (|funding| < strong_threshold * 0.5)
+          3. ADX regime changed from when the trade was entered
+        """
+        key = self._cooldown_key(strategy, symbol)
+        state = self._cooldown_state.get(key)
+        if state is None:
+            return False, None
+
+        now = event.timestamp_ms
+        elapsed = now - state["last_trade_ms"]
+
+        # 1. Time-based reset
+        if elapsed >= state["duration_ms"]:
+            logger.info(
+                "Cooldown EXPIRED %s — %.1f min elapsed (limit %.1f min)",
+                key, elapsed / 60_000, state["duration_ms"] / 60_000,
+            )
+            del self._cooldown_state[key]
+            return False, None
+
+        # 2. Funding normalization reset
+        # Use a simple threshold: if current funding is mild, reset cooldown
+        funding = event.funding or event.predicted_funding
+        if funding is not None and abs(funding) < 0.002:  # 0.2% = "normal"
+            logger.info(
+                "Cooldown RESET %s — funding normalized to %.4f%%",
+                key, funding * 100,
+            )
+            del self._cooldown_state[key]
+            return False, None
+
+        # 3. ADX regime change reset
+        current_adx = event.adx_14
+        if current_adx is not None and state.get("adx") is not None:
+            old_regime = (
+                "trend" if state["adx"] > self._adx_trend_threshold
+                else "range" if state["adx"] < self._adx_range_threshold
+                else "neutral"
+            )
+            new_regime = (
+                "trend" if current_adx > self._adx_trend_threshold
+                else "range" if current_adx < self._adx_range_threshold
+                else "neutral"
+            )
+            if old_regime != new_regime and new_regime != "neutral":
+                logger.info(
+                    "Cooldown RESET %s — regime changed %s → %s (ADX %.1f → %.1f)",
+                    key, old_regime, new_regime, state["adx"], current_adx,
+                )
+                del self._cooldown_state[key]
+                return False, None
+
+        remaining = (state["duration_ms"] - elapsed) / 60_000
+        return True, f"cooldown {remaining:.1f}min remaining ({state['consecutive_losses']} losses)"
+
+    def _update_cooldown_on_entry(
+        self,
+        strategy: str,
+        symbol: str,
+        event: MarketEvent,
+    ) -> None:
+        """Record entry time and context for future cooldown checks."""
+        key = self._cooldown_key(strategy, symbol)
+        self._cooldown_state[key] = {
+            "last_trade_ms": event.timestamp_ms,
+            "duration_ms": self._cooldown_base_ms,  # will be updated on exit
+            "consecutive_losses": self._cooldown_state.get(key, {}).get("consecutive_losses", 0),
+            "adx": event.adx_14,
+            "funding": event.funding or event.predicted_funding,
+        }
+
+    def _update_cooldown_on_exit(
+        self,
+        strategy: str,
+        symbol: str,
+        pnl_pct: float,
+    ) -> None:
+        """Update cooldown state after a position is closed.
+
+        After loss: double cooldown duration (cap at max).
+        After win: reset consecutive losses and cooldown.
+        """
+        key = self._cooldown_key(strategy, symbol)
+        state = self._cooldown_state.get(key)
+        if state is None:
+            return  # shouldn't happen but be safe
+
+        if pnl_pct > 0:
+            # WIN — reset cooldown
+            state["consecutive_losses"] = 0
+            state["duration_ms"] = self._cooldown_base_ms
+            logger.info(
+                "Cooldown RESET %s — WIN (pnl=%.2f%%). Back to base %.1f min.",
+                key, pnl_pct * 100, self._cooldown_base_ms / 60_000,
+            )
+        else:
+            # LOSS — increase cooldown
+            state["consecutive_losses"] += 1
+            new_duration = min(
+                self._cooldown_base_ms * (self._cooldown_multiplier ** state["consecutive_losses"]),
+                self._cooldown_max_ms,
+            )
+            state["duration_ms"] = int(new_duration)
+            logger.info(
+                "Cooldown INCREASED %s — LOSS #%d (pnl=%.2f%%). "
+                "Next cooldown: %.1f min (max %.1f min)",
+                key, state["consecutive_losses"], pnl_pct * 100,
+                state["duration_ms"] / 60_000,
+                self._cooldown_max_ms / 60_000,
+            )
+
+    # ------------------------------------------------------------------
     # Signal processing
     # ------------------------------------------------------------------
 
@@ -731,6 +866,28 @@ class TradingEngine:
         }
         self._signal_history.insert(0, sig_record)
         self._signal_history = self._signal_history[:100]
+
+        # --- Cooldown check (Task 2.4) ---
+        in_cooldown, cooldown_reason = self._is_in_cooldown(
+            signal.strategy, signal.symbol, event,
+        )
+        if in_cooldown:
+            logger.info(
+                "Signal REJECTED %s %s — %s",
+                signal.symbol, signal.side, cooldown_reason,
+            )
+            sig_record["status"] = "rejected"
+            sig_record["risk_reason"] = cooldown_reason
+            self._decision_history.insert(0, {
+                "time": sig_time,
+                "type": "cooldown",
+                "symbol": signal.symbol,
+                "side": signal.side,
+                "result": "rejected",
+                "reason": cooldown_reason,
+            })
+            self._decision_history = self._decision_history[:100]
+            return
 
         # --- Risk check ---
         capital = await self._portfolio.current_capital
@@ -931,6 +1088,9 @@ class TradingEngine:
         )
         await self._portfolio.add_position(position, cost=notional)
 
+        # --- Update cooldown state on entry (Task 2.4) ---
+        self._update_cooldown_on_entry(signal.strategy, signal.symbol, event)
+
         logger.info(
             "Signal EXECUTED %s %s size=%.6f @ %.4f (id=%d)",
             signal.symbol,
@@ -1004,6 +1164,10 @@ class TradingEngine:
 
         # Update risk manager metrics
         self._risk.on_trade_closed(result)
+
+        # --- Update cooldown state on exit (Task 2.4) ---
+        strategy = position.metadata.get("strategy", "unknown")
+        self._update_cooldown_on_exit(strategy, position.symbol, result.pnl_pct)
 
         self._decision_history.insert(0, {
             "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
