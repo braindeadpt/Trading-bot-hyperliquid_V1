@@ -46,6 +46,52 @@ class AggregatedFundingOI:
 
 # ── Exchange clients ──
 
+class CoinalyzeClient:
+    """Coinalyze API — aggregated funding + OI from 15+ exchanges."""
+    BASE = "https://api.coinalyze.net/v1"
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    async def fetch(self, session: aiohttp.ClientSession, symbol: str) -> Optional[FundingOI]:
+        """symbol: BTCUSDT_PERP"""
+        try:
+            async with session.get(
+                f"{self.BASE}/futures/funding/latest",
+                params={"symbols": symbol},
+                headers={"api-key": self.api_key},
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning("Coinalyze HTTP %s for %s", resp.status, symbol)
+                    return None
+                data = await resp.json()
+                if not data or not data.get("success"):
+                    return None
+                result = data.get("result", [])
+                if not result:
+                    return None
+                latest = result[0]
+                funding = float(latest.get("fundingRate", 0))
+                predicted = float(latest.get("predictedFundingRate", 0)) if latest.get("predictedFundingRate") else None
+                oi_value = float(latest.get("oiValue", 0))  # OI in USD
+                oi_coin = float(latest.get("openInterest", 0))  # OI in coins
+                mark = float(latest.get("markPrice", 0))
+                funding_time = int(latest.get("fundingTime", 0)) * 1000  # Convert to ms
+
+                return FundingOI(
+                    symbol=symbol.replace("USDT_PERP", "").replace("-PERP", ""),
+                    exchange="coinalyze",
+                    funding_rate=funding,
+                    predicted_funding=predicted,
+                    open_interest=oi_value,  # Already in USD
+                    mark_price=mark,
+                    timestamp_ms=funding_time,
+                )
+        except Exception as e:
+            logger.warning("Coinalyze fetch failed for %s: %s", symbol, e)
+            return None
+
+
 class BinanceFundingClient:
     """Binance public API for funding rates."""
     BASE = "https://fapi.binance.com/fapi/v1"
@@ -220,21 +266,39 @@ class OKXFundingClient:
 class FundingOIAggregator:
     """
     Aggregates funding + OI from multiple exchanges.
+    Primary: Coinalyze (15+ exchanges aggregated)
+    Fallback: Binance, Bybit, OKX (individual exchanges)
     Polls every 8 hours (funding rate interval).
     """
 
     SYMBOL_MAP = {
-        "BTC": {"binance": "BTCUSDT", "bybit": "BTCUSDT", "okx": "BTC-USDT-SWAP"},
-        "ETH": {"binance": "ETHUSDT", "bybit": "ETHUSDT", "okx": "ETH-USDT-SWAP"},
-        "SOL": {"binance": "SOLUSDT", "bybit": "SOLUSDT", "okx": "SOL-USDT-SWAP"},
+        "BTC": {
+            "coinalyze": "BTCUSDT_PERP",
+            "binance": "BTCUSDT",
+            "bybit": "BTCUSDT",
+            "okx": "BTC-USDT-SWAP",
+        },
+        "ETH": {
+            "coinalyze": "ETHUSDT_PERP",
+            "binance": "ETHUSDT",
+            "bybit": "ETHUSDT",
+            "okx": "ETH-USDT-SWAP",
+        },
+        "SOL": {
+            "coinalyze": "SOLUSDT_PERP",
+            "binance": "SOLUSDT",
+            "bybit": "SOLUSDT",
+            "okx": "SOL-USDT-SWAP",
+        },
     }
 
-    def __init__(self):
-        self.clients = {
-            "binance": BinanceFundingClient(),
-            "bybit": BybitFundingClient(),
-            "okx": OKXFundingClient(),
-        }
+    def __init__(self, coinalyze_key: Optional[str] = None):
+        self.clients: Dict[str, Any] = {}
+        if coinalyze_key:
+            self.clients["coinalyze"] = CoinalyzeClient(coinalyze_key)
+        self.clients["binance"] = BinanceFundingClient()
+        self.clients["bybit"] = BybitFundingClient()
+        self.clients["okx"] = OKXFundingClient()
         self._cache: Dict[str, AggregatedFundingOI] = {}
         self._last_poll_ms: int = 0
 
@@ -250,15 +314,32 @@ class FundingOIAggregator:
 
                 by_exchange: Dict[str, FundingOI] = {}
                 tasks = []
-                for ex, mapped in mappings.items():
-                    client = self.clients.get(ex)
-                    if client:
-                        tasks.append(client.fetch(session, mapped))
+                
+                # Try Coinalyze first (aggregated 15+ exchanges)
+                if "coinalyze" in mappings and "coinalyze" in self.clients:
+                    client = self.clients["coinalyze"]
+                    mapped = mappings["coinalyze"]
+                    coinalyze_result = await client.fetch(session, mapped)
+                    if coinalyze_result:
+                        by_exchange["coinalyze"] = coinalyze_result
+                        logger.info("Coinalyze %s: funding=%.6f, predicted=%s, OI=$%.0f",
+                                    sym, coinalyze_result.funding_rate or 0,
+                                    f"{coinalyze_result.predicted_funding:.6f}" if coinalyze_result.predicted_funding else "N/A",
+                                    coinalyze_result.open_interest or 0)
 
-                responses = await asyncio.gather(*tasks, return_exceptions=True)
-                for resp in responses:
-                    if isinstance(resp, FundingOI):
-                        by_exchange[resp.exchange] = resp
+                # Fallback to individual exchanges if Coinalyze failed
+                if not by_exchange:
+                    for ex, mapped in mappings.items():
+                        if ex == "coinalyze":
+                            continue
+                        client = self.clients.get(ex)
+                        if client:
+                            tasks.append(client.fetch(session, mapped))
+
+                    responses = await asyncio.gather(*tasks, return_exceptions=True)
+                    for resp in responses:
+                        if isinstance(resp, FundingOI):
+                            by_exchange[resp.exchange] = resp
 
                 # Aggregate
                 if not by_exchange:
@@ -278,6 +359,14 @@ class FundingOIAggregator:
                     total_oi = sum(ois)
                     if total_oi > 0:
                         funding_weighted = sum(f * oi for f, oi in zip(fundings, ois)) / total_oi
+
+                # If Coinalyze is present, use its values as primary (already aggregated)
+                coinalyze_data = by_exchange.get("coinalyze")
+                if coinalyze_data:
+                    funding_avg = coinalyze_data.funding_rate
+                    funding_weighted = coinalyze_data.funding_rate
+                    predicted_avg = coinalyze_data.predicted_funding
+                    oi_total = coinalyze_data.open_interest
 
                 results[sym] = AggregatedFundingOI(
                     symbol=sym,
