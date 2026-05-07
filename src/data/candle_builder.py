@@ -8,6 +8,7 @@ historical access.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import deque
@@ -51,6 +52,31 @@ class Candle:
     @property
     def oi_delta(self) -> float:
         return self.oi_close - self.oi_open
+
+    # ── Aliases for strategy compatibility (indicators.py uses short names) ──
+    @property
+    def open(self) -> float:
+        return self.open_price
+
+    @property
+    def high(self) -> float:
+        return self.high_price
+
+    @property
+    def low(self) -> float:
+        return self.low_price
+
+    @property
+    def close(self) -> float:
+        return self.close_price
+
+    @property
+    def timestamp_ms(self) -> int:
+        return self.close_time_ms
+
+    @property
+    def open_interest(self) -> Optional[float]:
+        return self.oi_close if self.oi_close != 0.0 else None
 
 
 @dataclass(slots=True)
@@ -166,9 +192,11 @@ class CandleBuilder:
         """Subscribe to the DataBus topics we need."""
         if self._subscribed:
             return
-        await self.bus.subscribe("price:*", self._on_price)
-        await self.bus.subscribe("trade:*", self._on_trade)
-        await self.bus.subscribe("ctx:*", self._on_ctx)
+        for sym in self.symbols:
+            await self.bus.subscribe(f"price:{sym}", self._on_price)
+            await self.bus.subscribe(f"trade:{sym}", self._on_trade)
+            await self.bus.subscribe(f"ctx:{sym}", self._on_ctx)
+            logger.info("CandleBuilder subscribed to price:%s, trade:%s, ctx:%s", sym, sym, sym)
         self._subscribed = True
         logger.info("CandleBuilder started for %s", self.symbols)
 
@@ -179,27 +207,31 @@ class CandleBuilder:
     # ── DataBus callbacks ──
 
     async def _on_price(self, tick: Any) -> None:
-        if not isinstance(tick, HlPriceTick):
+        # Simplified duck-typing check to avoid cross-module isinstance issues
+        if not hasattr(tick, 'symbol') or not hasattr(tick, 'mid'):
             return
         if tick.symbol not in self.symbols:
             return
-        self._update(tick.symbol, tick.timestamp_ms, price=tick.mid)
+        logger.info("CandleBuilder received price: %s = %.2f", tick.symbol, tick.mid)
+        self._update(tick.symbol, getattr(tick, 'timestamp_ms', int(time.time() * 1000)), price=tick.mid)
 
     async def _on_trade(self, trade: Any) -> None:
-        if not isinstance(trade, HlTrade):
+        # Simplified duck-typing check
+        if not hasattr(trade, 'symbol') or not hasattr(trade, 'size'):
             return
         if trade.symbol not in self.symbols:
             return
         self._update(
             trade.symbol,
-            trade.timestamp_ms,
-            price=trade.price,
+            getattr(trade, 'timestamp_ms', int(time.time() * 1000)),
+            price=getattr(trade, 'price', None),
             size=trade.size,
-            side=trade.side,
+            side=getattr(trade, 'side', 'buy'),
         )
 
     async def _on_ctx(self, ctx: Any) -> None:
-        if not isinstance(ctx, HlAssetCtx):
+        # Simplified duck-typing check
+        if not hasattr(ctx, 'symbol'):
             return
         if ctx.symbol not in self.symbols:
             return
@@ -208,16 +240,16 @@ class CandleBuilder:
             inflight = self._inflight.get(key)
             if inflight is None:
                 continue
-            inflight.oi_latest = ctx.open_interest
-            inflight.funding_latest = ctx.funding_rate
-            inflight.predicted_funding_latest = ctx.predicted_funding
+            inflight.oi_latest = getattr(ctx, 'open_interest', 0)
+            inflight.funding_latest = getattr(ctx, 'funding_rate', 0)
+            inflight.predicted_funding_latest = getattr(ctx, 'predicted_funding', 0)
             # Seed open values if they haven't been set yet
-            if inflight.oi_open == 0.0 and ctx.open_interest > 0:
-                inflight.oi_open = ctx.open_interest
+            if inflight.oi_open == 0.0 and getattr(ctx, 'open_interest', 0) > 0:
+                inflight.oi_open = getattr(ctx, 'open_interest', 0)
             if inflight.funding_open == 0.0:
-                inflight.funding_open = ctx.funding_rate
+                inflight.funding_open = getattr(ctx, 'funding_rate', 0)
             if inflight.predicted_funding_open == 0.0:
-                inflight.predicted_funding_open = ctx.predicted_funding
+                inflight.predicted_funding_open = getattr(ctx, 'predicted_funding', 0)
 
     # ── Core logic ──
 

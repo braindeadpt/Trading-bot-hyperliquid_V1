@@ -181,12 +181,14 @@ class TrendFollow(Strategy):
             signal = self._build_signal(event, "long", confidence, atr, long_conditions)
             state.last_signal_side = "long"
             state.last_signal_ts = event.timestamp_ms
+            logger.info("TrendFollow LONG signal for %s (confidence=%.2f)", event.symbol, confidence)
 
         elif short_met >= MIN_CONFLUENCE and short_met > long_met:
             confidence = self._calculate_confidence(short_conditions)
             signal = self._build_signal(event, "short", confidence, atr, short_conditions)
             state.last_signal_side = "short"
             state.last_signal_ts = event.timestamp_ms
+            logger.info("TrendFollow SHORT signal for %s (confidence=%.2f)", event.symbol, confidence)
 
         return signal
 

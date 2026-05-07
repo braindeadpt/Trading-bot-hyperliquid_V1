@@ -1,13 +1,47 @@
-﻿*.pyc
+# Logs
+logs/*.log
+logs/*.log.*
+logs/*.err
+
+# SQLite
+data/live/*.db
+data/live/*.db-shm
+data/live/*.db-wal
+
+# Python cache
 __pycache__/
-*.log
-*.db
-data/live/
-data/historical/
-logs/
-*.enc
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Environment variables (secrets)
+.env
+
+# IDE
 .vscode/
 .idea/
-*.egg-info/
-dist/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
 build/
+dist/
+*.egg-info/
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Backtest data
+tests/data/

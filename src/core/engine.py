@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Dict, List, Optional, Set
 
 from src.data.database import (
@@ -72,8 +73,8 @@ class TradingEngine:
         # In-memory cache of latest data per symbol
         self._latest_price: Dict[str, HlPriceTick] = {}
         self._latest_ctx: Dict[str, HlAssetCtx] = {}
-        self._latest_candles: Dict[str, Dict[str, Optional[Candle]]] = {
-            sym: {"1m": None, "5m": None, "15m": None, "1h": None}
+        self._latest_candles: Dict[str, Dict[int, Optional[Candle]]] = {
+            sym: {60: None, 300: None, 900: None, 3600: None}
             for sym in self._symbols
         }
 
@@ -87,9 +88,54 @@ class TradingEngine:
         self._running: bool = False
         self._shutdown_event: Optional[asyncio.Event] = None
         self._event_lock = asyncio.Lock()
+        self._start_time: Optional[float] = None
 
         # Track which topics we subscribed to so we can unsubscribe on stop
         self._subscribed_callbacks: Dict[str, Any] = {}
+
+    # ── Public properties for dashboard / external access ──
+    @property
+    def portfolio(self) -> PortfolioState:
+        return self._portfolio
+
+    @property
+    def database(self) -> Database:
+        return self._db
+
+    @property
+    def data_bus(self) -> DataBus:
+        return self._bus
+
+    @property
+    def risk_manager(self) -> RiskManager:
+        return self._risk
+
+    @property
+    def executor(self) -> ExecutionEngine:
+        return self._executor
+
+    @property
+    def uptime_sec(self) -> int:
+        if self._start_time is None:
+            return 0
+        return int(time.time() - self._start_time)
+
+    @property
+    def memory_mb(self) -> float:
+        try:
+            import psutil
+            proc = psutil.Process()
+            return round(proc.memory_info().rss / (1024 * 1024), 1)
+        except Exception:
+            return 0.0
+
+    @property
+    def daily_trade_count(self) -> int:
+        return getattr(self._portfolio, "sync_daily_trades", lambda: 0)()
+
+    @property
+    def positions(self) -> Dict[str, Any]:
+        return self._portfolio.get_positions_sync() if hasattr(self._portfolio, "get_positions_sync") else {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -103,6 +149,7 @@ class TradingEngine:
 
         self._running = True
         self._shutdown_event = asyncio.Event()
+        self._start_time = time.time()
         logger.info("TradingEngine starting …")
 
         # 1. Open executor session
@@ -124,7 +171,7 @@ class TradingEngine:
             self._subscribed_callbacks[f"ctx:{symbol}"] = cb_ctx
 
             # Completed candles per timeframe
-            for tf in ("1m", "5m", "15m", "1h"):
+            for tf in (60, 300, 900, 3600):
                 cb_candle = self._make_candle_callback(symbol, tf)
                 await self._bus.subscribe(f"candle_complete:{tf}:{symbol}", cb_candle)
                 self._subscribed_callbacks[f"candle_complete:{tf}:{symbol}"] = cb_candle
@@ -207,6 +254,7 @@ class TradingEngine:
           4. Execute approved entries / exits.
           5. Persist everything to the DB.
         """
+        logger.info("Processing market event for %s", symbol)
         async with self._event_lock:
             if not self._running:
                 return
@@ -282,22 +330,43 @@ class TradingEngine:
             return None
 
         # Build the MarketEvent
-        return MarketEvent(
+        event = MarketEvent(
             symbol=symbol,
             price=price,
             timestamp_ms=tick.timestamp_ms,
-            candle_1m=candles.get("1m"),
-            candle_5m=candles.get("5m"),
-            candle_15m=candles.get("15m"),
-            candle_1h=candles.get("1h"),
+            candle_1m=candles.get(60),
+            candle_5m=candles.get(300),
+            candle_15m=candles.get(900),
+            candle_1h=candles.get(3600),
             funding=safe_float(ctx.funding_rate) if ctx else None,
             predicted_funding=safe_float(ctx.predicted_funding) if ctx else None,
             oi_total=safe_float(ctx.open_interest) if ctx else None,
-            oi_delta=None,  # Would require history; strategies compute from metadata if needed
-            volume_1m=None,  # Populated by Binance integration or CandleBuilder
-            bid_ask_imbalance=None,
-            vwap_15m=None,
+            oi_delta=getattr(candles.get(900), 'oi_delta', None) if candles.get(900) else None,
+            volume_1m=getattr(candles.get(60), 'volume', None) if candles.get(60) else None,
+            bid_ask_imbalance=self._calc_imbalance(candles.get(900)),
+            vwap_15m=getattr(candles.get(900), 'vwap', None) if candles.get(900) else None,
         )
+        
+        # Log orderflow metrics for debugging
+        logger.info(
+            "MarketEvent %s: price=%.2f, funding=%.6f, oi=%.2f, oi_delta=%s, imbalance=%s, vwap=%s, candles=%s",
+            symbol, event.price, event.funding or 0, event.oi_total or 0,
+            event.oi_delta, event.bid_ask_imbalance, event.vwap_15m,
+            {k: "yes" if v else "no" for k, v in candles.items()}
+        )
+        
+        return event
+
+    def _calc_imbalance(self, candle_15m) -> Optional[float]:
+        """Compute bid/ask imbalance from 15m candle buy/sell volume."""
+        if candle_15m is None:
+            return None
+        buy = getattr(candle_15m, 'buy_volume', 0.0)
+        sell = getattr(candle_15m, 'sell_volume', 0.0)
+        total = buy + sell
+        if total <= 0:
+            return None
+        return (buy - sell) / total
 
     # ------------------------------------------------------------------
     # Signal processing

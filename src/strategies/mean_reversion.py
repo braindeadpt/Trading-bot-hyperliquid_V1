@@ -148,6 +148,7 @@ class MeanReversion(Strategy):
         # Build metadata for transparency
         overcrowded_score = calculate_overcrowded_score(funding, oi_ratio)
 
+        logger.info("MeanReversion %s signal for %s (funding=%.4f, confidence=%.2f)", target_side, event.symbol, funding, confidence)
         return Signal(
             strategy=self.name,
             symbol=event.symbol,

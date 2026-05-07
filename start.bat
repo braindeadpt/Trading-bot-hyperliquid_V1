@@ -55,7 +55,11 @@ echo [MODE] Paper Trading
 echo Dashboard: http://localhost:5000
 echo Press Ctrl+C to stop.
 echo.
-python main.py --mode paper
+python main.py --mode paper 2>logs\paper_errors.log
+if errorlevel 1 (
+    echo [ERROR] Bot crashed. Check logs\paper_errors.log
+    pause
+)
 goto end
 
 :testnet
@@ -80,7 +84,15 @@ if /i not "%confirm%"=="MAINNET" (
     pause
     goto end
 )
-python main.py --mode mainnet
+echo.
+echo [MODE] Mainnet — REAL MONEY
+echo Dashboard: http://localhost:5000
+echo.
+python main.py --mode live 2>logs\mainnet_errors.log
+if errorlevel 1 (
+    echo [ERROR] Bot crashed. Check logs\mainnet_errors.log
+    pause
+)
 goto end
 
 :backtest

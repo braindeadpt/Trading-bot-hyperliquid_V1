@@ -38,7 +38,8 @@ class HlAssetCtx:
     funding_rate: float
     predicted_funding: float
     mark_price: float
-    timestamp_ms: int
+    mid_price: float = 0.0
+    timestamp_ms: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,23 +235,29 @@ class HyperliquidWSClient:
         """Send subscription messages for every channel we need."""
         if self._ws is None:
             return
-        channels = [
-            {"method": "subscribe", "subscription": {"type": "allMids"}},
-            {"method": "subscribe", "subscription": {"type": "activeAssetCtxs"}},
-            {"method": "subscribe", "subscription": {"type": "trades"}},
-        ]
-        for msg in channels:
-            await self._ws.send(json.dumps(msg))
-            logger.debug("Sent subscribe: %s", msg["subscription"]["type"])
+        # Subscribe to allMids (prices for all assets)
+        await self._ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "allMids"}}))
+        logger.info("Subscribed to allMids")
+        # Subscribe to activeAssetCtx per symbol (funding, OI)
+        for sym in self.symbols:
+            await self._ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "activeAssetCtx", "coin": sym}}))
+            logger.info("Subscribed to activeAssetCtx for %s", sym)
+        # Subscribe to trades per symbol
+        for sym in self.symbols:
+            await self._ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "trades", "coin": sym}}))
+            logger.info("Subscribed to trades for %s", sym)
 
     async def _read_loop(self) -> None:
         """Read messages, heartbeat, and parse until disconnect."""
         if self._ws is None:
             return
+        logger.info("_read_loop started")
         try:
             async for raw in self._ws:
                 self.messages_received += 1
                 self._last_heartbeat = time.time()
+                if self.messages_received <= 5:
+                    logger.info("WS raw msg #%d: %s...", self.messages_received, str(raw)[:80])
                 try:
                     self._on_message(raw)
                 except Exception as exc:  # noqa: BLE001
@@ -274,11 +281,12 @@ class HyperliquidWSClient:
         data = payload.get("data")
         if channel is None or data is None:
             return
-
+        self.messages_received += 1
+        logger.debug("WS channel=%s data_len=%d", channel, len(str(data)))
         if channel == "allMids":
             self._parse_all_mids(data)
-        elif channel == "activeAssetCtxs":
-            self._parse_active_asset_ctxs(data)
+        elif channel == "activeAssetCtx":
+            self._parse_active_asset_ctx(data)
         elif channel == "trades":
             self._parse_trades(data)
         else:
@@ -287,35 +295,40 @@ class HyperliquidWSClient:
     def _parse_all_mids(self, data: Dict[str, Any]) -> None:
         """Emit ``price:<symbol>`` topics."""
         ts = int(time.time() * 1000)
-        for sym, mid_str in data.items():
+        mids = data.get("mids", data)  # Handle both {"mids": {...}} and raw dict
+        if not isinstance(mids, dict):
+            return
+        for sym, mid_str in mids.items():
             try:
                 mid = float(mid_str)
             except (ValueError, TypeError):
                 continue
             tick = HlPriceTick(symbol=sym, mid=mid, timestamp_ms=ts)
             asyncio.create_task(self.bus.publish(f"price:{sym}", tick))
+            logger.info("price:%s = %.2f", sym, mid)
 
-    def _parse_active_asset_ctxs(self, data: List[Dict[str, Any]]) -> None:
+    def _parse_active_asset_ctx(self, data: Dict[str, Any]) -> None:
         """Emit ``ctx:<symbol>`` topics."""
+        sym = data.get("coin")
+        ctx = data.get("ctx")
+        if sym is None or ctx is None:
+            return
         ts = int(time.time() * 1000)
-        for entry in data:
-            sym = entry.get("coin")
-            ctx = entry.get("ctx")
-            if sym is None or ctx is None:
-                continue
-            try:
-                parsed = HlAssetCtx(
-                    symbol=sym,
-                    open_interest=_safe_float(ctx.get("oi")),
-                    funding_rate=_safe_float(ctx.get("funding")),
-                    predicted_funding=_safe_float(ctx.get("predFunding")),
-                    mark_price=_safe_float(ctx.get("markPx")),
-                    timestamp_ms=ts,
-                )
-            except (ValueError, TypeError) as exc:
-                logger.debug("Skipping malformed asset ctx for %s: %s", sym, exc)
-                continue
-            asyncio.create_task(self.bus.publish(f"ctx:{sym}", parsed))
+        try:
+            parsed = HlAssetCtx(
+                symbol=sym,
+                open_interest=_safe_float(ctx.get("openInterest")),
+                funding_rate=_safe_float(ctx.get("funding")),
+                predicted_funding=_safe_float(ctx.get("premium")),
+                mark_price=_safe_float(ctx.get("markPx")),
+                mid_price=_safe_float(ctx.get("midPx")),
+                timestamp_ms=ts,
+            )
+        except (ValueError, TypeError) as exc:
+            logger.debug("Skipping malformed asset ctx for %s: %s", sym, exc)
+            return
+        asyncio.create_task(self.bus.publish(f"ctx:{sym}", parsed))
+        logger.info("ctx:%s funding=%.6f oi=%.2f", sym, parsed.funding_rate, parsed.open_interest)
 
     def _parse_trades(self, data: List[Dict[str, Any]]) -> None:
         """Emit ``trade:<symbol>`` topics."""

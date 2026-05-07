@@ -116,6 +116,36 @@ class PortfolioState:
         async with self._lock:
             return {sym: snap.to_position() for sym, snap in self._positions.items()}
 
+    def get_positions_sync(self) -> Dict[str, Position]:
+        """Synchronous read of open positions (for dashboard only)."""
+        return {sym: snap.to_position() for sym, snap in self._positions.items()}
+
+    def sync_capital(self) -> float:
+        """Synchronous read of cash balance (for dashboard only)."""
+        return self._cash
+
+    def sync_initial_capital(self) -> float:
+        """Synchronous read of initial capital (for dashboard only)."""
+        return self._initial_capital
+
+    def sync_daily_pnl(self) -> float:
+        """Synchronous read of daily PnL (for dashboard only)."""
+        return self._daily_pnl
+
+    def sync_max_drawdown_pct(self) -> float:
+        """Synchronous read of max drawdown % (for dashboard only)."""
+        total = self._cash + sum(p.unrealized_pnl for p in self._positions.values())
+        if self._peak_capital <= 0.0:
+            return 0.0
+        dd = (self._peak_capital - total) / self._peak_capital
+        return max(dd, 0.0) * 100.0
+
+    def sync_total_pnl(self) -> float:
+        """Synchronous read of total PnL (for dashboard only)."""
+        realized = sum(t.get("pnl_usd", 0.0) for t in self._trade_history)
+        unrealized = sum(p.unrealized_pnl for p in self._positions.values())
+        return realized + unrealized
+
     @property
     async def trade_history(self) -> List[Dict[str, Any]]:
         """Return a copy of the closed-trade history."""
@@ -328,6 +358,18 @@ class PortfolioState:
             self._daily_trades = safe_float(data.get("daily_trades"), 0.0)
             self._last_reset_date = data.get("last_reset_date", utc_now().strftime("%Y-%m-%d"))
 
+    async def from_dict(self, data: Dict[str, Any]) -> None:
+        """Restore portfolio state from a previously saved snapshot.
+
+        Used on engine startup to resume from DB state.
+        """
+        async with self._lock:
+            self._cash = safe_float(data.get("cash"), self._initial_capital)
+            self._peak_capital = safe_float(data.get("peak_capital"), self._peak_capital)
+            self._daily_pnl = safe_float(data.get("daily_pnl"), 0.0)
+            self._daily_trades = safe_float(data.get("daily_trades"), 0.0)
+            self._last_reset_date = data.get("last_reset_date", utc_now().strftime("%Y-%m-%d"))
+
             # Restore positions
             for sym, p_data in data.get("positions", {}).items():
                 snap = _PositionSnapshot(
@@ -346,3 +388,46 @@ class PortfolioState:
                 self._cash,
                 len(self._positions),
             )
+
+    # ------------------------------------------------------------------
+    # Synchronous accessors (for dashboard — race-safe snapshots)
+    # ------------------------------------------------------------------
+
+    def sync_capital(self) -> float:
+        """Return current total capital (cash + unrealized)."""
+        unrealized = sum(p.unrealized_pnl for p in self._positions.values())
+        return self._cash + unrealized
+
+    def sync_initial_capital(self) -> float:
+        """Return the initial capital."""
+        return self._initial_capital
+
+    def sync_total_pnl(self) -> float:
+        """Return total realized PnL (daily PnL)."""
+        return self._daily_pnl
+
+    def sync_max_drawdown_pct(self) -> float:
+        """Return max drawdown as percentage."""
+        total = self._cash + sum(p.unrealized_pnl for p in self._positions.values())
+        if self._peak_capital <= 0.0:
+            return 0.0
+        dd = (self._peak_capital - total) / self._peak_capital
+        return max(dd, 0.0) * 100
+
+    def get_positions_sync(self) -> Dict[str, Any]:
+        """Return a shallow copy of positions for dashboard display."""
+        return {
+            sym: p for sym, p in self._positions.items()
+        }
+
+    def sync_daily_trades(self) -> int:
+        """Return number of trades today."""
+        return self._daily_trades
+
+    def sync_daily_pnl(self) -> float:
+        """Return today's PnL."""
+        return self._daily_pnl
+
+    def sync_trade_history(self) -> List[Dict[str, Any]]:
+        """Return a copy of closed-trade history."""
+        return list(self._trade_history)

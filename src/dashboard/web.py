@@ -3,11 +3,14 @@ Hyperliquid Premium — Dashboard Web Server
 Flask + Socket.IO for real-time push updates.
 """
 
+import logging
 import os
 import time
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_socketio import SocketIO, emit
@@ -282,10 +285,16 @@ def create_dashboard(engine: Any, config: Dict[str, Any]):
     def is_online() -> bool:
         if engine is None:
             return True  # Mock mode — pretend online
-        ws = _safe(engine, "websocket_client", None)
-        if ws is None:
-            return True
-        return getattr(ws, "connected", False)
+        # Check if engine is running and data is flowing
+        data_bus = get_data_bus()
+        if data_bus is None:
+            return False
+        # At least one price tick received in last 30s?
+        for sym in ("BTC", "ETH", "SOL"):
+            tick = data_bus.get_latest(f"price:{sym}")
+            if tick is not None:
+                return True
+        return False
 
     def circuit_breaker_tripped() -> bool:
         rm = get_risk_manager()
@@ -311,9 +320,9 @@ def create_dashboard(engine: Any, config: Dict[str, Any]):
         risk_mgr = get_risk_manager()
         db = get_database()
 
-        capital = getattr(portfolio, "capital", 0.0) if portfolio else 0.0
-        initial = getattr(portfolio, "initial_capital", capital) if portfolio else capital
-        total_pnl = getattr(portfolio, "total_pnl", 0.0) if portfolio else 0.0
+        capital = _call(portfolio, "sync_capital") or 0.0 if portfolio else 0.0
+        initial = _call(portfolio, "sync_initial_capital") or capital if portfolio else capital
+        total_pnl = _call(portfolio, "sync_total_pnl") or 0.0 if portfolio else 0.0
 
         wins = getattr(risk_mgr, "daily_wins", 0) if risk_mgr else 0
         losses = getattr(risk_mgr, "daily_losses", 0) if risk_mgr else 0
@@ -321,8 +330,9 @@ def create_dashboard(engine: Any, config: Dict[str, Any]):
         win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
 
         daily_pnl = getattr(risk_mgr, "daily_pnl", 0.0) if risk_mgr else 0.0
-        max_dd = getattr(portfolio, "max_drawdown_pct", 0.0) if portfolio else 0.0
-        open_count = len(getattr(portfolio, "positions", [])) if portfolio else 0
+        max_dd = _call(portfolio, "sync_max_drawdown_pct") or 0.0 if portfolio else 0.0
+        positions = _call(portfolio, "get_positions_sync") or {}
+        open_count = len(positions) if positions else 0
         daily_trades = getattr(risk_mgr, "daily_trade_count", 0) if risk_mgr else 0
 
         return {
@@ -354,7 +364,7 @@ def create_dashboard(engine: Any, config: Dict[str, Any]):
         portfolio = get_portfolio()
         if portfolio is None:
             return []
-        positions = getattr(portfolio, "positions", {})
+        positions = _call(portfolio, "get_positions_sync") or {}
         prices = build_prices()
         result = []
         for symbol, pos in (positions.items() if isinstance(positions, dict) else []):
@@ -498,19 +508,23 @@ def create_dashboard(engine: Any, config: Dict[str, Any]):
         data_bus = get_data_bus()
         if data_bus is None:
             return []
-        funding_map = getattr(data_bus, "funding_rates", {}) or {}
-        predicted_map = getattr(data_bus, "predicted_funding", {}) or {}
         positions = build_positions()
         pos_symbols = {p["symbol"]: p["side"] for p in positions}
         result = []
-        for symbol, rate in (funding_map.items() if isinstance(funding_map, dict) else []):
-            result.append({
-                "symbol": symbol,
-                "rate": rate,
-                "predicted": predicted_map.get(symbol),
-                "has_position": symbol in pos_symbols,
-                "position_side": pos_symbols.get(symbol),
-            })
+        for sym in ("BTC", "ETH", "SOL"):
+            ctx = data_bus.get_latest(f"ctx:{sym}")
+            if ctx is None:
+                continue
+            try:
+                result.append({
+                    "symbol": sym,
+                    "rate": getattr(ctx, "funding_rate", 0.0),
+                    "predicted": getattr(ctx, "predicted_funding", 0.0),
+                    "has_position": sym in pos_symbols,
+                    "position_side": pos_symbols.get(sym),
+                })
+            except Exception:
+                pass
         return result
 
     def build_oi() -> List[Dict[str, Any]]:
@@ -519,19 +533,22 @@ def create_dashboard(engine: Any, config: Dict[str, Any]):
         data_bus = get_data_bus()
         if data_bus is None:
             return []
-        oi_map = getattr(data_bus, "oi_data", {}) or {}
         result = []
-        for symbol, data in (oi_map.items() if isinstance(oi_map, dict) else []):
-            if isinstance(data, dict):
-                long_ratio = data.get("long_ratio", 0.5)
-                overcrowded = abs(long_ratio - 0.5) * 2  # 0 = balanced, 1 = all one side
+        for sym in ("BTC", "ETH", "SOL"):
+            ctx = data_bus.get_latest(f"ctx:{sym}")
+            if ctx is None:
+                continue
+            try:
+                oi = getattr(ctx, "open_interest", 0.0)
                 result.append({
-                    "symbol": symbol,
-                    "oi": data.get("total", 0),
-                    "oi_delta_24h": data.get("delta_24h", 0),
-                    "long_ratio": long_ratio,
-                    "overcrowded_score": round(overcrowded, 2),
+                    "symbol": sym,
+                    "oi": oi,
+                    "oi_delta_24h": 0,
+                    "long_ratio": 0.5,
+                    "overcrowded_score": 0.0,
                 })
+            except Exception:
+                pass
         return result
 
     def build_prices() -> Dict[str, float]:
@@ -540,7 +557,12 @@ def create_dashboard(engine: Any, config: Dict[str, Any]):
         data_bus = get_data_bus()
         if data_bus is None:
             return {}
-        return getattr(data_bus, "prices", {}) or {}
+        result = {}
+        for sym in ("BTC", "ETH", "SOL"):
+            tick = data_bus.get_latest(f"price:{sym}")
+            if tick is not None:
+                result[sym] = getattr(tick, "mid", 0.0)
+        return result
 
     def build_candles() -> List[Dict[str, Any]]:
         if engine is None:
@@ -548,29 +570,22 @@ def create_dashboard(engine: Any, config: Dict[str, Any]):
         data_bus = get_data_bus()
         if data_bus is None:
             return []
-        latest = getattr(data_bus, "latest_candles", {}) or {}
         result = []
-        for (symbol, tf), c in (latest.items() if isinstance(latest, dict) else []):
-            if isinstance(c, dict):
-                result.append({
-                    "symbol": symbol,
-                    "timeframe": tf,
-                    "open": c.get("open"),
-                    "high": c.get("high"),
-                    "low": c.get("low"),
-                    "close": c.get("close"),
-                    "volume": c.get("volume"),
-                })
-            else:
+        for sym in ("BTC", "ETH", "SOL"):
+            for tf in (60, 300, 900, 3600):
+                candle = data_bus.get_latest(f"candle_complete:{tf}:{sym}")
+                if candle is None:
+                    continue
                 try:
+                    tf_label = {60: "1m", 300: "5m", 900: "15m", 3600: "1h"}.get(tf, str(tf))
                     result.append({
-                        "symbol": symbol,
-                        "timeframe": tf,
-                        "open": c[0],
-                        "high": c[1],
-                        "low": c[2],
-                        "close": c[3],
-                        "volume": c[4],
+                        "symbol": sym,
+                        "timeframe": tf_label,
+                        "open": getattr(candle, "open_price", 0.0),
+                        "high": getattr(candle, "high_price", 0.0),
+                        "low": getattr(candle, "low_price", 0.0),
+                        "close": getattr(candle, "close_price", 0.0),
+                        "volume": getattr(candle, "volume", 0.0),
                     })
                 except Exception:
                     pass
@@ -618,12 +633,21 @@ def create_dashboard(engine: Any, config: Dict[str, Any]):
     def api_oi():
         return jsonify(build_oi())
 
+    @app.route("/api/prices")
+    def api_prices():
+        return jsonify(build_prices())
+
+    @app.route("/api/candles")
+    def api_candles():
+        return jsonify(build_candles())
+
     # -----------------------------------------------------------------------
     # Socket.IO events
     # -----------------------------------------------------------------------
 
     @socketio.on("connect")
-    def on_connect():
+    def on_connect(auth=None):
+        logger.info("Socket.IO client connected")
         # Emit full state immediately on connection
         emit("status_update", build_status())
         emit("price_update", build_prices())
@@ -633,8 +657,8 @@ def create_dashboard(engine: Any, config: Dict[str, Any]):
         emit("candle_update", build_candles())
 
     @socketio.on("disconnect")
-    def on_disconnect():
-        pass  # No action needed; client auto-reconnects
+    def on_disconnect(reason=None):
+        logger.info("Socket.IO client disconnected: %s", reason)
 
     @socketio.on("request_status")
     def on_request_status():

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import signal
 import sys
@@ -64,6 +65,9 @@ from dashboard.web import create_dashboard
 # ---------------------------------------------------------------------------
 _engine: Optional[TradingEngine] = None
 _dashboard_socketio: Optional[Any] = None
+_hl_ws: Optional[HyperliquidWSClient] = None
+_binance_ws: Optional[BinanceWSClient] = None
+_candle_builder: Optional[CandleBuilder] = None
 _logger = None
 
 
@@ -78,8 +82,16 @@ def _shutdown(signum: int, frame: Any) -> None:
     """Graceful shutdown handler."""
     if _logger:
         _logger.warning(f"Received signal {signum}, initiating shutdown...")
+    loop = asyncio.get_event_loop()
+    tasks = []
     if _engine:
-        asyncio.run_coroutine_threadsafe(_engine.stop(), asyncio.get_event_loop())
+        tasks.append(asyncio.run_coroutine_threadsafe(_engine.stop(), loop))
+    if _hl_ws:
+        tasks.append(asyncio.run_coroutine_threadsafe(_hl_ws.stop(), loop))
+    if _binance_ws:
+        tasks.append(asyncio.run_coroutine_threadsafe(_binance_ws.stop(), loop))
+    if _candle_builder:
+        tasks.append(asyncio.run_coroutine_threadsafe(_candle_builder.stop(), loop))
     # Give dashboard a moment to finish
     time.sleep(1)
     sys.exit(0)
@@ -175,6 +187,11 @@ async def main() -> None:
         log_file=str(log_dir / "bot.log"),
         json_format=cfg.get("logging.json", False),
     )
+    # Route all other loggers to the same handlers
+    root = logging.getLogger()
+    root.setLevel(logger.level)
+    for handler in logger.handlers:
+        root.addHandler(handler)
     global _logger
     _logger = logger
 
@@ -234,7 +251,12 @@ async def main() -> None:
             ws_base=cfg.get("exchange.binance.ws_url", "wss://stream.binance.com:9443/ws"),
         )
 
-    candle_builder = CandleBuilder(bus=data_bus, symbols=cfg.get("assets", ["BTC", "ETH", "SOL"]), timeframes=["1m", "5m", "15m", "1h"])
+    candle_builder = CandleBuilder(bus=data_bus, symbols=cfg.get("assets", ["BTC", "ETH", "SOL"]), timeframes=[60, 300, 900, 3600])
+
+    global _hl_ws, _binance_ws, _candle_builder
+    _hl_ws = hl_ws
+    _binance_ws = binance_ws
+    _candle_builder = candle_builder
 
     # -----------------------------------------------------------------------
     # 6. Initialize strategies
@@ -254,8 +276,8 @@ async def main() -> None:
     # Attempt DB recovery of portfolio state
     last_snapshot = db.get_latest_portfolio_snapshot()
     if last_snapshot:
-        portfolio.from_dict(last_snapshot)
-        logger.info(f"Recovered portfolio from DB: capital={portfolio.capital:.2f}")
+        await portfolio.from_dict(last_snapshot)
+        logger.info(f"Recovered portfolio from DB: capital={portfolio.sync_capital():.2f}")
 
     risk_mgr = RiskManager(
         config=cfg,
@@ -275,7 +297,20 @@ async def main() -> None:
         logger.info(f"Recovered {len(open_trades)} open trades from DB")
 
     # -----------------------------------------------------------------------
-    # 8. Start TradingEngine
+    # 8. Start data pipeline (WS + CandleBuilder BEFORE engine)
+    # -----------------------------------------------------------------------
+    await hl_ws.start()
+    logger.info("Hyperliquid WebSocket connected")
+
+    if binance_ws is not None:
+        await binance_ws.start()
+        logger.info("Binance WebSocket connected")
+
+    await candle_builder.start()
+    logger.info("CandleBuilder started")
+
+    # -----------------------------------------------------------------------
+    # 9. Start TradingEngine
     # -----------------------------------------------------------------------
     engine = TradingEngine(
         config=cfg,
@@ -313,6 +348,7 @@ async def main() -> None:
                 port=dashboard_cfg["port"],
                 debug=False,
                 use_reloader=False,
+                allow_unsafe_werkzeug=True,
             )
 
         dashboard_thread = threading.Thread(target=_run_dashboard, daemon=True)
@@ -335,7 +371,14 @@ async def main() -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        await engine.stop()
+        if engine is not None:
+            await engine.stop()
+        if candle_builder is not None:
+            await candle_builder.stop()
+        if hl_ws is not None:
+            await hl_ws.stop()
+        if binance_ws is not None:
+            await binance_ws.stop()
         logger.info("Bot stopped.")
 
 

@@ -291,3 +291,37 @@ it is not used directly in the current implementation.
             "max_daily_loss_pct": self._max_daily_loss_pct,
             "circuit_breaker_drawdown_pct": self._circuit_breaker_drawdown_pct,
         }
+
+    # ------------------------------------------------------------------
+    # Dashboard-compatible properties (synchronous, read-only)
+    # ------------------------------------------------------------------
+
+    @property
+    def daily_wins(self) -> int:
+        """Total winning trades (dashboard metric)."""
+        return self._winning_trades
+
+    @property
+    def daily_losses(self) -> int:
+        """Total losing trades (dashboard metric)."""
+        return max(0, self._total_trades_closed - self._winning_trades)
+
+    @property
+    def daily_pnl(self) -> float:
+        """Total PnL across all closed trades (dashboard metric)."""
+        return self._total_pnl
+
+    @property
+    def daily_trade_count(self) -> int:
+        """Total trades closed (dashboard metric)."""
+        return self._total_trades_closed
+
+    @property
+    def max_positions(self) -> int:
+        """Maximum allowed open positions."""
+        return self._max_total_positions
+
+    @property
+    def max_daily_trades(self) -> int:
+        """Maximum allowed trades per day."""
+        return self.MAX_DAILY_TRADES
