@@ -278,6 +278,83 @@ def calculate_overcrowded_score(funding: Optional[float], oi_ratio: Optional[flo
     return min(0.6 * funding_score + 0.4 * oi_score, 1.0)
 
 
+def calculate_adx(candles: List[Candle], period: int = 14) -> Optional[float]:
+    """Average Directional Index — strength of trend (0-100).
+
+    ADX > 25 = strong trend. ADX < 20 = weak/range-bound.
+    Uses Wilder's smoothing. Requires at least 2*period + 1 candles.
+    """
+    if len(candles) < 2 * period + 1:
+        return None
+
+    # True Range, +DM, -DM
+    tr_values: List[float] = []
+    plus_dm: List[float] = []
+    minus_dm: List[float] = []
+
+    for i in range(1, len(candles)):
+        prev = candles[i - 1]
+        curr = candles[i]
+
+        tr1 = curr.high - curr.low
+        tr2 = abs(curr.high - prev.close)
+        tr3 = abs(curr.low - prev.close)
+        tr_values.append(max(tr1, tr2, tr3))
+
+        up_move = curr.high - prev.high
+        down_move = prev.low - curr.low
+
+        if up_move > down_move and up_move > 0:
+            plus_dm.append(up_move)
+        else:
+            plus_dm.append(0.0)
+
+        if down_move > up_move and down_move > 0:
+            minus_dm.append(down_move)
+        else:
+            minus_dm.append(0.0)
+
+    # Need at least period values after the first diff
+    if len(tr_values) < period:
+        return None
+
+    # Wilder's smoothing — first value = SMA, then iterative
+    tr_smooth = sum(tr_values[:period]) / period
+    plus_smooth = sum(plus_dm[:period]) / period
+    minus_smooth = sum(minus_dm[:period]) / period
+
+    multiplier = 1.0 / period
+
+    dx_values: List[float] = []
+    for i in range(period, len(tr_values)):
+        tr_smooth = tr_smooth + multiplier * (tr_values[i] - tr_smooth)
+        plus_smooth = plus_smooth + multiplier * (plus_dm[i] - plus_smooth)
+        minus_smooth = minus_smooth + multiplier * (minus_dm[i] - minus_smooth)
+
+        if tr_smooth == 0:
+            dx_values.append(0.0)
+            continue
+
+        plus_di = 100.0 * plus_smooth / tr_smooth
+        minus_di = 100.0 * minus_smooth / tr_smooth
+        di_sum = plus_di + minus_di
+        if di_sum == 0:
+            dx_values.append(0.0)
+            continue
+        dx = 100.0 * abs(plus_di - minus_di) / di_sum
+        dx_values.append(dx)
+
+    if len(dx_values) < period:
+        return None
+
+    # Smooth DX values to get ADX
+    adx = sum(dx_values[:period]) / period
+    for dx in dx_values[period:]:
+        adx = adx + multiplier * (dx - adx)
+
+    return adx
+
+
 def calculate_realized_volatility(
     candles: List[Candle],
     period: int = 480,  # 20 days of 1h candles

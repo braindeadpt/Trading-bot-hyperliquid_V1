@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from strategies.indicators import Candle
+from src.strategies.indicators import Candle
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,7 @@ class MarketEvent:
     ema_20: Optional[float] = None
     atr_14: Optional[float] = None
     rsi_14: Optional[float] = None
+    adx_14: Optional[float] = None
 
 
 @dataclass(frozen=True)

@@ -177,6 +177,17 @@ class HyperliquidRESTClient:
                 continue
         return out
 
+    async def l2_book(self, symbol: str) -> Dict[str, Any]:
+        """Return the L2 orderbook for a single asset.
+
+        Response shape::
+            {"coin": "BTC", "levels": [[["bid_px", "bid_sz"], ...], [["ask_px", "ask_sz"], ...]]}
+        """
+        raw = await self._post(self._info_url, {"type": "l2Book", "coin": symbol})
+        if not isinstance(raw, dict):
+            raise HyperliquidAPIError(f"Unexpected l2Book response: {raw!r}")
+        return raw
+
     # ── Order placement ──
 
     async def place_order(

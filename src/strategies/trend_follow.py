@@ -9,8 +9,8 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 import collections
 import time
 
-from strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
-from strategies.indicators import (
+from src.strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
+from src.strategies.indicators import (
     Candle,
     calculate_vwap,
     calculate_ema,
@@ -18,6 +18,7 @@ from strategies.indicators import (
     calculate_volume_profile,
     calculate_realized_volatility,
     volatility_target_size,
+    calculate_rsi,
 )
 
 
@@ -58,6 +59,12 @@ class TrendFollow(Strategy):
         self.FUNDING_EXTREME = cfg.get("extreme_threshold", 0.008)
         self.IMBALANCE_THRESHOLD = cfg.get("imbalance_threshold", 0.02)
         self.OVERCROWDED_PENALTY = cfg.get("overcrowded_penalty", 0.2)
+        # Microstructure filters (Task 2.2)
+        self.OIR_LONG_THRESHOLD = cfg.get("oir_long_threshold", 0.6)      # OIR > 0.6 confirms long
+        self.OIR_SHORT_THRESHOLD = cfg.get("oir_short_threshold", -0.6)  # OIR < -0.6 confirms short
+        self.WALL_PROXIMITY_PCT = cfg.get("wall_proximity_pct", 0.005)    # avoid walls within 0.5%
+        self.RSI_MIN = cfg.get("rsi_min", 40.0)                           # no long if RSI < 40
+        self.RSI_MAX = cfg.get("rsi_max", 70.0)                           # no short if RSI > 70
         # Volatility targeting
         self.TARGET_VOL_ANNUAL = cfg.get("target_vol_annual", 0.20)  # 20% target volatility
         self.VOLATILITY_PERIOD = cfg.get("volatility_period", 480)   # 480 1h candles = 20 days
@@ -153,6 +160,33 @@ class TrendFollow(Strategy):
         # --- Volume surge check ---
         volume_surge = current_volume > (volume_avg * self.VOLUME_SURGE)
 
+        # --- Microstructure filters (Task 2.2) ---
+        # 1. RSI(14) — avoid overbought/oversold
+        rsi = calculate_rsi(closes, 14)
+        rsi_ok_long = rsi is not None and rsi >= self.RSI_MIN
+        rsi_ok_short = rsi is not None and rsi <= self.RSI_MAX
+
+        # 2. OIR filter — orderbook imbalance ratio confirms direction
+        oir = event.orderbook_oir
+        oir_confirms_long = oir is not None and oir > self.OIR_LONG_THRESHOLD
+        oir_confirms_short = oir is not None and oir < self.OIR_SHORT_THRESHOLD
+        oir_present = oir is not None
+
+        # 3. Wall detection — avoid entering near large walls
+        wall_blocks_long = False
+        wall_blocks_short = False
+        if current_price > 0:
+            if event.orderbook_largest_ask_wall is not None:
+                # Long: avoid if large ask wall is just above price (resistance)
+                ask_wall_dist = abs(event.orderbook_largest_ask_wall - current_price) / current_price
+                if ask_wall_dist < self.WALL_PROXIMITY_PCT:
+                    wall_blocks_long = True
+            if event.orderbook_largest_bid_wall is not None:
+                # Short: avoid if large bid wall is just below price (support)
+                bid_wall_dist = abs(current_price - event.orderbook_largest_bid_wall) / current_price
+                if bid_wall_dist < self.WALL_PROXIMITY_PCT:
+                    wall_blocks_short = True
+
         # --- LONG entry conditions ---
         long_conditions: List[Tuple[str, bool]] = []
         long_conditions.append(("price_above_vwap", current_price > vwap))
@@ -168,6 +202,14 @@ class TrendFollow(Strategy):
         long_conditions.append(
             ("buying_pressure", buying_pressure or not imbalance_present)
         )
+        # OIR confirms long OR no OIR data
+        long_conditions.append(
+            ("oir_confirms_long", oir_confirms_long or not oir_present)
+        )
+        # RSI not oversold
+        long_conditions.append(("rsi_ok", rsi_ok_long))
+        # No ask wall blocking just above
+        long_conditions.append(("no_wall_blocking", not wall_blocks_long))
 
         # --- SHORT entry conditions ---
         short_conditions: List[Tuple[str, bool]] = []
@@ -182,14 +224,22 @@ class TrendFollow(Strategy):
         short_conditions.append(
             ("selling_pressure", selling_pressure or not imbalance_present)
         )
+        # OIR confirms short OR no OIR data
+        short_conditions.append(
+            ("oir_confirms_short", oir_confirms_short or not oir_present)
+        )
+        # RSI not overbought
+        short_conditions.append(("rsi_ok", rsi_ok_short))
+        # No bid wall blocking just below
+        short_conditions.append(("no_wall_blocking", not wall_blocks_short))
 
         # --- Evaluate confluence and generate signal ---
         long_met = sum(1 for _, v in long_conditions if v)
         short_met = sum(1 for _, v in short_conditions if v)
         total_conditions = len(long_conditions)  # same for both
 
-        # Minimum 4 of 6 conditions for entry
-        MIN_CONFLUENCE = 4
+        # Minimum 6 of 9 conditions for entry (raised bar with microstructure filters)
+        MIN_CONFLUENCE = 6
 
         signal: Optional[Signal] = None
 
@@ -304,16 +354,16 @@ class TrendFollow(Strategy):
     def _calculate_confidence(self, conditions: List[Tuple[str, bool]]) -> float:
         """Map confluence (number of met conditions) to confidence 0.5-1.0.
 
-        4/6 met → 0.50
-        5/6 met → 0.75
-        6/6 met → 1.00
+        6/9 met → 0.50
+        7/9 met → 0.75
+        8/9 met → 1.00
         """
         met = sum(1 for _, v in conditions if v)
         total = len(conditions)
-        if met < 4:
+        if met < 6:
             return 0.0
-        # Linear interpolation: 4 → 0.5, 6 → 1.0
-        confidence = 0.5 + 0.25 * (met - 4)
+        # Linear interpolation: 6 → 0.5, 8 → 1.0
+        confidence = 0.5 + 0.25 * (met - 6)
         return min(confidence, 1.0)
 
     def _build_signal(
@@ -372,5 +422,9 @@ class TrendFollow(Strategy):
                 "imbalance": event.bid_ask_imbalance,
                 "realized_vol_annual": rv,
                 "size_pct": risk_pct,
+                "rsi": event.rsi_14,
+                "oir": event.orderbook_oir,
+                "ask_wall": event.orderbook_largest_ask_wall,
+                "bid_wall": event.orderbook_largest_bid_wall,
             },
         )

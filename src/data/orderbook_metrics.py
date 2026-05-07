@@ -212,6 +212,22 @@ def estimate_slippage(
     return slippage_pct
 
 
+def calculate_fill_ratio(
+    levels: List[PriceLevel],
+    target_size: float,
+) -> float:
+    """Return the fraction of *target_size* that can be filled from *levels*.
+
+    Example: if the book has 0.3 BTC and target is 0.5 BTC,
+    returns 0.6 (60%).
+    """
+    if not levels or target_size <= 0:
+        return 0.0
+
+    total_available = sum(level.size for level in levels)
+    return min(total_available / target_size, 1.0)
+
+
 def detect_wall(
     levels: List[PriceLevel],
     avg_size: float,

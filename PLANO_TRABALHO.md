@@ -21,8 +21,8 @@
 |---|---|---|---|---|
 | 1.1 | ATR-based stop loss | Substituir stops fixos (3.5% / 3%) por ATR(14) × 2.5. Stop dinâmico adapta-se à volatilidade real do asset. | 1h | ✅ DONE |
 | 1.2 | Volatility targeting sizing | Position size = base_size × (target_vol / realized_vol_20d). BTC com 25% vol → 1.6x. SOL com 60% vol → 0.5x. | 1.5h | ✅ DONE |
-| 1.3 | Trailing take-profit | Breakeven @ +1R. Trailing stop @ +2R (ATR × 1.5). Maximiza tendências que correm. | 1.5h | ⏳ |
-| 1.4 | Slippage estimation (realista) | Usar L2 book para estimar slippage antes de entrar. Se slippage > 0.2%, rejeita sinal. | 1h | ⏳ |
+| 1.3 | Trailing take-profit | Breakeven @ +1R. Trailing stop @ +2R (ATR × 1.5). Maximiza tendências que correm. | 1.5h | ✅ DONE |
+| 1.4 | Slippage estimation (realista) | Usar L2 book para estimar slippage antes de entrar. Se slippage > 0.2%, rejeita sinal. | 1h | ✅ DONE |
 
 ---
 
@@ -31,8 +31,8 @@
 
 | # | Tarefa | Descrição | Tempo |
 |---|---|---|---|
-| 2.1 | Regime filter (ADX) | ADX(14) > 25 = tendência → TrendFollow 70%, MeanReversion 30%. ADX < 20 = range → inverte pesos. | 1.5h |
-| 2.2 | SmartMoneyFlow upgrade | Adicionar: OIR filter (>0.6 confirma long), wall detection (evitar paredes), RSI(14) filter (40-70). | 2h |
+| 2.1 | Regime filter (ADX) | ADX(14) > 25 = tendência → TrendFollow 70%, MeanReversion 30%. ADX < 20 = range → inverte pesos. | 1.5h | ✅ DONE |
+| 2.2 | SmartMoneyFlow upgrade | Adicionar: OIR filter (>0.6 confirma long), wall detection (evitar paredes), RSI(14) filter (40-70). | 2h | ✅ DONE |
 | 2.3 | FundingExtreme upgrade | Funding percentil(90) dinâmico. Cross-exchange confirmation. OI_delta < 0 filter. Predicted funding check. | 2h |
 | 2.4 | Cooldown inteligente | Cooldown aumenta após loss (1h → 2h → 4h). Reseta quando funding normaliza ou ADX muda regime. | 1h |
 

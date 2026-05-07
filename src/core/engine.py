@@ -42,7 +42,7 @@ from src.strategies.base import (
     Signal,
     Strategy,
 )
-from src.strategies.indicators import Candle
+from src.strategies.indicators import Candle, calculate_adx
 from src.utils.config import Config
 from src.utils.helpers import safe_float, safe_divide, utc_timestamp_ms
 
@@ -82,11 +82,43 @@ class TradingEngine:
         # Symbols to trade (from config)
         self._symbols: List[str] = list(config.get("symbols", ["BTC", "ETH", "SOL"]))
 
+        # Slippage threshold (fraction, e.g. 0.002 = 0.2%)
+        self._max_slippage_pct = safe_float(
+            config.get("risk.max_slippage_pct", 0.2)
+        ) / 100.0
+
+        # Minimum fill ratio from L2 book (fraction, e.g. 0.8 = 80%)
+        self._min_fill_ratio = safe_float(
+            config.get("risk.min_fill_ratio", 0.8)
+        )
+
+        # ── Regime filter (ADX-based strategy weighting) ──
+        self._adx_period = int(config.get("strategy.adx_period", 14))
+        self._adx_trend_threshold = safe_float(
+            config.get("strategy.adx_trend_threshold", 25.0)
+        )
+        self._adx_range_threshold = safe_float(
+            config.get("strategy.adx_range_threshold", 20.0)
+        )
+        self._regime_weights = config.get("strategy.regime_weights", {
+            "trend": {"SmartMoneyFlow": 1.3, "FundingExtreme": 0.7},
+            "range": {"SmartMoneyFlow": 0.7, "FundingExtreme": 1.3},
+        })
+        self._latest_adx: Dict[str, float] = {}
+        self._candles_15m_history: Dict[str, Any] = {}  # symbol -> deque
+
         # In-memory cache of latest data per symbol
         self._latest_price: Dict[str, HlPriceTick] = {}
         self._latest_ctx: Dict[str, HlAssetCtx] = {}
         self._latest_candles: Dict[str, Dict[int, Optional[Candle]]] = {
             sym: {60: None, 300: None, 900: None, 3600: None}
+            for sym in self._symbols
+        }
+
+        # 15m candle history for ADX calculation (regime filter)
+        import collections
+        self._candles_15m_history: Dict[str, Any] = {
+            sym: collections.deque(maxlen=50)
             for sym in self._symbols
         }
 
@@ -107,6 +139,7 @@ class TradingEngine:
 
         # ── Latest orderbook per symbol ──
         self._latest_orderbook: Dict[str, OrderbookMetrics] = {}
+        self._latest_orderbook_raw: Dict[str, Any] = {}  # HlOrderbook
 
         # ── Cross-exchange funding + OI aggregator ──
         self._funding_aggregator = FundingOIAggregator()
@@ -317,6 +350,8 @@ class TradingEngine:
     def _make_orderbook_callback(self, symbol: str):
         """Factory: returns an async callback for orderbook:* topics."""
         async def _on_orderbook(book: HlOrderbook) -> None:
+            # Keep raw book for slippage estimation
+            self._latest_orderbook_raw[symbol] = book
             # Convert to our PriceLevel format and calculate metrics
             bids = [PriceLevel(price=b.price, size=b.size) for b in book.bids]
             asks = [PriceLevel(price=a.price, size=a.size) for a in book.asks]
@@ -340,6 +375,9 @@ class TradingEngine:
         """Factory: returns an async callback for candle_complete:* topics."""
         async def _on_candle(candle: Candle) -> None:
             self._latest_candles[symbol][timeframe] = candle
+            # Append 15m candles to history for ADX (regime filter)
+            if timeframe == 900:
+                self._candles_15m_history[symbol].append(candle)
         return _on_candle
 
     # ------------------------------------------------------------------
@@ -436,8 +474,10 @@ class TradingEngine:
                     logger.exception("Strategy %s error on %s: %s", strategy.name, symbol, exc)
 
             if signals:
-                # Conflict resolution: pick highest confidence
-                best_signal = max(signals, key=lambda s: s.confidence)
+                # Regime-based confidence weighting
+                weighted_signals = self._apply_regime_weights(signals, symbol)
+                # Conflict resolution: pick highest weighted confidence
+                best_signal = max(weighted_signals, key=lambda s: s.confidence)
                 await self._process_entry_signal(best_signal, event)
 
             # --- 2. Strategy exit signals (only if position exists) ---
@@ -488,7 +528,13 @@ class TradingEngine:
         # Orderbook metrics (if available)
         ob = self._latest_orderbook.get(symbol)
 
-        # Build the MarketEvent
+        # ── ADX calculation (regime filter) ──
+        adx = None
+        hist_15m = self._candles_15m_history.get(symbol)
+        if hist_15m is not None and len(hist_15m) >= 2 * self._adx_period + 1:
+            adx = calculate_adx(list(hist_15m), self._adx_period)
+            if adx is not None:
+                self._latest_adx[symbol] = adx
         event = MarketEvent(
             symbol=symbol,
             price=price,
@@ -517,13 +563,15 @@ class TradingEngine:
             orderbook_bid_ask_ratio=ob.bid_ask_ratio if ob else None,
             orderbook_largest_bid_wall=ob.largest_bid_wall_price if ob else None,
             orderbook_largest_ask_wall=ob.largest_ask_wall_price if ob else None,
+            # Regime filter
+            adx_14=adx,
         )
 
         # Log orderflow metrics for debugging
         logger.info(
             "MarketEvent %s: price=%.2f, funding=%.6f, predicted=%s, oi=%.2f, "
             "agg_funding=%s, agg_oi=%s, exchanges=%d, "
-            "spread=%s, oir=%s, depth=%s, imbalance=%s",
+            "spread=%s, oir=%s, depth=%s, imbalance=%s, adx=%s",
             symbol, event.price,
             event.funding or 0,
             f"{event.predicted_funding:.6f}" if event.predicted_funding else "N/A",
@@ -535,6 +583,7 @@ class TradingEngine:
             f"{event.orderbook_oir:.3f}" if event.orderbook_oir else "N/A",
             f"{event.orderbook_depth_quality:.3f}" if event.orderbook_depth_quality else "N/A",
             event.bid_ask_imbalance,
+            f"{event.adx_14:.1f}" if event.adx_14 is not None else "N/A",
         )
 
         return event
@@ -549,6 +598,103 @@ class TradingEngine:
         if total <= 0:
             return None
         return (buy - sell) / total
+
+    def _apply_regime_weights(
+        self,
+        signals: List[Signal],
+        symbol: str,
+    ) -> List[Signal]:
+        """Adjust signal confidence based on ADX regime.
+
+        ADX > 25 (trending) → boost trend-following, penalize mean-reversion.
+        ADX < 20 (ranging)   → boost mean-reversion, penalize trend-following.
+        20-25 (neutral)      → no adjustment.
+
+        Returns signals with modified confidence (logged but original preserved
+        in metadata).
+        """
+        adx = self._latest_adx.get(symbol)
+        if adx is None:
+            return signals
+
+        if adx > self._adx_trend_threshold:
+            regime = "trend"
+        elif adx < self._adx_range_threshold:
+            regime = "range"
+        else:
+            return signals  # neutral — no weighting
+
+        weights = self._regime_weights.get(regime, {})
+        adjusted: List[Signal] = []
+        for sig in signals:
+            w = weights.get(sig.strategy, 1.0)
+            new_conf = min(sig.confidence * w, 1.0)
+            if w != 1.0:
+                logger.info(
+                    "Regime %s (ADX=%.1f) — %s confidence %.2f → %.2f (weight %.2f)",
+                    regime, adx, sig.strategy, sig.confidence, new_conf, w,
+                )
+            adjusted.append(
+                Signal(
+                    strategy=sig.strategy,
+                    symbol=sig.symbol,
+                    side=sig.side,
+                    confidence=new_conf,
+                    size_pct=sig.size_pct,
+                    entry_price=sig.entry_price,
+                    stop_loss_pct=sig.stop_loss_pct,
+                    take_profit_pct=sig.take_profit_pct,
+                    reason=sig.reason,
+                    metadata={
+                        **sig.metadata,
+                        "regime": regime,
+                        "adx": adx,
+                        "confidence_raw": sig.confidence,
+                        "confidence_weight": w,
+                    },
+                )
+            )
+        return adjusted
+
+    def _estimate_fill_ratio(
+        self,
+        signal: Signal,
+        size: float,
+        ob_raw: Any,  # HlOrderbook
+    ) -> float:
+        """Return the fraction of *size* that the L2 book can absorb.
+
+        Uses the same side logic as _estimate_slippage:
+          long  → asks (we buy)
+          short → bids (we sell)
+        """
+        from src.data.orderbook_metrics import calculate_fill_ratio, PriceLevel
+        if signal.side == "long":
+            levels = [PriceLevel(price=a.price, size=a.size) for a in ob_raw.asks]
+        else:
+            levels = [PriceLevel(price=b.price, size=b.size) for b in ob_raw.bids]
+        return calculate_fill_ratio(levels, size)
+
+    def _estimate_slippage(
+        self,
+        signal: Signal,
+        size: float,
+        ob_raw: Any,  # HlOrderbook
+    ) -> float:
+        """Estimate market-order slippage from L2 book for the proposed size.
+
+        Returns slippage as a fraction (e.g. 0.002 = 0.2%).
+        """
+        from src.data.orderbook_metrics import estimate_slippage, PriceLevel
+        if signal.side == "long":
+            # Buying = hit asks
+            levels = [PriceLevel(price=a.price, size=a.size) for a in ob_raw.asks]
+            side = "buy"
+        else:
+            # Selling = hit bids
+            levels = [PriceLevel(price=b.price, size=b.size) for b in ob_raw.bids]
+            side = "sell"
+        return estimate_slippage(levels, size, side)
 
     # ------------------------------------------------------------------
     # Signal processing
@@ -649,6 +795,76 @@ class TradingEngine:
             reason=signal.reason,
             metadata={**signal.metadata, "calculated_size": size, "atr_pct": atr_pct},
         )
+
+        # --- Slippage estimation (L2 book) ---
+        ob_raw = self._latest_orderbook_raw.get(signal.symbol)
+        if ob_raw is not None:
+            # 1. Fill ratio check — can the book cover enough of the size?
+            fill_ratio = self._estimate_fill_ratio(signal, size, ob_raw)
+            if fill_ratio < self._min_fill_ratio:
+                logger.warning(
+                    "Signal REJECTED %s %s - fill_ratio %.1f%% < %.0f%% "
+                    "(book_depth=%.4f, size=%.6f)",
+                    signal.symbol,
+                    signal.side,
+                    fill_ratio * 100,
+                    self._min_fill_ratio * 100,
+                    fill_ratio * size,
+                    size,
+                )
+                sig_record["status"] = "rejected"
+                sig_record["risk_reason"] = (
+                    f"fill_ratio {fill_ratio*100:.1f}% < {self._min_fill_ratio*100:.0f}%"
+                )
+                self._decision_history.insert(0, {
+                    "time": sig_time,
+                    "type": "risk",
+                    "symbol": signal.symbol,
+                    "side": signal.side,
+                    "result": "rejected",
+                    "reason": (
+                        f"fill_ratio {fill_ratio*100:.1f}% < {self._min_fill_ratio*100:.0f}%"
+                    ),
+                })
+                self._decision_history = self._decision_history[:100]
+                return
+
+            # 2. Slippage check — is the price impact acceptable?
+            slippage = self._estimate_slippage(signal, size, ob_raw)
+            if slippage > self._max_slippage_pct:
+                logger.warning(
+                    "Signal REJECTED %s %s - slippage %.3f%% > %.2f%% (size=%.6f)",
+                    signal.symbol,
+                    signal.side,
+                    slippage * 100,
+                    self._max_slippage_pct * 100,
+                    size,
+                )
+                sig_record["status"] = "rejected"
+                sig_record["risk_reason"] = f"slippage {slippage*100:.3f}% > {self._max_slippage_pct*100:.2f}%"
+                self._decision_history.insert(0, {
+                    "time": sig_time,
+                    "type": "risk",
+                    "symbol": signal.symbol,
+                    "side": signal.side,
+                    "result": "rejected",
+                    "reason": f"slippage {slippage*100:.3f}% > {self._max_slippage_pct*100:.2f}%",
+                })
+                self._decision_history = self._decision_history[:100]
+                return
+            logger.info(
+                "Slippage OK %s %s - %.3f%% ≤ %.2f%% (size=%.6f)",
+                signal.symbol,
+                signal.side,
+                slippage * 100,
+                self._max_slippage_pct * 100,
+                size,
+            )
+        else:
+            logger.warning(
+                "Slippage check skipped %s - no L2 book available",
+                signal.symbol,
+            )
 
         # --- Compute stop distance ---
         # Use strategy's ATR-based stop if provided, else fall back to engine calc

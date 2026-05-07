@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 import collections
 
-from strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
-from strategies.indicators import (
+from src.strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
+from src.strategies.indicators import (
     Candle,
     calculate_atr,
     calculate_realized_volatility,
