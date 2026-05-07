@@ -125,6 +125,25 @@ strategy:
     oi_delta_max: 1000.0             # max OI increase allowed
 
   # ═══════════════════════════════════════════════════════════
+  # Strategy: VWAP Deviation (Task 3.2)
+  # ═══════════════════════════════════════════════════════════
+  vwap_deviation:
+    enabled: true
+    z_threshold: 2.5                # |Z-score| > 2.5σ from VWAP
+    volume_surge: 1.5               # volume > 150% of 24h average
+    max_adx: 25.0                   # only trade when ADX < 25 (non-trending)
+    require_oir_confirm: true       # OIR must confirm the one-sided move
+    oir_threshold: 0.4              # |OIR| > 0.4
+    max_funding_opposite: 0.005     # avoid if funding extreme in signal direction
+    base_size_pct: 0.01             # 1% base size
+    max_size_pct: 0.03             # 3% max size
+    stop_loss_atr_multiplier: 2.0   # ATR-based stop
+    max_hold_hours: 4               # mean reversion is quick or wrong
+    min_confidence: 0.65
+    confidence_extreme: 0.85
+    signal_throttle_ms: 300000      # 5 min between signals
+
+  # ═══════════════════════════════════════════════════════════
   # Cooldown Manager (Task 2.4)
   # ═══════════════════════════════════════════════════════════
   cooldown:

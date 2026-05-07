@@ -396,6 +396,75 @@ def calculate_realized_volatility(
     return annualized_vol
 
 
+def calculate_vwap_zscore(
+    candles: List[Candle],
+    current_price: float,
+    lookback: int = 24,  # 24h of 1h candles
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """VWAP + Z-score of current price deviation from VWAP.
+
+    Returns (vwap, stddev, zscore) where:
+      zscore = (current_price - vwap) / stddev
+
+    Positive zscore = price above VWAP (potentially overbought)
+    Negative zscore = price below VWAP (potentially oversold)
+
+    Returns (None, None, None) if insufficient data or stddev=0.
+    """
+    if len(candles) < lookback:
+        return None, None, None
+
+    recent = candles[-lookback:]
+
+    # Calculate VWAP
+    total_pv = 0.0
+    total_vol = 0.0
+    typical_prices: List[float] = []
+    for c in recent:
+        tp = (c.high + c.low + c.close) / 3.0
+        typical_prices.append(tp)
+        total_pv += tp * c.volume
+        total_vol += c.volume
+
+    if total_vol == 0.0:
+        return None, None, None
+
+    vwap = total_pv / total_vol
+
+    # Calculate stddev of typical prices
+    mean_tp = sum(typical_prices) / len(typical_prices)
+    variance = sum((tp - mean_tp) ** 2 for tp in typical_prices) / len(typical_prices)
+    stddev = variance ** 0.5
+
+    if stddev == 0.0:
+        return vwap, 0.0, None
+
+    zscore = (current_price - vwap) / stddev
+    return vwap, stddev, zscore
+
+
+def calculate_volume_ratio(
+    candles: List[Candle],
+    lookback: int = 24,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Current volume vs average volume over lookback.
+
+    Returns (current_volume, ratio) where ratio = current / average.
+    """
+    if len(candles) < 2:
+        return None, None
+
+    recent = candles[-lookback:] if len(candles) >= lookback else candles
+    avg_volume = sum(c.volume for c in recent) / len(recent)
+    current_volume = candles[-1].volume
+
+    if avg_volume == 0.0:
+        return current_volume, None
+
+    ratio = current_volume / avg_volume
+    return current_volume, ratio
+
+
 def volatility_target_size(
     base_size_pct: float,
     realized_vol_annual: float,
