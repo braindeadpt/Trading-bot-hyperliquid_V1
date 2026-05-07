@@ -53,6 +53,7 @@ from data.candle_builder import CandleBuilder
 
 from strategies.trend_follow import TrendFollow
 from strategies.mean_reversion import MeanReversion
+from strategies.funding_arbitrage import FundingArbitrage
 
 from core.portfolio import PortfolioState
 from core.risk_manager import RiskManager
@@ -116,6 +117,7 @@ async def _run_backtest(cfg: Config, db: Database, logger: Any) -> Dict[str, Any
     strategies = [
         TrendFollow(cfg.get("strategy.trend_follow", {})),
         MeanReversion(cfg.get("strategy.mean_reversion", {})),
+        FundingArbitrage(cfg.get("strategy.funding_arbitrage", {})),
     ]
 
     bt = BacktestEngine(
@@ -265,6 +267,7 @@ async def main() -> None:
     strategies = [
         TrendFollow(cfg.get("strategy.trend_follow", {})),
         MeanReversion(cfg.get("strategy.mean_reversion", {})),
+        FundingArbitrage(cfg.get("strategy.funding_arbitrage", {})),
     ]
     logger.info(f"Loaded {len(strategies)} strategies: {[s.name for s in strategies]}")
 

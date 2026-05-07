@@ -43,7 +43,7 @@
 
 | # | Tarefa | Descrição | Tempo |
 |---|---|---|---|
-| 3.1 | FundingArbitrage | Cross-exchange funding spread. Long na exchange com funding baixo, short na HL com funding alto. Market neutral. | 3h |
+| 3.1 | FundingArbitrage | Long funding-negative, short funding-positive. Hedge ratio 1:1. Spread > 1.2%, each leg > 0.5%. | 3h | ✅ DONE |
 | 3.2 | VWAPDeviation | Preço afasta >2.5σ do VWAP(1h) + volume >150% média → mean reversion para VWAP. | 2.5h |
 | 3.3 | LiquidationCatcher | Monitorizar clusters de liquidations. $50M+ numa direção em <5min → entrar oposto. Stop 1% ATR, TP 2R. | 3h |
 

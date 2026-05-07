@@ -468,6 +468,16 @@ class TradingEngine:
             # --- Update executor price tracking ---
             await self._executor.update_position_prices({symbol: event.price})
 
+            # --- Cache funding for FundingArbitrage pair scan ---
+            if event.funding is not None:
+                self._latest_funding[symbol] = event.funding
+            elif event.predicted_funding is not None:
+                self._latest_funding[symbol] = event.predicted_funding
+            self._latest_oi_delta[symbol] = event.oi_delta
+
+            # --- FundingArbitrage pair scan (after all symbols have been seen) ---
+            await self._maybe_scan_funding_arbitrage(event)
+
             # --- 1. Strategy entry signals ---
             signals: List[Signal] = []
             for strategy in self._strategies:
@@ -702,6 +712,55 @@ class TradingEngine:
             levels = [PriceLevel(price=b.price, size=b.size) for b in ob_raw.bids]
             side = "sell"
         return estimate_slippage(levels, size, side)
+
+    # ------------------------------------------------------------------
+    # FundingArbitrage pair scan (Task 3.1)
+    # ------------------------------------------------------------------
+
+    async def _maybe_scan_funding_arbitrage(self, event: MarketEvent) -> None:
+        """Periodically scan for cross-asset funding arbitrage opportunities.
+
+        Only runs when we have funding data for all configured symbols.
+        Produces paired signals (long + short) for the engine.
+        """
+        # Find the FundingArbitrage strategy instance
+        arb_strategy = None
+        for s in self._strategies:
+            if s.name == "FundingArbitrage":
+                arb_strategy = s
+                break
+        if arb_strategy is None:
+            return  # Strategy not enabled
+
+        # Throttle: only scan every 60 seconds
+        now = event.timestamp_ms
+        if hasattr(self, "_last_funding_scan_ms"):
+            if now - self._last_funding_scan_ms < 60_000:
+                return
+        self._last_funding_scan_ms = now
+
+        # Check if we have funding for all symbols
+        missing = [sym for sym in self._symbols if sym not in self._latest_funding]
+        if missing:
+            logger.debug(
+                "FundingArbitrage scan skipped — missing funding for %s", missing,
+            )
+            return
+
+        # Scan for pair opportunity
+        pair = arb_strategy.scan_pair_opportunity(
+            funding_map=self._latest_funding,
+            oi_delta_map=self._latest_oi_delta,
+            timestamp_ms=now,
+        )
+        if pair is None:
+            return
+
+        long_sig, short_sig = pair
+
+        # Process both legs through the full pipeline
+        for sig in (long_sig, short_sig):
+            await self._process_entry_signal(sig, event)
 
     # ------------------------------------------------------------------
     # Cooldown manager (Task 2.4)

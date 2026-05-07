@@ -110,6 +110,21 @@ strategy:
     use_predicted_primary: true     # use predicted funding as primary signal
 
   # ═══════════════════════════════════════════════════════════
+  # Strategy: Funding Arbitrage (Task 3.1)
+  # ═══════════════════════════════════════════════════════════
+  funding_arbitrage:
+    enabled: true
+    min_funding_spread: 0.012        # 1.2% spread between long and short legs
+    min_individual_funding: 0.005    # each leg must have |funding| > 0.5%
+    exit_threshold: 0.002            # exit when funding reverts to <0.2%
+    max_hold_hours: 8                # max hold until next funding payment
+    pair_size_pct: 0.02              # 2% of capital per leg
+    stop_loss_pct: 0.03              # 3% stop on each leg
+    confidence: 0.75
+    require_oi_stable: true          # avoid if OI is still surging
+    oi_delta_max: 1000.0             # max OI increase allowed
+
+  # ═══════════════════════════════════════════════════════════
   # Cooldown Manager (Task 2.4)
   # ═══════════════════════════════════════════════════════════
   cooldown:
