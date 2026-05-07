@@ -162,6 +162,25 @@ strategy:
     signal_throttle_ms: 7200000     # 2h cooldown between catches
 
   # ═══════════════════════════════════════════════════════════
+  # Kelly Criterion Sizing (Task 4.4)
+  # ═══════════════════════════════════════════════════════════
+  kelly:
+    enabled: true
+    min_trades: 20                # minimum history before Kelly activates
+    half_kelly: true               # use 0.5 * f* for safety
+    max_multiplier: 2.0            # cap Kelly boost at 2x
+    min_multiplier: 0.25           # floor Kelly reduction at 0.25x
+    lookback_trades: 50           # rolling window for stats
+
+  # ═══════════════════════════════════════════════════════════
+  # Portfolio Heat & Governance (Task 4.1–4.3)
+  # ═══════════════════════════════════════════════════════════
+  portfolio_governance:
+    max_directional_exposure_pct: 60   # 4.1: max 60% book same direction
+    max_sector_exposure_pct: 30        # 4.2: max 30% in crypto sector
+    daily_drawdown_circuit_pct: 5      # 4.3: daily drawdown > 5% = circuit breaker
+
+  # ═══════════════════════════════════════════════════════════
   # Cooldown Manager (Task 2.4)
   # ═══════════════════════════════════════════════════════════
   cooldown:

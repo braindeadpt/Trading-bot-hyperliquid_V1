@@ -49,6 +49,8 @@ from src.utils.helpers import safe_float, safe_divide, utc_timestamp_ms
 from .execution import ExecutionEngine, TradeResult
 from .portfolio import PortfolioState
 from .risk_manager import RiskManager
+from .kelly_sizer import KellySizer
+from .risk_manager import RiskManager
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +80,16 @@ class TradingEngine:
         self._strategies = list(strategies)
         self._risk = risk_manager
         self._executor = executor
+
+        # ── Kelly Criterion sizer (Task 4.4) ──
+        kelly_cfg = config.get("kelly", {})
+        self._kelly_sizer = KellySizer(
+            min_trades=int(kelly_cfg.get("min_trades", 20)),
+            half_kelly=bool(kelly_cfg.get("half_kelly", True)),
+            max_multiplier=safe_float(kelly_cfg.get("max_multiplier", 2.0)),
+            min_multiplier=safe_float(kelly_cfg.get("min_multiplier", 0.25)),
+            lookback_trades=int(kelly_cfg.get("lookback_trades", 50)),
+        )
 
         # Symbols to trade (from config)
         self._symbols: List[str] = list(config.get("symbols", ["BTC", "ETH", "SOL"]))
@@ -1059,6 +1071,28 @@ class TradingEngine:
             self._decision_history = self._decision_history[:100]
             return
 
+        # --- Kelly Criterion sizing (Task 4.4) ---
+        kelly_mult = self._kelly_sizer.get_size_multiplier()
+        if kelly_mult != 1.0:
+            # Create new signal with Kelly-adjusted size
+            signal = Signal(
+                strategy=signal.strategy,
+                symbol=signal.symbol,
+                side=signal.side,
+                confidence=signal.confidence,
+                size_pct=signal.size_pct * kelly_mult,
+                entry_price=signal.entry_price,
+                stop_loss_pct=signal.stop_loss_pct,
+                take_profit_pct=signal.take_profit_pct,
+                reason=f"{signal.reason} (kelly:{kelly_mult:.2f}x)",
+                metadata={**signal.metadata, "kelly_multiplier": kelly_mult},
+            )
+            logger.info(
+                "Kelly sizing applied: %s %s — base=%.4f → adjusted=%.4f (mult=%.3f)",
+                signal.symbol, signal.side,
+                signal.size_pct / kelly_mult, signal.size_pct, kelly_mult,
+            )
+
         # --- Risk check ---
         capital = await self._portfolio.current_capital
         positions = await self._portfolio.positions
@@ -1334,6 +1368,9 @@ class TradingEngine:
 
         # Update risk manager metrics
         self._risk.on_trade_closed(result)
+
+        # --- Update Kelly sizer with trade result (Task 4.4) ---
+        self._kelly_sizer.record_trade(result.pnl_pct)
 
         # --- Update cooldown state on exit (Task 2.4) ---
         strategy = position.metadata.get("strategy", "unknown")

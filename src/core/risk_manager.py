@@ -44,6 +44,10 @@ class RiskManager:
     CIRCUIT_BREAKER_DRAWDOWN_PCT: float = 0.10
     OVERCROWDED_CONFIDENCE_PENALTY: float = 0.20
     OVERCROWDED_THRESHOLD: float = 0.70
+    # FASE 4: Portfolio Heat & Governance
+    MAX_DIRECTIONAL_EXPOSURE_PCT: float = 0.60  # 4.1: max 60% book same direction
+    MAX_SECTOR_EXPOSURE_PCT: float = 0.30      # 4.2: max 30% in crypto (if mixed assets)
+    DAILY_DRAWDOWN_CIRCUIT_PCT: float = 0.05   # 4.3: daily drawdown > 5% = stop
 
     def __init__(self, config: Config, db: Any) -> None:
         """Initialise with config overrides and DB reference.
@@ -72,6 +76,11 @@ it is not used directly in the current implementation.
         self._circuit_breaker_tripped: bool = False
         self._circuit_breaker_reason: str = ""
         self._circuit_breaker_date: str = ""
+
+        # FASE 4: Daily drawdown circuit (4.3)
+        self._daily_peak_capital: float = 0.0  # set on first trade of day
+        self._daily_drawdown_circuit_tripped: bool = False
+        self._daily_drawdown_circuit_date: str = ""
 
         # Accumulated metrics for reporting
         self._total_trades_closed: int = 0
@@ -127,7 +136,7 @@ it is not used directly in the current implementation.
                 )
                 return False, self._circuit_breaker_reason
 
-        # --- 7. Drawdown circuit breaker ---
+        # --- 7. Drawdown circuit breaker (max from peak) ---
         drawdown = portfolio.get_max_drawdown()  # type: ignore
         if drawdown >= self._circuit_breaker_drawdown_pct:
             self._trip_circuit_breaker(
@@ -135,7 +144,67 @@ it is not used directly in the current implementation.
             )
             return False, self._circuit_breaker_reason
 
-        # --- 8. Confidence after overcrowded penalty ---
+        # --- 8. Daily drawdown circuit (FASE 4.3) ---
+        # Check daily drawdown from today's peak capital
+        today = utc_now().strftime("%Y-%m-%d")
+        if self._daily_drawdown_circuit_date != today:
+            # New day — reset daily tracker
+            self._daily_drawdown_circuit_tripped = False
+            self._daily_drawdown_circuit_date = today
+            self._daily_peak_capital = capital
+        else:
+            # Update daily peak if capital grew
+            if capital > self._daily_peak_capital:
+                self._daily_peak_capital = capital
+        # Calculate daily drawdown
+        if self._daily_peak_capital > 0.0:
+            daily_dd = (self._daily_peak_capital - capital) / self._daily_peak_capital
+            if daily_dd >= self.DAILY_DRAWDOWN_CIRCUIT_PCT:
+                self._daily_drawdown_circuit_tripped = True
+                logger.error(
+                    "DAILY DRAWDOWN CIRCUIT: %.2f%% (limit %.2f%%). "
+                    "Closing positions and stopping entries.",
+                    daily_dd * 100,
+                    self.DAILY_DRAWDOWN_CIRCUIT_PCT * 100,
+                )
+                return (
+                    False,
+                    f"Daily drawdown circuit: {daily_dd * 100:.2f}% >= "
+                    f"{self.DAILY_DRAWDOWN_CIRCUIT_PCT * 100:.2f}%",
+                )
+
+        # --- 9. Directional exposure limit (FASE 4.1) ---
+        # Max 60% of book in same direction (long or short)
+        long_exposure, short_exposure = self._calculate_directional_exposure(
+            positions, capital
+        )
+        if signal.side == "long":
+            if long_exposure + (signal.size_pct * 100) > self.MAX_DIRECTIONAL_EXPOSURE_PCT * 100:
+                return (
+                    False,
+                    f"Directional exposure limit: long={long_exposure:.1f}% + "
+                    f"{signal.size_pct * 100:.1f}% > {self.MAX_DIRECTIONAL_EXPOSURE_PCT * 100:.0f}%",
+                )
+        else:
+            if short_exposure + (signal.size_pct * 100) > self.MAX_DIRECTIONAL_EXPOSURE_PCT * 100:
+                return (
+                    False,
+                    f"Directional exposure limit: short={short_exposure:.1f}% + "
+                    f"{signal.size_pct * 100:.1f}% > {self.MAX_DIRECTIONAL_EXPOSURE_PCT * 100:.0f}%",
+                )
+
+        # --- 10. Sector exposure cap (FASE 4.2) ---
+        # Max 30% of capital in crypto (if we had other asset classes)
+        # For now, all positions are crypto so this is a total book cap
+        total_exposure = long_exposure + short_exposure
+        if total_exposure + (signal.size_pct * 100) > self.MAX_SECTOR_EXPOSURE_PCT * 100:
+            return (
+                False,
+                f"Sector exposure limit: total={total_exposure:.1f}% + "
+                f"{signal.size_pct * 100:.1f}% > {self.MAX_SECTOR_EXPOSURE_PCT * 100:.0f}%",
+            )
+
+        # --- 11. Confidence after overcrowded penalty ---
         effective_confidence = self._apply_overcrowded_penalty(signal)
         if effective_confidence < 0.5:
             return (
@@ -143,7 +212,7 @@ it is not used directly in the current implementation.
                 f"Confidence too low after overcrowding penalty ({effective_confidence:.2f})",
             )
 
-        # --- 9. Minimum capital sanity check ---
+        # --- 12. Minimum capital sanity check ---
         if capital <= 0.0:
             return False, "Zero or negative capital — cannot trade"
 
@@ -155,6 +224,68 @@ it is not used directly in the current implementation.
         if overcrowded_score > self.OVERCROWDED_THRESHOLD:
             return max(0.0, signal.confidence - self.OVERCROWDED_CONFIDENCE_PENALTY)
         return signal.confidence
+
+    # ------------------------------------------------------------------
+    # Directional exposure (FASE 4.1)
+    # ------------------------------------------------------------------
+
+    def _calculate_directional_exposure(
+        self,
+        positions: Dict[str, Any],
+        capital: float,
+    ) -> Tuple[float, float]:
+        """Return (long_exposure_pct, short_exposure_pct) of capital.
+
+        Each position's exposure = position notional / capital * 100
+        """
+        if capital <= 0.0:
+            return 0.0, 0.0
+        long_exposure = 0.0
+        short_exposure = 0.0
+        for pos in positions.values():
+            notional = pos.entry_price * pos.size
+            pct = (notional / capital) * 100.0
+            if pos.side == "long":
+                long_exposure += pct
+            else:
+                short_exposure += pct
+        return long_exposure, short_exposure
+
+    def get_directional_exposure(self, portfolio: Any) -> Tuple[float, float]:
+        """Public accessor for directional exposure."""
+        positions = portfolio.positions  # type: ignore
+        capital = portfolio.current_capital  # type: ignore
+        return self._calculate_directional_exposure(positions, capital)
+
+    # ------------------------------------------------------------------
+    # Daily drawdown circuit (FASE 4.3)
+    # ------------------------------------------------------------------
+
+    def is_daily_drawdown_circuit_tripped(self) -> bool:
+        """Return True if the daily drawdown circuit is active.
+
+        Auto-resets at 00:00 UTC.
+        """
+        if not self._daily_drawdown_circuit_tripped:
+            return False
+        today = utc_now().strftime("%Y-%m-%d")
+        if today != self._daily_drawdown_circuit_date:
+            logger.info("Daily drawdown circuit auto-reset — new UTC day: %s", today)
+            self._daily_drawdown_circuit_tripped = False
+            self._daily_drawdown_circuit_date = ""
+            self._daily_peak_capital = 0.0
+            return False
+        return True
+
+    def get_daily_drawdown(self, portfolio: Any) -> float:
+        """Return current daily drawdown as fraction of today's peak."""
+        today = utc_now().strftime("%Y-%m-%d")
+        capital = portfolio.current_capital  # type: ignore
+        if self._daily_drawdown_circuit_date != today:
+            return 0.0
+        if self._daily_peak_capital <= 0.0:
+            return 0.0
+        return (self._daily_peak_capital - capital) / self._daily_peak_capital
 
     # ------------------------------------------------------------------
     # Position sizing
