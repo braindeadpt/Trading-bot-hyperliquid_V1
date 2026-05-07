@@ -24,7 +24,7 @@ class MarketEvent:
     candle_15m: Optional[Candle] = None
     candle_1h: Optional[Candle] = None
 
-    # Market microstructure
+    # Market microstructure — Hyperliquid specific
     funding: Optional[float] = None
     predicted_funding: Optional[float] = None
     oi_total: Optional[float] = None
@@ -32,6 +32,13 @@ class MarketEvent:
     volume_1m: Optional[float] = None
     bid_ask_imbalance: Optional[float] = None
     vwap_15m: Optional[float] = None
+
+    # Cross-exchange aggregated data (funding + OI from Binance, Bybit, OKX, etc.)
+    funding_avg: Optional[float] = None          # Simple average across exchanges
+    funding_weighted: Optional[float] = None     # Weighted by OI
+    predicted_funding_avg: Optional[float] = None
+    oi_total_aggregated: Optional[float] = None   # Sum of OI across exchanges
+    oi_exchange_count: int = 0
 
     # Optional pre-computed indicator values from upstream
     ema_20: Optional[float] = None

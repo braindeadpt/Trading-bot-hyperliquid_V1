@@ -19,6 +19,10 @@ from src.data.database import (
     PortfolioSnapshot,
     SignalRecord,
 )
+from src.exchanges.funding_aggregator import (
+    AggregatedFundingOI,
+    FundingOIAggregator,
+)
 from src.exchanges.hyperliquid_ws import (
     DataBus,
     HlAssetCtx,
@@ -93,6 +97,11 @@ class TradingEngine:
 
         # Track which topics we subscribed to so we can unsubscribe on stop
         self._subscribed_callbacks: Dict[str, Any] = {}
+
+        # ── Cross-exchange funding + OI aggregator ──
+        self._funding_aggregator = FundingOIAggregator()
+        self._latest_agg_funding: Dict[str, AggregatedFundingOI] = {}
+        self._funding_poll_task: Optional[asyncio.Task] = None
 
         # ── Dashboard tracking (real-time introspection) ──
         self._last_market_events: Dict[str, Dict] = {}
@@ -191,6 +200,41 @@ class TradingEngine:
             [s.name for s in self._strategies],
         )
 
+        # 4. Start background funding + OI polling
+        self._funding_poll_task = asyncio.create_task(self._poll_funding_loop())
+        logger.info("FundingAggregator polling started (interval=30s)")
+
+    async def _poll_funding_loop(self) -> None:
+        """Background task: poll cross-exchange funding + OI every 30s."""
+        while self._running:
+            try:
+                results = await self._funding_aggregator.poll(self._symbols)
+                for sym, data in results.items():
+                    if data:
+                        self._latest_agg_funding[sym] = data
+                logger.info(
+                    "FundingAggregator updated for %d symbols (exchanges=%s)",
+                    len(results),
+                    ", ".join(
+                        sorted(
+                            set(
+                                ex
+                                for d in results.values()
+                                for ex in d.by_exchange.keys()
+                            )
+                        )
+                    ) if results else "none",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("FundingAggregator poll failed: %s", exc)
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait() if self._shutdown_event else asyncio.sleep(30),
+                    timeout=30,
+                )
+            except asyncio.TimeoutError:
+                pass
+
     async def stop(self) -> None:
         """Graceful shutdown: close all positions, save state, unsubscribe."""
         if not self._running:
@@ -200,6 +244,14 @@ class TradingEngine:
         self._running = False
         if self._shutdown_event is not None:
             self._shutdown_event.set()
+
+        # Cancel funding poll task
+        if self._funding_poll_task and not self._funding_poll_task.done():
+            self._funding_poll_task.cancel()
+            try:
+                await self._funding_poll_task
+            except asyncio.CancelledError:
+                pass
 
         # 1. Unsubscribe from DataBus
         for topic, callback in self._subscribed_callbacks.items():
@@ -293,6 +345,11 @@ class TradingEngine:
                 "volume_1m": event.volume_1m,
                 "bid_ask_imbalance": event.bid_ask_imbalance,
                 "vwap_15m": event.vwap_15m,
+                "funding_avg": event.funding_avg,
+                "funding_weighted": event.funding_weighted,
+                "predicted_funding_avg": event.predicted_funding_avg,
+                "oi_total_aggregated": event.oi_total_aggregated,
+                "oi_exchange_count": event.oi_exchange_count,
                 "candles": {
                     "1m": event.candle_1m is not None,
                     "5m": event.candle_5m is not None,
@@ -378,6 +435,9 @@ class TradingEngine:
         if price <= 0.0:
             return None
 
+        # Cross-exchange aggregated funding + OI (if available)
+        agg = self._latest_agg_funding.get(symbol)
+
         # Build the MarketEvent
         event = MarketEvent(
             symbol=symbol,
@@ -394,15 +454,25 @@ class TradingEngine:
             volume_1m=getattr(candles.get(60), 'volume', None) if candles.get(60) else None,
             bid_ask_imbalance=self._calc_imbalance(candles.get(900)),
             vwap_15m=getattr(candles.get(900), 'vwap', None) if candles.get(900) else None,
+            # Cross-exchange aggregated data
+            funding_avg=agg.funding_avg if agg else None,
+            funding_weighted=agg.funding_weighted if agg else None,
+            predicted_funding_avg=agg.predicted_funding_avg if agg else None,
+            oi_total_aggregated=agg.oi_total if agg else None,
+            oi_exchange_count=agg.exchange_count if agg else 0,
         )
 
         # Log orderflow metrics for debugging
         logger.info(
-            "MarketEvent %s: price=%.2f, funding=%.6f, predicted=%s, oi=%.2f, imbalance=%s",
+            "MarketEvent %s: price=%.2f, funding=%.6f, predicted=%s, oi=%.2f, "
+            "agg_funding=%s, agg_oi=%s, exchanges=%d, imbalance=%s",
             symbol, event.price,
             event.funding or 0,
             f"{event.predicted_funding:.6f}" if event.predicted_funding else "N/A",
             event.oi_total or 0,
+            f"{event.funding_avg:.6f}" if event.funding_avg else "N/A",
+            f"{event.oi_total_aggregated:,.0f}" if event.oi_total_aggregated else "N/A",
+            event.oi_exchange_count,
             event.bid_ask_imbalance,
         )
 
