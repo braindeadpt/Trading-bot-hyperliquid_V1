@@ -185,6 +185,22 @@ class TradingEngine:
         self._last_market_events: Dict[str, Dict] = {}
         self._signal_history: List[Dict] = []
         self._decision_history: List[Dict] = []
+
+        # Strategy-level stats for dashboard drill-down (Task 5.3)
+        self._strategy_stats: Dict[str, Dict[str, Any]] = {
+            getattr(s, "name", "unknown"): {
+                "total_signals": 0,
+                "approved_signals": 0,
+                "rejected_signals": 0,
+                "winning_trades": 0,
+                "losing_trades": 0,
+                "total_pnl": 0.0,
+                "avg_confidence": 0.0,
+                "last_signal_time": None,
+                "signal_history": [],  # last 20 signals for this strategy
+            }
+            for s in strategies
+        }
         self._tick_stats = {"total": 0, "per_second": 0.0, "last_tick_time": 0.0, "tick_times": []}
         self._last_error: Optional[str] = None
         self._on_dashboard_tick: Optional[Any] = None  # callback set by main.py
@@ -1093,6 +1109,20 @@ class TradingEngine:
                 signal.size_pct / kelly_mult, signal.size_pct, kelly_mult,
             )
 
+        # --- Update strategy stats (Task 5.3) ---
+        strat_stats = self._strategy_stats.get(signal.strategy)
+        if strat_stats:
+            strat_stats["total_signals"] += 1
+            strat_stats["last_signal_time"] = sig_time
+            strat_stats["signal_history"].insert(0, {
+                "time": sig_time,
+                "symbol": signal.symbol,
+                "side": signal.side,
+                "confidence": signal.confidence,
+                "status": "pending",
+            })
+            strat_stats["signal_history"] = strat_stats["signal_history"][:20]
+
         # --- Risk check ---
         capital = await self._portfolio.current_capital
         positions = await self._portfolio.positions
@@ -1118,6 +1148,12 @@ class TradingEngine:
             )
             sig_record["status"] = "rejected"
             sig_record["risk_reason"] = reason
+            # Update strategy stats
+            strat_stats = self._strategy_stats.get(signal.strategy)
+            if strat_stats:
+                strat_stats["rejected_signals"] += 1
+                if strat_stats["signal_history"]:
+                    strat_stats["signal_history"][0]["status"] = "rejected"
             self._decision_history.insert(0, {
                 "time": sig_time,
                 "type": "risk",
@@ -1267,6 +1303,13 @@ class TradingEngine:
 
         sig_record["status"] = "executed"
         sig_record["size"] = result.size
+        # Update strategy stats
+        strat_stats = self._strategy_stats.get(signal.strategy)
+        if strat_stats:
+            strat_stats["approved_signals"] += 1
+            if strat_stats["signal_history"]:
+                strat_stats["signal_history"][0]["status"] = "executed"
+
         self._decision_history.insert(0, {
             "time": sig_time,
             "type": "execution",
@@ -1371,6 +1414,23 @@ class TradingEngine:
 
         # --- Update Kelly sizer with trade result (Task 4.4) ---
         self._kelly_sizer.record_trade(result.pnl_pct)
+
+        # --- Update strategy stats on exit (Task 5.3) ---
+        strategy = position.metadata.get("strategy", "unknown")
+        strat_stats = self._strategy_stats.get(strategy)
+        if strat_stats:
+            if result.pnl_pct > 0:
+                strat_stats["winning_trades"] += 1
+            else:
+                strat_stats["losing_trades"] += 1
+            strat_stats["total_pnl"] += result.pnl_pct
+            total_trades = strat_stats["winning_trades"] + strat_stats["losing_trades"]
+            strat_stats["win_rate"] = (
+                strat_stats["winning_trades"] / total_trades if total_trades > 0 else 0.0
+            )
+            strat_stats["avg_pnl"] = (
+                strat_stats["total_pnl"] / total_trades if total_trades > 0 else 0.0
+            )
 
         # --- Update cooldown state on exit (Task 2.4) ---
         strategy = position.metadata.get("strategy", "unknown")

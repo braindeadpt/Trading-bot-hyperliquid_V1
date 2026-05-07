@@ -443,8 +443,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
             border-radius: 4px;
             border-left: 3px solid var(--border);
         }
-        .strategy-card.active { border-left-color: var(--green); }
-        .strategy-card.inactive { border-left-color: var(--muted); opacity: 0.6; }
+        .strategy-card.active { border-left-color: var(--green); cursor: pointer; }
+        .strategy-card.inactive { border-left-color: var(--muted); opacity: 0.6; cursor: pointer; }
+        .strategy-card:hover { opacity: 1.0; filter: brightness(1.2); }
         .strategy-name { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
         .strategy-desc { color: var(--dim); font-size: 10px; }
         .strategy-params { margin-top: 4px; font-family: monospace; font-size: 10px; color: var(--muted); }
@@ -481,6 +482,24 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
         /* Sparkline placeholder */
         .spark { height: 20px; background: linear-gradient(90deg, var(--green) 0%, var(--green) 60%, var(--red) 100%); border-radius: 2px; margin-top: 4px; opacity: 0.5; }
+        /* Modal */
+        .modal-overlay {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8); z-index: 1000; justify-content: center; align-items: center;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal-box {
+            background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+            width: 90%; max-width: 600px; max-height: 80vh; overflow-y: auto; padding: 16px;
+        }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .modal-title { font-size: 14px; font-weight: 600; }
+        .modal-close { cursor: pointer; font-size: 18px; color: var(--muted); }
+        .modal-close:hover { color: var(--text); }
+        .stat-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--border); }
+        .stat-label { color: var(--dim); }
+        .stat-value { font-weight: 600; }
+
     </style>
 </head>
 <body>
@@ -843,7 +862,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 return;
             }
             container.innerHTML = data.map(s => `
-                <div class="strategy-card ${s.enabled ? 'active' : 'inactive'}">
+                <div class="strategy-card ${s.enabled ? 'active' : 'inactive'}" onclick="showStrategyDetail('${s.name}')">
                     <div class="strategy-name">${s.name} ${s.enabled ? "●" : "○"}</div>
                     <div class="strategy-desc">${s.description || "No description"}</div>
                     <div class="strategy-params">${s.params || ""}</div>
@@ -967,7 +986,57 @@ def create_app(config: Dict[str, Any]) -> tuple:
         fetch("/api/status").then(r => r.json()).then(d => {
             if (d.mode) document.getElementById("mode-badge").textContent = d.mode.toUpperCase();
         });
+        // ── Strategy Drill-down (Task 5.3) ──
+        async function showStrategyDetail(name) {
+            const modal = document.getElementById('strategy-modal');
+            const content = document.getElementById('modal-content');
+            document.getElementById('modal-title').textContent = name;
+            modal.classList.add('active');
+            content.innerHTML = '<div class="muted" style="text-align:center;">Loading...</div>';
+            try {
+                const res = await fetch('/api/strategy/' + encodeURIComponent(name));
+                const data = await res.json();
+                if (data.error) {
+                    content.innerHTML = '<div class="muted" style="text-align:center;color:var(--red)">' + data.error + '</div>';
+                    return;
+                }
+                const s = data.stats;
+                let html = '<div class="stat-row"><span class="stat-label">Signals (total / approved / rejected)</span><span class="stat-value">' + s.total_signals + ' / ' + s.approved_signals + ' / ' + s.rejected_signals + '</span></div>';
+                html += '<div class="stat-row"><span class="stat-label">Trades (win / loss)</span><span class="stat-value">' + s.winning_trades + ' / ' + s.losing_trades + '</span></div>';
+                html += '<div class="stat-row"><span class="stat-label">Win Rate</span><span class="stat-value" style="color:' + (s.win_rate >= 0.5 ? 'var(--green)' : 'var(--red)') + '">' + (s.win_rate * 100).toFixed(1) + '%</span></div>';
+                html += '<div class="stat-row"><span class="stat-label">Total PnL</span><span class="stat-value" style="color:' + (s.total_pnl_pct >= 0 ? 'var(--green)' : 'var(--red)') + '">' + (s.total_pnl_pct >= 0 ? '+' : '') + s.total_pnl_pct.toFixed(2) + '%</span></div>';
+                html += '<div class="stat-row"><span class="stat-label">Avg PnL per trade</span><span class="stat-value">' + (s.avg_pnl_pct >= 0 ? '+' : '') + s.avg_pnl_pct.toFixed(2) + '%</span></div>';
+                if (data.signal_history && data.signal_history.length > 0) {
+                    html += '<div style="margin-top:12px;font-weight:600;font-size:11px;">Recent Signals</div>';
+                    html += '<table class="data-table"><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Conf</th><th>Status</th></tr></thead><tbody>';
+                    html += data.signal_history.map(sig => '<tr><td class="muted tiny">' + (sig.time || '--') + '</td><td>' + sig.symbol + '</td><td class="' + (sig.side === 'long' ? 'up' : 'down') + '">' + (sig.side || '--').toUpperCase() + '</td><td>' + (sig.confidence != null ? Math.round(sig.confidence * 100) + '%' : '--') + '</td><td><span class="pill pill-' + (sig.status || 'pending') + '">' + (sig.status || 'PENDING') + '</span></td></tr>').join('');
+                    html += '</tbody></table>';
+                }
+                content.innerHTML = html;
+            } catch (e) {
+                content.innerHTML = '<div class="muted" style="text-align:center;color:var(--red)">Failed to load: ' + e.message + '</div>';
+            }
+        }
+        function closeStrategyModal(e) {
+            if (e.target === document.getElementById('strategy-modal')) {
+                document.getElementById('strategy-modal').classList.remove('active');
+            }
+        }
+
     </script>
+    <!-- Strategy Drill-down Modal (Task 5.3) -->
+    <div id="strategy-modal" class="modal-overlay" onclick="closeStrategyModal(event)">
+        <div class="modal-box" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <span class="modal-title" id="modal-title">Strategy Detail</span>
+                <span class="modal-close" onclick="document.getElementById('strategy-modal').classList.remove('active')">×</span>
+            </div>
+            <div id="modal-content">
+                <div class="muted" style="text-align:center;">Loading...</div>
+            </div>
+        </div>
+    </div>
+
 </body>
 </html>
 '''
@@ -1020,6 +1089,45 @@ def create_app(config: Dict[str, Any]) -> tuple:
             }
             for s in getattr(_engine, "_strategies", [])
         ])
+
+    @app.route("/api/strategy/<name>")
+    def api_strategy_detail(name):
+        """Drill-down endpoint for a single strategy (Task 5.3).
+
+        Returns signals, win rate, PnL, and parameters.
+        """
+        if _engine is None:
+            return jsonify({"error": "Engine not running"}), 503
+
+        # Find strategy
+        strategy = None
+        for s in getattr(_engine, "_strategies", []):
+            if getattr(s, "name", "") == name:
+                strategy = s
+                break
+        if strategy is None:
+            return jsonify({"error": f"Strategy {name} not found"}), 404
+
+        # Get stats from engine
+        stats = getattr(_engine, "_strategy_stats", {}).get(name, {})
+
+        return jsonify({
+            "name": name,
+            "enabled": getattr(strategy, "enabled", True),
+            "description": (getattr(strategy, "__doc__", "") or "No description").split("\n")[0][:200],
+            "params": getattr(strategy, "params", {}),
+            "stats": {
+                "total_signals": stats.get("total_signals", 0),
+                "approved_signals": stats.get("approved_signals", 0),
+                "rejected_signals": stats.get("rejected_signals", 0),
+                "winning_trades": stats.get("winning_trades", 0),
+                "losing_trades": stats.get("losing_trades", 0),
+                "win_rate": stats.get("win_rate", 0.0),
+                "total_pnl_pct": stats.get("total_pnl", 0.0) * 100,
+                "avg_pnl_pct": stats.get("avg_pnl", 0.0) * 100,
+            },
+            "signal_history": stats.get("signal_history", [])[:20],
+        })
 
     @app.route("/api/portfolio")
     def api_portfolio():
