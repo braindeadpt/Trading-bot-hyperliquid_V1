@@ -1,768 +1,748 @@
 """
-Hyperliquid Premium — Dashboard Web Server
-Flask + Socket.IO for real-time push updates.
+Hyperliquid Premium — Real-Time Operations Dashboard
+Simple, dense, informative. Shows what the bot is actually doing.
 """
 
 import logging
 import os
 import time
-import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
-
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, emit
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
 
-PUSH_INTERVAL_SEC = 2.0
-MAX_TRADES_DEFAULT = 50
-MAX_SIGNALS_DEFAULT = 50
-MAX_EQUITY_POINTS = 500
-
-# ---------------------------------------------------------------------------
-# Mock data generators (used when engine is None or missing attributes)
-# ---------------------------------------------------------------------------
-
-_mock_counter = {"tick": 0}
+# Globals set by main.py
+_engine: Optional[Any] = None
+_socketio: Optional[SocketIO] = None
 
 
-def _mock_status() -> Dict[str, Any]:
-    _mock_counter["tick"] += 1
-    t = _mock_counter["tick"]
-    return {
-        "online": True,
-        "mode": "PAPER",
-        "circuit_breaker_tripped": False,
-        "sync_warning": False,
-        "version": "1.0.0",
-        "uptime_sec": t * 2,
-        "memory_mb": 42.0 + (t % 10),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "capital": 25000.0 + (t * 15.5),
-        "initial_capital": 25000.0,
-        "daily_pnl": 120.0 + (t % 50 - 25),
-        "total_pnl": 450.0 + (t * 3.2),
-        "win_rate": 62.5,
-        "wins": 10,
-        "losses": 6,
-        "max_drawdown_pct": 4.2,
-        "open_positions_count": 2,
-        "max_positions": 5,
-        "daily_trades_count": 3,
-        "max_daily_trades": 5,
-    }
+def set_engine(engine: Any) -> None:
+    global _engine
+    _engine = engine
 
 
-def _mock_positions() -> List[Dict[str, Any]]:
-    return [
-        {
-            "symbol": "BTC",
-            "side": "long",
-            "entry_price": 67500.0,
-            "current_price": 68120.0,
-            "size": 0.15,
-            "unrealized_pnl": 93.0,
-            "unrealized_pnl_pct": 0.92,
-            "stop_loss": 66000.0,
-            "opened_at": datetime.now(timezone.utc).isoformat(),
-            "time_open_min": 45,
-        },
-        {
-            "symbol": "ETH",
-            "side": "short",
-            "entry_price": 3520.0,
-            "current_price": 3485.0,
-            "size": 1.2,
-            "unrealized_pnl": 42.0,
-            "unrealized_pnl_pct": 1.19,
-            "stop_loss": 3650.0,
-            "opened_at": datetime.now(timezone.utc).isoformat(),
-            "time_open_min": 12,
-        },
-    ]
+def get_engine() -> Optional[Any]:
+    return _engine
 
 
-def _mock_trades(limit: int = 50) -> List[Dict[str, Any]]:
-    base = [
-        {
-            "time": "2026-05-06T14:32:00+00:00",
-            "symbol": "BTC",
-            "side": "long",
-            "entry": 67200.0,
-            "exit": 68100.0,
-            "pnl_usd": 135.0,
-            "pnl_pct": 1.34,
-            "strategy": "Trend Follow",
-            "reason": "Breakout + volume surge",
-        },
-        {
-            "time": "2026-05-06T12:15:00+00:00",
-            "symbol": "SOL",
-            "side": "short",
-            "entry": 148.5,
-            "exit": 145.2,
-            "pnl_usd": 66.0,
-            "pnl_pct": 2.22,
-            "strategy": "Mean Reversion",
-            "reason": "Extreme funding + overcrowded longs",
-        },
-        {
-            "time": "2026-05-06T10:00:00+00:00",
-            "symbol": "ETH",
-            "side": "long",
-            "entry": 3480.0,
-            "exit": 3460.0,
-            "pnl_usd": -24.0,
-            "pnl_pct": -0.57,
-            "strategy": "Trend Follow",
-            "reason": "Failed breakout",
-        },
-    ]
-    return base[:limit]
-
-
-def _mock_signals(limit: int = 50) -> List[Dict[str, Any]]:
-    base = [
-        {
-            "time": "2026-05-06T14:30:00+00:00",
-            "strategy": "Trend Follow",
-            "symbol": "BTC",
-            "side": "long",
-            "confidence": 0.85,
-            "reason": "Breakout + volume surge",
-            "status": "EXECUTED",
-        },
-        {
-            "time": "2026-05-06T12:10:00+00:00",
-            "strategy": "Mean Reversion",
-            "symbol": "SOL",
-            "side": "short",
-            "confidence": 0.78,
-            "reason": "Extreme funding + overcrowded longs",
-            "status": "EXECUTED",
-        },
-        {
-            "time": "2026-05-06T09:55:00+00:00",
-            "strategy": "Trend Follow",
-            "symbol": "ETH",
-            "side": "long",
-            "confidence": 0.62,
-            "reason": "Failed breakout",
-            "status": "REJECTED",
-        },
-    ]
-    return base[:limit]
-
-
-def _mock_equity() -> List[Dict[str, Any]]:
-    points = []
-    base = 25000.0
-    for i in range(MAX_EQUITY_POINTS):
-        points.append({
-            "time": f"2026-05-06T{10 + i // 60:02d}:{i % 60:02d}:00+00:00",
-            "value": base + (i * 2.5) + (5 if i % 7 == 0 else -3),
-        })
-    return points
-
-
-def _mock_metrics() -> Dict[str, Any]:
-    return {
-        "sharpe": 1.85,
-        "sortino": 2.40,
-        "max_drawdown_pct": 4.2,
-        "win_rate": 62.5,
-        "profit_factor": 1.55,
-        "avg_trade_pnl": 18.5,
-        "avg_win": 65.0,
-        "avg_loss": -28.0,
-        "total_trades": 16,
-        "total_return_pct": 2.1,
-    }
-
-
-def _mock_funding() -> List[Dict[str, Any]]:
-    return [
-        {"symbol": "BTC", "rate": 0.00025, "predicted": 0.00030, "has_position": True, "position_side": "long"},
-        {"symbol": "ETH", "rate": -0.00015, "predicted": -0.00010, "has_position": True, "position_side": "short"},
-        {"symbol": "SOL", "rate": 0.00085, "predicted": 0.00090, "has_position": False, "position_side": None},
-    ]
-
-
-def _mock_oi() -> List[Dict[str, Any]]:
-    return [
-        {"symbol": "BTC", "oi": 1_200_000_000, "oi_delta_24h": 0.05, "long_ratio": 0.55, "overcrowded_score": 0.35},
-        {"symbol": "ETH", "oi": 850_000_000, "oi_delta_24h": -0.02, "long_ratio": 0.48, "overcrowded_score": 0.20},
-        {"symbol": "SOL", "oi": 420_000_000, "oi_delta_24h": 0.18, "long_ratio": 0.72, "overcrowded_score": 0.82},
-    ]
-
-
-def _mock_prices() -> Dict[str, float]:
-    t = _mock_counter["tick"]
-    return {
-        "BTC": 68120.0 + (t % 5 - 2) * 50,
-        "ETH": 3485.0 + (t % 3 - 1) * 10,
-        "SOL": 146.2 + (t % 4 - 2) * 1.5,
-    }
-
-
-def _mock_candles() -> List[Dict[str, Any]]:
-    return [
-        {"symbol": "BTC", "timeframe": "15m", "open": 68000.0, "high": 68200.0, "low": 67900.0, "close": 68120.0, "volume": 1200.0},
-        {"symbol": "ETH", "timeframe": "15m", "open": 3490.0, "high": 3495.0, "low": 3475.0, "close": 3485.0, "volume": 8500.0},
-        {"symbol": "SOL", "timeframe": "15m", "open": 147.0, "high": 147.5, "low": 145.0, "close": 146.2, "volume": 45000.0},
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Safe attribute access helpers
-# ---------------------------------------------------------------------------
-
-def _safe(obj: Any, attr: str, default: Any = None) -> Any:
-    return getattr(obj, attr, default) if obj else default
-
-
-def _call(obj: Any, method: str, *args, **kwargs) -> Any:
-    if obj is None:
-        return None
-    fn = getattr(obj, method, None)
-    if callable(fn):
-        return fn(*args, **kwargs)
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Dashboard factory
-# ---------------------------------------------------------------------------
-
-def create_dashboard(engine: Any, config: Dict[str, Any]):
-    """
-    Create the Flask app + Socket.IO server.
-    
-    Args:
-        engine: The main trading engine (may be None for standalone testing).
-        config: Dict with at least { 'mode': str, 'version': str }.
-    """
+def create_app(config: Dict[str, Any]) -> tuple:
     app = Flask(__name__)
-    socketio = SocketIO(
-        app,
-        cors_allowed_origins="*",
-        async_mode="threading",
-        ping_interval=25,
-        ping_timeout=60,
-    )
+    app.config["SECRET_KEY"] = config.get("secret_key", "dev-secret-123")
+    socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+    global _socketio
+    _socketio = socketio
 
-    # Resolve dashboard directory
-    dashboard_dir = os.path.dirname(os.path.abspath(__file__))
-    static_dir = os.path.join(dashboard_dir, "static")
-
-    # -----------------------------------------------------------------------
-    # Helpers to read from engine (with graceful fallbacks)
-    # -----------------------------------------------------------------------
-
-    def engine_mode() -> str:
-        return _safe(config, "mode", "PAPER").upper()
-
-    def engine_version() -> str:
-        return _safe(config, "version", "1.0.0")
-
-    def get_portfolio() -> Any:
-        return _safe(engine, "portfolio", None)
-
-    def get_risk_manager() -> Any:
-        return _safe(engine, "risk_manager", None)
-
-    def get_database() -> Any:
-        return _safe(engine, "database", None)
-
-    def get_data_bus() -> Any:
-        return _safe(engine, "data_bus", None)
-
-    def is_online() -> bool:
-        if engine is None:
-            return True  # Mock mode — pretend online
-        # Check if engine is running and data is flowing
-        data_bus = get_data_bus()
-        if data_bus is None:
-            return False
-        # At least one price tick received in last 30s?
-        for sym in ("BTC", "ETH", "SOL"):
-            tick = data_bus.get_latest(f"price:{sym}")
-            if tick is not None:
-                return True
-        return False
-
-    def circuit_breaker_tripped() -> bool:
-        rm = get_risk_manager()
-        return getattr(rm, "circuit_breaker_tripped", False) if rm else False
-
-    def sync_warning() -> bool:
-        # True if DB and engine state diverge
-        if engine is None:
-            return False
-        db_trade_count = 0
-        db = get_database()
-        if db:
-            db_trade_count = _call(db, "count_trades_today") or 0
-        engine_trade_count = getattr(engine, "daily_trade_count", 0)
-        return abs(db_trade_count - engine_trade_count) > 2
-
-    def build_status() -> Dict[str, Any]:
-        """Build the full engine state payload."""
-        if engine is None:
-            return _mock_status()
-
-        portfolio = get_portfolio()
-        risk_mgr = get_risk_manager()
-        db = get_database()
-
-        capital = _call(portfolio, "sync_capital") or 0.0 if portfolio else 0.0
-        initial = _call(portfolio, "sync_initial_capital") or capital if portfolio else capital
-        total_pnl = _call(portfolio, "sync_total_pnl") or 0.0 if portfolio else 0.0
-
-        wins = getattr(risk_mgr, "daily_wins", 0) if risk_mgr else 0
-        losses = getattr(risk_mgr, "daily_losses", 0) if risk_mgr else 0
-        total_trades = wins + losses
-        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
-
-        daily_pnl = getattr(risk_mgr, "daily_pnl", 0.0) if risk_mgr else 0.0
-        max_dd = _call(portfolio, "sync_max_drawdown_pct") or 0.0 if portfolio else 0.0
-        positions = _call(portfolio, "get_positions_sync") or {}
-        open_count = len(positions) if positions else 0
-        daily_trades = getattr(risk_mgr, "daily_trade_count", 0) if risk_mgr else 0
-
-        return {
-            "online": is_online(),
-            "mode": engine_mode(),
-            "circuit_breaker_tripped": circuit_breaker_tripped(),
-            "sync_warning": sync_warning(),
-            "version": engine_version(),
-            "uptime_sec": getattr(engine, "uptime_sec", 0),
-            "memory_mb": getattr(engine, "memory_mb", 0.0),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "capital": capital,
-            "initial_capital": initial,
-            "daily_pnl": daily_pnl,
-            "total_pnl": total_pnl,
-            "win_rate": round(win_rate, 1),
-            "wins": wins,
-            "losses": losses,
-            "max_drawdown_pct": round(max_dd, 2),
-            "open_positions_count": open_count,
-            "max_positions": getattr(risk_mgr, "max_positions", 5) if risk_mgr else 5,
-            "daily_trades_count": daily_trades,
-            "max_daily_trades": getattr(risk_mgr, "max_daily_trades", 5) if risk_mgr else 5,
+    # ── HTML Template — clean, dense, informative ──
+    INDEX_HTML = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Hyperliquid Bot — Operations</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            font-size: 13px;
+            line-height: 1.4;
         }
+        .header {
+            background: #111;
+            border-bottom: 1px solid #333;
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+        .status-badge {
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .status-ok { background: #1a472a; color: #4ade80; }
+        .status-warn { background: #451a03; color: #fbbf24; }
+        .status-err { background: #450a0a; color: #f87171; }
 
-    def build_positions() -> List[Dict[str, Any]]:
-        if engine is None:
-            return _mock_positions()
-        portfolio = get_portfolio()
-        if portfolio is None:
-            return []
-        positions = _call(portfolio, "get_positions_sync") or {}
-        prices = build_prices()
-        result = []
-        for symbol, pos in (positions.items() if isinstance(positions, dict) else []):
-            current = prices.get(symbol, getattr(pos, "entry_price", 0.0))
-            entry = getattr(pos, "entry_price", 0.0)
-            size = getattr(pos, "size", 0.0)
-            side = getattr(pos, "side", "long")
-            unrealized = 0.0
-            if side == "long":
-                unrealized = (current - entry) * size
-            else:
-                unrealized = (entry - current) * size
-            unrealized_pct = (unrealized / (entry * size) * 100) if (entry * size) != 0 else 0.0
-            opened = getattr(pos, "opened_at", None)
-            time_open_min = 0
-            if opened:
-                if isinstance(opened, (int, float)):
-                    opened_dt = datetime.fromtimestamp(opened / 1000, tz=timezone.utc)
-                elif hasattr(opened, "isoformat"):
-                    opened_dt = opened
-                else:
-                    opened_dt = datetime.now(timezone.utc)
-                delta = datetime.now(timezone.utc) - opened_dt
-                time_open_min = int(delta.total_seconds() / 60)
-            result.append({
-                "symbol": symbol,
-                "side": side,
-                "entry_price": entry,
-                "current_price": current,
-                "size": size,
-                "unrealized_pnl": round(unrealized, 2),
-                "unrealized_pnl_pct": round(unrealized_pct, 2),
-                "stop_loss": getattr(pos, "stop_loss", None),
-                "opened_at": opened.isoformat() if hasattr(opened, "isoformat") else str(opened),
-                "time_open_min": time_open_min,
-            })
-        return result
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+            gap: 16px;
+            padding: 16px;
+        }
+        .panel {
+            background: #111;
+            border: 1px solid #222;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .panel-header {
+            background: #161616;
+            padding: 10px 14px;
+            border-bottom: 1px solid #222;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: #888;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .panel-body { padding: 12px 14px; }
 
-    def build_trades(limit: int = 50) -> List[Dict[str, Any]]:
-        if engine is None:
-            return _mock_trades(limit)
-        db = get_database()
-        if db is None:
-            return []
-        rows = _call(db, "get_recent_trades", limit) or []
-        result = []
-        for row in rows:
-            if isinstance(row, dict):
-                result.append({
-                    "time": row.get("closed_at") or row.get("opened_at") or row.get("time"),
-                    "symbol": row.get("symbol"),
-                    "side": row.get("side"),
-                    "entry": row.get("entry_price"),
-                    "exit": row.get("exit_price"),
-                    "pnl_usd": row.get("pnl"),
-                    "pnl_pct": row.get("pnl_pct"),
-                    "strategy": row.get("strategy"),
-                    "reason": row.get("reason"),
-                })
-            else:
-                # tuple fallback (assumed column order)
-                try:
-                    result.append({
-                        "time": row[0],
-                        "symbol": row[1],
-                        "side": row[2],
-                        "entry": row[3],
-                        "exit": row[4],
-                        "pnl_usd": row[5],
-                        "pnl_pct": row[6],
-                        "strategy": row[7],
-                        "reason": row[8],
-                    })
-                except Exception:
-                    pass
-        return result
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        th { text-align: left; padding: 6px 8px; color: #666; font-weight: 500; border-bottom: 1px solid #222; }
+        td { padding: 5px 8px; border-bottom: 1px solid #1a1a1a; }
+        tr:hover td { background: #1a1a1a; }
+        .num { font-family: "SF Mono", "Consolas", monospace; text-align: right; }
+        .up { color: #4ade80; }
+        .down { color: #f87171; }
+        .muted { color: #666; }
+        .highlight { color: #60a5fa; font-weight: 600; }
 
-    def build_signals(limit: int = 50) -> List[Dict[str, Any]]:
-        if engine is None:
-            return _mock_signals(limit)
-        db = get_database()
-        if db is None:
-            return []
-        rows = _call(db, "get_recent_signals", limit) or []
-        result = []
-        for row in rows:
-            if isinstance(row, dict):
-                result.append({
-                    "time": row.get("created_at") or row.get("time"),
-                    "strategy": row.get("strategy"),
-                    "symbol": row.get("symbol"),
-                    "side": row.get("side"),
-                    "confidence": row.get("confidence"),
-                    "reason": row.get("reason"),
-                    "status": row.get("status", "ACTIVE"),
-                })
-            else:
-                try:
-                    result.append({
-                        "time": row[0],
-                        "strategy": row[1],
-                        "symbol": row[2],
-                        "side": row[3],
-                        "confidence": row[4],
-                        "reason": row[5],
-                        "status": row[6] if len(row) > 6 else "ACTIVE",
-                    })
-                except Exception:
-                    pass
-        return result
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            border-bottom: 1px solid #1a1a1a;
+        }
+        .metric-label { color: #888; }
+        .metric-value { font-family: monospace; }
 
-    def build_equity() -> List[Dict[str, Any]]:
-        if engine is None:
-            return _mock_equity()
-        db = get_database()
-        if db is None:
-            return []
-        rows = _call(db, "get_equity_curve", MAX_EQUITY_POINTS) or []
-        result = []
-        for row in rows:
-            if isinstance(row, dict):
-                result.append({"time": row.get("time"), "value": row.get("value")})
-            else:
-                try:
-                    result.append({"time": row[0], "value": row[1]})
-                except Exception:
-                    pass
-        return result
+        .log-box {
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 11px;
+            line-height: 1.5;
+            color: #aaa;
+        }
+        .log-box .log-time { color: #666; }
+        .log-box .log-info { color: #60a5fa; }
+        .log-box .log-warn { color: #fbbf24; }
+        .log-box .log-err { color: #f87171; }
 
-    def build_metrics() -> Dict[str, Any]:
-        if engine is None:
-            return _mock_metrics()
-        db = get_database()
-        if db is None:
-            return {}
-        return _call(db, "get_metrics") or {}
+        .bar {
+            height: 4px;
+            background: #222;
+            border-radius: 2px;
+            margin-top: 4px;
+            overflow: hidden;
+        }
+        .bar-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.5s;
+        }
+        .bar-green { background: #4ade80; }
+        .bar-yellow { background: #fbbf24; }
+        .bar-red { background: #f87171; }
 
-    def build_funding() -> List[Dict[str, Any]]:
-        if engine is None:
-            return _mock_funding()
-        data_bus = get_data_bus()
-        if data_bus is None:
-            return []
-        positions = build_positions()
-        pos_symbols = {p["symbol"]: p["side"] for p in positions}
-        result = []
-        for sym in ("BTC", "ETH", "SOL"):
-            ctx = data_bus.get_latest(f"ctx:{sym}")
-            if ctx is None:
-                continue
-            try:
-                result.append({
-                    "symbol": sym,
-                    "rate": getattr(ctx, "funding_rate", 0.0),
-                    "predicted": getattr(ctx, "predicted_funding", 0.0),
-                    "has_position": sym in pos_symbols,
-                    "position_side": pos_symbols.get(sym),
-                })
-            except Exception:
-                pass
-        return result
+        .strategy-card {
+            padding: 10px;
+            margin-bottom: 8px;
+            background: #161616;
+            border-radius: 6px;
+            border-left: 3px solid #333;
+        }
+        .strategy-active { border-left-color: #4ade80; }
+        .strategy-inactive { border-left-color: #666; }
+        .strategy-name { font-weight: 600; color: #fff; margin-bottom: 4px; }
+        .strategy-desc { color: #888; font-size: 11px; }
+        .strategy-params { margin-top: 6px; font-family: monospace; font-size: 11px; color: #aaa; }
 
-    def build_oi() -> List[Dict[str, Any]]:
-        if engine is None:
-            return _mock_oi()
-        data_bus = get_data_bus()
-        if data_bus is None:
-            return []
-        result = []
-        for sym in ("BTC", "ETH", "SOL"):
-            ctx = data_bus.get_latest(f"ctx:{sym}")
-            if ctx is None:
-                continue
-            try:
-                oi = getattr(ctx, "open_interest", 0.0)
-                result.append({
-                    "symbol": sym,
-                    "oi": oi,
-                    "oi_delta_24h": 0,
-                    "long_ratio": 0.5,
-                    "overcrowded_score": 0.0,
-                })
-            except Exception:
-                pass
-        return result
+        .pulse {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.3; }
+            100% { opacity: 1; }
+        }
+        .pulse-green { background: #4ade80; }
+        .pulse-yellow { background: #fbbf24; }
+        .pulse-red { background: #f87171; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <span id="conn-indicator" class="pulse pulse-green"></span>
+            <h1>Hyperliquid Bot — Operations Dashboard</h1>
+        </div>
+        <span id="status-badge" class="status-badge status-ok">Running</span>
+    </div>
 
-    def build_prices() -> Dict[str, float]:
-        if engine is None:
-            return _mock_prices()
-        data_bus = get_data_bus()
-        if data_bus is None:
-            return {}
-        result = {}
-        for sym in ("BTC", "ETH", "SOL"):
-            tick = data_bus.get_latest(f"price:{sym}")
-            if tick is not None:
-                result[sym] = getattr(tick, "mid", 0.0)
-        return result
+    <div class="grid">
+        <!-- Bot Status -->
+        <div class="panel">
+            <div class="panel-header">Bot Status <span id="uptime" class="muted">--</span></div>
+            <div class="panel-body">
+                <div class="metric-row"><span class="metric-label">Mode</span><span id="mode" class="metric-value">--</span></div>
+                <div class="metric-row"><span class="metric-label">Uptime</span><span id="uptime2" class="metric-value">--</span></div>
+                <div class="metric-row"><span class="metric-label">Memory</span><span id="memory" class="metric-value">--</span></div>
+                <div class="metric-row"><span class="metric-label">Last Event</span><span id="last-event" class="metric-value">--</span></div>
+                <div class="metric-row"><span class="metric-label">Events/sec</span><span id="eps" class="metric-value">--</span></div>
+                <div class="metric-row"><span class="metric-label">Circuit Breaker</span><span id="circuit" class="metric-value">--</span></div>
+            </div>
+        </div>
 
-    def build_candles() -> List[Dict[str, Any]]:
-        if engine is None:
-            return _mock_candles()
-        data_bus = get_data_bus()
-        if data_bus is None:
-            return []
-        result = []
-        for sym in ("BTC", "ETH", "SOL"):
-            for tf in (60, 300, 900, 3600):
-                candle = data_bus.get_latest(f"candle_complete:{tf}:{sym}")
-                if candle is None:
-                    continue
-                try:
-                    tf_label = {60: "1m", 300: "5m", 900: "15m", 3600: "1h"}.get(tf, str(tf))
-                    result.append({
-                        "symbol": sym,
-                        "timeframe": tf_label,
-                        "open": getattr(candle, "open_price", 0.0),
-                        "high": getattr(candle, "high_price", 0.0),
-                        "low": getattr(candle, "low_price", 0.0),
-                        "close": getattr(candle, "close_price", 0.0),
-                        "volume": getattr(candle, "volume", 0.0),
-                    })
-                except Exception:
-                    pass
-        return result
+        <!-- Market Data Feed -->
+        <div class="panel">
+            <div class="panel-header">Market Data Feed <span class="muted">Real-time</span></div>
+            <div class="panel-body">
+                <table>
+                    <thead><tr><th>Asset</th><th class="num">Price</th><th class="num">Funding</th><th class="num">Pred</th><th class="num">OI (M)</th><th>Candles</th><th>Last Tick</th></tr></thead>
+                    <tbody id="market-data"></tr><td colspan="7" class="muted" style="text-align:center;">Waiting for data...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
 
-    # -----------------------------------------------------------------------
-    # REST endpoints (fallback when Socket.IO unavailable)
-    # -----------------------------------------------------------------------
+        <!-- Strategies -->
+        <div class="panel">
+            <div class="panel-header">Strategies <span class="muted">Active</span></div>
+            <div class="panel-body" id="strategies">
+                <div class="muted" style="text-align:center;">Loading...</div>
+            </div>
+        </div>
+
+        <!-- Signals -->
+        <div class="panel">
+            <div class="panel-header">Signals <span class="muted">Last 10</span></div>
+            <div class="panel-body">
+                <table>
+                    <thead><tr><th>Time</th><th>Strat</th><th>Sym</th><th>Side</th><th class="num">Conf</th><th>Reason</th></tr></thead>
+                    <tbody id="signals"><tr><td colspan="6" class="muted" style="text-align:center;">No signals yet</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Portfolio -->
+        <div class="panel">
+            <div class="panel-header">Portfolio</div>
+            <div class="panel-body">
+                <div class="metric-row"><span class="metric-label">Capital</span><span id="capital" class="metric-value">--</span></div>
+                <div class="metric-row"><span class="metric-label">Daily PnL</span><span id="daily-pnl" class="metric-value">--</span></div>
+                <div class="metric-row"><span class="metric-label">Max Drawdown</span><span id="drawdown" class="metric-value">--</span></div>
+                <div class="metric-row"><span class="metric-label">Open Positions</span><span id="positions-count" class="metric-value">--</span></div>
+                <div class="metric-row"><span class="metric-label">Daily Trades</span><span id="daily-trades" class="metric-value">--</span></div>
+            </div>
+        </div>
+
+        <!-- Open Positions -->
+        <div class="panel">
+            <div class="panel-header">Open Positions</div>
+            <div class="panel-body">
+                <table>
+                    <thead><tr><th>Symbol</th><th>Side</th><th class="num">Size</th><th class="num">Entry</th><th class="num">Current</th><th class="num">PnL%</th><th class="num">Duration</th></tr></thead>
+                    <tbody id="positions"><tr><td colspan="7" class="muted" style="text-align:center;">No open positions</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Funding Comparison -->
+        <div class="panel">
+            <div class="panel-header">Funding Comparison <span class="muted">HL vs Aggregated</span></div>
+            <div class="panel-body">
+                <table>
+                    <thead><tr><th>Asset</th><th class="num">HL Funding</th><th class="num">Agg Funding</th><th class="num">HL OI</th><th class="num">Agg OI</th><th>Exchanges</th></tr></thead>
+                    <tbody id="funding-comp"><tr><td colspan="6" class="muted" style="text-align:center;">No data</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Recent Logs -->
+        <div class="panel">
+            <div class="panel-header">Recent Logs <span class="muted">Last 20</span></div>
+            <div class="panel-body">
+                <div id="logs" class="log-box">Waiting for logs...</div>
+            </div㹬/div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+        let lastUpdate = Date.now();
+        let eventCount = 0;
+        let eventHistory = [];
+
+        // Track events per second
+        setInterval(() => {
+            const now = Date.now();
+            eventHistory = eventHistory.filter(t => now - t < 1000);
+            document.getElementById("eps").textContent = eventHistory.length.toString();
+        }, 1000);
+
+        socket.on("connect", () => {
+            document.getElementById("conn-indicator").className = "pulse pulse-green";
+            document.getElementById("status-badge").textContent = "Connected";
+            document.getElementById("status-badge").className = "status-badge status-ok";
+        });
+
+        socket.on("disconnect", () => {
+            document.getElementById("conn-indicator").className = "pulse pulse-red";
+            document.getElementById("status-badge").textContent = "DISCONNECTED";
+            document.getElementById("status-badge").className = "status-badge status-err";
+        });
+
+        socket.on("status_update", (data) => {
+            document.getElementById("mode").textContent = data.mode || "--";
+            document.getElementById("uptime2").textContent = data.uptime || "--";
+            document.getElementById("uptime").textContent = data.uptime || "--";
+            document.getElementById("memory").textContent = data.memory || "--";
+            document.getElementById("circuit").textContent = data.circuit_breaker || "OFF";
+            if (data.circuit_breaker === "ON") {
+                document.getElementById("circuit").style.color = "#f87171";
+            }
+        });
+
+        socket.on("market_data", (data) => {
+            eventHistory.push(Date.now());
+            const tbody = document.getElementById("market-data");
+            if (!data || data.length === 0) return;
+            tbody.innerHTML = data.map(row => {
+                const priceClass = row.price_change > 0 ? "up" : row.price_change < 0 ? "down" : "";
+                return `<tr>
+                    <td><span class="highlight">${row.symbol}</span></td>
+                    <td class="num ${priceClass}">${row.price ? row.price.toLocaleString("en-US", {minimumFractionDigits: 2}) : "--"}</td>
+                    <td class="num">${row.funding != null ? (row.funding * 100).toFixed(4) + "%" : "--"}</td>
+                    <td class="num">${row.predicted != null ? (row.predicted * 100).toFixed(4) + "%" : "--"}</td>
+                    <td class="num">${row.oi != null ? (row.oi / 1e6).toFixed(1) + "M" : "--"}</td>
+                    <td>${row.candles || "--"}</td>
+                    <td class="muted">${row.last_tick || "--"}</td>
+                </tr>`;
+            }).join("");
+        });
+
+        socket.on("strategies", (data) => {
+            const container = document.getElementById("strategies");
+            container.innerHTML = data.map(s => `
+                <div class="strategy-card ${s.active ? "strategy-active" : "strategy-inactive"}">
+                    <div class="strategy-name">${s.name} ${s.active ? "●" : "○"}</div>
+                    <div class="strategy-desc">${s.description}</div>
+                    <div class="strategy-params">${s.params || ""}</div>
+                    <div style="margin-top:6px; font-size:11px;">
+                        Last signal: ${s.last_signal || "never"} | 
+                        Signals today: ${s.signals_today || 0}
+                    </div>
+                </div>
+            `).join("");
+        });
+
+        socket.on("signals", (data) => {
+            const tbody = document.getElementById("signals");
+            if (!data || data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="6" class="muted" style="text-align:center;">No signals yet</td></tr>`;
+                return;
+            }
+            tbody.innerHTML = data.map(s => {
+                const sideClass = s.side === "long" ? "up" : s.side === "short" ? "down" : "";
+                return `<tr>
+                    <td class="muted">${s.time || "--"}</td>
+                    <td>${s.strategy}</td>
+                    <td>${s.symbol}</td>
+                    <td class="${sideClass}">${s.side ? s.side.toUpperCase() : "--"}</td>
+                    <td class="num">${s.confidence != null ? (s.confidence * 100).toFixed(0) + "%" : "--"}</td>
+                    <td class="muted">${s.reason || ""}</td>
+                </tr>`;
+            }).join("");
+        });
+
+        socket.on("portfolio", (data) => {
+            document.getElementById("capital").textContent = data.capital != null
+                ? "$" + data.capital.toLocaleString("en-US", {minimumFractionDigits: 2})
+                : "--";
+            const pnlEl = document.getElementById("daily-pnl");
+            pnlEl.textContent = data.daily_pnl != null
+                ? (data.daily_pnl >= 0 ? "+" : "") + "$" + data.daily_pnl.toFixed(2)
+                : "--";
+            pnlEl.className = "metric-value " + (data.daily_pnl >= 0 ? "up" : data.daily_pnl < 0 ? "down" : "");
+            document.getElementById("drawdown").textContent = data.max_drawdown != null
+                ? data.max_drawdown.toFixed(2) + "%"
+                : "--";
+            document.getElementById("positions-count").textContent = data.open_positions != null
+                ? data.open_positions.toString()
+                : "--";
+            document.getElementById("daily-trades").textContent = data.daily_trades != null
+                ? data.daily_trades.toString()
+                : "--";
+        });
+
+        socket.on("positions", (data) => {
+            const tbody = document.getElementById("positions");
+            if (!data || data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="7" class="muted" style="text-align:center;">No open positions</td></tr>`;
+                return;
+            }
+            tbody.innerHTML = data.map(p => {
+                const pnlClass = p.pnl_pct > 0 ? "up" : p.pnl_pct < 0 ? "down" : "";
+                return `<tr>
+                    <td>${p.symbol}</td>
+                    <td class="${p.side === "long" ? "up" : "down"}">${p.side ? p.side.toUpperCase() : "--"}</td>
+                    <td class="num">${p.size != null ? p.size.toFixed(4) : "--"}</td>
+                    <td class="num">${p.entry_price != null ? p.entry_price.toFixed(2) : "--"}</td>
+                    <td class="num">${p.current_price != null ? p.current_price.toFixed(2) : "--"}</td>
+                    <td class="num ${pnlClass}">${p.pnl_pct != null ? p.pnl_pct.toFixed(2) + "%" : "--"}</td>
+                    <td class="num muted">${p.duration || "--"}</td>
+                </tr>`;
+            }).join("");
+        });
+
+        socket.on("funding_comp", (data) => {
+            const tbody = document.getElementById("funding-comp");
+            if (!data || data.length === 0) return;
+            tbody.innerHTML = data.map(row => `
+                <tr>
+                    <td>${row.symbol}</td>
+                    <td class="num">${row.hl_funding != null ? (row.hl_funding * 100).toFixed(4) + "%" : "--"}</td>
+                    <td class="num">${row.agg_funding != null ? (row.agg_funding * 100).toFixed(4) + "%" : "--"}</td>
+                    <td class="num">${row.hl_oi != null ? (row.hl_oi / 1e6).toFixed(1) + "M" : "--"}</td>
+                    <td class="num">${row.agg_oi != null ? (row.agg_oi / 1e6).toFixed(1) + "M" : "--"}</td>
+                    <td class="muted">${row.exchanges || "--"}</td>
+                </tr>
+            `).join("");
+        });
+
+        socket.on("logs", (data) => {
+            const container = document.getElementById("logs");
+            const entries = data.map(l => {
+                let cls = "log-info";
+                if (l.level === "WARNING" || l.level === "WARN") cls = "log-warn";
+                if (l.level === "ERROR") cls = "log-err";
+                return `<div><span class="log-time">${l.time}</span> <span class="${cls}">[${l.level}]</span> ${l.message}</div>`;
+            }).join("");
+            container.innerHTML = entries;
+            container.scrollTop = container.scrollHeight;
+        });
+
+        // Initial load
+        fetch("/api/status").then(r => r.json()).then(data => {
+            if (data.mode) document.getElementById("mode").textContent = data.mode;
+        });
+    </script>
+</body>
+</html>
+'''
 
     @app.route("/")
     def index():
-        return send_from_directory(dashboard_dir, "index.html")
+        return INDEX_HTML
+
+    # ── REST API ──
 
     @app.route("/api/status")
     def api_status():
-        return jsonify(build_status())
+        if _engine is None:
+            return jsonify({"status": "no_engine", "online": False})
+        return jsonify({
+            "status": "ok",
+            "online": True,
+            "mode": "paper",  # TODO: pass from main
+            "uptime": _engine.uptime_sec if hasattr(_engine, "uptime_sec") else 0,
+            "memory_mb": _engine.memory_mb if hasattr(_engine, "memory_mb") else 0,
+            "circuit_breaker": "ON" if (_engine.risk_manager.circuit_breaker_tripped if hasattr(_engine, "risk_manager") else False) else "OFF",
+        })
 
-    @app.route("/api/trades")
-    def api_trades():
-        limit = request.args.get("limit", MAX_TRADES_DEFAULT, type=int)
-        return jsonify(build_trades(limit))
+    @app.route("/api/market")
+    def api_market():
+        """Return current market data for all tracked assets."""
+        if _engine is None:
+            return jsonify([])
+        
+        result = []
+        for sym in getattr(_engine, "_symbols", []):
+            price = getattr(_engine, "_latest_prices", {}).get(sym)
+            ctx = getattr(_engine, "_latest_ctx", {}).get(sym)
+            agg = getattr(_engine, "_latest_aggregated_funding", {}).get(sym)
+            candles = getattr(_engine, "_latest_candles", {}).get(sym, {})
+            
+            candle_status = []
+            for tf, label in [(60, "1m"), (300, "5m"), (900, "15m"), (3600, "1h")]:
+                c = candles.get(tf)
+                if c:
+                    candle_status.append(label)
+            
+            result.append({
+                "symbol": sym,
+                "price": price,
+                "funding": getattr(ctx, "funding_rate", None) if ctx else None,
+                "predicted": getattr(ctx, "predicted_funding", None) if ctx else None,
+                "oi": getattr(ctx, "open_interest", None) if ctx else None,
+                "agg_funding": getattr(agg, "funding_weighted", None) if agg else None,
+                "agg_oi": getattr(agg, "oi_total", None) if agg else None,
+                "candles": ", ".join(candle_status) if candle_status else "none",
+                "last_tick": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            })
+        return jsonify(result)
 
-    @app.route("/api/positions")
-    def api_positions():
-        return jsonify(build_positions())
+    @app.route("/api/strategies")
+    def api_strategies():
+        if _engine is None:
+            return jsonify([])
+        strategies = getattr(_engine, "_strategies", [])
+        result = []
+        for s in strategies:
+            result.append({
+                "name": getattr(s, "name", "unknown"),
+                "active": True,
+                "description": getattr(s, "__doc__", "No description"),
+                "params": str(getattr(s, "params", {})),
+                "last_signal": "--",
+                "signals_today": 0,
+            })
+        return jsonify(result)
 
     @app.route("/api/signals")
     def api_signals():
-        limit = request.args.get("limit", MAX_SIGNALS_DEFAULT, type=int)
-        return jsonify(build_signals(limit))
+        if _engine is None:
+            return jsonify([])
+        db = getattr(_engine, "_db", None)
+        if db is None:
+            return jsonify([])
+        try:
+            rows = db.get_signals(limit=10)
+            return jsonify(rows)
+        except Exception:
+            return jsonify([])
 
-    @app.route("/api/equity")
-    def api_equity():
-        return jsonify(build_equity())
+    @app.route("/api/portfolio")
+    def api_portfolio():
+        if _engine is None:
+            return jsonify({})
+        portfolio = getattr(_engine, "portfolio", None)
+        if portfolio is None:
+            return jsonify({})
+        return jsonify({
+            "capital": getattr(portfolio, "sync_capital", lambda: 0)(),
+            "daily_pnl": getattr(portfolio, "sync_daily_pnl", lambda: 0)(),
+            "max_drawdown": getattr(portfolio, "sync_max_drawdown_pct", lambda: 0)(),
+            "open_positions": len(getattr(portfolio, "get_positions_sync", lambda: {})()),
+            "daily_trades": getattr(portfolio, "sync_daily_trades", lambda: 0)(),
+        })
 
-    @app.route("/api/metrics")
-    def api_metrics():
-        return jsonify(build_metrics())
+    @app.route("/api/positions")
+    def api_positions():
+        if _engine is None:
+            return jsonify([])
+        portfolio = getattr(_engine, "portfolio", None)
+        if portfolio is None:
+            return jsonify([])
+        positions = getattr(portfolio, "get_positions_sync", lambda: {})()
+        result = []
+        for sym, pos in positions.items():
+            result.append({
+                "symbol": sym,
+                "side": getattr(pos, "side", "--"),
+                "size": getattr(pos, "size", 0),
+                "entry_price": getattr(pos, "entry_price", 0),
+                "current_price": getattr(pos, "current_price", getattr(pos, "entry_price", 0)),
+                "pnl_pct": getattr(pos, "unrealized_pnl", 0) / getattr(pos, "entry_price", 1) * 100 if getattr(pos, "entry_price", 0) else 0,
+                "duration": "--",
+            })
+        return jsonify(result)
 
     @app.route("/api/funding")
     def api_funding():
-        return jsonify(build_funding())
+        """Return funding comparison: Hyperliquid vs Aggregated."""
+        if _engine is None:
+            return jsonify([])
+        result = []
+        for sym in getattr(_engine, "_symbols", []):
+            ctx = getattr(_engine, "_latest_ctx", {}).get(sym)
+            agg = getattr(_engine, "_latest_aggregated_funding", {}).get(sym)
+            result.append({
+                "symbol": sym,
+                "hl_funding": getattr(ctx, "funding_rate", None) if ctx else None,
+                "agg_funding": getattr(agg, "funding_weighted", None) if agg else None,
+                "hl_oi": getattr(ctx, "open_interest", None) if ctx else None,
+                "agg_oi": getattr(agg, "oi_total", None) if agg else None,
+                "exchanges": getattr(agg, "exchange_count", 0) if agg else 0,
+            })
+        return jsonify(result)
 
-    @app.route("/api/oi")
-    def api_oi():
-        return jsonify(build_oi())
+    @app.route("/api/logs")
+    def api_logs():
+        """Return last N log entries."""
+        # Read from the log file
+        log_path = os.path.join(os.path.dirname(__file__), "..", "..", "logs", "bot.log")
+        log_path = os.path.abspath(log_path)
+        entries = []
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+                for line in lines[-20:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Parse log format: 2026-05-07 00:00:00 | LEVEL | module | message
+                    parts = line.split(" | ")
+                    if len(parts) >= 4:
+                        entries.append({
+                            "time": parts[0],
+                            "level": parts[1].strip(),
+                            "module": parts[2].strip(),
+                            "message": " | ".join(parts[3:]),
+                        })
+                    else:
+                        entries.append({
+                            "time": "",
+                            "level": "INFO",
+                            "module": "",
+                            "message": line,
+                        })
+        except Exception:
+            pass
+        return jsonify(entries)
 
-    @app.route("/api/prices")
-    def api_prices():
-        return jsonify(build_prices())
+    # ── Socket.IO emitters ──
 
-    @app.route("/api/candles")
-    def api_candles():
-        return jsonify(build_candles())
+    def emit_updates():
+        """Called by main.py to push real-time updates via Socket.IO."""
+        if _socketio is None or _engine is None:
+            return
+        try:
+            # Status
+            _socketio.emit("status_update", {
+                "mode": "paper",
+                "uptime": getattr(_engine, "uptime_sec", 0),
+                "memory": getattr(_engine, "memory_mb", 0),
+                "circuit_breaker": "ON" if getattr(getattr(_engine, "risk_manager", None), "circuit_breaker_tripped", False) else "OFF",
+            })
 
-    # -----------------------------------------------------------------------
-    # Socket.IO events
-    # -----------------------------------------------------------------------
+            # Market data
+            market_data = []
+            for sym in getattr(_engine, "_symbols", []):
+                price = getattr(_engine, "_latest_prices", {}).get(sym)
+                ctx = getattr(_engine, "_latest_ctx", {}).get(sym)
+                agg = getattr(_engine, "_latest_aggregated_funding", {}).get(sym)
+                candles = getattr(_engine, "_latest_candles", {}).get(sym, {})
+                candle_status = []
+                for tf, label in [(60, "1m"), (300, "5m"), (900, "15m"), (3600, "1h")]:
+                    if candles.get(tf):
+                        candle_status.append(label)
+                market_data.append({
+                    "symbol": sym,
+                    "price": price,
+                    "funding": getattr(ctx, "funding_rate", None) if ctx else None,
+                    "predicted": getattr(ctx, "predicted_funding", None) if ctx else None,
+                    "oi": getattr(ctx, "open_interest", None) if ctx else None,
+                    "candles": ", ".join(candle_status) if candle_status else "none",
+                    "last_tick": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                })
+            _socketio.emit("market_data", market_data)
+
+            # Strategies
+            strategies = getattr(_engine, "_strategies", [])
+            strat_data = []
+            for s in strategies:
+                strat_data.append({
+                    "name": getattr(s, "name", "unknown"),
+                    "active": True,
+                    "description": getattr(s, "__doc__", "No description"),
+                    "params": str(getattr(s, "params", {})),
+                    "last_signal": "--",
+                    "signals_today": 0,
+                })
+            _socketio.emit("strategies", strat_data)
+
+            # Portfolio
+            portfolio = getattr(_engine, "portfolio", None)
+            if portfolio:
+                _socketio.emit("portfolio", {
+                    "capital": getattr(portfolio, "sync_capital", lambda: 0)(),
+                    "daily_pnl": getattr(portfolio, "sync_daily_pnl", lambda: 0)(),
+                    "max_drawdown": getattr(portfolio, "sync_max_drawdown_pct", lambda: 0)(),
+                    "open_positions": len(getattr(portfolio, "get_positions_sync", lambda: {})()),
+                    "daily_trades": getattr(portfolio, "sync_daily_trades", lambda: 0)(),
+                })
+
+            # Positions
+            positions = getattr(portfolio, "get_positions_sync", lambda: {})() if portfolio else {}
+            pos_data = []
+            for sym, pos in positions.items():
+                pos_data.append({
+                    "symbol": sym,
+                    "side": getattr(pos, "side", "--"),
+                    "size": getattr(pos, "size", 0),
+                    "entry_price": getattr(pos, "entry_price", 0),
+                    "current_price": getattr(pos, "current_price", getattr(pos, "entry_price", 0)),
+                    "pnl_pct": getattr(pos, "unrealized_pnl", 0) / getattr(pos, "entry_price", 1) * 100 if getattr(pos, "entry_price", 0) else 0,
+                    "duration": "--",
+                })
+            _socketio.emit("positions", pos_data)
+
+            # Funding comparison
+            funding_data = []
+            for sym in getattr(_engine, "_symbols", []):
+                ctx = getattr(_engine, "_latest_ctx", {}).get(sym)
+                agg = getattr(_engine, "_latest_aggregated_funding", {}).get(sym)
+                funding_data.append({
+                    "symbol": sym,
+                    "hl_funding": getattr(ctx, "funding_rate", None) if ctx else None,
+                    "agg_funding": getattr(agg, "funding_weighted", None) if agg else None,
+                    "hl_oi": getattr(ctx, "open_interest", None) if ctx else None,
+                    "agg_oi": getattr(agg, "oi_total", None) if agg else None,
+                    "exchanges": getattr(agg, "exchange_count", 0) if agg else 0,
+                })
+            _socketio.emit("funding_comp", funding_data)
+
+            # Logs
+            log_path = os.path.join(os.path.dirname(__file__), "..", "..", "logs", "bot.log")
+            log_path = os.path.abspath(log_path)
+            log_entries = []
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                    for line in lines[-20:]:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        parts = line.split(" | ")
+                        if len(parts) >= 4:
+                            log_entries.append({
+                                "time": parts[0],
+                                "level": parts[1].strip(),
+                                "message": " | ".join(parts[3:]),
+                            })
+            except Exception:
+                pass
+            _socketio.emit("logs", log_entries)
+
+        except Exception as e:
+            logger.warning("emit_updates failed: %s", e)
+
+    # ── Socket.IO events ──
 
     @socketio.on("connect")
     def on_connect(auth=None):
-        logger.info("Socket.IO client connected")
-        # Emit full state immediately on connection
-        emit("status_update", build_status())
-        emit("price_update", build_prices())
-        emit("trade_update", {"trades": build_trades(10)})
-        emit("signal_update", {"signals": build_signals(10)})
-        emit("funding_update", build_funding())
-        emit("candle_update", build_candles())
+        logger.info("Dashboard client connected")
+        emit("status_update", {
+            "mode": "paper",
+            "uptime": getattr(_engine, "uptime_sec", 0) if _engine else 0,
+            "memory": getattr(_engine, "memory_mb", 0) if _engine else 0,
+            "circuit_breaker": "OFF",
+        })
+        # Push immediate data
+        emit_updates()
 
     @socketio.on("disconnect")
     def on_disconnect(reason=None):
-        logger.info("Socket.IO client disconnected: %s", reason)
+        logger.info("Dashboard client disconnected: %s", reason)
 
-    @socketio.on("request_status")
-    def on_request_status():
-        emit("status_update", build_status())
-
-    @socketio.on("request_trades")
-    def on_request_trades(data: Optional[Dict] = None):
-        limit = (data or {}).get("limit", MAX_TRADES_DEFAULT)
-        emit("trade_update", {"trades": build_trades(limit)})
-
-    @socketio.on("request_signals")
-    def on_request_signals(data: Optional[Dict] = None):
-        limit = (data or {}).get("limit", MAX_SIGNALS_DEFAULT)
-        emit("signal_update", {"signals": build_signals(limit)})
-
-    @socketio.on("request_positions")
-    def on_request_positions():
-        emit("positions_update", build_positions())
-
-    # -----------------------------------------------------------------------
-    # Background push loop
-    # -----------------------------------------------------------------------
-
-    _push_running = False
-    _push_thread: Optional[threading.Thread] = None
-
-    def _push_loop():
-        """Push updates to all connected clients every PUSH_INTERVAL_SEC."""
-        nonlocal _push_running
-        _push_running = True
-        prev_prices: Dict[str, float] = {}
-        while _push_running:
-            try:
-                time.sleep(PUSH_INTERVAL_SEC)
-                if not _push_running:
-                    break
-
-                status = build_status()
-                prices = build_prices()
-                funding = build_funding()
-                candles = build_candles()
-                positions = build_positions()
-
-                # Detect price changes for flash animation
-                price_changes = {}
-                for sym, price in prices.items():
-                    prev = prev_prices.get(sym)
-                    if prev is not None and prev != 0:
-                        change = price - prev
-                        price_changes[sym] = "up" if change > 0 else "down" if change < 0 else "flat"
-                    else:
-                        price_changes[sym] = "flat"
-                prev_prices = dict(prices)
-
-                payload = {
-                    "prices": prices,
-                    "changes": price_changes,
-                }
-
-                socketio.emit("status_update", status)
-                socketio.emit("price_update", payload)
-                socketio.emit("funding_update", funding)
-                socketio.emit("candle_update", candles)
-                socketio.emit("positions_update", positions)
-
-            except Exception:
-                # Never crash the push loop
-                pass
-
-    def start_push_loop():
-        nonlocal _push_thread
-        if _push_thread is None or not _push_thread.is_alive():
-            _push_thread = threading.Thread(target=_push_loop, daemon=True)
-            _push_thread.start()
-
-    def stop_push_loop():
-        nonlocal _push_running
-        _push_running = False
-
-    # Start push loop immediately
-    start_push_loop()
-
-    # -----------------------------------------------------------------------
-    # Cross-thread event emitter for external callers (engine callbacks)
-    # -----------------------------------------------------------------------
-
-    def emit_trade(trade_data: Dict[str, Any]) -> None:
-        """Call from engine/execution when a trade is filled or closed."""
-        try:
-            socketio.emit("trade_update", {"trades": [trade_data]})
-        except Exception:
-            pass
-
-    def emit_signal(signal_data: Dict[str, Any]) -> None:
-        """Call from strategy when a new signal is generated."""
-        try:
-            socketio.emit("signal_update", {"signals": [signal_data]})
-        except Exception:
-            pass
-
-    # Attach helpers to socketio for external access
-    socketio.emit_trade = emit_trade
-    socketio.emit_signal = emit_signal
-    socketio.start_push_loop = start_push_loop
-    socketio.stop_push_loop = stop_push_loop
-
-    return app, socketio
+    return app, socketio, emit_updates
