@@ -1,9 +1,13 @@
 @echo off
 chcp 65001 >nul
-title Hyperliquid Bot — Background Service
+title Hyperliquid Bot - Background Service with Crash Recovery
 
-:: Runs the bot in background with auto-restart on crash
-:: Logs everything to logs/service.log
+:: Runs the bot with automatic crash recovery (Task 5.2)
+:: Uses run_with_recovery.py which:
+::   - Detects crashes and captures reason
+::   - Restarts in paper mode (safety fallback)
+::   - Limits to 3 restarts with 30s cooldown
+::   - Logs crashes to logs/crashes.log
 :: Use stop.bat to terminate
 
 cd /d "%~dp0"
@@ -11,26 +15,19 @@ cd /d "%~dp0"
 :: Ensure logs dir exists
 if not exist logs mkdir logs
 
-:loop
-echo [%date% %time%] Starting bot... >> logs\service.log
+echo Starting Hyperliquid Bot with Crash Recovery...
+echo Mode: paper (fallback after any crash)
+echo Dashboard: http://localhost:5000
+echo.
+echo Logs: logs/bot.log (bot output)
+echo Crash log: logs/crashes.log (crash history)
+echo.
+echo Press Ctrl+C to stop permanently.
+echo.
 
-:: Run bot and capture ALL output (stdout + stderr)
-python main.py --mode paper >> logs\service.log 2>&1
+:: Run with crash recovery wrapper
+python run_with_recovery.py --mode paper --max-restarts 3 --cooldown 30
 
-set EXITCODE=%ERRORLEVEL%
-echo [%date% %time%] Bot exited with code %EXITCODE% >> logs\service.log
-
-:: If exit code is 0, user stopped gracefully — don't restart
-if %EXITCODE%==0 (
-    echo [%date% %time%] Graceful stop. Not restarting. >> logs\service.log
-    goto end
-)
-
-:: Otherwise wait 5 seconds and restart
-echo [%date% %time%] Restarting in 5 seconds... >> logs\service.log
-timeout /t 5 /nobreak >nul
-goto loop
-
-:end
-echo Bot stopped. Check logs\service.log for details.
+echo.
+echo Bot stopped. Check logs/crashes.log for crash history.
 pause

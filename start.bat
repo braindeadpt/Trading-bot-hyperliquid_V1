@@ -23,7 +23,7 @@ if errorlevel 1 (
 :: Show menu
 echo.
 echo ╔══════════════════════════════════════════════════════════╗
-echo ║    HYPERLIQUID PREMIUM BOT v2.0.0                        ║
+echo ║    HYPERLIQUID PREMIUM BOT v3.1.0                        ║
 echo ╚══════════════════════════════════════════════════════════╝
 echo.
 echo Choose mode:
@@ -33,9 +33,10 @@ echo   [3] Mainnet         (REAL MONEY — confirm required)
 echo   [4] Backtest        (historical simulation)
 echo   [5] Security Audit  (scan code for vulnerabilities)
 echo   [6] Update from GitHub  (git pull latest)
+echo   [7] Crash Recovery     (restart with log analysis, Task 5.2)
 echo   [0] Exit
 echo.
-set /p choice="Enter option [1-6,0]: "
+set /p choice="Enter option [1-7,0]: "
 
 if "%choice%"=="1" goto paper
 if "%choice%"=="2" goto testnet
@@ -43,6 +44,7 @@ if "%choice%"=="3" goto mainnet
 if "%choice%"=="4" goto backtest
 if "%choice%"=="5" goto audit
 if "%choice%"=="6" goto update
+if "%choice%"=="7" goto recovery
 if "%choice%"=="0" goto end
 
 echo Invalid option.
@@ -125,6 +127,19 @@ echo Installing/updating dependencies...
 pip install -r requirements.txt
 echo.
 echo Done. Press any key to return.
+pause
+goto end
+
+:recovery
+echo.
+echo [MODE] Crash Recovery (Task 5.2)
+echo Restarts bot on crash with log analysis.
+echo Fallback to paper mode after any crash.
+echo Dashboard: http://localhost:5000
+echo.
+echo Press Ctrl+C to stop permanently.
+echo.
+python run_with_recovery.py --mode paper --max-restarts 3 --cooldown 30
 pause
 goto end
 
