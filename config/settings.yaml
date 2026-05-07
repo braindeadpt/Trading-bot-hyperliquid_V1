@@ -144,6 +144,24 @@ strategy:
     signal_throttle_ms: 300000      # 5 min between signals
 
   # ═══════════════════════════════════════════════════════════
+  # Strategy: Liquidation Catcher (Task 3.3)
+  # ═══════════════════════════════════════════════════════════
+  liquidation_catcher:
+    enabled: true
+    min_notional_usd: 50000000     # $50M in 5min to trigger
+    min_liquidation_count: 10       # avoid single large liquidation
+    require_oi_decreasing: true    # confirm positions were wiped out
+    oi_delta_max: 0.0              # OI must be decreasing
+    max_adx: 40.0                   # avoid in strong trends (cascades may continue)
+    base_size_pct: 0.005            # 0.5% — small size, catching a knife
+    max_size_pct: 0.01              # 1% max
+    stop_loss_atr_multiplier: 1.0  # tight stop
+    max_hold_minutes: 30            # liquidation cascades resolve quickly
+    take_profit_r: 2.0              # 2R take profit
+    min_confidence: 0.70
+    signal_throttle_ms: 7200000     # 2h cooldown between catches
+
+  # ═══════════════════════════════════════════════════════════
   # Cooldown Manager (Task 2.4)
   # ═══════════════════════════════════════════════════════════
   cooldown:

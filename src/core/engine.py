@@ -475,6 +475,10 @@ class TradingEngine:
                 self._latest_funding[symbol] = event.predicted_funding
             self._latest_oi_delta[symbol] = event.oi_delta
 
+            # --- Liquidation proxy accumulation (Task 3.3) ---
+            self._accumulate_liquidation_proxy(symbol, event)
+            liq_notional, liq_side, liq_count = self._get_liquidation_stats(symbol)
+
             # --- FundingArbitrage pair scan (after all symbols have been seen) ---
             await self._maybe_scan_funding_arbitrage(event)
 
@@ -582,6 +586,10 @@ class TradingEngine:
             orderbook_largest_ask_wall=ob.largest_ask_wall_price if ob else None,
             # Regime filter
             adx_14=adx,
+            # Liquidation data (Task 3.3)
+            liquidation_notional_5m=liq_notional,
+            liquidation_side_5m=liq_side,
+            liquidation_count_5m=liq_count,
         )
 
         # Log orderflow metrics for debugging
@@ -615,6 +623,96 @@ class TradingEngine:
         if total <= 0:
             return None
         return (buy - sell) / total
+
+    def _accumulate_liquidation_proxy(
+        self,
+        symbol: str,
+        event: MarketEvent,
+    ) -> None:
+        """Estimate liquidations from sharp price moves + volume.
+
+        This is a proxy until real liquidation WebSocket data is wired.
+        A sharp drop with OI decreasing suggests long liquidations.
+        A sharp pump with OI decreasing suggests short liquidations.
+        """
+        acc = self._liquidation_acc[symbol]
+        now = event.timestamp_ms
+
+        # Clean old events outside 5-min window
+        while acc["events"] and acc["events"][0][0] < now - acc["window_ms"]:
+            acc["events"].popleft()
+
+        last_price = self._last_prices.get(symbol)
+        last_ts = self._last_price_ts.get(symbol)
+
+        if last_price is not None and last_ts is not None and last_price > 0:
+            dt_ms = now - last_ts
+            if dt_ms > 0:
+                price_change = (event.price - last_price) / last_price
+                # Annualized velocity
+                velocity = abs(price_change) * (3_600_000 / dt_ms)  # per hour
+
+                # Proxy liquidation detection:
+                # Sharp move (>5% per hour) + OI decreasing
+                if velocity > 0.05:  # 5% per hour
+                    oi_delta = event.oi_delta
+                    if oi_delta is not None and oi_delta < 0:
+                        # Estimate notional: use volume_1m as proxy
+                        volume_1m = event.volume_1m or 0
+                        # Rough estimate: assume 30% of volume is liquidations
+                        est_notional = volume_1m * event.price * 0.30
+                        # Determine side based on price direction
+                        if price_change < 0:
+                            liq_side = "long"  # longs liquidated, price drops
+                        else:
+                            liq_side = "short"  # shorts liquidated, price pumps
+
+                        acc["events"].append((now, est_notional, liq_side))
+                        logger.debug(
+                            "Liquidation proxy %s: %.1fM %s "
+                            "(price_change=%.2f%%, OI_delta=%.0f)",
+                            symbol,
+                            est_notional / 1_000_000,
+                            liq_side,
+                            price_change * 100,
+                            oi_delta,
+                        )
+
+        # Update last known price
+        self._last_prices[symbol] = event.price
+        self._last_price_ts[symbol] = now
+
+    def _get_liquidation_stats(
+        self,
+        symbol: str,
+    ) -> Tuple[Optional[float], Optional[str], Optional[int]]:
+        """Return (notional_5m, side_5m, count_5m) from accumulator.
+
+        Returns the dominant side by notional.
+        """
+        acc = self._liquidation_acc[symbol]
+        if not acc["events"]:
+            return None, None, None
+
+        total_long = 0.0
+        total_short = 0.0
+        count_long = 0
+        count_short = 0
+
+        for _, notional, side in acc["events"]:
+            if side == "long":
+                total_long += notional
+                count_long += 1
+            else:
+                total_short += notional
+                count_short += 1
+
+        # Return dominant side
+        if total_long >= total_short and total_long > 0:
+            return total_long, "long", count_long
+        elif total_short > 0:
+            return total_short, "short", count_short
+        return None, None, None
 
     def _apply_regime_weights(
         self,

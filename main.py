@@ -55,6 +55,7 @@ from strategies.trend_follow import TrendFollow
 from strategies.mean_reversion import MeanReversion
 from strategies.funding_arbitrage import FundingArbitrage
 from strategies.vwap_deviation import VWAPDeviation
+from strategies.liquidation_catcher import LiquidationCatcher
 
 from core.portfolio import PortfolioState
 from core.risk_manager import RiskManager
@@ -271,6 +272,7 @@ async def main() -> None:
         MeanReversion(cfg.get("strategy.mean_reversion", {})),
         FundingArbitrage(cfg.get("strategy.funding_arbitrage", {})),
         VWAPDeviation(cfg.get("strategy.vwap_deviation", {})),
+        LiquidationCatcher(cfg.get("strategy.liquidation_catcher", {})),
     ]
     logger.info(f"Loaded {len(strategies)} strategies: {[s.name for s in strategies]}")
 
