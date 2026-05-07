@@ -116,7 +116,7 @@ class LiquidationCatcher(Strategy):
         state = self._get_state(event.symbol)
 
         # Throttle: avoid chasing multiple cascades
-        if event.timestamp_ms - state.last_signal_ms < self.SIGNAL_THROTTLE_MS:
+        if state.last_signal_ms > 0 and event.timestamp_ms - state.last_signal_ms < self.SIGNAL_THROTTLE_MS:
             logger.debug(
                 "LiquidationCatcher SKIP %s — throttle active (%d min remaining)",
                 event.symbol,

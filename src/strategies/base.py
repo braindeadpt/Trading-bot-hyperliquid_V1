@@ -54,6 +54,11 @@ class MarketEvent:
     rsi_14: Optional[float] = None
     adx_14: Optional[float] = None
 
+    # Liquidation cluster data (Task 3.3)
+    liquidation_notional_5m: Optional[float] = None  # USD notional liquidated in last 5min
+    liquidation_side_5m: Optional[str] = None  # "long" (longs liquidated = price down) or "short"
+    liquidation_count_5m: Optional[int] = None  # number of liquidation events
+
 
 @dataclass(frozen=True)
 class Signal:

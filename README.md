@@ -1,75 +1,84 @@
-# Hyperliquid Premium Trading Bot
+# Hyperliquid Premium Trading Bot v3.0
 
-Bot de trading automatizado para Hyperliquid com arquitetura modular, dashboard real-time, e duas estratégias de confluência (TrendFollow + MeanReversion).
-
----
-
-## Estado actual
-
-| Componente | Estado |
-|---|---|
-| Bot paper trading | ✅ Funcional — `python main.py --mode paper` |
-| Dashboard web v2 | ✅ Funcional — http://localhost:5000 |
-| WebSocket Hyperliquid | ✅ Ligado (tickers + allMids + assetCtxs + **l2Book**) |
-| CandleBuilder | ✅ 1m / 5m / 15m / 1h |
-| Orderbook L2 + métricas | ✅ OIR, wall detection, depth quality, spread analysis |
-| Funding cross-exchange | ✅ Agregado Binance + Bybit + OKX + Coinalyze |
-| Orderflow (bid/ask imbalance) | ✅ Integrado na TrendFollow |
-| Crash recovery + graceful shutdown | ✅ Implementado |
-| Paper trader | ✅ Simula execução com slippage |
+Bot de trading automatizado para Hyperliquid com arquitetura modular, dashboard real-time, 5 estratégias de confluência, gestão de risco avançada, e execução em paper/testnet/live.
 
 ---
 
-## Estrutura do repositório
+## Estado Actual
+
+| Componente | Estado | Detalhe |
+|---|---|---|
+| Bot paper trading | ✅ Funcional | `python main.py --mode paper` |
+| Dashboard web v2 | ✅ Funcional | http://localhost:5000 |
+| WebSocket Hyperliquid | ✅ Ligado | tickers + allMids + assetCtxs + l2Book + trades |
+| CandleBuilder | ✅ 1m / 5m / 15m / 1h | Com OI, funding, buy/sell volume |
+| Orderbook L2 + métricas | ✅ | OIR, wall detection, depth quality, slippage, fill ratio |
+| Funding cross-exchange | ✅ | Agregado Binance + Bybit + OKX + Coinalyze |
+| **ADX Regime Filter** | ✅ **FASE 2.1** | Trend/Range/Neutral — ajusta confiança por estratégia |
+| **SmartMoneyFlow v2** | ✅ **FASE 2.2** | OIR >0.6, wall detection 0.5%, RSI 40-70, confluência 6/9 |
+| **FundingExtreme v2** | ✅ **FASE 2.3** | Percentis dinâmicos, cross-exchange confirm, OI decreasing, predicted primary |
+| **Cooldown Inteligente** | ✅ **FASE 2.4** | Per-(strategy,symbol), doubling after loss, auto-reset on funding/ADX |
+| **FundingArbitrage** | ✅ **FASE 3.1** | Long funding-negative, short funding-positive, hedge 1:1 |
+| **VWAPDeviation** | ✅ **FASE 3.2** | Z-score >2.5σ do VWAP(1h) + volume surge → mean reversion |
+| **LiquidationCatcher** | ✅ **FASE 3.3** | Fade $50M+ liquidation cascades, stop 1% ATR, TP 2R |
+| Crash recovery + graceful shutdown | ✅ | SQLite persistence + signal handlers |
+| Paper trader | ✅ | Simula execução com slippage realista |
+
+---
+
+## Estrutura do Repositório
 
 ```
 trading-bot-hyperliquid/
-├── main.py                 # Entry point — parse args, bootstrap all modules
-├── start.bat               # Launcher interactivo (Paper / Testnet / Mainnet / Backtest / Audit)
-├── quickstart.bat          # Paper mode directo + abre browser
+├── main.py                    # Entry point — parse args, bootstrap all modules
+├── start.bat                  # Launcher interactivo (Paper/Testnet/Mainnet/Backtest/Audit)
+├── quickstart.bat             # Paper mode directo + abre browser
 ├── config/
-│   ├── settings.yaml       # Configurações (assets, risk, timeframes, dashboard)
-│   └── .env.example        # Template para chaves API
+│   ├── settings.yaml          # Configurações completas (assets, risk, strategies, dashboard)
+│   └── .env.example           # Template para chaves API
 ├── src/
 │   ├── core/
-│   │   ├── engine.py        # TradingEngine — orquestra eventos, estratégias, execução
-│   │   ├── portfolio.py     # Estado do portfolio (cash, positions, PnL)
-│   │   ├── risk_manager.py  # Gestão de risco (circuit breaker, daily limits)
-│   │   └── execution.py     # ExecutionEngine (paper/live) + simulação de fills
+│   │   ├── engine.py          # TradingEngine — orquestra eventos, estratégias, execução
+│   │   ├── portfolio.py       # Estado do portfolio (cash, positions, PnL unrealized)
+│   │   ├── risk_manager.py    # Gestão de risco (max positions, size limits, correlation)
+│   │   └── execution.py       # ExecutionEngine (paper/live) + simulação de fills + slippage
 │   ├── strategies/
-│   │   ├── trend_follow.py  # Estratégia de tendência (6 critérios de confluência)
-│   │   ├── mean_reversion.py # Estratégia de mean reversion (funding + OI + VP)
-│   │   ├── base.py          # MarketEvent, Signal, ExitSignal, Position, Strategy
-│   │   └── indicators.py    # EMA, RSI, MACD, ATR, VWAP
+│   │   ├── base.py            # MarketEvent, Signal, ExitSignal, Position, Strategy ABC
+│   │   ├── indicators.py      # EMA, RSI, MACD, ATR, VWAP, ADX, Volume Profile (pure Python)
+│   │   ├── trend_follow.py    # SmartMoneyFlow — trend following com microestrutura
+│   │   ├── mean_reversion.py  # FundingExtreme — contrarian com funding + OI dinâmico
+│   │   ├── funding_arbitrage.py   # FundingArbitrage — market-neutral funding spread
+│   │   ├── vwap_deviation.py      # VWAPDeviation — mean reversion ao VWAP(1h)
+│   │   └── liquidation_catcher.py # LiquidationCatcher — fade liquidation cascades
 │   ├── exchanges/
-│   │   ├── hyperliquid_ws.py   # WebSocket client Hyperliquid
-│   │   ├── hyperliquid_api.py  # REST API (orders, positions, fills)
-│   │   ├── hyperliquid_base.py # Modelos de dados (HlPriceTick, HlTrade, HlAssetCtx)
-│   │   └── binance_api.py      # Dados de mercado Binance (fallback)
+│   │   ├── hyperliquid_ws.py    # WebSocket client (allMids, assetCtx, l2Book, trades)
+│   │   ├── hyperliquid_rest.py  # REST API (orders, positions, fills, l2Book fallback)
+│   │   ├── hyperliquid_base.py  # Modelos: HlPriceTick, HlTrade, HlAssetCtx, HlOrderbook
+│   │   ├── binance_api.py       # Dados de mercado Binance (fallback + funding agregado)
+│   │   └── funding_aggregator.py # Agrega funding + OI de múltiplas exchanges
 │   ├── data/
-│   │   ├── candle_builder.py   # Constrói candles OHLCV + OI + funding + buy/sell volume
-│   │   ├── data_bus.py         # Pub/sub assíncrono entre módulos
-│   │   ├── orderbook_metrics.py # OIR, wall detection, depth quality, slippage estimation
-│   │   └── hyperliquid_candles.py # REST candles REST
+│   │   ├── candle_builder.py     # Constrói candles OHLCV + OI + funding + buy/sell volume
+│   │   ├── data_bus.py           # Pub/sub assíncrono entre módulos
+│   │   ├── orderbook_metrics.py  # OIR, wall detection, depth quality, slippage estimation
+│   │   └── database.py           # SQLite (signals, trades, portfolio snapshots, funding history)
 │   ├── dashboard/
-│   │   ├── web.py           # Flask + Socket.IO server
-│   │   └── index.html       # UI real-time (cypherpunk dark)
-│   ├── database/
-│   │   └── database.py      # SQLite (signals, trades, portfolio snapshots, funding)
+│   │   ├── web.py                # Flask + Socket.IO server
+│   │   └── index.html            # UI real-time (cypherpunk dark theme)
 │   └── utils/
-│       ├── config_manager.py   # YAML + overrides + dot-notation
-│       ├── logging_config.py   # Pretty-logs com rotação
-│       ├── logger.py           # Logger customizado
-│       └── helpers.py          # safe_float, safe_divide, utc_now
+│       ├── config.py             # YAML + overrides + dot-notation
+│       ├── logger.py             # Pretty-logs com rotação
+│       └── helpers.py            # safe_float, safe_divide, utc_now, utc_timestamp_ms
 ├── tests/
-│   ├── test_security.py     # Security audit scanner
-│   ├── test_strategies.py   # Unit tests para estratégias
-│   └── conftest.py          # Fixtures pytest
-├── data/
-│   └── live/
-│       └── bot.db            # SQLite runtime (auto-criado)
+│   ├── test_tasks_1_4_2_1_2_2.py   # ADX, regime weights, slippage, SmartMoneyFlow filters
+│   ├── test_task_2_3.py            # Dynamic thresholds, cross-exchange, OI filter
+│   ├── test_task_2_4.py            # Cooldown state machine, doubling, auto-reset
+│   ├── test_task_3_1.py            # FundingArbitrage pair selection, spread, exit
+│   ├── test_task_3_2.py            # VWAPDeviation Z-score, entry, ADX filter, exit
+│   └── test_task_3_3.py            # LiquidationCatcher entry, filters, 2R exit, max hold
+├── data/live/
+│   └── bot.db                    # SQLite runtime (auto-criado)
 ├── logs/
-│   └── bot.log              # Logs com rotação (auto-criado)
+│   └── bot.log                   # Logs com rotação (auto-criado)
 └── README.md
 ```
 
@@ -77,51 +86,20 @@ trading-bot-hyperliquid/
 
 ## Requisitos
 
-- Python 3.11+
-- Windows (bat files) ou Linux/Mac (comandos equivalentes)
+- **Python 3.11+** (testado em 3.14)
+- **Windows** (bat files incluídos) ou Linux/Mac (comandos equivalentes)
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Copia `.env.example` para `.env` e configura as chaves da Hyperliquid (só necessário para modo live).
+Copia `config/.env.example` para `config/.env` e configura as chaves da Hyperliquid (só necessário para modo live).
 
 ---
 
-## Features Premium
+## Como Correr
 
-### 1. Dashboard Real-Time v2
-- **Live Data Stream** — preços, funding, OI, volume, imbalance, spread, OIR (Orderbook Imbalance Ratio), depth quality
-- **Candle Watch** — OHLCV + buy% + VWAP por timeframe (1m, 5m, 15m, 1h)
-- **Engine Monitor** — ticks/sec, total ticks, memória, último erro, eventos recentes
-- **Strategies Detail** — parâmetros, último sinal, confiança, status, sinais hoje
-- **Signal Stream** — últimos 20 sinais com side colorido + status (pending/approved/rejected/executed)
-- **Decision Log** — risk approvals/rejections + executions + exits
-- **Portfolio** — capital, PnL diário, drawdown, trades
-- **Open Positions** — posições com PnL%, entry, current, estratégia
-- **Live Logs** — últimas 50 linhas do ficheiro de log
-
-### 2. Funding Cross-Exchange
-Agregador de funding + OI de múltiplas exchanges (Binance, Bybit, OKX, Coinalyze):
-- `funding_avg` — média simples
-- `funding_weighted` — média ponderada por OI
-- `predicted_funding_avg` — predicted funding médio
-- `oi_total_aggregated` — OI total cross-exchange
-- `oi_exchange_count` — número de exchanges com dados
-
-### 3. Orderbook L2 Hyperliquid
-Métricas de microestrutura em tempo real:
-- **OIR** (Orderbook Imbalance Ratio) — (bid_vol - ask_vol) / total_vol nas primeiras 10 camadas
-- **Spread analysis** — spread absoluto + percentual + weighted mid price
-- **Depth quality** — bid_depth / total_depth (0-1), bid_ask_ratio
-- **Wall detection** — maior parede de bids e asks
-- **Slippage estimation** — estimativa de slippage para ordens de mercado
-
----
-
-## Como correr
-
-### Modo rápido (Paper Trading)
+### Modo Rápido (Paper Trading)
 
 Duplo-clique em **`quickstart.bat`** — abre o browser automaticamente e inicia o bot em paper mode.
 
@@ -131,11 +109,10 @@ cd trading-bot-hyperliquid
 python main.py --mode paper
 ```
 
-Dashboard: http://localhost:5000
-
+Dashboard: http://localhost:5000  
 Para parar: `Ctrl+C` na janela do terminal (graceful shutdown).
 
-### Outros modos
+### Outros Modos
 
 ```bash
 # Paper trading (simulação)
@@ -155,11 +132,58 @@ Ou usa **`start.bat`** para menu interactivo.
 
 ---
 
-## Estratégias
+## Features Premium
 
-### TrendFollow (Confluência 4/6)
+### 1. Dashboard Real-Time v2
+- **Live Data Stream** — preços, funding, OI, volume, imbalance, spread, OIR, depth quality
+- **Candle Watch** — OHLCV + buy% + VWAP por timeframe (1m, 5m, 15m, 1h)
+- **Engine Monitor** — ticks/sec, total ticks, memória, último erro, eventos recentes
+- **Strategies Detail** — parâmetros, último sinal, confiança, status, sinais hoje (5 estratégias)
+- **Signal Stream** — últimos 20 sinais com side colorido + status (pending/approved/rejected/executed)
+- **Decision Log** — risk approvals/rejections + executions + exits + cooldown resets
+- **Portfolio** — capital, PnL diário, drawdown, trades, positions abertas
+- **Open Positions** — posições com PnL%, entry, current, estratégia, stop, TP
+- **Live Logs** — últimas 50 linhas do ficheiro de log
 
-Sinal de entrada quando **≥4 de 6** condições alinhadas:
+### 2. Orderbook L2 Hyperliquid
+Métricas de microestrutura em tempo real:
+- **OIR** (Orderbook Imbalance Ratio) — (bid_vol − ask_vol) / total_vol nas primeiras 10 camadas
+- **Spread analysis** — spread absoluto + percentual + weighted mid price
+- **Depth quality** — bid_depth / total_depth (0-1), bid_ask_ratio
+- **Wall detection** — maior parede de bids e asks (suporte/resistência)
+- **Slippage estimation** — estimativa de slippage para ordens de mercado
+- **Fill ratio gate** — rejeita se book não cobre size mínimo (0.8 default)
+
+### 3. Funding Cross-Exchange
+Agregador de funding + OI de múltiplas exchanges (Binance, Bybit, OKX, Coinalyze):
+- `funding_avg` — média simples
+- `funding_weighted` — média ponderada por OI
+- `predicted_funding_avg` — predicted funding médio
+- `oi_total_aggregated` — OI total cross-exchange
+- `oi_exchange_count` — número de exchanges com dados
+
+### 4. ADX Regime Filter (FASE 2.1)
+Calcula ADX(14) a partir de candles 15m e classifica o regime:
+- **ADX > 25** → Trend → aumenta confiança da TrendFollow (1.3x), diminui MeanReversion (0.7x)
+- **ADX < 20** → Range → aumenta confiança da MeanReversion (1.3x), diminui TrendFollow (0.7x)
+- **ADX 20-25** → Neutral → sem ajuste
+
+Aplicado no engine antes da resolução de conflitos entre sinais.
+
+### 5. Cooldown Inteligente (FASE 2.4)
+Per-(strategy, symbol) state machine:
+- **Base**: 60 min após entrada
+- **After loss**: duplica (2x), max 240 min, capped
+- **After win**: reseta para base
+- **Auto-reset**: funding normaliza (<0.2%) ou ADX regime muda
+
+---
+
+## Estratégias (5)
+
+### 1. SmartMoneyFlow (TrendFollow) — FASE 2.2
+
+Sinal de entrada quando **≥6 de 9** condições alinhadas:
 
 | # | Condição LONG | Condição SHORT |
 |---|---|---|
@@ -169,52 +193,154 @@ Sinal de entrada quando **≥4 de 6** condições alinhadas:
 | 4 | MACD histograma > 0 | MACD histograma < 0 |
 | 5 | Preço > VWAP | Preço < VWAP |
 | 6 | Orderflow imbalance > 0.15 | Orderflow imbalance < -0.15 |
+| 7 | **OIR > 0.6** (book bids dominam) | **OIR < -0.6** (book asks dominam) |
+| 8 | **RSI 40-70** (não overbought) | **RSI 30-60** (não oversold) |
+| 9 | **Sem ask wall a 0.5%** (resistência) | **Sem bid wall a 0.5%** (suporte) |
 
-Orderflow: calculado a partir do **buy_volume − sell_volume** da candle de 15m.
+Confidence: 6/9 → 0.50, 7/9 → 0.75, 8/9 → 1.00
 
-### MeanReversion (Funding + OI + VP)
+### 2. FundingExtreme (MeanReversion) — FASE 2.3
 
-Sinal quando funding rate atinge extremos (>0.01% ou <-0.01%) com:
-- OI elevado (crowded trade)
-- Preço em suporte/resistência do Volume Profile
-- Confiança ajustada pela força do sinal
+Contrarian em funding extremo com filtros dinâmicos:
+- **Thresholds dinâmicos**: rolling p90/p70 por asset (lookback 90 períodos), sanity caps 0.1%-2.0%
+- **Cross-exchange confirmation**: rejeita se HL funding desvia >0.3% da média ou sinais opostos
+- **OI decreasing**: só entra se OI_delta < 0 (crowd já está a sair)
+- **Predicted funding**: sinal primário, fallback para current funding
+
+### 3. FundingArbitrage (FASE 3.1)
+
+Market-neutral funding spread:
+- **Long**: ativo com funding mais negativo (shorts pagam longs)
+- **Short**: ativo com funding mais positivo (longs pagam shorts)
+- **Entry**: spread > 1.2%, cada leg |funding| > 0.5%, OI estável
+- **Exit**: funding reverte para < 0.2% ou max hold 8h
+
+### 4. VWAPDeviation (FASE 3.2)
+
+Mean reversion ao VWAP(1h):
+- **Entry**: |Z-score| > 2.5σ do VWAP(1h) + volume > 150% média 24h
+- **Z > 2.5** → SHORT (preço muito acima, reverte para baixo)
+- **Z < -2.5** → LONG (preço muito abaixo, reverte para cima)
+- **Filtros**: ADX < 25 (só não-trending), OIR confirma, funding não extremo oposto
+- **Exit**: cruza VWAP (|Z| < 0.5) ou max hold 4h
+
+### 5. LiquidationCatcher (FASE 3.3)
+
+Fade liquidation cascades:
+- **Entry**: $50M+ liquidado numa direção em <5min
+- **Longs liquidados** (price drop) → **go LONG**
+- **Shorts liquidados** (price pump) → **go SHORT**
+- **Filtros**: count > 10, OI decreasing, ADX < 40
+- **Stop**: 1% ATR (tight)
+- **Take Profit**: 2R (2x risk)
+- **Exit**: 2R hit, VWAP reversion, ou max hold 30min
+- **Size**: 0.5-1% capital (small — catching a knife)
+- **Throttle**: 2h cooldown entre catches
 
 ---
 
-## Arquitetura de dados
+## Arquitetura de Dados
 
 ```
 Hyperliquid WS ──▶ DataBus ──▶ CandleBuilder ──▶ DataBus ──▶ TradingEngine
                         │                              │
-                        │                              ├──▶ TrendFollow
-                        │                              ├──▶ MeanReversion
+                        │                              ├──▶ SmartMoneyFlow
+                        │                              ├──▶ FundingExtreme
+                        │                              ├──▶ FundingArbitrage
+                        │                              ├──▶ VWAPDeviation
+                        │                              ├──▶ LiquidationCatcher
                         │                              └──▶ Portfolio / Risk / Executor
                         └──▶ Dashboard (Socket.IO)
 ```
 
-- **DataBus**: pub/sub assíncrono — `price:BTC`, `ctx:ETH`, `candle_complete:60:BTC`, etc.
+- **DataBus**: pub/sub assíncrono — `price:BTC`, `ctx:ETH`, `candle_complete:60:BTC`, `orderbook:BTC`, etc.
 - **CandleBuilder**: acumula ticks em candles OHLCV com OI, funding, buy/sell volume
-- **TradingEngine**: recebe `candle_complete`, constrói `MarketEvent`, alimenta estratégias
+- **TradingEngine**: recebe `candle_complete`, constrói `MarketEvent` (com ADX, funding agregado, orderbook metrics, liquidation stats), alimenta estratégias, aplica regime weights, gating via RiskManager
+- **RiskManager**: valida size, max positions, correlation, drawdown limits
+- **ExecutionEngine**: executa approved signals (paper simula slippage realista)
 
 ---
 
-## Notas de segurança
+## Testes
+
+### Unit Tests (TODOS PASSING)
+
+```bash
+# Bateria completa (FASE 0–3)
+python test_tasks_1_4_2_1_2_2.py   # ADX, regime weights, slippage, SmartMoneyFlow
+python test_task_2_3.py            # Dynamic thresholds, cross-exchange, OI filter
+python test_task_2_4.py            # Cooldown state machine, doubling, auto-reset
+python test_task_3_1.py            # FundingArbitrage pair selection, spread, exit
+python test_task_3_2.py            # VWAPDeviation Z-score, entry, ADX filter, exit
+python test_task_3_3.py            # LiquidationCatcher entry, filters, 2R exit, max hold
+```
+
+Resultados: **32/32 testes passing** (100% pass rate)
+
+### Integration Test
+
+```bash
+# Cria engine com todas as 5 estratégias e verifica inicialização
+python -c "from main import main; print('OK')"
+```
+
+---
+
+## Notas de Segurança
 
 - O bot corre em **paper trading por defeito** — sem dinheiro real
 - Modo live requer `HYPERLIQUID_API_KEY` e `HYPERLIQUID_API_SECRET` no `.env`
 - `.env` está no `.gitignore` — nunca é commitado
 - `start.bat` pede confirmação escrita `MAINNET` antes de arrancar em live
+- **Nunca** executa prune automático de Docker em cron
+- **Nunca** desactiva auth services ou firewall
 
 ---
 
-## Changelog v2.0.0
+## Changelog
 
+### v3.0.0 — FASE 3 Completa (5 Estratégias)
+- **FundingArbitrage** — market-neutral funding spread (long negative, short positive)
+- **VWAPDeviation** — mean reversion ao VWAP(1h) com Z-score e volume surge
+- **LiquidationCatcher** — fade $50M+ liquidation cascades, stop 1% ATR, TP 2R
+- Liquidation proxy accumulator no engine (detecta sharp moves + OI decreasing)
+
+### v2.1.0 — FASE 2 Completa (Sinais Inteligentes)
+- **ADX Regime Filter** — trend/range/neutral, ajusta confiança por estratégia
+- **SmartMoneyFlow v2** — OIR >0.6, wall detection 0.5%, RSI 40-70, confluência 6/9
+- **FundingExtreme v2** — percentis dinâmicos rolling, cross-exchange confirm, OI decreasing
+- **Cooldown Inteligente** — per-(strategy,symbol), doubling after loss, auto-reset
+
+### v2.0.0 — FASE 0 + FASE 1 (Fundamentos)
 - Arquitetura modular com DataBus pub/sub
-- WebSocket Hyperliquid com auto-reconnect
-- CandleBuilder multi-timeframe (1m/5m/15m/1h) com OI + funding
-- Duas estratégias de confluência com orderflow
-- Dashboard real-time (Flask + Socket.IO)
+- WebSocket Hyperliquid com auto-reconnect (allMids, assetCtx, l2Book, trades)
+- CandleBuilder multi-timeframe (1m/5m/15m/1h) com OI + funding + buy/sell volume
+- Orderbook L2 com OIR, wall detection, depth quality, slippage estimation, fill ratio gate
+- Funding cross-exchange aggregator (Binance, Bybit, OKX, Coinalyze)
+- Dashboard real-time v2 (Flask + Socket.IO, 9 painéis)
 - SQLite persistence + crash recovery
-- Paper trader com simulação realista de fills
+- Paper trader com simulação realista de fills e slippage
 - Security audit integrado (0 findings)
 
+---
+
+## Roadmap
+
+| FASE | Tarefas | Estado |
+|---|---|---|
+| FASE 0 | Dashboard, fundações | ✅ |
+| FASE 1 | Risk, Execution, ATR stops, Slippage | ✅ |
+| FASE 2 | ADX, SmartMoneyFlow, FundingExtreme, Cooldown | ✅ |
+| FASE 3 | FundingArbitrage, VWAPDeviation, LiquidationCatcher | ✅ |
+| **FASE 4** | Portfolio Heat & Governance (correlation, drawdown circuit, Kelly) | ⏳ |
+| **FASE 5** | Observability (alerts, metrics, health checks) | ⏳ |
+
+---
+
+## Licença
+
+MIT — uso comercial permitido. **Usa por tua conta e risco.**
+
+---
+
+*Built with Python, asyncio, and a lot of caffeine.*

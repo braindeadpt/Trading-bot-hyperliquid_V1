@@ -148,6 +148,19 @@ class TradingEngine:
         self._latest_orderbook: Dict[str, OrderbookMetrics] = {}
         self._latest_orderbook_raw: Dict[str, Any] = {}  # HlOrderbook
 
+        # ── Latest funding + liquidation tracking (Task 3.3) ──
+        self._latest_funding: Dict[str, float] = {}
+        self._latest_oi_delta: Dict[str, Optional[float]] = {}
+        self._liquidation_acc: Dict[str, Any] = {
+            sym: {
+                "window_ms": 5 * 60_000,  # 5 min window
+                "events": collections.deque(),  # (timestamp_ms, notional, side)
+            }
+            for sym in self._symbols
+        }
+        self._last_prices: Dict[str, float] = {}
+        self._last_price_ts: Dict[str, int] = {}
+
         # ── Cross-exchange funding + OI aggregator ──
         self._funding_aggregator = FundingOIAggregator()
         self._latest_agg_funding: Dict[str, AggregatedFundingOI] = {}
