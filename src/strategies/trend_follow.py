@@ -4,6 +4,7 @@ Rides directional momentum confirmed by volume, open interest, and
 microstructure. Avoids entering when funding is extreme (crowded).
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 import collections
@@ -20,6 +21,8 @@ from src.strategies.indicators import (
     volatility_target_size,
     calculate_rsi,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
