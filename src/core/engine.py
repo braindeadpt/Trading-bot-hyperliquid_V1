@@ -597,6 +597,10 @@ class TradingEngine:
             adx = calculate_adx(list(hist_15m), self._adx_period)
             if adx is not None:
                 self._latest_adx[symbol] = adx
+
+        # ── Liquidation stats (Task 3.3) ──
+        liq_notional, liq_side, liq_count = self._get_liquidation_stats(symbol)
+
         event = MarketEvent(
             symbol=symbol,
             price=price,

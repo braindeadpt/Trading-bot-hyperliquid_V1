@@ -163,6 +163,8 @@ class BybitFundingClient:
                 if resp.status != 200:
                     return None
                 data = await resp.json()
+                if data is None:
+                    return None
                 result = data.get("result", {}).get("list", [])
                 if not result:
                     return None
@@ -176,7 +178,10 @@ class BybitFundingClient:
                 params={"category": "linear", "symbol": symbol, "limit": 1}
             ) as resp:
                 oi_data = await resp.json()
-                oi_list = oi_data.get("result", {}).get("list", [])
+                if oi_data is None:
+                    oi_list = []
+                else:
+                    oi_list = oi_data.get("result", {}).get("list", [])
                 oi = float(oi_list[0].get("openInterest", 0)) if oi_list else None
 
             # Mark price
@@ -185,7 +190,10 @@ class BybitFundingClient:
                 params={"category": "linear", "symbol": symbol}
             ) as resp:
                 ticker_data = await resp.json()
-                ticker_list = ticker_data.get("result", {}).get("list", [])
+                if ticker_data is None:
+                    ticker_list = []
+                else:
+                    ticker_list = ticker_data.get("result", {}).get("list", [])
                 mark = float(ticker_list[0].get("markPrice", 0)) if ticker_list else None
 
             return FundingOI(
