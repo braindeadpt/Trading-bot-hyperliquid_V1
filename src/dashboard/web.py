@@ -83,7 +83,7 @@ class DashboardEmitter:
         if self.socketio is None:
             return
         try:
-            self.socketio.emit(event, data, broadcast=True)
+            self.socketio.emit(event, data)
         except Exception as e:
             logger.warning("emit %s error: %s", event, e)
 
