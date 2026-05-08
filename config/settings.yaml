@@ -179,6 +179,8 @@ strategy:
     max_directional_exposure_pct: 60   # 4.1: max 60% book same direction
     max_sector_exposure_pct: 30        # 4.2: max 30% in crypto sector
     daily_drawdown_circuit_pct: 5      # 4.3: daily drawdown > 5% = circuit breaker
+    max_correlation: 0.70              # max |r| between any two positions (0=off)
+    max_correlation_lookback: 60       # 60 periods (15m candles = 15h history)
 
   # ═══════════════════════════════════════════════════════════
   # Cooldown Manager (Task 2.4)

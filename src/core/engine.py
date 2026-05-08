@@ -50,7 +50,7 @@ from .execution import ExecutionEngine, TradeResult
 from .portfolio import PortfolioState
 from .risk_manager import RiskManager
 from .kelly_sizer import KellySizer
-from .risk_manager import RiskManager
+from .correlation_monitor import CorrelationMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +146,12 @@ class TradingEngine:
             config.get("backtest.initial_capital", 100_000.0)
         )
         self._portfolio = PortfolioState(initial_capital)
+
+        # Realized correlation monitor (positions heat)
+        corr_lookback = int(config.get("portfolio.max_correlation_lookback", 60))
+        self._correlation_monitor = CorrelationMonitor(lookback=corr_lookback)
+        # Last close per symbol for return calc
+        self._last_candle_close: Dict[str, float] = {}
 
         # Internal state
         self._running: bool = False
@@ -426,6 +432,13 @@ class TradingEngine:
             # Append 15m candles to history for ADX (regime filter)
             if timeframe == 900:
                 self._candles_15m_history[symbol].append(candle)
+            # Feed return to correlation monitor (any timeframe, 15m preferred)
+            if timeframe == 900 and hasattr(candle, 'close'):
+                prev = self._last_candle_close.get(symbol)
+                curr = float(candle.close)
+                if prev is not None and prev > 0:
+                    self._correlation_monitor.add_candle_return(symbol, prev, curr)
+                self._last_candle_close[symbol] = curr
         return _on_candle
 
     # ------------------------------------------------------------------
@@ -1133,6 +1146,41 @@ class TradingEngine:
         daily_pnl = await self._portfolio.daily_pnl
         daily_trades = await self._portfolio.daily_trades
 
+        # --- Correlation check (max realized correlation) ---
+        corr_threshold = safe_float(
+            self._config.get("portfolio.max_correlation", 0.70)
+        )
+        if corr_threshold > 0 and positions:
+            existing_syms = list(positions.keys())
+            if signal.symbol not in existing_syms:
+                violated, conflict_sym, corr = self._correlation_monitor.would_violate(
+                    signal.symbol, existing_syms, corr_threshold
+                )
+                if violated:
+                    reason = (
+                        f"Correlation limit: |r({signal.symbol},{conflict_sym})|="
+                        f"{abs(corr):.2f} > {corr_threshold:.2f}"
+                    )
+                    logger.info("Signal REJECTED %s %s — %s", signal.symbol, signal.side, reason)
+                    sig_record["status"] = "rejected"
+                    sig_record["risk_reason"] = reason
+                    strat_stats = self._strategy_stats.get(signal.strategy)
+                    if strat_stats:
+                        strat_stats["rejected_signals"] += 1
+                        if strat_stats["signal_history"]:
+                            strat_stats["signal_history"][0]["status"] = "rejected"
+                    self._decision_history.insert(0, {
+                        "time": sig_time,
+                        "type": "correlation",
+                        "symbol": signal.symbol,
+                        "side": signal.side,
+                        "result": "rejected",
+                        "reason": reason,
+                    })
+                    self._decision_history = self._decision_history[:100]
+                    return
+
+        # --- Risk check ---
         portfolio_proxy = _PortfolioProxy(
             capital=capital,
             positions=positions,
