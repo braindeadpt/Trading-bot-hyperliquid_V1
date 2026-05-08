@@ -106,7 +106,7 @@ trading-bot-hyperliquid/
 ## Requisitos
 
 - **Python 3.11+** (testado em 3.14)
-- **Windows** (bat files incluídos) ou Linux/Mac (comandos equivalentes)
+- **Windows** (bat files incluídos) ou **Linux/macOS** (comandos equivalentes abaixo)
 
 ```bash
 pip install -r requirements.txt
@@ -116,7 +116,59 @@ Copia `config/.env.example` para `config/.env` e configura as chaves da Hyperliq
 
 ---
 
-## Como Correr
+## Setup no macOS
+
+### 1. Clonar o repositório
+
+```bash
+git clone https://github.com/braindeadpt/Trading-bot-hyperliquid_V1.git
+cd Trading-bot-hyperliquid_V1
+```
+
+### 2. Criar ambiente virtual (recomendado)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 3. Instalar dependências
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Configurar chaves API (modo live/testnet)
+
+```bash
+cp config/.env.example config/.env
+# Edita config/.env com as tuas chaves da Hyperliquid
+```
+
+### 5. Criar diretórios de runtime
+
+```bash
+mkdir -p data/live logs
+```
+
+### 6. Correr em Paper Trading
+
+```bash
+python main.py --mode paper
+```
+
+Dashboard: http://localhost:5000  
+Para parar: `Ctrl+C` no terminal (graceful shutdown).
+
+### 7. Correr com auto-recovery (recomendado para 24/7)
+
+```bash
+python run_with_recovery.py --mode paper
+```
+
+---
+
+## Como Correr (Windows / Geral)
 
 ### Modo Rápido (Paper Trading)
 
