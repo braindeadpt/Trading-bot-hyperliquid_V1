@@ -79,6 +79,8 @@ class PortfolioState:
         self._daily_trades: int = 0
         self._trade_history: List[Dict[str, Any]] = []
         self._last_reset_date: str = utc_now().strftime("%Y-%m-%d")
+        # Daily peak capital for drawdown tracking (resets at 00:00 UTC)
+        self._daily_peak_capital: float = self._cash
 
         self._lock = asyncio.Lock()
 
@@ -199,10 +201,21 @@ class PortfolioState:
             return (pos.entry_price - price) * pos.size
 
     def _update_peak_and_drawdown(self) -> None:
-        """Update peak capital and recalc drawdown."""
+        """Update peak capital (global) and daily peak capital."""
         total = self._cash + sum(p.unrealized_pnl for p in self._positions.values())
         if total > self._peak_capital:
             self._peak_capital = total
+        # Update daily peak as well
+        if total > self._daily_peak_capital:
+            self._daily_peak_capital = total
+
+    def sync_daily_max_drawdown_pct(self) -> float:
+        """Synchronous read of daily max drawdown % (for dashboard only)."""
+        total = self._cash + sum(p.unrealized_pnl for p in self._positions.values())
+        if self._daily_peak_capital <= 0.0:
+            return 0.0
+        dd = (self._daily_peak_capital - total) / self._daily_peak_capital
+        return max(dd, 0.0) * 100.0
 
     # ------------------------------------------------------------------
     # Position lifecycle
@@ -302,8 +315,9 @@ class PortfolioState:
         if today != self._last_reset_date:
             self._daily_pnl = 0.0
             self._daily_trades = 0
+            self._daily_peak_capital = self._cash  # Reset daily peak to current capital
             self._last_reset_date = today
-            logger.info("Daily portfolio reset — date=%s", today)
+            logger.info("Daily portfolio reset - date=%s, daily_peak=%.2f", today, self._daily_peak_capital)
 
     async def force_daily_reset(self) -> None:
         """Manually trigger a daily reset (useful for testing)."""

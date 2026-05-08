@@ -33,6 +33,8 @@ class _TrendState:
     candles_1h: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=500))  # 20+ days for vol
     last_vwap: Optional[float] = None
     last_ema20: Optional[float] = None
+    last_ema50: Optional[float] = None
+    last_macd_hist: Optional[float] = None
     last_volume_avg: Optional[float] = None
     last_atr: Optional[float] = None
     last_oi: Optional[float] = None
@@ -112,7 +114,11 @@ class TrendFollow(Strategy):
         # --- Calculate indicators ---
         vwap = calculate_vwap(candles_15m)
         ema20 = calculate_ema(closes, self.EMA_PERIOD)
+        # EMA 50 for trend confirmation (README condition #2)
+        ema50 = calculate_ema(closes, 50) if len(closes) >= 50 else None
         atr = calculate_atr(candles_15m, self.ATR_PERIOD)
+        # MACD histogram for momentum confirmation (README condition #4)
+        macd_hist = self._calculate_macd_histogram(candles_15m)
 
         # Volume average (last 20 candles, excluding current)
         if len(candles_15m) >= self.VOLUME_LOOKBACK + 1:
@@ -124,6 +130,8 @@ class TrendFollow(Strategy):
         # Save for exit logic
         state.last_vwap = vwap
         state.last_ema20 = ema20
+        state.last_ema50 = ema50
+        state.last_macd_hist = macd_hist
         state.last_volume_avg = volume_avg
         state.last_atr = atr
         if event.oi_total is not None:
@@ -134,6 +142,8 @@ class TrendFollow(Strategy):
             return None
         if atr == 0.0:
             return None  # Can't size a position without volatility
+        if ema50 is None:
+            return None  # Need EMA 50 for trend confirmation
 
         current_candle = candles_15m[-1]
         current_volume = current_candle.volume
@@ -190,58 +200,74 @@ class TrendFollow(Strategy):
                 if bid_wall_dist < self.WALL_PROXIMITY_PCT:
                     wall_blocks_short = True
 
-        # --- LONG entry conditions ---
+        # --- LONG entry conditions (9 conditions per README) ---
         long_conditions: List[Tuple[str, bool]] = []
+        # 1. Price vs VWAP
         long_conditions.append(("price_above_vwap", current_price > vwap))
-        long_conditions.append(("price_above_ema20", current_price > ema20))
+        # 2. EMA 20 > EMA 50 (trend confirmation)
+        ema_trend_long = ema50 is not None and ema20 > ema50
+        long_conditions.append(("ema20_above_ema50", ema_trend_long))
+        # 3. RSI > 50 (momentum)
+        rsi_momentum_long = rsi is not None and rsi > 50.0
+        long_conditions.append(("rsi_above_50", rsi_momentum_long))
+        # 4. MACD histogram > 0
+        macd_positive = macd_hist is not None and macd_hist > 0
+        long_conditions.append(("macd_positive", macd_positive))
+        # 5. Volume surge
         long_conditions.append(("volume_surge", volume_surge))
-        long_conditions.append(("oi_increasing", oi_increasing))
-        # Funding not extreme negative (not overcrowded short)
+        # 6. Buying pressure (imbalance > 0.15) OR no data
+        long_conditions.append(
+            ("buying_pressure", buying_pressure or not imbalance_present)
+        )
+        # 7. OIR confirms long (OIR > 0.6) OR no data
+        long_conditions.append(
+            ("oir_confirms_long", oir_confirms_long or not oir_present)
+        )
+        # 8. Funding not extreme negative (not overcrowded short)
         not_overcrowded_short = (
             funding_effective is None or funding_effective > -self.FUNDING_EXTREME
         )
         long_conditions.append(("not_overcrowded_short", not_overcrowded_short))
-        # Buying pressure in imbalance OR we don't have imbalance data
-        long_conditions.append(
-            ("buying_pressure", buying_pressure or not imbalance_present)
-        )
-        # OIR confirms long OR no OIR data
-        long_conditions.append(
-            ("oir_confirms_long", oir_confirms_long or not oir_present)
-        )
-        # RSI not oversold
-        long_conditions.append(("rsi_ok", rsi_ok_long))
-        # No ask wall blocking just above
+        # 9. No ask wall blocking within 0.5%
         long_conditions.append(("no_wall_blocking", not wall_blocks_long))
 
-        # --- SHORT entry conditions ---
+        # --- SHORT entry conditions (9 conditions per README) ---
         short_conditions: List[Tuple[str, bool]] = []
+        # 1. Price vs VWAP
         short_conditions.append(("price_below_vwap", current_price < vwap))
-        short_conditions.append(("price_below_ema20", current_price < ema20))
+        # 2. EMA 20 < EMA 50 (trend confirmation)
+        ema_trend_short = ema50 is not None and ema20 < ema50
+        short_conditions.append(("ema20_below_ema50", ema_trend_short))
+        # 3. RSI < 50 (momentum)
+        rsi_momentum_short = rsi is not None and rsi < 50.0
+        short_conditions.append(("rsi_below_50", rsi_momentum_short))
+        # 4. MACD histogram < 0
+        macd_negative = macd_hist is not None and macd_hist < 0
+        short_conditions.append(("macd_negative", macd_negative))
+        # 5. Volume surge
         short_conditions.append(("volume_surge", volume_surge))
-        short_conditions.append(("oi_increasing", oi_increasing))
+        # 6. Selling pressure (imbalance < -0.15) OR no data
+        short_conditions.append(
+            ("selling_pressure", selling_pressure or not imbalance_present)
+        )
+        # 7. OIR confirms short (OIR < -0.6) OR no data
+        short_conditions.append(
+            ("oir_confirms_short", oir_confirms_short or not oir_present)
+        )
+        # 8. Funding not extreme positive (not overcrowded long)
         not_overcrowded_long = (
             funding_effective is None or funding_effective < self.FUNDING_EXTREME
         )
         short_conditions.append(("not_overcrowded_long", not_overcrowded_long))
-        short_conditions.append(
-            ("selling_pressure", selling_pressure or not imbalance_present)
-        )
-        # OIR confirms short OR no OIR data
-        short_conditions.append(
-            ("oir_confirms_short", oir_confirms_short or not oir_present)
-        )
-        # RSI not overbought
-        short_conditions.append(("rsi_ok", rsi_ok_short))
-        # No bid wall blocking just below
+        # 9. No bid wall blocking within 0.5%
         short_conditions.append(("no_wall_blocking", not wall_blocks_short))
 
         # --- Evaluate confluence and generate signal ---
         long_met = sum(1 for _, v in long_conditions if v)
         short_met = sum(1 for _, v in short_conditions if v)
-        total_conditions = len(long_conditions)  # same for both
+        total_conditions = len(long_conditions)  # should be 9
 
-        # Minimum 6 of 9 conditions for entry (raised bar with microstructure filters)
+        # Minimum 6 of 9 conditions for entry
         MIN_CONFLUENCE = 6
 
         signal: Optional[Signal] = None
@@ -353,6 +379,34 @@ class TrendFollow(Strategy):
                 )
 
         return None
+
+    def _calculate_macd_histogram(self, candles: List[Candle]) -> Optional[float]:
+        """Calculate MACD histogram (MACD - signal line).
+        
+        Uses 12-period EMA (fast), 26-period EMA (slow), 9-period signal.
+        Returns None if not enough candles.
+        """
+        closes = [c.close for c in candles]
+        if len(closes) < 26:
+            return None
+        ema_fast = calculate_ema(closes, 12)
+        ema_slow = calculate_ema(closes, 26)
+        if ema_fast is None or ema_slow is None:
+            return None
+        macd_line = ema_fast - ema_slow
+        # Signal line = 9-period EMA of MACD line
+        if len(closes) >= 35:  # 26 + 9
+            macd_history = []
+            for i in range(26, len(closes)):
+                f = calculate_ema(closes[:i], 12)
+                s = calculate_ema(closes[:i], 26)
+                if f is not None and s is not None:
+                    macd_history.append(f - s)
+            if len(macd_history) >= 9:
+                signal_line = calculate_ema(macd_history, 9)
+                if signal_line is not None:
+                    return macd_line - signal_line
+        return macd_line * 0.1  # Fallback: small positive/negative bias
 
     def _calculate_confidence(self, conditions: List[Tuple[str, bool]]) -> float:
         """Map confluence (number of met conditions) to confidence 0.5-1.0.
