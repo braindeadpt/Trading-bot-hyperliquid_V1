@@ -260,8 +260,11 @@ class PortfolioState:
                 logger.warning("remove_position called for unknown symbol: %s", symbol)
                 return
 
-            # Credit cash with realized PnL
-            self._cash += safe_float(pnl_usd)
+            # Credit cash with the notional value + realized PnL
+            # When opening, we debited entry_price * size (cost).
+            # When closing, we must credit back that cost plus the PnL.
+            notional = pos.entry_price * pos.size
+            self._cash += safe_float(notional) + safe_float(pnl_usd)
             self._daily_pnl += safe_float(pnl_usd)
 
             self._trade_history.append({

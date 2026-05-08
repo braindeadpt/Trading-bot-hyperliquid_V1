@@ -88,6 +88,7 @@ class PortfolioSnapshot:
     """Portfolio state at a point in time."""
     timestamp: int
     capital: float
+    peak_capital: float
     daily_pnl: float
     positions_json: str
 
@@ -163,6 +164,7 @@ class Database:
             self._create_funding_table()
             self._create_oi_table()
             self._create_portfolio_table()
+            self._migrate_portfolio_table()
             self._create_indexes()
 
     def _create_candle_tables(self) -> None:
@@ -244,10 +246,21 @@ class Database:
             CREATE TABLE IF NOT EXISTS portfolio_snapshots (
                 timestamp      INTEGER PRIMARY KEY,
                 capital        REAL    NOT NULL,
+                peak_capital   REAL    NOT NULL,
                 daily_pnl      REAL    NOT NULL,
                 positions_json TEXT    NOT NULL
             );
         """)
+
+    def _migrate_portfolio_table(self) -> None:
+        """Add peak_capital column to existing portfolio_snapshots table."""
+        try:
+            self._conn().execute(
+                "ALTER TABLE portfolio_snapshots ADD COLUMN peak_capital REAL NOT NULL DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            # Column already exists — ignore
+            pass
 
     def _create_indexes(self) -> None:
         cur = self._cursor()
@@ -514,12 +527,12 @@ class Database:
 
     def save_portfolio_snapshot(self, snapshot: PortfolioSnapshot) -> None:
         sql = """
-            INSERT OR REPLACE INTO portfolio_snapshots (timestamp, capital, daily_pnl, positions_json)
-            VALUES (?, ?, ?, ?)
+            INSERT OR REPLACE INTO portfolio_snapshots (timestamp, capital, peak_capital, daily_pnl, positions_json)
+            VALUES (?, ?, ?, ?, ?)
         """
         with self._conn():
             self._conn().execute(sql, (
-                snapshot.timestamp, snapshot.capital, snapshot.daily_pnl, snapshot.positions_json,
+                snapshot.timestamp, snapshot.capital, snapshot.peak_capital, snapshot.daily_pnl, snapshot.positions_json,
             ))
 
     def get_portfolio_history(self, limit: int = 500) -> List[Dict[str, Any]]:

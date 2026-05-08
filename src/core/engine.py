@@ -1524,7 +1524,7 @@ class TradingEngine:
                 positions_data = json.loads(snap["positions_json"])
                 await self._portfolio.from_dict({
                     "cash": snap["capital"],
-                    "peak_capital": snap["capital"],  # Will be re-estimated from prices
+                    "peak_capital": snap.get("peak_capital", snap["capital"]),
                     "daily_pnl": snap["daily_pnl"],
                     "positions": positions_data,
                 })
@@ -1542,6 +1542,7 @@ class TradingEngine:
             snapshot = PortfolioSnapshot(
                 timestamp=utc_timestamp_ms(),
                 capital=state["current_capital"],
+                peak_capital=state["peak_capital"],
                 daily_pnl=state["daily_pnl"],
                 positions_json=json.dumps(state.get("positions", {})),
             )

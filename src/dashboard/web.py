@@ -74,6 +74,7 @@ class DashboardEmitter:
             self._emit_decisions()
             self._emit_portfolio()
             self._emit_positions()
+            self._emit_trades()
             self._emit_logs()
         except Exception as e:
             logger.warning("emit_all error: %s", e)
@@ -265,6 +266,34 @@ class DashboardEmitter:
                     "strategy": getattr(pos, "metadata", {}).get("strategy", "unknown"),
                 })
             self._safe_emit("positions", result)
+        except Exception:
+            pass
+
+    def _emit_trades(self) -> None:
+        """Emit last 50 trades from the DB (open + closed)."""
+        db = getattr(_engine, "_db", None)
+        if db is None:
+            return
+        try:
+            rows = db.get_trades(limit=50)
+            result = []
+            for r in rows:
+                result.append({
+                    "id": r.get("id"),
+                    "symbol": r.get("symbol"),
+                    "side": r.get("side"),
+                    "entry_price": r.get("entry_price"),
+                    "exit_price": r.get("exit_price"),
+                    "entry_time": r.get("entry_time"),
+                    "exit_time": r.get("exit_time"),
+                    "size": r.get("size"),
+                    "pnl_usd": r.get("pnl_usd"),
+                    "pnl_pct": r.get("pnl_pct"),
+                    "strategy": r.get("strategy"),
+                    "exit_reason": r.get("exit_reason"),
+                    "status": r.get("status"),
+                })
+            self._safe_emit("trades", result)
         except Exception:
             pass
 
@@ -727,6 +756,32 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 </div>
             </div>
 
+            <!-- Trade History -->
+            <div class="panel">
+                <div class="panel-header">Trade History <span class="dim">Last 50</span></div>
+                <div class="panel-body">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Sym</th>
+                                <th>Side</th>
+                                <th class="num">Entry</th>
+                                <th class="num">Exit</th>
+                                <th class="num">PnL</th>
+                                <th class="num">PnL%</th>
+                                <th>Strat</th>
+                                <th>Reason</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trades-tbody">
+                            <tr><td colspan="10" class="muted" style="text-align:center;">Loading trades...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
             <!-- Live Logs -->
             <div class="panel">
                 <div class="panel-header">Live Logs <span class="dim">Last 50</span></div>
@@ -965,6 +1020,40 @@ def create_app(config: Dict[str, Any]) -> tuple:
             }).join("");
         });
 
+        // ── Trades ──
+        function renderTrades(data) {
+            const tbody = document.getElementById("trades-tbody");
+            if (!data || data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="10" class="muted" style="text-align:center;">No trades yet</td></tr>`;
+                return;
+            }
+            tbody.innerHTML = data.map(t => {
+                const isOpen = t.status === "open";
+                const pnl = typeof t.pnl_usd === "number" ? t.pnl_usd : 0;
+                const pnlClass = isOpen ? "" : (pnl > 0 ? "up" : pnl < 0 ? "down" : "");
+                const sideClass = t.side === "long" ? "up" : "down";
+                const entryTime = t.entry_time ? new Date(t.entry_time).toLocaleString("pt-PT", {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"}) : "--";
+                const pnlDisplay = isOpen ? "<span class='muted'>—</span>" : ((pnl >= 0 ? "+" : "") + "$" + Math.abs(pnl).toFixed(2));
+                const pnlPctDisplay = isOpen ? "<span class='muted'>—</span>" : ((t.pnl_pct >= 0 ? "+" : "") + (t.pnl_pct || 0).toFixed(2) + "%");
+                const statusBadge = isOpen ? '<span class="pill pill-pending">OPEN</span>' : '<span class="pill pill-executed">CLOSED</span>';
+                return `<tr style="${isOpen ? 'background:rgba(0,229,255,0.03);' : ''}">
+                    <td class="muted tiny">${entryTime}</td>
+                    <td><span class="highlight">${t.symbol}</span></td>
+                    <td class="${sideClass}">${t.side ? t.side.toUpperCase() : "--"}</td>
+                    <td class="num">$${fmtNum(t.entry_price)}</td>
+                    <td class="num">${t.exit_price != null ? "$" + fmtNum(t.exit_price) : "<span class='muted'>—</span>"}</td>
+                    <td class="num ${pnlClass}">${pnlDisplay}</td>
+                    <td class="num ${pnlClass}">${pnlPctDisplay}</td>
+                    <td class="muted tiny">${t.strategy || "?"}</td>
+                    <td class="muted tiny">${t.exit_reason || (isOpen ? "● Active" : "")}</td>
+                    <td>${statusBadge}</td>
+                </tr>`;
+            }).join("");
+        }
+        socket.on("trades", (data) => {
+            renderTrades(data);
+        });
+
         // ── Logs ──
         socket.on("logs", (data) => {
             const container = document.getElementById("logs-container");
@@ -994,6 +1083,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
         // Initial load via REST fallback
         fetch("/api/status").then(r => r.json()).then(d => {
             if (d.mode) document.getElementById("mode-badge").textContent = d.mode.toUpperCase();
+        });
+        fetch("/api/trades").then(r => r.json()).then(d => {
+            renderTrades(d);
         });
         // ── Strategy Drill-down (Task 5.3) ──
         async function showStrategyDetail(name) {
@@ -1150,6 +1242,19 @@ def create_app(config: Dict[str, Any]) -> tuple:
             "daily_pnl": getattr(portfolio, "sync_daily_pnl", lambda: 0)(),
             "open_positions": len(getattr(portfolio, "get_positions_sync", lambda: {})()),
         })
+
+    @app.route("/api/trades")
+    def api_trades():
+        if _engine is None:
+            return jsonify([])
+        db = getattr(_engine, "_db", None)
+        if db is None:
+            return jsonify([])
+        try:
+            rows = db.get_trades(limit=100)
+            return jsonify(rows)
+        except Exception:
+            return jsonify([])
 
     @app.route("/api/logs")
     def api_logs():
