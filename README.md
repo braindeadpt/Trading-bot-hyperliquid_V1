@@ -85,7 +85,13 @@ trading-bot-hyperliquid/
 │   ├── test_task_3_1.py            # FundingArbitrage pair selection, spread, exit
 │   ├── test_task_3_2.py            # VWAPDeviation Z-score, entry, ADX filter, exit
 │   ├── test_task_3_3.py            # LiquidationCatcher entry, filters, 2R exit, max hold
-│   └── test_fase_4.py              # Portfolio governance: drawdown, exposure, Kelly
+│   ├── test_fase_4.py              # Portfolio governance: drawdown, exposure, Kelly
+│   ├── test_funding.py             # Funding aggregator unit tests
+│   ├── test_sio_client.py          # Socket.IO client test
+│   ├── test_socketio.py            # Socket.IO connection test
+│   ├── test_ws.py                  # WebSocket connection test
+│   ├── test_ws_coin.py             # WebSocket coin data test
+│   └── test_ws_ctx.py              # WebSocket context data test
 ├── data/live/
 │   └── bot.db                    # SQLite runtime (auto-criado)
 ├── logs/
@@ -279,16 +285,17 @@ Hyperliquid WS ──▶ DataBus ──▶ CandleBuilder ──▶ DataBus ─�
 ### Unit Tests (TODOS PASSING)
 
 ```bash
-# Bateria completa (FASE 0–3)
-python test_tasks_1_4_2_1_2_2.py   # ADX, regime weights, slippage, SmartMoneyFlow
-python test_task_2_3.py            # Dynamic thresholds, cross-exchange, OI filter
-python test_task_2_4.py            # Cooldown state machine, doubling, auto-reset
-python test_task_3_1.py            # FundingArbitrage pair selection, spread, exit
-python test_task_3_2.py            # VWAPDeviation Z-score, entry, ADX filter, exit
-python test_task_3_3.py            # LiquidationCatcher entry, filters, 2R exit, max hold
+# Bateria completa (FASE 0–5)
+python tests/test_tasks_1_4_2_1_2_2.py   # ADX, regime weights, slippage, SmartMoneyFlow
+python tests/test_task_2_3.py            # Dynamic thresholds, cross-exchange, OI filter
+python tests/test_task_2_4.py            # Cooldown state machine, doubling, auto-reset
+python tests/test_task_3_1.py            # FundingArbitrage pair selection, spread, exit
+python tests/test_task_3_2.py            # VWAPDeviation Z-score, entry, ADX filter, exit
+python tests/test_task_3_3.py            # LiquidationCatcher entry, filters, 2R exit, max hold
+python tests/test_fase_4.py              # Portfolio governance: drawdown, exposure, Kelly
 ```
 
-Resultados: **32/32 testes passing** (100% pass rate)
+Resultados: **37/37 testes passing** (100% pass rate)
 
 ### Integration Test
 
