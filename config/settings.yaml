@@ -51,6 +51,8 @@ risk:
   leverage_max: 10.0
   max_slippage_pct: 0.2             # reject signal if L2 slippage > 0.2%
   min_fill_ratio: 0.8              # reject signal if book covers <80% of size
+  taker_fee_pct: 0.035              # Hyperliquid taker fee per side (0.035%)
+  paper_slippage_pct: 0.05         # simulated slippage in paper mode (0.05%)
 
 # ═══════════════════════════════════════════════════════════
 # Strategy: Trend Follow (Smart Money Flow)

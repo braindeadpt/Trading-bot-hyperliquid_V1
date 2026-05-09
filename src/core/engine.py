@@ -1379,6 +1379,7 @@ class TradingEngine:
 
         # --- Update portfolio ---
         notional = result.entry_price * result.size
+        total_cost = notional + result.entry_fee
         position = Position(
             symbol=result.symbol,
             side=result.side,
@@ -1390,7 +1391,7 @@ class TradingEngine:
             unrealized_pnl=0.0,
             metadata={"strategy": signal.strategy, "trade_id": result.trade_id},
         )
-        await self._portfolio.add_position(position, cost=notional)
+        await self._portfolio.add_position(position, cost=total_cost)
 
         # --- Update cooldown state on entry (Task 2.4) ---
         self._update_cooldown_on_entry(signal.strategy, signal.symbol, event)

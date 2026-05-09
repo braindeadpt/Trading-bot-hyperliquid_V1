@@ -216,8 +216,10 @@ class HyperliquidWSClient:
                 logger.info("Connecting to %s", self.ws_url)
                 self._ws = await websockets.connect(
                     self.ws_url,
-                    ping_interval=None,  # we roll our own heartbeat
+                    ping_interval=20,
+                    ping_timeout=10,
                     close_timeout=5,
+                    open_timeout=10,
                 )
                 self.connected_at = time.time()
                 self._backoff = INITIAL_BACKOFF_SECONDS

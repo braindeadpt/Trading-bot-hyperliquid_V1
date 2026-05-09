@@ -34,6 +34,7 @@ class TradeResult:
     status: str  # 'open' | 'closed'
     reason: str
     timestamp_ms: int
+    entry_fee: float = 0.0  # fee paid on entry (for portfolio cash tracking)
 
 
 class ExecutionEngine:
@@ -63,6 +64,16 @@ class ExecutionEngine:
         self._config = config
         self._db = db
         self._mode = mode
+
+        # Fee model — Hyperliquid taker fee (paper & live)
+        self._taker_fee_pct: float = safe_float(
+            config.get("risk.taker_fee_pct", 0.035)
+        ) / 100.0
+
+        # Slippage model for paper trading
+        self._paper_slippage_pct: float = safe_float(
+            config.get("risk.paper_slippage_pct", 0.05)
+        ) / 100.0
 
         # Mainnet safety gate
         self._mainnet_enabled: bool = bool(config.get("exchange.mainnet_enabled", False))
@@ -118,21 +129,34 @@ class ExecutionEngine:
         Returns a :class:`TradeResult` in all cases.
         """
         now_ms = utc_timestamp_ms()
-        price = safe_float(signal.entry_price)
-        if price <= 0.0:
-            logger.error("enter_position: invalid price %.4f for %s", price, signal.symbol)
-            raise ValueError(f"Invalid entry price for {signal.symbol}: {price}")
+        raw_price = safe_float(signal.entry_price)
+        if raw_price <= 0.0:
+            logger.error("enter_position: invalid price %.4f for %s", raw_price, signal.symbol)
+            raise ValueError(f"Invalid entry price for {signal.symbol}: {raw_price}")
 
         size = safe_float(signal.metadata.get("calculated_size", 0.0))
         if size <= 0.0:
             logger.error("enter_position: zero size for %s", signal.symbol)
             raise ValueError(f"Calculated position size is zero for {signal.symbol}")
 
+        # Paper slippage: worse fill for the direction of the trade
+        if self._mode == "paper":
+            slippage = self._paper_slippage_pct
+            if signal.side == "long":
+                fill_price = raw_price * (1.0 + slippage)
+            else:
+                fill_price = raw_price * (1.0 - slippage)
+        else:
+            fill_price = raw_price
+
+        notional = fill_price * size
+        entry_fee = notional * self._taker_fee_pct
+
         # Persist entry to DB
         entry_record = TradeEntry(
             symbol=signal.symbol,
             side=signal.side,
-            entry_price=price,
+            entry_price=fill_price,
             entry_time=now_ms,
             size=size,
             strategy=signal.strategy,
@@ -141,13 +165,13 @@ class ExecutionEngine:
         trade_id = self._db.save_trade_entry(entry_record)
 
         if self._mode in ("testnet", "mainnet"):
-            await self._submit_live_order(signal, size, price)
+            await self._submit_live_order(signal, size, raw_price)
 
         result = TradeResult(
             trade_id=trade_id,
             symbol=signal.symbol,
             side=signal.side,
-            entry_price=price,
+            entry_price=fill_price,
             exit_price=None,
             size=size,
             pnl_usd=0.0,
@@ -155,19 +179,22 @@ class ExecutionEngine:
             status="open",
             reason=signal.reason,
             timestamp_ms=now_ms,
+            entry_fee=entry_fee,
         )
 
         async with self._lock:
             self._open_trades[signal.symbol] = result
 
         logger.info(
-            "ENTER  mode=%s id=%d %s %s size=%.6f @ %.4f (%s)",
+            "ENTER  mode=%s id=%d %s %s size=%.6f @ %.4f (slippage=%.4f%%) fee=$%.2f (%s)",
             self._mode,
             trade_id,
             signal.symbol,
             signal.side,
             size,
-            price,
+            fill_price,
+            self._paper_slippage_pct * 100.0 if self._mode == "paper" else 0.0,
+            entry_fee,
             signal.reason,
         )
         return result
@@ -188,10 +215,23 @@ class ExecutionEngine:
         position from the internal open-trade index.
         """
         now_ms = utc_timestamp_ms()
-        exit_price_f = safe_float(exit_price)
-        if exit_price_f <= 0.0:
-            logger.error("close_position: invalid exit price %.4f for %s", exit_price_f, position.symbol)
-            raise ValueError(f"Invalid exit price for {position.symbol}: {exit_price_f}")
+        raw_exit = safe_float(exit_price)
+        if raw_exit <= 0.0:
+            logger.error("close_position: invalid exit price %.4f for %s", raw_exit, position.symbol)
+            raise ValueError(f"Invalid exit price for {position.symbol}: {raw_exit}")
+
+        # Paper slippage: worse fill for the direction of the trade
+        if self._mode == "paper":
+            slippage = self._paper_slippage_pct
+            if position.side == "long":
+                fill_exit = raw_exit * (1.0 - slippage)
+            else:
+                fill_exit = raw_exit * (1.0 + slippage)
+        else:
+            fill_exit = raw_exit
+
+        notional = position.entry_price * position.size
+        exit_fee = notional * self._taker_fee_pct
 
         async with self._lock:
             open_trade = self._open_trades.pop(position.symbol, None)
@@ -199,14 +239,14 @@ class ExecutionEngine:
         if open_trade is None:
             logger.warning("close_position: no open trade found for %s", position.symbol)
             # Build a synthetic result so callers don't crash
-            pnl_usd = self._compute_pnl(position, exit_price_f)
-            pnl_pct = safe_divide(pnl_usd, position.entry_price * position.size, 0.0)
+            pnl_usd = self._compute_pnl(position, fill_exit) - exit_fee
+            pnl_pct = safe_divide(pnl_usd, notional, 0.0)
             return TradeResult(
                 trade_id=-1,
                 symbol=position.symbol,
                 side=position.side,
                 entry_price=position.entry_price,
-                exit_price=exit_price_f,
+                exit_price=fill_exit,
                 size=position.size,
                 pnl_usd=pnl_usd,
                 pnl_pct=pnl_pct,
@@ -215,14 +255,13 @@ class ExecutionEngine:
                 timestamp_ms=now_ms,
             )
 
-        pnl_usd = self._compute_pnl(position, exit_price_f)
-        notional = position.entry_price * position.size
+        pnl_usd = self._compute_pnl(position, fill_exit) - exit_fee
         pnl_pct = safe_divide(pnl_usd, notional, 0.0)
 
         # Update DB
         exit_record = TradeExit(
             trade_id=open_trade.trade_id,
-            exit_price=exit_price_f,
+            exit_price=fill_exit,
             exit_time=now_ms,
             pnl_usd=pnl_usd,
             pnl_pct=pnl_pct,
@@ -249,13 +288,14 @@ class ExecutionEngine:
         )
 
         logger.info(
-            "EXIT   mode=%s id=%d %s %s pnl=%.2f (%.2f%%) reason=%s",
+            "EXIT   mode=%s id=%d %s %s pnl=%.2f (%.2f%%) fee=$%.2f reason=%s",
             self._mode,
             result.trade_id,
             position.symbol,
             position.side,
             pnl_usd,
             pnl_pct * 100.0,
+            exit_fee,
             reason,
         )
         return result
