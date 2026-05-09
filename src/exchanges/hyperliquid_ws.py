@@ -6,7 +6,6 @@ from typing import Any, Dict, Optional
 import websockets
 from websockets import Data
 
-from src.data.candle_builder import CandleBuilder
 from src.utils.config import Config
 from src.utils.helpers import JSONSafetyError, safe_json_loads, safe_float
 
@@ -18,7 +17,7 @@ RECONNECT_JITTER_MAX = 2
 HEARTBEAT_INTERVAL_SECONDS = 30
 
 class HyperliquidWSClient:
-    def __init__(self, config: Config, symbols: list, bus=None, candle_builder: Optional[CandleBuilder] = None):
+    def __init__(self, config: Config, symbols: list, bus=None, candle_builder: Optional[Any] = None):
         self.symbols = symbols
         self.ws_url = config.get("exchange.hyperliquid_ws_url", "wss://api.hyperliquid.xyz/ws")
         self._bus = bus
