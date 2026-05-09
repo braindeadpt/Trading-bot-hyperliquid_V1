@@ -560,8 +560,13 @@ class TradingEngine:
             positions = await self._portfolio.positions
             position = positions.get(symbol)
             if position is not None:
+                # Only the strategy that opened the position can suggest exits
+                position_strategy = position.metadata.get("strategy") if position.metadata else None
                 for strategy in self._strategies:
                     if not getattr(strategy, "enabled", True):
+                        continue
+                    # Skip if another strategy opened this position
+                    if position_strategy is not None and position_strategy != strategy.name:
                         continue
                     try:
                         exit_sig = strategy.on_position(position, event)
