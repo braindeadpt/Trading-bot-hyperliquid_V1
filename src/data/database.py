@@ -132,7 +132,7 @@ class Database:
             self._local.connection = sqlite3.connect(
                 str(self.db_path),
                 detect_types=sqlite3.PARSE_DECLTYPES,
-                check_same_thread=False,
+                check_same_thread=False,  # MEDIUM-001: disabled for threading flexibility; ensure all DB access is from the same thread or use proper locking
             )
             self._local.connection.row_factory = sqlite3.Row
             # Speed-ups for batch inserts

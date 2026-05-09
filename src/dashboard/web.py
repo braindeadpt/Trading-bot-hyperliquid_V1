@@ -822,7 +822,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
         </div>
     </div>
 
-    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js" integrity="sha384-mZLF4UVrpi/QTWPA7BjNPEfhIf0yXbjJrCRMYZciyRL6TMmCCZ8W1Z7EPWWvWqoP" crossorigin="anonymous"></script>
     <script>
         const socket = io();
 
@@ -1288,8 +1288,12 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
     @app.route("/api/logs")
     def api_logs():
-        log_path = os.path.join(os.path.dirname(__file__), "..", "..", "logs", "bot.log")
-        log_path = os.path.abspath(log_path)
+        # HIGH-010: Path validation — prevent directory traversal
+        logs_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "logs"))
+        log_path = os.path.abspath(os.path.join(logs_dir, "bot.log"))
+        # Ensure the resolved path is still inside the logs directory
+        if not log_path.startswith(logs_dir + os.sep):
+            abort(403)
         entries = []
         try:
             with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
