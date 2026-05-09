@@ -121,6 +121,16 @@ class Config:
     def __contains__(self, key: str) -> bool:
         return key in self._data
 
+    def set(self, dot_path: str, value: Any) -> None:
+        """Set a config value by dot-path (e.g. config.set('mode', 'paper'))."""
+        keys = dot_path.split(".")
+        node = self._data
+        for key in keys[:-1]:
+            if key not in node:
+                node[key] = {}
+            node = node[key]
+        node[keys[-1]] = value
+
     def to_dict(self) -> Dict[str, Any]:
         """Return a shallow copy of the underlying dict."""
         return dict(self._data)

@@ -83,7 +83,7 @@ def _resolve_path(path_str: str) -> Path:
 
 
 def _shutdown(signum: int, frame: Any) -> None:
-    """Graceful shutdown handler."""
+    """Graceful shutdown handler — waits up to 10s for components to stop."""
     if _logger:
         _logger.warning(f"Received signal {signum}, initiating shutdown...")
     loop = asyncio.get_event_loop()
@@ -96,8 +96,19 @@ def _shutdown(signum: int, frame: Any) -> None:
         tasks.append(asyncio.run_coroutine_threadsafe(_binance_ws.stop(), loop))
     if _candle_builder:
         tasks.append(asyncio.run_coroutine_threadsafe(_candle_builder.stop(), loop))
-    # Give dashboard a moment to finish
-    time.sleep(1)
+    # Wait up to 10s for graceful shutdown
+    timeout = 10.0
+    start = time.time()
+    while tasks and (time.time() - start) < timeout:
+        remaining = [t for t in tasks if not t.done()]
+        if not remaining:
+            break
+        time.sleep(0.2)
+    for t in tasks:
+        if not t.done():
+            t.cancel()
+    if _logger:
+        _logger.info("Shutdown complete.")
     sys.exit(0)
 
 
@@ -180,7 +191,7 @@ async def main() -> None:
 
     # Override mode from CLI if provided
     mode = args.mode or cfg.get("mode", "paper")
-    cfg.raw["mode"] = mode
+    cfg.set("mode", mode)  # HIGH-010: use setter instead of raw dict mutation
 
     # -----------------------------------------------------------------------
     # 2. Setup logging
@@ -342,13 +353,16 @@ async def main() -> None:
         dashboard_cfg = {
             "mode": mode.upper(),
             "version": cfg.get("version", "1.0.0"),
-            "host": cfg.get("dashboard.host", "0.0.0.0"),
+            # CRIT-003: Default to localhost only (was 0.0.0.0 = all interfaces)
+            "host": cfg.get("dashboard.host", "127.0.0.1"),
             "port": cfg.get("dashboard.port", 5000),
+            "secret_key": cfg.get("dashboard.secret_key"),
+            "dashboard_password": cfg.get("dashboard.password"),
         }
         from dashboard.web import create_app as create_dashboard, set_engine
         app, socketio, emit_fn = create_dashboard(config=dashboard_cfg)
         set_engine(engine)
-        engine._on_dashboard_tick = emit_fn  # force emit on important events
+        engine.on_dashboard_tick = emit_fn  # CRIT-004: use validated setter
 
         global _dashboard_socketio
         _dashboard_socketio = socketio
@@ -361,12 +375,17 @@ async def main() -> None:
                 port=dashboard_cfg["port"],
                 debug=False,
                 use_reloader=False,
-                allow_unsafe_werkzeug=True,
+                # Removed: allow_unsafe_werkzeug=True  (HIGH-002)
             )
 
         dashboard_thread = threading.Thread(target=_run_dashboard, daemon=True)
         dashboard_thread.start()
         logger.info(f"Dashboard started at http://{dashboard_cfg['host']}:{dashboard_cfg['port']}")
+        if not dashboard_cfg.get("dashboard_password"):
+            logger.warning(
+                "Dashboard has NO password protection. "
+                "Set dashboard.password in config to secure access."
+            )
 
     # -----------------------------------------------------------------------
     # 10. Signal handlers

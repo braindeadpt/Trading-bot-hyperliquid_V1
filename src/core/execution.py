@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -75,8 +76,15 @@ class ExecutionEngine:
             config.get("risk.paper_slippage_pct", 0.05)
         ) / 100.0
 
-        # Mainnet safety gate
-        self._mainnet_enabled: bool = bool(config.get("exchange.mainnet_enabled", False))
+        # Mainnet safety gate — HIGH-007: require explicit env var + config flag
+        env_mainnet = os.environ.get("HYPERLIQUID_MAINNET_ENABLED", "").lower() in ("1", "true", "yes")
+        cfg_mainnet = bool(config.get("exchange.mainnet_enabled", False))
+        self._mainnet_enabled: bool = env_mainnet and cfg_mainnet
+        if self._mode == "mainnet" and not self._mainnet_enabled:
+            raise RuntimeError(
+                "Mainnet mode blocked: set both HYPERLIQUID_MAINNET_ENABLED=1 env var "
+                "AND exchange.mainnet_enabled=true in config to enable live trading."
+            )
         if mode == "mainnet" and not self._mainnet_enabled:
             raise RuntimeError(
                 "Mainnet mode requested but 'exchange.mainnet_enabled' is False in config. "

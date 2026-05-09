@@ -5,12 +5,13 @@ Complete rewrite for maximum visibility into bot internals.
 
 import logging
 import os
+import secrets
 import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Callable
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request, abort
 from flask_socketio import SocketIO, emit
 
 logger = logging.getLogger(__name__)
@@ -329,11 +330,40 @@ class DashboardEmitter:
 
 def create_app(config: Dict[str, Any]) -> tuple:
     app = Flask(__name__)
-    app.config["SECRET_KEY"] = config.get("secret_key", "dev-secret-123")
-    socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+
+    # CRIT-001: SECRET_KEY — generate random if not configured (no hardcoded fallback)
+    secret_key = config.get("secret_key")
+    if not secret_key:
+        secret_key = secrets.token_urlsafe(32)
+        logger.warning(
+            "Dashboard SECRET_KEY not configured — generated one-time key. "
+            "Set dashboard.secret_key in config for persistence across restarts."
+        )
+    app.config["SECRET_KEY"] = secret_key
+
+    # CRIT-002: CORS — restrict to localhost by default
+    allowed_origins = config.get("cors_allowed_origins", ["http://localhost:5000", "http://127.0.0.1:5000"])
+    if isinstance(allowed_origins, str):
+        allowed_origins = [allowed_origins]
+    socketio = SocketIO(app, cors_allowed_origins=allowed_origins, async_mode="threading")
 
     global _socketio
     _socketio = socketio
+
+    # CRIT-003: Dashboard auth — simple token-based guard
+    _dashboard_password = config.get("dashboard_password")
+    if _dashboard_password:
+        @app.before_request
+        def _require_auth():
+            # Skip auth for Socket.IO handshake (auth via connection params)
+            if request.path.startswith("/socket.io"):
+                return None
+            # Skip for static health checks
+            if request.path == "/health":
+                return None
+            token = request.headers.get("X-Dashboard-Token") or request.args.get("token")
+            if not token or token != _dashboard_password:
+                abort(401)
 
     # Start background emitter
     emitter = DashboardEmitter(socketio)

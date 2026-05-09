@@ -20,7 +20,9 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -207,92 +209,121 @@ class Vault:
         self._fernet: Fernet = Fernet(self._key)
         self._entries: Dict[str, str] = {}
         self._loaded: bool = False
+        self._lock = threading.Lock()  # HIGH-005: thread-safe mutation
+
+        # HIGH-006: Register cleanup to zero key on object destruction
+        weakref.finalize(self, self._zero_key, self._key)
 
         if self._vault_path.exists():
             self._load()
         else:
             self._save()  # Create an empty encrypted vault file
 
+    @staticmethod
+    def _zero_key(key_ref: bytes) -> None:
+        """Overwrite key bytes in memory (best-effort on GC)."""
+        try:
+            for i in range(len(key_ref)):
+                key_ref[i] = 0
+        except (TypeError, IndexError):
+            pass  # bytes are immutable in Python — best effort only
+
     # -- Internal persistence ------------------------------------------------
 
     def _load(self) -> None:
         """Decrypt and load entries from the vault file on disk."""
-        if not self._vault_path.exists():
-            self._entries = {}
+        with self._lock:
+            if not self._vault_path.exists():
+                self._entries = {}
+                self._loaded = True
+                return
+
+            raw = self._vault_path.read_bytes()
+            if not raw:
+                self._entries = {}
+                self._loaded = True
+                return
+
+            try:
+                decrypted: bytes = self._fernet.decrypt(raw)
+            except InvalidToken as exc:
+                raise VaultIntegrityError(
+                    "Vault decryption failed — wrong password or corrupted data"
+                ) from exc
+
+            try:
+                payload: Dict[str, Any] = json.loads(decrypted.decode("utf-8"))
+
+                # HIGH-009: JSON depth limit to prevent DoS
+                def _check_depth(obj, depth=0):
+                    if depth > 20:
+                        raise VaultIntegrityError("Vault JSON exceeds maximum nesting depth")
+                    if isinstance(obj, dict):
+                        for v in obj.values():
+                            _check_depth(v, depth + 1)
+                    elif isinstance(obj, list):
+                        for v in obj:
+                            _check_depth(v, depth + 1)
+
+                _check_depth(payload)
+
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise VaultIntegrityError("Vault payload is not valid JSON") from exc
+
+            # Optional integrity check: stored salt must match ours when present
+            stored_salt_b64: Optional[str] = payload.get("salt")
+            if stored_salt_b64 is not None:
+                stored_salt = base64.b64decode(stored_salt_b64)
+                if stored_salt != self._salt:
+                    raise VaultIntegrityError("Vault salt mismatch — wrong password?")
+
+            entries = payload.get("entries")
+            if not isinstance(entries, dict):
+                raise VaultIntegrityError("Vault entries block is malformed")
+
+            # Validate every loaded key/value so corrupt payloads fail fast
+            for k, v in entries.items():
+                _validate_key_name(k)
+                _validate_value(v)
+
+            self._entries = {str(k): str(v) for k, v in entries.items()}
             self._loaded = True
-            return
-
-        raw = self._vault_path.read_bytes()
-        if not raw:
-            self._entries = {}
-            self._loaded = True
-            return
-
-        try:
-            decrypted: bytes = self._fernet.decrypt(raw)
-        except InvalidToken as exc:
-            raise VaultIntegrityError(
-                "Vault decryption failed — wrong password or corrupted data"
-            ) from exc
-
-        try:
-            payload: Dict[str, Any] = json.loads(decrypted.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise VaultIntegrityError("Vault payload is not valid JSON") from exc
-
-        # Optional integrity check: stored salt must match ours when present
-        stored_salt_b64: Optional[str] = payload.get("salt")
-        if stored_salt_b64 is not None:
-            stored_salt = base64.b64decode(stored_salt_b64)
-            if stored_salt != self._salt:
-                raise VaultIntegrityError("Vault salt mismatch — wrong password?")
-
-        entries = payload.get("entries")
-        if not isinstance(entries, dict):
-            raise VaultIntegrityError("Vault entries block is malformed")
-
-        # Validate every loaded key/value so corrupt payloads fail fast
-        for k, v in entries.items():
-            _validate_key_name(k)
-            _validate_value(v)
-
-        self._entries = {str(k): str(v) for k, v in entries.items()}
-        self._loaded = True
-        logger.debug("Vault loaded from %s", self._vault_path)
+            logger.debug("Vault loaded from %s", self._vault_path)
 
     def _save(self) -> None:
         """Encrypt and persist the current entries to disk (atomic write)."""
-        payload: Dict[str, Any] = {
-            "created_at": int(time.time()),
-            "entries": self._entries,
-        }
-        if self._salt:
-            payload["salt"] = base64.b64encode(self._salt).decode("ascii")
+        with self._lock:
+            payload: Dict[str, Any] = {
+                "created_at": int(time.time()),
+                "entries": self._entries,
+            }
+            if self._salt:
+                payload["salt"] = base64.b64encode(self._salt).decode("ascii")
 
-        plaintext = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
-            "utf-8"
-        )
-        encrypted: bytes = self._fernet.encrypt(plaintext)
+            plaintext = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
+                "utf-8"
+            )
+            encrypted: bytes = self._fernet.encrypt(plaintext)
 
-        # Atomic write via temp file + rename
-        self._vault_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_path = tempfile.mkstemp(
-            dir=str(self._vault_path.parent),
-            prefix=".vault_tmp_",
-        )
-        try:
-            os.write(fd, encrypted)
-            os.close(fd)
-            shutil.move(temp_path, self._vault_path)
-        except Exception:
+            # Atomic write via temp file + rename
+            self._vault_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temp_path = tempfile.mkstemp(
+                dir=str(self._vault_path.parent),
+                prefix=".vault_tmp_",
+            )
             try:
+                os.write(fd, encrypted)
                 os.close(fd)
-            except OSError:
-                pass
-            Path(temp_path).unlink(missing_ok=True)
-            raise
+                shutil.move(temp_path, self._vault_path)
+            except Exception:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                Path(temp_path).unlink(missing_ok=True)
+                raise
 
-        logger.debug("Vault saved to %s (%d entries)", self._vault_path, len(self._entries))
+            logger.debug("Vault saved to %s (%d entries)", self._vault_path, len(self._entries))
 
     # -- Public API ----------------------------------------------------------
 
@@ -309,8 +340,9 @@ class Vault:
         """
         _validate_key_name(key_name)
         _validate_value(value)
-        self._entries[key_name] = value
-        self._save()
+        with self._lock:
+            self._entries[key_name] = value
+            self._save()
 
     def retrieve(self, key_name: str, fallback_env: bool = True) -> str:
         """
@@ -343,8 +375,9 @@ class Vault:
                 f"Vault not initialised and no env fallback for '{key_name}'"
             )
 
-        if key_name in self._entries:
-            return self._entries[key_name]
+        with self._lock:
+            if key_name in self._entries:
+                return self._entries[key_name]
 
         if fallback_env:
             env_val = os.environ.get(key_name.upper().replace(".", "_"))
@@ -361,15 +394,17 @@ class Vault:
             ``True`` if the key existed and was removed, ``False`` otherwise.
         """
         _validate_key_name(key_name)
-        if key_name in self._entries:
-            del self._entries[key_name]
-            self._save()
-            return True
+        with self._lock:
+            if key_name in self._entries:
+                del self._entries[key_name]
+                self._save()
+                return True
         return False
 
     def list_keys(self) -> List[str]:
         """Return a sorted list of all key names currently stored."""
-        return sorted(self._entries.keys())
+        with self._lock:
+            return sorted(self._entries.keys())
 
     def rotate(self, new_password: Optional[str] = None) -> None:
         """
@@ -378,9 +413,10 @@ class Vault:
         This creates a fresh salt and derived key, then atomically rewrites
         the vault file. The old key is discarded.
         """
-        self._key, self._salt = _generate_master_key(new_password)
-        self._fernet = Fernet(self._key)
-        self._save()
+        with self._lock:
+            self._key, self._salt = _generate_master_key(new_password)
+            self._fernet = Fernet(self._key)
+            self._save()
         logger.info("Vault key rotated successfully")
 
     # -- Environment-variable helpers -----------------------------------------
@@ -397,16 +433,17 @@ class Vault:
             Number of keys imported.
         """
         imported = 0
-        for key_name in key_names:
-            _validate_key_name(key_name)
-            if not overwrite and key_name in self._entries:
-                continue
-            env_val = os.environ.get(key_name.upper().replace(".", "_"))
-            if env_val is not None:
-                self._entries[key_name] = env_val
-                imported += 1
-        if imported:
-            self._save()
+        with self._lock:
+            for key_name in key_names:
+                _validate_key_name(key_name)
+                if not overwrite and key_name in self._entries:
+                    continue
+                env_val = os.environ.get(key_name.upper().replace(".", "_"))
+                if env_val is not None:
+                    self._entries[key_name] = env_val
+                    imported += 1
+            if imported:
+                self._save()
         return imported
 
     def exists(self) -> bool:
@@ -415,10 +452,11 @@ class Vault:
 
 
 # ---------------------------------------------------------------------------
-# Convenience singleton (lazy)
+# Convenience singleton (lazy, thread-safe)
 # ---------------------------------------------------------------------------
 
 _vault_singleton: Optional[Vault] = None
+_vault_singleton_lock = threading.Lock()
 
 
 def get_vault(
@@ -426,18 +464,20 @@ def get_vault(
     vault_path: Optional[Union[str, Path]] = None,
 ) -> Vault:
     """
-    Return the lazily-initialised global vault instance.
+    Return the lazily-initialised global vault instance (thread-safe).
 
     Callers should pass *password* on first invocation; subsequent calls
     may omit it and receive the same instance.
     """
     global _vault_singleton
-    if _vault_singleton is None:
-        _vault_singleton = Vault(password=password, vault_path=vault_path)
-    return _vault_singleton
+    with _vault_singleton_lock:
+        if _vault_singleton is None:
+            _vault_singleton = Vault(password=password, vault_path=vault_path)
+        return _vault_singleton
 
 
 def reset_vault_singleton() -> None:
     """Clear the global vault singleton (useful in tests)."""
     global _vault_singleton
-    _vault_singleton = None
+    with _vault_singleton_lock:
+        _vault_singleton = None

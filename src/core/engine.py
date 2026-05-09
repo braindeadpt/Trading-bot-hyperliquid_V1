@@ -209,7 +209,8 @@ class TradingEngine:
         }
         self._tick_stats = {"total": 0, "per_second": 0.0, "last_tick_time": 0.0, "tick_times": []}
         self._last_error: Optional[str] = None
-        self._on_dashboard_tick: Optional[Any] = None  # callback set by main.py
+        # CRIT-004: Dashboard callback — private, only set via validated setter
+        self._on_dashboard_tick: Optional[Callable[[], Any]] = None
 
     # ── Public properties for dashboard / external access ──
     @property
@@ -231,6 +232,17 @@ class TradingEngine:
     @property
     def executor(self) -> ExecutionEngine:
         return self._executor
+
+    # CRIT-004: Validated setter for dashboard callback
+    @property
+    def on_dashboard_tick(self) -> Optional[Callable[[], Any]]:
+        return self._on_dashboard_tick
+
+    @on_dashboard_tick.setter
+    def on_dashboard_tick(self, value: Any) -> None:
+        if value is not None and not callable(value):
+            raise TypeError("on_dashboard_tick must be a callable or None")
+        self._on_dashboard_tick = value
 
     @property
     def uptime_sec(self) -> int:

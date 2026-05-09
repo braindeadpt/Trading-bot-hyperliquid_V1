@@ -375,18 +375,6 @@ class PortfolioState:
             self._daily_trades = safe_float(data.get("daily_trades"), 0.0)
             self._last_reset_date = data.get("last_reset_date", utc_now().strftime("%Y-%m-%d"))
 
-    async def from_dict(self, data: Dict[str, Any]) -> None:
-        """Restore portfolio state from a previously saved snapshot.
-
-        Used on engine startup to resume from DB state.
-        """
-        async with self._lock:
-            self._cash = safe_float(data.get("cash"), self._initial_capital)
-            self._peak_capital = safe_float(data.get("peak_capital"), self._peak_capital)
-            self._daily_pnl = safe_float(data.get("daily_pnl"), 0.0)
-            self._daily_trades = safe_float(data.get("daily_trades"), 0.0)
-            self._last_reset_date = data.get("last_reset_date", utc_now().strftime("%Y-%m-%d"))
-
             # Restore positions
             for sym, p_data in data.get("positions", {}).items():
                 snap = _PositionSnapshot(
