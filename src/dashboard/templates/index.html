@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hyperliquid Trading Bot Dashboard</title>
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js" integrity="sha384-mZLF4UVrpi/QTWPA7BjNPEfhIf0yXbjJrCRMYZciyRL6TMmCCZ8W1Z7EPWWvWqoP" crossorigin="anonymous"></script>
+<style>
+:root {
+    --bg:#0d1117; --panel:#161b22; --border:#30363d;
+    --text:#c9d1d9; --muted:#8b949e; --up:#3fb950; --down:#f85149;
+    --accent:#58a6ff; --accent2:#a371f7; --warn:#d29922;
+}
+body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg); color: var(--text);
+    margin: 0; padding: 20px;
+}
+h1 { font-size: 20px; margin: 0 0 15px; color: var(--accent); }
+.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.badge {
+    background: var(--accent); color: #fff; padding: 4px 12px;
+    border-radius: 12px; font-size: 12px; font-weight: 600;
+}
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+.panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+}
+.panel-header {
+    background: rgba(88,166,255,0.1); padding: 10px 15px;
+    font-size: 13px; font-weight: 600; color: var(--accent);
+    display: flex; justify-content: space-between; align-items: center;
+}
+.panel-body { padding: 12px 15px; font-size: 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 11px; }
+th { text-align: left; padding: 6px 4px; color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 500; }
+td { padding: 5px 4px; border-bottom: 1px solid rgba(48,54,61,0.5); }
+.num { text-align: right; font-family: 'SF Mono', monospace; }
+.up { color: var(--up); font-weight: 600; }
+.down { color: var(--down); font-weight: 600; }
+.muted { color: var(--muted); }
+.highlight { color: var(--accent2); font-weight: 600; }
+.pill {
+    display: inline-block; padding: 2px 6px; border-radius: 4px;
+    font-size: 10px; font-weight: 600;
+}
+.pill-pending { background: rgba(217,119,6,0.2); color: #d97706; }
+.pill-executed { background: rgba(59,130,246,0.2); color: #3b82f6; }
+.pill-rejected { background: rgba(239,68,68,0.2); color: #ef4444; }
+.tiny { font-size: 10px; }
+.log-entry { font-family: 'SF Mono', monospace; padding: 2px 0; border-bottom: 1px dotted var(--border); }
+.log-warn { color: var(--warn); }
+.log-error { color: var(--down); }
+#index { flex: 2; min-width: 380px; }
+</style>
+</head>
+<body>
+<div class="header">
+    <div>
+        <h1>Hyperliquid Trading Bot <span id="mode-badge" class="badge">PAPER</span></h1>
+        <div class="muted tiny" id="status-bar">Connecting...</div>
+    </div>
+    <div class="muted tiny" id="uptime-bar">Uptime: --</div>
+</div>
+
+<div class="grid">
+    <div class="panel">
+        <div class="panel-header">Portfolio <span class="dim" id="portfolio-time"></span></div>
+        <div class="panel-body">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                <div>
+                    <div class="muted tiny">Capital</div>
+                    <div id="capital-val" style="font-size: 18px; font-weight: 700;">$--</div>
+                </div>
+                <div>
+                    <div class="muted tiny">Daily PnL</div>
+                    <div id="daily-pnl-val" style="font-size: 18px; font-weight: 700;">$--</div>
+                </div>
+                <div>
+                    <div class="muted tiny">Open Positions</div>
+                    <div id="open-positions-val" style="font-size: 18px; font-weight: 700;">--</div>
+                </div>
+                <div>
+                    <div class="muted tiny">Max Drawdown</div>
+                    <div id="drawdown-val" style="font-size: 18px; font-weight: 700;">--%</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="panel-header">Market Monitor <span class="dim" id="market-time"></span></div>
+        <div class="panel-body">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                <div><span class="muted tiny">Price:</span> <span id="market-price" class="highlight">--</span></div>
+                <div><span class="muted tiny">Funding:</span> <span id="market-funding">--</span></div>
+                <div><span class="muted tiny">OI:</span> <span id="market-oi">--</span></div>
+                <div><span class="muted tiny">24h Vol:</span> <span id="market-volume">--</span></div>
+            </div>
+            <div style="margin-top: 8px;">
+                <span class="muted tiny">Strategy Signals:</span>
+                <span id="strategy-signals" class="highlight">--</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="panel-header">Engine Status</div>
+        <div class="panel-body">
+            <div id="engine-status">Waiting for engine...</div>
+        </div>
+    </div>
+</div>
+
+<div class="grid" style="margin-top: 15px;">
+    <div id="index" class="column" style="flex: 2; min-width: 380px;">
+        <div class="panel">
+            <div class="panel-header">Chart (15m) <span class="dim">Candles</span></div>
+            <div class="panel-body">
+                <div id="chart-area" style="height: 300px; background: rgba(0,0,0,0.3); border-radius: 4px; display: flex; align-items: center; justify-content: center; color: var(--muted);">Waiting for data...</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="column" style="flex: 1; min-width: 280px;">
+        <div class="panel">
+            <div class="panel-header">Signal Stream <span class="dim">Live</span></div>
+            <div class="panel-body" style="max-height: 300px; overflow-y: auto;">
+                <div id="signals-list" style="font-size: 11px;">Waiting for signals...</div>
+            </div>
+        </div>
+
+        <div class="panel" style="margin-top: 15px;">
+            <div class="panel-header">Decision Log <span class="dim">Last 20</span></div>
+            <div class="panel-body" style="max-height: 250px; overflow-y: auto;">
+                <div id="decisions-list" style="font-size: 11px;">Waiting for decisions...</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="column" style="flex: 1; min-width: 280px;">
+        <div class="panel">
+            <div class="panel-header">Strategy Monitor</div>
+            <div class="panel-body" id="strategies-panel">Waiting...</div>
+        </div>
+
+        <div class="panel" style="margin-top: 15px;">
+            <div class="panel-header">Risk Metrics</div>
+            <div class="panel-body" id="risk-panel">Waiting...</div>
+        </div>
+    </div>
+</div>
+
+<div class="grid" style="margin-top: 15px;">
+    <div class="panel">
+        <div class="panel-header">Open Positions</div>
+        <div class="panel-body">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Sym</th>
+                        <th>Side</th>
+                        <th class="num">Size</th>
+                        <th class="num">Entry</th>
+                        <th class="num">Current</th>
+                        <th class="num">PnL%</th>
+                        <th>Strat</th>
+                    </tr>
+                </thead>
+                <tbody id="positions-tbody">
+                    <tr><td colspan="7" class="muted" style="text-align:center;">No positions</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="panel-header">Trade History <span class="dim">Last 50</span></div>
+        <div class="panel-body">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Sym</th>
+                        <th>Side</th>
+                        <th class="num">Entry</th>
+                        <th class="num">Exit</th>
+                        <th class="num">PnL</th>
+                        <th class="num">PnL%</th>
+                        <th>Strat</th>
+                        <th>Reason</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="trades-tbody">
+                    <tr><td colspan="10" class="muted" style="text-align:center;">Loading trades...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="panel-header">Live Logs <span class="dim">Last 50</span></div>
+        <div class="panel-body" style="max-height: 300px; overflow-y: auto; font-size: 11px;" id="logs-container">
+            <div class="muted">Waiting for logs...</div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const socket = io();
+    let statusUpdate = {};
+
+    // ── Formatting helpers ──
+    function fmtNum(n, d=2) {
+        if (n == null) return "--";
+        return Number(n).toLocaleString("en-US", {minimumFractionDigits:d, maximumFractionDigits:d});
+    }
+    function fmtTime(ts) {
+        if (!ts) return "--";
+        return new Date(ts).toLocaleTimeString("pt-PT", {hour:"2-digit", minute:"2-digit", second:"2-digit"});
+    }
+
+    // ── Portfolio ──
+    function renderPortfolio(data) {
+        if (!data) return;
+        document.getElementById("capital-val").textContent = "$" + fmtNum(data.capital);
+        const pnl = data.daily_pnl || 0;
+        const pnlEl = document.getElementById("daily-pnl-val");
+        pnlEl.textContent = (pnl >= 0 ? "+" : "") + "$" + fmtNum(Math.abs(pnl));
+        pnlEl.className = pnl >= 0 ? "up" : "down";
+        document.getElementById("open-positions-val").textContent = data.open_positions || 0;
+        document.getElementById("drawdown-val").textContent = (data.max_drawdown || 0).toFixed(2) + "%";
+        document.getElementById("portfolio-time").textContent = fmtTime(data.timestamp_ms);
+    }
+
+    // ── Market ──
+    function renderMarket(data) {
+        if (!data) return;
+        document.getElementById("market-price").textContent = "$" + fmtNum(data.price);
+        document.getElementById("market-funding").textContent = (data.funding || 0).toFixed(4) + "%";
+        document.getElementById("market-oi").textContent = fmtNum(data.open_interest || 0, 0);
+        document.getElementById("market-volume").textContent = fmtNum(data.volume_24h || 0, 0);
+        document.getElementById("market-time").textContent = fmtTime(data.timestamp_ms);
+    }
+
+    // ── Engine ──
+    function renderEngine(data) {
+        if (!data) return;
+        const div = document.getElementById("engine-status");
+        const state = data.state || "--";
+        const uptime = data.uptime_sec || 0;
+        const uptimeStr = uptime < 60 ? uptime + "s" : Math.floor(uptime/60) + "m";
+        const trades = data.trades_today || 0;
+        const profit = data.total_profit || 0;
+        div.innerHTML = `
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                <div><span class="muted tiny">State:</span> <span class="highlight">${state.toUpperCase()}</span></div>
+                <div><span class="muted tiny">Uptime:</span> ${uptimeStr}</div>
+                <div><span class="muted tiny">Trades today:</span> ${trades}</div>
+                <div><span class="muted tiny">Total profit:</span> $${fmtNum(profit)}</div>
+            </div>
+        `;
+    }
+
+    // ── Signals ──
+    function renderSignals(data) {
+        const div = document.getElementById("signals-list");
+        if (!data || data.length === 0) {
+            div.innerHTML = '<span class="muted">No signals yet</span>';
+            return;
+        }
+        div.innerHTML = data.map(s => {
+            const time = fmtTime(s.timestamp_ms);
+            const sideClass = s.side === "long" ? "up" : "down";
+            return `<div style="padding: 4px 0; border-bottom: 1px dotted var(--border);">
+                <span class="muted tiny">${time}</span>
+                <span class="highlight">${s.symbol}</span>
+                <span class="${sideClass}">${s.side}</span>
+                <span class="muted">${s.strategy || "?"}</span>
+                <span class="muted tiny">${(s.confidence || 0).toFixed(2)}</span>
+            </div>`;
+        }).join('');
+    }
+
+    // ── Decisions ──
+    function renderDecisions(data) {
+        const div = document.getElementById("decisions-list");
+        if (!data || data.length === 0) {
+            div.innerHTML = '<span class="muted">No decisions yet</span>';
+            return;
+        }
+        div.innerHTML = data.map(d => {
+            const time = fmtTime(d.timestamp_ms);
+            const isRej = d.status === "rejected";
+            const statusClass = isRej ? "down" : d.status === "executed" ? "up" : "muted";
+            return `<div style="padding: 4px 0; border-bottom: 1px dotted var(--border);">
+                <span class="muted tiny">${time}</span>
+                <span class="highlight">${d.symbol}</span>
+                <span class="${statusClass}">${d.status}</span>
+                <span class="muted tiny">${d.reason || ""}</span>
+            </div>`;
+        }).join('');
+    }
+
+    // ── Strategies ──
+    function renderStrategies(data) {
+        const div = document.getElementById("strategies-panel");
+        if (!data || data.length === 0) {
+            div.innerHTML = '<span class="muted">No strategies</span>';
+            return;
+        }
+        div.innerHTML = data.map(s => {
+            const enabled = s.enabled !== false;
+            return `<div style="display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dotted var(--border);">
+                <span>${s.name}</span>
+                <span class="${enabled ? 'up' : 'muted'}">${enabled ? 'ON' : 'OFF'}</span>
+            </div>`;
+        }).join('');
+    }
+
+    // ── Positions ──
+    function renderPositions(data) {
+        const tbody = document.getElementById("positions-tbody");
+        if (!data || data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" class="muted" style="text-align:center;">No positions</td></tr>';
+            return;
+        }
+        tbody.innerHTML = data.map(p => {
+            const sideClass = p.side === "long" ? "up" : "down";
+            const pnl = p.pnl_pct || 0;
+            const pnlClass = pnl >= 0 ? "up" : "down";
+            return `<tr>
+                <td><span class="highlight">${p.symbol}</span></td>
+                <td class="${sideClass}">${p.side.toUpperCase()}</td>
+                <td class="num">${fmtNum(p.size)}</td>
+                <td class="num">$${fmtNum(p.entry_price)}</td>
+                <td class="num">$${fmtNum(p.current_price)}</td>
+                <td class="num ${pnlClass}">${pnl.toFixed(2)}%</td>
+                <td class="muted tiny">${p.strategy || "?"}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    // ── Trades ──
+    function renderTrades(data) {
+        const tbody = document.getElementById("trades-tbody");
+        if (!data || data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="10" class="muted" style="text-align:center;">No trades yet</td></tr>';
+            return;
+        }
+        tbody.innerHTML = data.map(t => {
+            const isOpen = t.status === "open";
+            const pnl = typeof t.pnl_usd === "number" ? t.pnl_usd : 0;
+            const pnlClass = isOpen ? "" : (pnl > 0 ? "up" : pnl < 0 ? "down" : "");
+            const sideClass = t.side === "long" ? "up" : "down";
+            const entryTime = t.entry_time ? new Date(t.entry_time).toLocaleString("pt-PT", {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"}) : "--";
+            const pnlDisplay = isOpen ? "<span class='muted'>—</span>" : ((pnl >= 0 ? "+" : "") + "$" + Math.abs(pnl).toFixed(2));
+            const pnlPctDisplay = isOpen ? "<span class='muted'>—</span>" : ((t.pnl_pct >= 0 ? "+" : "") + (t.pnl_pct || 0).toFixed(2) + "%");
+            const statusBadge = isOpen ? '<span class="pill pill-pending">OPEN</span>' : '<span class="pill pill-executed">CLOSED</span>';
+            return `<tr style="${isOpen ? 'background:rgba(0,229,255,0.03);' : ''}">
+                <td class="muted tiny">${entryTime}</td>
+                <td><span class="highlight">${t.symbol}</span></td>
+                <td class="${sideClass}">${t.side ? t.side.toUpperCase() : "--"}</td>
+                <td class="num">$${fmtNum(t.entry_price)}</td>
+                <td class="num">${t.exit_price != null ? "$" + fmtNum(t.exit_price) : "<span class='muted'>—</span>"}</td>
+                <td class="num ${pnlClass}">${pnlDisplay}</td>
+                <td class="num ${pnlClass}">${pnlPctDisplay}</td>
+                <td class="muted tiny">${t.strategy || "?"}</td>
+                <td class="muted tiny">${t.exit_reason || (isOpen ? "● Active" : "")}</td>
+                <td>${statusBadge}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    // ── Logs ──
+    function renderLogs(data) {
+        const div = document.getElementById("logs-container");
+        if (!data || data.length === 0) return;
+        div.innerHTML = data.map(l => {
+            const cls = l.includes("WARNING") ? "log-warn" : l.includes("ERROR") ? "log-error" : "";
+            return `<div class="log-entry ${cls}">${l}</div>`;
+        }).join('');
+    }
+
+    // ── Socket.IO event handlers ──
+    socket.on("connect", () => {
+        document.getElementById("status-bar").textContent = "Connected to bot";
+        document.getElementById("status-bar").className = "up tiny";
+    });
+    socket.on("disconnect", () => {
+        document.getElementById("status-bar").textContent = "Disconnected — reconnecting...";
+        document.getElementById("status-bar").className = "down tiny";
+    });
+    socket.on("status", (data) => {
+        statusUpdate = data;
+        if (data.mode) document.getElementById("mode-badge").textContent = data.mode.toUpperCase();
+    });
+    socket.on("portfolio", (data) => {
+        renderPortfolio(data);
+    });
+    socket.on("market", (data) => {
+        renderMarket(data);
+    });
+    socket.on("engine", (data) => {
+        renderEngine(data);
+    });
+    socket.on("signals", (data) => {
+        renderSignals(data);
+    });
+    socket.on("decisions", (data) => {
+        renderDecisions(data);
+    });
+    socket.on("strategies", (data) => {
+        renderStrategies(data);
+    });
+    socket.on("positions", (data) => {
+        renderPositions(data);
+    });
+    socket.on("trades", (data) => {
+        renderTrades(data);
+    });
+    socket.on("logs", (data) => {
+        renderLogs(data);
+    });
+
+    // Initial load via REST fallback
+    fetch("/api/status").then(r => r.json()).then(d => {
+        if (d.mode) document.getElementById("mode-badge").textContent = d.mode.toUpperCase();
+    });
+    fetch("/api/trades").then(r => r.json()).then(d => {
+        renderTrades(d);
+    });
+
+    // Refresh uptime display
+    setInterval(() => {
+        if (statusUpdate.uptime_sec) {
+            const s = statusUpdate.uptime_sec;
+            const str = s < 60 ? s + "s" : Math.floor(s/60) + "m " + (s%60) + "s";
+            document.getElementById("uptime-bar").textContent = "Uptime: " + str;
+        }
+    }, 5000);
+</script>
+</body>
+</html>

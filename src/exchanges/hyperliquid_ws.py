@@ -1,7 +1,12 @@
+"""Hyperliquid WebSocket client with automatic reconnect and L2 book support."""
+from __future__ import annotations
+
+import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Callable
 
 import websockets
 from websockets import Data
@@ -16,22 +21,119 @@ MAX_BACKOFF_SECONDS = 30
 RECONNECT_JITTER_MAX = 2
 HEARTBEAT_INTERVAL_SECONDS = 30
 
+
+# ---------------------------------------------------------------------------
+# Simple DataBus for intra-process pub/sub
+# ---------------------------------------------------------------------------
+
+class DataBus:
+    """Simple publish/subscribe message bus (thread-safe)."""
+
+    def __init__(self) -> None:
+        self._listeners: Dict[str, List[Callable[[Any], Any]]] = {}
+        self._lock = asyncio.Lock()
+
+    async def subscribe(self, topic: str, callback: Callable[[Any], Any]) -> None:
+        async with self._lock:
+            self._listeners.setdefault(topic, []).append(callback)
+
+    def publish(self, topic: str, data: Any) -> None:
+        listeners = self._listeners.get(topic, [])
+        for cb in listeners:
+            try:
+                if asyncio.iscoroutinefunction(cb):
+                    asyncio.create_task(cb(data))
+                else:
+                    cb(data)
+            except Exception:
+                logger.exception("DataBus callback error on %s", topic)
+
+
+# ---------------------------------------------------------------------------
+# Hyperliquid data types
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class HlPriceTick:
+    """Snapshot from Hyperliquid allMids."""
+    symbol: str
+    mid: float
+    timestamp_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class HlAssetCtx:
+    """Per-asset context from activeAssetCtxs."""
+    symbol: str
+    open_interest: float
+    funding_rate: float
+    predicted_funding: float
+    mark_price: float
+    mid_price: float = 0.0
+    timestamp_ms: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class HlTrade:
+    """Individual trade from the trades channel."""
+    symbol: str
+    side: str  # "B" buy / "S" sell
+    price: float
+    size: float
+    timestamp_ms: int
+    hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class HlL2Level:
+    """Single level in the L2 orderbook."""
+    price: float
+    size: float
+    timestamp_ms: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class HlL2Book:
+    """L2 orderbook snapshot."""
+    symbol: str
+    bids: List[HlL2Level]
+    asks: List[HlL2Level]
+    timestamp_ms: int = 0
+
+
+# Backward compatibility alias
+HlOrderbook = HlL2Book
+
+
+# ---------------------------------------------------------------------------
+# WebSocket client
+# ---------------------------------------------------------------------------
+
 class HyperliquidWSClient:
-    def __init__(self, config: Config, symbols: list, bus=None, candle_builder: Optional[Any] = None):
+    """Hyperliquid WebSocket client with auto-reconnect."""
+
+    def __init__(
+        self,
+        config: Config,
+        symbols: list,
+        bus: Optional[DataBus] = None,
+        candle_builder: Optional[Any] = None,
+    ) -> None:
         self.symbols = symbols
         self.ws_url = config.get("exchange.hyperliquid_ws_url", "wss://api.hyperliquid.xyz/ws")
         self._bus = bus
         self._candle_builder = candle_builder
-        self._ws = None
+        self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._shutdown = False
         self._connected = False
-        self._last_heartbeat = 0
+        self._last_heartbeat = 0.0
         self._backoff = INITIAL_BACKOFF_SECONDS
         self.reconnect_count = 0
         self.connected_at = 0.0
         self.messages_received = 0
 
-    async def start(self):
+    async def start(self) -> None:
+        """Main connection loop with exponential backoff reconnect."""
         while not self._shutdown:
             try:
                 logger.info("Connecting to %s", self.ws_url)
@@ -72,7 +174,8 @@ class HyperliquidWSClient:
             self._backoff = min(self._backoff * 2, MAX_BACKOFF_SECONDS)
             self.reconnect_count += 1
 
-    async def _subscribe_all(self):
+    async def _subscribe_all(self) -> None:
+        """Subscribe to all relevant channels."""
         if self._ws is None:
             return
         await self._ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "allMids"}}))
@@ -81,7 +184,8 @@ class HyperliquidWSClient:
             await self._ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "trades", "coin": sym}}))
             await self._ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "l2Book", "coin": sym}}))
 
-    async def _read_loop(self):
+    async def _read_loop(self) -> None:
+        """Read messages from the WebSocket until disconnect."""
         if self._ws is None:
             return
         logger.info("_read_loop started")
@@ -106,6 +210,7 @@ class HyperliquidWSClient:
             logger.info("WebSocket closed normally")
 
     def _on_message(self, raw: Data) -> None:
+        """Dispatch a single WebSocket message to the appropriate parser."""
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
         payload = safe_json_loads(raw)
@@ -126,7 +231,8 @@ class HyperliquidWSClient:
         else:
             logger.debug("Unknown WS channel: %s", channel)
 
-    def _parse_all_mids(self, data):
+    def _parse_all_mids(self, data: Any) -> None:
+        """Parse allMids snapshot and publish price ticks."""
         if not isinstance(data, dict):
             return
         for symbol, price_str in data.items():
@@ -137,7 +243,8 @@ class HyperliquidWSClient:
             except (ValueError, TypeError):
                 continue
 
-    def _parse_active_asset_ctx(self, data):
+    def _parse_active_asset_ctx(self, data: Any) -> None:
+        """Parse activeAssetCtx and publish funding/oi data."""
         if not isinstance(data, dict):
             return
         coin = data.get("coin")
@@ -148,7 +255,8 @@ class HyperliquidWSClient:
         open_interest = safe_float(ctx.get("openInterest"), 0.0)
         self._bus.publish(f"funding:{coin}", {"symbol": coin, "funding": funding, "open_interest": open_interest})
 
-    def _parse_trades(self, data):
+    def _parse_trades(self, data: Any) -> None:
+        """Parse trades channel and publish individual trades."""
         if not isinstance(data, list):
             return
         for trade in data:
@@ -165,15 +273,16 @@ class HyperliquidWSClient:
             except (ValueError, TypeError, KeyError):
                 continue
 
-    def _parse_l2_book(self, data):
+    def _parse_l2_book(self, data: Any) -> None:
+        """Parse L2 orderbook and publish bids/asks."""
         if not isinstance(data, dict):
             return
         coin = data.get("coin")
         if not coin:
             return
         levels = data.get("levels", [])
-        bids = []
-        asks = []
+        bids: List[Dict[str, float]] = []
+        asks: List[Dict[str, float]] = []
         if isinstance(levels, list) and len(levels) >= 2:
             for lvl in levels[0]:
                 if isinstance(lvl, dict):
@@ -183,7 +292,8 @@ class HyperliquidWSClient:
                     asks.append({"price": safe_float(lvl.get("px")), "size": safe_float(lvl.get("sz"))})
         self._bus.publish(f"l2book:{coin}", {"symbol": coin, "bids": bids, "asks": asks})
 
-    async def stop(self):
+    async def stop(self) -> None:
+        """Graceful shutdown."""
         self._shutdown = True
         if self._ws:
             await self._ws.close()

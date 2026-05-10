@@ -1078,7 +1078,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
                     <td class="muted tiny">${t.exit_reason || (isOpen ? "● Active" : "")}</td>
                     <td>${statusBadge}</td>
                 </tr>`;
-            }).join("");
+            }).join('');
         }
         socket.on("trades", (data) => {
             renderTrades(data);
