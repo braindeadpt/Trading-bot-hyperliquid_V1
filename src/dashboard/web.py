@@ -1286,6 +1286,31 @@ def create_app(config: Dict[str, Any]) -> tuple:
         except Exception:
             return jsonify([])
 
+    @app.route("/api/metrics")
+    def api_metrics():
+        db = _get_db()
+        since_ms = int((time.time() - 30 * 86400) * 1000)
+        strategy_metrics = db.get_metrics_by_strategy(since_ms)
+        daily_pnl = db.get_daily_pnl_series(30)
+
+        # Overall metrics
+        total_trades = sum(m["total_trades"] for m in strategy_metrics.values())
+        total_wins = sum(m["wins"] for m in strategy_metrics.values())
+        total_pnl = sum(m["total_pnl"] for m in strategy_metrics.values())
+        overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
+
+        return jsonify(
+            {
+                "overall": {
+                    "total_trades": total_trades,
+                    "win_rate": round(overall_win_rate, 2),
+                    "total_pnl": round(total_pnl, 2),
+                },
+                "strategies": strategy_metrics,
+                "daily_pnl": daily_pnl,
+            }
+        )
+
     @app.route("/api/logs")
     def api_logs():
         # HIGH-010: Path validation — prevent directory traversal
