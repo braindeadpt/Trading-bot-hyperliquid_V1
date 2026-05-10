@@ -114,13 +114,19 @@ class HyperliquidWSClient:
 
     def __init__(
         self,
-        config: Config,
-        symbols: list,
+        config: Optional[Config] = None,
+        symbols: list = None,
         bus: Optional[DataBus] = None,
         candle_builder: Optional[Any] = None,
+        ws_url: Optional[str] = None,
     ) -> None:
-        self.symbols = symbols
-        self.ws_url = config.get("exchange.hyperliquid_ws_url", "wss://api.hyperliquid.xyz/ws")
+        self.symbols = symbols or []
+        if ws_url is not None:
+            self.ws_url = ws_url
+        elif config is not None:
+            self.ws_url = config.get("exchange.hyperliquid_ws_url", "wss://api.hyperliquid.xyz/ws")
+        else:
+            self.ws_url = "wss://api.hyperliquid.xyz/ws"
         self._bus = bus
         self._candle_builder = candle_builder
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
