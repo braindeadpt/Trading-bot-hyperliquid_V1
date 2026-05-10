@@ -37,6 +37,7 @@ INITIAL_BACKOFF_SECONDS = 1.0
 MAX_BACKOFF_SECONDS = 60.0
 RECONNECT_JITTER_MAX = 1.0
 HEARTBEAT_INTERVAL_SECONDS = 30.0
+MAX_RECONNECT_ATTEMPTS = 20  # Alert after this many consecutive failures
 
 Data = Union[str, bytes]
 
@@ -202,10 +203,16 @@ class HyperliquidWSClient:
                 return
             jitter = (asyncio.get_event_loop().time() % 1) * RECONNECT_JITTER_MAX
             wait = min(self._backoff + jitter, MAX_BACKOFF_SECONDS)
+            self.reconnect_count += 1
+            if self.reconnect_count >= MAX_RECONNECT_ATTEMPTS:
+                logger.error("WS reconnect exceeded max attempts (%d) — giving up. Manual restart required.", MAX_RECONNECT_ATTEMPTS)
+                # TODO: send Telegram/Discord alert here
+                return
+            if self.reconnect_count % 5 == 0:
+                logger.warning("WS reconnect attempt #%d/%d — possible network issue", self.reconnect_count, MAX_RECONNECT_ATTEMPTS)
             logger.info("Reconnecting in %.1fs (attempt #%d)", wait, self.reconnect_count)
             await asyncio.sleep(wait)
             self._backoff = min(self._backoff * 2, MAX_BACKOFF_SECONDS)
-            self.reconnect_count += 1
 
     async def _subscribe_all(self) -> None:
         """Subscribe to all relevant channels."""
@@ -319,7 +326,7 @@ class HyperliquidWSClient:
         else:
             logger.debug("Unexpected allMids data type: %s", type(data).__name__)
         if count > 0:
-            logger.info("Parsed allMids: %d prices published", count)
+            logger.debug("Parsed allMids: %d prices published", count)
 
     def _parse_active_asset_ctx(self, data: Any) -> None:
         """Parse active asset context (mark, index, funding, OI)."""
