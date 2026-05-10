@@ -289,11 +289,9 @@ class CandleBuilder:
     def _store_and_emit(self, candle: Candle) -> None:
         key = (candle.symbol, candle.timeframe_s)
         self._history.setdefault(key, deque(maxlen=self.ring_size)).append(candle)
-        asyncio.create_task(
-            self.bus.publish(
-                f"candle_complete:{candle.timeframe_s}:{candle.symbol}",
-                candle,
-            )
+        self.bus.publish(
+            f"candle_complete:{candle.timeframe_s}:{candle.symbol}",
+            candle,
         )
         logger.debug(
             "Candle complete %s %dm O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f",

@@ -162,6 +162,9 @@ class TradingEngine:
         # Track which topics we subscribed to so we can unsubscribe on stop
         self._subscribed_callbacks: Dict[str, Any] = {}
 
+        # Dashboard task references (prevent Python 3.14 deallocation crash)
+        self._dashboard_tasks: set = set()
+
         # ── Latest orderbook per symbol ──
         self._latest_orderbook: Dict[str, OrderbookMetrics] = {}
         self._latest_orderbook_raw: Dict[str, Any] = {}  # HlOrderbook
@@ -522,7 +525,9 @@ class TradingEngine:
                 try:
                     cb = self._on_dashboard_tick
                     if asyncio.iscoroutinefunction(cb):
-                        asyncio.create_task(cb())
+                        task = asyncio.create_task(cb())
+                        self._dashboard_tasks.add(task)
+                        task.add_done_callback(self._dashboard_tasks.discard)
                     else:
                         cb()
                 except Exception:

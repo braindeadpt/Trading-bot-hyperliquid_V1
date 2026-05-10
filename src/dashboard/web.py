@@ -822,7 +822,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
         </div>
     </div>
 
-    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js" integrity="sha384-mZLF4UVrpi/QTWPA7BjNPEfhIf0yXbjJrCRMYZciyRL6TMmCCZ8W1Z7EPWWvWqoP" crossorigin="anonymous"></script>
+    <script src="/socket.io.min.js"></script>
     <script>
         const socket = io();
 
@@ -1313,6 +1313,17 @@ def create_app(config: Dict[str, Any]) -> tuple:
         except Exception:
             pass
         return jsonify(entries)
+
+    # Serve socket.io.min.js locally (avoids CDN / SRI issues in sandboxed browsers)
+    @app.route("/socket.io.min.js")
+    def serve_socket_io_js():
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        js_path = os.path.join(project_root, "socket.io.min.js")
+        if os.path.exists(js_path):
+            with open(js_path, "rb") as f:
+                from flask import Response
+                return Response(f.read(), mimetype="application/javascript")
+        abort(404)
 
     # ── Socket.IO events ──
 

@@ -313,18 +313,19 @@ async def main() -> None:
     # Load open trades from DB into executor + portfolio
     open_trades = db.get_open_trades()
     if open_trades:
-        executor.load_open_trades(open_trades, portfolio)
+        await executor.load_open_trades()
         logger.info(f"Recovered {len(open_trades)} open trades from DB")
 
     # -----------------------------------------------------------------------
     # 8. Start data pipeline (WS + CandleBuilder BEFORE engine)
     # -----------------------------------------------------------------------
-    await hl_ws.start()
-    logger.info("Hyperliquid WebSocket connected")
+    # Run WS clients as background tasks (Python 3.14 work-around)
+    hl_ws_task = asyncio.create_task(hl_ws.start())
+    logger.info("Hyperliquid WebSocket task started")
 
     if binance_ws is not None:
-        await binance_ws.start()
-        logger.info("Binance WebSocket connected")
+        binance_ws_task = asyncio.create_task(binance_ws.start())
+        logger.info("Binance WebSocket task started")
 
     await candle_builder.start()
     logger.info("CandleBuilder started")
@@ -375,7 +376,7 @@ async def main() -> None:
                 port=dashboard_cfg["port"],
                 debug=False,
                 use_reloader=False,
-                # Removed: allow_unsafe_werkzeug=True  (HIGH-002)
+                allow_unsafe_werkzeug=True,  # Required for local/paper mode (not production)
             )
 
         dashboard_thread = threading.Thread(target=_run_dashboard, daemon=True)
@@ -408,9 +409,13 @@ async def main() -> None:
         if candle_builder is not None:
             await candle_builder.stop()
         if hl_ws is not None:
-            await hl_ws.stop()
+            hl_ws._shutdown = True
+            if hl_ws._ws:
+                await hl_ws._ws.close()
         if binance_ws is not None:
-            await binance_ws.stop()
+            binance_ws._shutdown = True
+            if binance_ws._ws:
+                await binance_ws._ws.close()
         logger.info("Bot stopped.")
 
 

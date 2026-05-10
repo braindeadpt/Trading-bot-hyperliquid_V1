@@ -33,6 +33,26 @@ Bot de trading automatizado para Hyperliquid com arquitetura modular, dashboard 
 
 ---
 
+## Changelog — 2026-05-10
+
+### Bug Fixes (API parsers + WebSocket + Dashboard)
+
+| # | Problema | Correção | Ficheiro |
+|---|---|---|---|
+| 1 | **allMids parser errado** — iterava sobre `{"mids": {"BTC": "..."}}` em vez de extrair `data["mids"]` | Extrair `data["mids"]` antes de iterar | `src/exchanges/hyperliquid_ws.py` |
+| 2 | **activeAssetCtx parser errado** — lia campos do dict exterior em vez de `data["ctx"]` | Usar `ctx_data = data.get("ctx", data)` | `src/exchanges/hyperliquid_ws.py` |
+| 3 | **l2Book parser errado** — procurava `data["bids"]` mas API envia `data["levels"]` | Parse `levels[0]`/`levels[1]` com `HlLevel` | `src/exchanges/hyperliquid_ws.py` |
+| 4 | **l2Book tópico errado** — publicava em `book:` mas engine subscrevia `orderbook:` | Alterar para `orderbook:{symbol}` | `src/exchanges/hyperliquid_ws.py` |
+| 5 | **HlL2Book datatype** — usava `List[Tuple[float,float]]` mas engine esperava `.price`/`.size` | Criar `HlLevel` dataclass com `price`/`size` | `src/exchanges/hyperliquid_ws.py` |
+| 6 | **WebSockets desativados** — `hl_ws.start()` e `binance_ws.start()` comentados | Descomentar e usar `asyncio.create_task()` | `main.py` |
+| 7 | **Dashboard crashava** — `allow_unsafe_werkzeug` removido causava `RuntimeError` | Restaurar `allow_unsafe_werkzeug=True` (paper only) | `main.py` |
+| 8 | **Socket.IO CDN bloqueado** — hash SRI errado impedia carregamento do script | Servir `socket.io.min.js` localmente via Flask route | `src/dashboard/web.py` |
+| 9 | **load_open_trades** — chamado com argumentos `(open_trades, portfolio)` mas método não os aceita | Chamar `await executor.load_open_trades()` sem args | `main.py` |
+
+**Resultado:** Bot paper trading funcional — dashboard recebe dados em tempo real, engine processa ticks, estratégias operacionais após acumulação de histórico de candles.
+
+---
+
 ## Estrutura do Repositório
 
 ```
