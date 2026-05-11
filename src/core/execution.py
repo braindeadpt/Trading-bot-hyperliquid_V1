@@ -98,6 +98,12 @@ class ExecutionEngine:
         self._open_trades: Dict[str, TradeResult] = {}
         self._lock = asyncio.Lock()
 
+        # Entry debounce: symbol → timestamp_ms (prevent rapid re-entry)
+        self._last_entry_ms: Dict[str, int] = {}
+        self._entry_debounce_ms: int = int(
+            config.get("execution.entry_debounce_ms", 5_000)
+        )  # 5s default
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -137,6 +143,33 @@ class ExecutionEngine:
         Returns a :class:`TradeResult` in all cases.
         """
         now_ms = utc_timestamp_ms()
+
+        # --- Debounce: prevent rapid re-entry for same symbol ---
+        last_entry = self._last_entry_ms.get(signal.symbol, 0)
+        if now_ms - last_entry < self._entry_debounce_ms:
+            logger.warning(
+                "enter_position REJECTED %s — debounce active (%d ms remaining)",
+                signal.symbol,
+                self._entry_debounce_ms - (now_ms - last_entry),
+            )
+            raise ValueError(
+                f"Entry debounce active for {signal.symbol}: "
+                f"wait {self._entry_debounce_ms - (now_ms - last_entry)}ms"
+            )
+
+        # --- Check if already have open trade for this symbol ---
+        async with self._lock:
+            if signal.symbol in self._open_trades:
+                logger.warning(
+                    "enter_position REJECTED %s — already have open trade (id=%d)",
+                    signal.symbol,
+                    self._open_trades[signal.symbol].trade_id,
+                )
+                raise ValueError(
+                    f"Already have open trade for {signal.symbol}: "
+                    f"id={self._open_trades[signal.symbol].trade_id}"
+                )
+
         raw_price = safe_float(signal.entry_price)
         if raw_price <= 0.0:
             logger.error("enter_position: invalid price %.4f for %s", raw_price, signal.symbol)
@@ -192,6 +225,7 @@ class ExecutionEngine:
 
         async with self._lock:
             self._open_trades[signal.symbol] = result
+            self._last_entry_ms[signal.symbol] = now_ms
 
         logger.info(
             "ENTER  mode=%s id=%d %s %s size=%.6f @ %.4f (slippage=%.4f%%) fee=$%.2f (%s)",

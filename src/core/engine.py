@@ -194,6 +194,17 @@ class TradingEngine:
 
         # Circuit-breaker alert state (notify once per trip)
         self._circuit_breaker_notified: bool = False
+
+        # Minimum hold time before evaluating exits (prevent 0s exits)
+        self._min_hold_time_ms: int = int(
+            config.get("engine.min_hold_time_ms", 30_000)
+        )  # 30s default
+
+        # Per-symbol entry debounce (prevent duplicate entries)
+        self._last_entry_signal_ms: Dict[str, int] = {}
+        self._entry_signal_debounce_ms: int = int(
+            config.get("engine.entry_signal_debounce_ms", 5_000)
+        )  # 5s default
         self._last_market_events: Dict[str, Dict] = {}
         self._signal_history: List[Dict] = []
         self._decision_history: List[Dict] = []
@@ -592,22 +603,32 @@ class TradingEngine:
             if position is not None:
                 # Only the strategy that opened the position can suggest exits
                 position_strategy = position.metadata.get("strategy") if position.metadata else None
-                for strategy in self._strategies:
-                    if not getattr(strategy, "enabled", True):
-                        continue
-                    # Skip if another strategy opened this position
-                    if position_strategy is not None and position_strategy != strategy.name:
-                        continue
-                    try:
-                        exit_sig = strategy.on_position(position, event)
-                        if exit_sig is not None:
-                            await self._process_exit_signal(exit_sig, position)
-                            exit_triggered = True
-                            break  # One exit signal is enough
-                    except Exception as exc:
-                        logger.exception(
-                            "Strategy %s exit error on %s: %s", strategy.name, symbol, exc
-                        )
+
+                # Enforce minimum hold time before any exit evaluation
+                hold_time_ms = event.timestamp_ms - position.entry_time_ms
+                if hold_time_ms < self._min_hold_time_ms:
+                    logger.debug(
+                        "EXIT SKIP %s — hold_time=%dms < min=%dms",
+                        symbol, hold_time_ms, self._min_hold_time_ms,
+                    )
+                else:
+                    for strategy in self._strategies:
+                        if not getattr(strategy, "enabled", True):
+                            continue
+                        # Skip if another strategy opened this position
+                        # If position_strategy is None, NO strategy can exit (safety)
+                        if position_strategy != strategy.name:
+                            continue
+                        try:
+                            exit_sig = strategy.on_position(position, event)
+                            if exit_sig is not None:
+                                await self._process_exit_signal(exit_sig, position)
+                                exit_triggered = True
+                                break  # One exit signal is enough
+                        except Exception as exc:
+                            logger.exception(
+                                "Strategy %s exit error on %s: %s", strategy.name, symbol, exc
+                            )
 
             # --- 3. Stop-loss / take-profit hard exits ---
             if not exit_triggered:
@@ -1087,6 +1108,18 @@ class TradingEngine:
 
     async def _process_entry_signal(self, signal: Signal, event: MarketEvent) -> None:
         """Gate an entry signal through risk management and execute if approved."""
+
+        # --- Engine-level entry debounce (prevent duplicate signals) ---
+        last_sig_ms = self._last_entry_signal_ms.get(signal.symbol, 0)
+        if event.timestamp_ms - last_sig_ms < self._entry_signal_debounce_ms:
+            logger.warning(
+                "Signal DEBOUNCED %s %s — last entry was %dms ago (min %dms)",
+                signal.symbol, signal.side,
+                event.timestamp_ms - last_sig_ms,
+                self._entry_signal_debounce_ms,
+            )
+            return
+
         # Save signal to DB for audit trail
         self._db.save_signal(
             SignalRecord(
@@ -1419,9 +1452,17 @@ class TradingEngine:
             stop_loss_price=stop_loss_price,
             take_profit_price=take_profit_price,
             unrealized_pnl=0.0,
-            metadata={"strategy": signal.strategy, "trade_id": result.trade_id},
+            metadata={
+                "strategy": signal.strategy,
+                "trade_id": result.trade_id,
+                "stop_loss_pct": stop_distance_pct,
+                "entry_price": result.entry_price,
+            },
         )
         await self._portfolio.add_position(position, cost=total_cost)
+
+        # --- Record entry timestamp for debounce ---
+        self._last_entry_signal_ms[signal.symbol] = result.timestamp_ms
 
         # --- Update cooldown state on entry (Task 2.4) ---
         self._update_cooldown_on_entry(signal.strategy, signal.symbol, event)

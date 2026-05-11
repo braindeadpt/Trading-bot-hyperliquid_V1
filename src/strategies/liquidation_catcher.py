@@ -68,7 +68,7 @@ class LiquidationCatcher(Strategy):
         self.MAX_SIZE_PCT = cfg.get("max_size_pct", 0.01)     # 1% max
         # Risk
         self.STOP_ATR_MULT = cfg.get("stop_loss_atr_multiplier", 1.0)  # tight stop
-        self.MAX_HOLD_MINUTES = cfg.get("max_hold_minutes", 30)
+        self.MAX_HOLD_MINUTES = cfg.get("max_hold_minutes", 60)  # 60min default (was 30)
         self.MAX_HOLD_MS = self.MAX_HOLD_MINUTES * 60_000
         self.TAKE_PROFIT_R = cfg.get("take_profit_r", 2.0)  # 2R = 2x risk
         # Confidence
@@ -234,16 +234,19 @@ class LiquidationCatcher(Strategy):
                 reason=f"max_hold_{self.MAX_HOLD_MINUTES}min",
             )
 
+        # Use the ATR-based stop that was calculated at entry (stored in metadata)
+        # Fallback to 1% default if not available
+        sl_pct = position.metadata.get("stop_loss_pct", 0.01)
+        if sl_pct is None or sl_pct <= 0:
+            sl_pct = 0.01
+
         # 2R take profit check
         entry = position.entry_price
         current = event.price
         if entry > 0 and current > 0:
-            # Use the ATR-based stop that was calculated at entry
-            # Default to 1% if not available
-            sl_pct = 0.01
+            tp_pct = sl_pct * self.TAKE_PROFIT_R
             if position.side == "long":
                 pnl_pct = (current - entry) / entry
-                tp_pct = sl_pct * self.TAKE_PROFIT_R
                 if pnl_pct >= tp_pct:
                     return ExitSignal(
                         strategy=self.name,
@@ -254,7 +257,6 @@ class LiquidationCatcher(Strategy):
                     )
             else:
                 pnl_pct = (entry - current) / entry
-                tp_pct = sl_pct * self.TAKE_PROFIT_R
                 if pnl_pct >= tp_pct:
                     return ExitSignal(
                         strategy=self.name,
