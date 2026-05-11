@@ -73,6 +73,7 @@ class TradingEngine:
         strategies: List[Strategy],
         risk_manager: RiskManager,
         executor: ExecutionEngine,
+        notifier: Optional[Any] = None,
     ) -> None:
         self._config = config
         self._db = db
@@ -80,6 +81,7 @@ class TradingEngine:
         self._strategies = list(strategies)
         self._risk = risk_manager
         self._executor = executor
+        self._notifier = notifier
 
         # ── Kelly Criterion sizer (Task 4.4) ──
         kelly_cfg = config.get("kelly", {})
@@ -190,7 +192,8 @@ class TradingEngine:
         # ── Trailing stop management ──
         self._trailing_data: Dict[str, Dict] = {}  # symbol -> trailing stop state
 
-        # ── Dashboard tracking (real-time introspection) ──
+        # Circuit-breaker alert state (notify once per trip)
+        self._circuit_breaker_notified: bool = False
         self._last_market_events: Dict[str, Dict] = {}
         self._signal_history: List[Dict] = []
         self._decision_history: List[Dict] = []
@@ -474,6 +477,16 @@ class TradingEngine:
         async with self._event_lock:
             if not self._running:
                 return
+
+            # --- Circuit breaker alert (notify once per trip) ---
+            if self._notifier is not None:
+                cb_tripped = self._risk.is_circuit_breaker_tripped()
+                if cb_tripped and not self._circuit_breaker_notified:
+                    self._circuit_breaker_notified = True
+                    reason = getattr(self._risk, '_circuit_breaker_reason', 'unknown')
+                    await self._notifier.circuit_breaker(reason=reason, action='Trading halted')
+                elif not cb_tripped and self._circuit_breaker_notified:
+                    self._circuit_breaker_notified = False
 
             # --- Build MarketEvent ---
             event = self._build_market_event(symbol)
@@ -1422,6 +1435,16 @@ class TradingEngine:
             result.trade_id,
         )
 
+        # --- Notify trade entry ---
+        if self._notifier is not None:
+            await self._notifier.trade_entry(
+                symbol=signal.symbol,
+                side=signal.side,
+                size=result.size,
+                price=result.entry_price,
+                strategy=signal.strategy,
+            )
+
     async def _process_exit_signal(self, exit_signal: ExitSignal, position: Position) -> None:
         """Execute a strategy-driven exit."""
         last_price = self._latest_price.get(position.symbol)
@@ -1528,6 +1551,16 @@ class TradingEngine:
             result.pnl_pct * 100.0,
             reason,
         )
+
+        # --- Notify trade exit ---
+        if self._notifier is not None:
+            await self._notifier.trade_exit(
+                symbol=position.symbol,
+                side=position.side,
+                pnl=result.pnl_usd,
+                exit_price=result.exit_price if hasattr(result, 'exit_price') else result.entry_price,
+                strategy=position.metadata.get("strategy", "unknown"),
+            )
 
     # ------------------------------------------------------------------
     # State persistence

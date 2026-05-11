@@ -62,6 +62,8 @@ from core.risk_manager import RiskManager
 from core.execution import ExecutionEngine
 from core.engine import TradingEngine
 
+from alerts.notifier import AlertNotifier, AlertConfig
+
 from dashboard.web import create_app as create_dashboard
 
 # ---------------------------------------------------------------------------
@@ -299,9 +301,21 @@ async def main() -> None:
         await portfolio.from_dict(last_snapshot)
         logger.info(f"Recovered portfolio from DB: capital={portfolio.sync_capital():.2f}")
 
+    # Alert notifier (telegram / discord)
+    alert_cfg = AlertConfig(
+        enabled=cfg.get("alerts.enabled", False),
+        telegram_bot_token=cfg.get("alerts.telegram_bot_token"),
+        telegram_chat_id=cfg.get("alerts.telegram_chat_id"),
+        discord_webhook_url=cfg.get("alerts.discord_webhook_url"),
+        min_level=cfg.get("alerts.min_level", "info"),
+    )
+    notifier = AlertNotifier(alert_cfg)
+    logger.info("AlertNotifier ready (enabled=%s)", alert_cfg.enabled)
+
     risk_mgr = RiskManager(
         config=cfg,
         db=db,
+        notifier=notifier,
     )
 
     executor = ExecutionEngine(
@@ -340,6 +354,7 @@ async def main() -> None:
         strategies=strategies,
         risk_manager=risk_mgr,
         executor=executor,
+        notifier=notifier,
     )
     global _engine
     _engine = engine
@@ -416,6 +431,8 @@ async def main() -> None:
             binance_ws._shutdown = True
             if binance_ws._ws:
                 await binance_ws._ws.close()
+        if notifier is not None:
+            await notifier.close()
         logger.info("Bot stopped.")
 
 
@@ -438,4 +455,10 @@ if __name__ == "__main__":
         traceback.print_exc()
         print(f"\n[FATAL] {e}", file=sys.stderr)
         print(f"\n[DEBUG] Full traceback saved to logs/fatal_errors.log", file=sys.stderr)
+        # Notify fatal error (best-effort, may fail if event loop is broken)
+        try:
+            if 'notifier' in locals() and notifier is not None:
+                asyncio.run(notifier.error(f"FATAL ERROR: {e}\n{tb[:500]}"))
+        except Exception:
+            pass
         sys.exit(1)

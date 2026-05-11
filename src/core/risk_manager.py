@@ -49,7 +49,7 @@ class RiskManager:
     MAX_SECTOR_EXPOSURE_PCT: float = 0.30      # 4.2: max 30% in crypto (if mixed assets)
     DAILY_DRAWDOWN_CIRCUIT_PCT: float = 0.05   # 4.3: daily drawdown > 5% = stop
 
-    def __init__(self, config: Config, db: Any) -> None:
+    def __init__(self, config: Config, db: Any, notifier: Any = None) -> None:
         """Initialise with config overrides and DB reference.
 
         The *db* reference is kept for future persistence of risk metrics;
@@ -57,6 +57,7 @@ it is not used directly in the current implementation.
         """
         self._config = config
         self._db = db
+        self._notifier = notifier
 
         # Allow config overrides (e.g. backtest tuning)
         self._max_total_positions = int(
@@ -379,6 +380,15 @@ it is not used directly in the current implementation.
         self._circuit_breaker_reason = reason
         self._circuit_breaker_date = utc_now().strftime("%Y-%m-%d")
         logger.error("CIRCUIT BREAKER TRIPPED: %s", reason)
+        # Notify via alert system (best-effort)
+        if self._notifier is not None:
+            try:
+                import asyncio
+                asyncio.create_task(
+                    self._notifier.circuit_breaker(reason=reason, action="Trading halted")
+                )
+            except Exception:
+                pass
 
     def is_circuit_breaker_tripped(self) -> bool:
         """Return True if the circuit breaker is currently active.
