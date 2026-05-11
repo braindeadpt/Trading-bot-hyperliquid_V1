@@ -12,7 +12,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from src.data.database import (
     Database,
@@ -560,6 +560,16 @@ class TradingEngine:
             # --- Update portfolio prices (triggers unrealized PnL) ---
             await self._portfolio.update_price(symbol, event.price)
 
+            # --- Drawdown circuit breaker check (every price tick) ---
+            max_dd = await self._portfolio.get_max_drawdown()
+            if self._risk.check_drawdown(max_dd):
+                logger.critical(
+                    "DRAWDOWN CIRCUIT BREAKER TRIPPED at %.2f%% — halting new entries",
+                    max_dd * 100.0,
+                )
+                # Flatten all open positions immediately
+                await self._flatten_all_positions(event.price)
+
             # --- Update executor price tracking ---
             await self._executor.update_position_prices({symbol: event.price})
 
@@ -954,10 +964,19 @@ class TradingEngine:
         # Check if we have funding for all symbols
         missing = [sym for sym in self._symbols if sym not in self._latest_funding]
         if missing:
-            logger.debug(
+            logger.info(
                 "FundingArbitrage scan skipped — missing funding for %s", missing,
             )
             return
+
+        # Guard: don't re-enter while a pair is active
+        if arb_strategy._active_pair is not None:
+            logger.debug(
+                "FundingArbitrage scan skipped — active pair %s", arb_strategy._active_pair,
+            )
+            return
+
+        logger.info("FundingArbitrage scan starting — symbols=%s", self._symbols)
 
         # Scan for pair opportunity
         pair = arb_strategy.scan_pair_opportunity(
@@ -966,12 +985,36 @@ class TradingEngine:
             timestamp_ms=now,
         )
         if pair is None:
+            logger.info("FundingArbitrage scan — no pair opportunity found")
             return
 
         long_sig, short_sig = pair
+        logger.info(
+            "FundingArbitrage PAIR selected — LONG %s @ %.2f, SHORT %s @ %.2f, spread=%.4f%%",
+            long_sig.symbol,
+            self._latest_price.get(long_sig.symbol, type('P', (), {'mid': 0.0})()).mid,
+            short_sig.symbol,
+            self._latest_price.get(short_sig.symbol, type('P', (), {'mid': 0.0})()).mid,
+            (short_sig.metadata.get("funding", 0) - long_sig.metadata.get("funding", 0)) * 100,
+        )
 
         # Process both legs through the full pipeline
+        # Use the correct price for each leg to avoid wrong entry_price
         for sig in (long_sig, short_sig):
+            tick = self._latest_price.get(sig.symbol)
+            if tick is not None:
+                sig = Signal(
+                    strategy=sig.strategy,
+                    symbol=sig.symbol,
+                    side=sig.side,
+                    confidence=sig.confidence,
+                    size_pct=sig.size_pct,
+                    entry_price=tick.mid,
+                    stop_loss_pct=sig.stop_loss_pct,
+                    take_profit_pct=sig.take_profit_pct,
+                    reason=sig.reason,
+                    metadata=sig.metadata,
+                )
             await self._process_entry_signal(sig, event)
 
     # ------------------------------------------------------------------
@@ -1556,6 +1599,14 @@ class TradingEngine:
 
         # --- Update strategy stats on exit (Task 5.3) ---
         strategy = position.metadata.get("strategy", "unknown")
+
+        # Clear FundingArbitrage active pair when any leg closes
+        if strategy == "FundingArbitrage":
+            for s in self._strategies:
+                if s.name == "FundingArbitrage":
+                    s.clear_active_pair()
+                    break
+
         strat_stats = self._strategy_stats.get(strategy)
         if strat_stats:
             if result.pnl_pct > 0:
@@ -1603,6 +1654,18 @@ class TradingEngine:
                 strategy=position.metadata.get("strategy", "unknown"),
             )
 
+    async def _flatten_all_positions(self, current_price: float) -> None:
+        """Emergency liquidation of all open positions (circuit breaker)."""
+        positions = await self._portfolio.positions
+        if not positions:
+            return
+        logger.critical("FLATTENING %d position(s) due to circuit breaker", len(positions))
+        for pos in positions.values():
+            try:
+                await self._execute_exit(pos, current_price, reason="circuit_breaker_drawdown")
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Flatten failed for %s: %s", pos.symbol, exc)
+
     # ------------------------------------------------------------------
     # State persistence
     # ------------------------------------------------------------------
@@ -1622,6 +1685,8 @@ class TradingEngine:
                 await self._portfolio.from_dict({
                     "cash": snap["capital"],
                     "peak_capital": snap.get("peak_capital", snap["capital"]),
+                    "daily_peak_capital": snap.get("daily_peak_capital", snap["capital"]),
+                    "initial_capital": snap.get("initial_capital", snap["capital"]),
                     "daily_pnl": snap["daily_pnl"],
                     "positions": positions_data,
                 })

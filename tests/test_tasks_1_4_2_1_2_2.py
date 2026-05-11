@@ -13,7 +13,8 @@ sys.path.insert(0, r"C:\Users\Braindead\Documents\trading-bot-hyperliquid")
 from src.strategies.base import MarketEvent, Signal
 from src.strategies.indicators import Candle, calculate_adx, calculate_rsi
 from src.data.orderbook_metrics import estimate_slippage, calculate_fill_ratio, PriceLevel
-from src.exchanges.hyperliquid_ws import HlOrderbook, HlPriceLevel
+# HlOrderbook and HlPriceLevel removed — they no longer exist in the codebase.
+# Use src.data.orderbook_metrics.PriceLevel if needed.
 from src.strategies.trend_follow import TrendFollow
 from src.strategies.mean_reversion import MeanReversion
 from datetime import datetime, timezone

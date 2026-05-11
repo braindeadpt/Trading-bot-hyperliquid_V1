@@ -163,6 +163,13 @@ class FundingArbitrage(Strategy):
     # Pair scan (called externally by engine or manually)
     # ------------------------------------------------------------------
 
+    def clear_active_pair(self) -> None:
+        """Clear the active pair state so new scans can proceed."""
+        if self._active_pair is not None:
+            logger.info("FundingArbitrage active pair %s cleared", self._active_pair)
+        self._active_pair = None
+        self._pair_entry_ms = 0
+
     def scan_pair_opportunity(
         self,
         funding_map: Dict[str, float],  # symbol -> funding
@@ -176,7 +183,15 @@ class FundingArbitrage(Strategy):
         This method is designed to be called by the engine after
         collecting funding data from all symbols.
         """
+        if self._active_pair is not None:
+            logger.debug(
+                "FundingArbitrage scan skipped — active pair %s still open",
+                self._active_pair,
+            )
+            return None
+
         if len(funding_map) < 2:
+            logger.debug("FundingArbitrage scan skipped — need >=2 symbols, got %d", len(funding_map))
             return None
 
         # Sort by funding
@@ -190,22 +205,23 @@ class FundingArbitrage(Strategy):
         # Check spread
         spread = short_funding - long_funding
         if spread < self.MIN_FUNDING_SPREAD:
-            logger.debug(
-                "Funding spread %.4f%% < threshold %.4f%% — no arb",
+            logger.info(
+                "FundingArbitrage scan — spread %.4f%% < threshold %.4f%% (long=%s %.4f%%, short=%s %.4f%%)",
                 spread * 100, self.MIN_FUNDING_SPREAD * 100,
+                long_sym, long_funding * 100, short_sym, short_funding * 100,
             )
             return None
 
         # Check individual extremes
         if abs(long_funding) < self.MIN_INDIVIDUAL_FUNDING:
-            logger.debug(
-                "Long leg %s funding %.4f%% < min %.4f%%",
+            logger.info(
+                "FundingArbitrage scan — long leg %s funding %.4f%% < min %.4f%%",
                 long_sym, long_funding * 100, self.MIN_INDIVIDUAL_FUNDING * 100,
             )
             return None
         if abs(short_funding) < self.MIN_INDIVIDUAL_FUNDING:
-            logger.debug(
-                "Short leg %s funding %.4f%% < min %.4f%%",
+            logger.info(
+                "FundingArbitrage scan — short leg %s funding %.4f%% < min %.4f%%",
                 short_sym, short_funding * 100, self.MIN_INDIVIDUAL_FUNDING * 100,
             )
             return None

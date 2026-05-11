@@ -310,11 +310,58 @@ class FundingOIAggregator:
         self._cache: Dict[str, AggregatedFundingOI] = {}
         self._last_poll_ms: int = 0
 
+    async def _fetch_with_retry(
+        self,
+        client: Any,
+        session: aiohttp.ClientSession,
+        mapped: str,
+        max_retries: int = 3,
+        base_delay: float = 1.0,
+    ) -> Optional[FundingOI]:
+        """Fetch with exponential backoff retry for transient errors."""
+        for attempt in range(max_retries):
+            try:
+                result = await client.fetch(session, mapped)
+                if result is not None:
+                    return result
+                # Result is None (soft failure) — retry once quickly
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(base_delay * (2 ** attempt))
+            except (aiohttp.ClientConnectorError, aiohttp.ServerTimeoutError, asyncio.TimeoutError) as exc:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        "%s fetch %s transient error (attempt %d/%d): %s — retrying in %.1fs",
+                        getattr(client, "__class__", "").__name__, mapped,
+                        attempt + 1, max_retries, exc, delay,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.warning(
+                        "%s fetch %s failed after %d attempts: %s",
+                        getattr(client, "__class__", "").__name__, mapped,
+                        max_retries, exc,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "%s fetch %s unexpected error: %s",
+                    getattr(client, "__class__", "").__name__, mapped, exc,
+                )
+                break
+        return None
+
     async def poll(self, symbols: List[str]) -> Dict[str, AggregatedFundingOI]:
         """Fetch and aggregate funding/OI for given symbols."""
         results: Dict[str, AggregatedFundingOI] = {}
 
-        async with aiohttp.ClientSession() as session:
+        connector = aiohttp.TCPConnector(
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+            limit=20,
+            enable_cleanup_closed=True,
+        )
+        timeout = aiohttp.ClientTimeout(total=15, connect=5)
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             for sym in symbols:
                 mappings = self.SYMBOL_MAP.get(sym)
                 if not mappings:
@@ -322,12 +369,12 @@ class FundingOIAggregator:
 
                 by_exchange: Dict[str, FundingOI] = {}
                 tasks = []
-                
+
                 # Try Coinalyze first (aggregated 15+ exchanges)
                 if "coinalyze" in mappings and "coinalyze" in self.clients:
                     client = self.clients["coinalyze"]
                     mapped = mappings["coinalyze"]
-                    coinalyze_result = await client.fetch(session, mapped)
+                    coinalyze_result = await self._fetch_with_retry(client, session, mapped)
                     if coinalyze_result:
                         by_exchange["coinalyze"] = coinalyze_result
                         logger.info("Coinalyze %s: funding=%.6f, predicted=%s, OI=$%.0f",
@@ -342,7 +389,7 @@ class FundingOIAggregator:
                             continue
                         client = self.clients.get(ex)
                         if client:
-                            tasks.append(client.fetch(session, mapped))
+                            tasks.append(self._fetch_with_retry(client, session, mapped))
 
                     responses = await asyncio.gather(*tasks, return_exceptions=True)
                     for resp in responses:

@@ -133,6 +133,15 @@ class VWAPDeviation(Strategy):
             target_side = "long"
             deviation = abs(zscore)
         else:
+            # Throttled logging for debugging silent strategies
+            if event.timestamp_ms - getattr(state, "_last_no_signal_log_ms", 0) > 300_000:
+                state._last_no_signal_log_ms = event.timestamp_ms
+                logger.info(
+                    "VWAPDeviation %s NO SIGNAL — zscore=%.2f (threshold=%.2f), adx=%s, vol_ratio=%s",
+                    event.symbol, zscore, self.Z_THRESHOLD,
+                    f"{adx:.1f}" if adx is not None else "N/A",
+                    f"{vol_ratio:.2f}" if vol_ratio is not None else "N/A",
+                )
             return None  # Not extreme enough
 
         # --- OIR filter: confirm the move is one-sided ---

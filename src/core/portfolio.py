@@ -90,9 +90,10 @@ class PortfolioState:
 
     @property
     async def current_capital(self) -> float:
-        """Return the current cash balance."""
+        """Return the current total capital (cash + unrealized PnL)."""
         async with self._lock:
-            return self._cash
+            total = self._cash + sum(p.unrealized_pnl for p in self._positions.values())
+            return total
 
     @property
     async def peak_capital(self) -> float:
@@ -122,31 +123,7 @@ class PortfolioState:
         """Synchronous read of open positions (for dashboard only)."""
         return {sym: snap.to_position() for sym, snap in self._positions.items()}
 
-    def sync_capital(self) -> float:
-        """Synchronous read of cash balance (for dashboard only)."""
-        return self._cash
 
-    def sync_initial_capital(self) -> float:
-        """Synchronous read of initial capital (for dashboard only)."""
-        return self._initial_capital
-
-    def sync_daily_pnl(self) -> float:
-        """Synchronous read of daily PnL (for dashboard only)."""
-        return self._daily_pnl
-
-    def sync_max_drawdown_pct(self) -> float:
-        """Synchronous read of max drawdown % (for dashboard only)."""
-        total = self._cash + sum(p.unrealized_pnl for p in self._positions.values())
-        if self._peak_capital <= 0.0:
-            return 0.0
-        dd = (self._peak_capital - total) / self._peak_capital
-        return max(dd, 0.0) * 100.0
-
-    def sync_total_pnl(self) -> float:
-        """Synchronous read of total PnL (for dashboard only)."""
-        realized = sum(t.get("pnl_usd", 0.0) for t in self._trade_history)
-        unrealized = sum(p.unrealized_pnl for p in self._positions.values())
-        return realized + unrealized
 
     @property
     async def trade_history(self) -> List[Dict[str, Any]]:
@@ -318,7 +295,8 @@ class PortfolioState:
         if today != self._last_reset_date:
             self._daily_pnl = 0.0
             self._daily_trades = 0
-            self._daily_peak_capital = self._cash  # Reset daily peak to current capital
+            total = self._cash + sum(p.unrealized_pnl for p in self._positions.values())
+            self._daily_peak_capital = total  # Reset daily peak to total capital
             self._last_reset_date = today
             logger.info("Daily portfolio reset - date=%s, daily_peak=%.2f", today, self._daily_peak_capital)
 
@@ -347,6 +325,8 @@ class PortfolioState:
                 "daily_pnl": self._daily_pnl,
                 "daily_trades": self._daily_trades,
                 "max_drawdown": safe_divide(self._peak_capital - total, self._peak_capital, 0.0),
+                "daily_peak_capital": self._daily_peak_capital,
+                "initial_capital": self._initial_capital,
                 "position_count": len(self._positions),
                 "positions": {
                     sym: {
@@ -371,6 +351,8 @@ class PortfolioState:
         async with self._lock:
             self._cash = safe_float(data.get("cash"), self._initial_capital)
             self._peak_capital = safe_float(data.get("peak_capital"), self._peak_capital)
+            self._daily_peak_capital = safe_float(data.get("daily_peak_capital"), self._cash)
+            self._initial_capital = safe_float(data.get("initial_capital"), self._initial_capital)
             self._daily_pnl = safe_float(data.get("daily_pnl"), 0.0)
             self._daily_trades = safe_float(data.get("daily_trades"), 0.0)
             self._last_reset_date = data.get("last_reset_date", utc_now().strftime("%Y-%m-%d"))
@@ -408,8 +390,10 @@ class PortfolioState:
         return self._initial_capital
 
     def sync_total_pnl(self) -> float:
-        """Return total realized PnL (daily PnL)."""
-        return self._daily_pnl
+        """Return total realized + unrealized PnL."""
+        realized = sum(t.get("pnl_usd", 0.0) for t in self._trade_history)
+        unrealized = sum(p.unrealized_pnl for p in self._positions.values())
+        return realized + unrealized
 
     def sync_max_drawdown_pct(self) -> float:
         """Return max drawdown as percentage."""
@@ -417,7 +401,7 @@ class PortfolioState:
         if self._peak_capital <= 0.0:
             return 0.0
         dd = (self._peak_capital - total) / self._peak_capital
-        return max(dd, 0.0) * 100
+        return max(dd, 0.0) * 100.0
 
     def get_positions_sync(self) -> Dict[str, Any]:
         """Return a shallow copy of positions for dashboard display."""

@@ -152,6 +152,8 @@ _ALLOWED_DOMAINS: Tuple[str, ...] = (
     "api.binance.com",
     "fapi.binance.com",
     "testnet.binance.vision",
+    "api.bybit.com",
+    "www.okx.com",
     "127.0.0.1",
     "localhost",
 )

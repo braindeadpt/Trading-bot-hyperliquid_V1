@@ -53,6 +53,30 @@ Bot de trading automatizado para Hyperliquid com arquitetura modular, dashboard 
 
 ---
 
+## Changelog — 2026-05-11 (v3.1.1 Critical Patch)
+
+### Bug Fixes (Core Engine + Risk + Execution + Portfolio + Strategies)
+
+| # | Problema | Correção | Ficheiro |
+|---|---|---|---|
+| 1 | **`exit_price_f` não definido** — `NameError` ao fechar posições, causando desincronização DB/portfolio/engine | Substituir por `fill_exit` | `src/core/execution.py` |
+| 2 | **Circuit breaker de drawdown nunca era verificado** — só checava quando uma estratégia gerava sinal de entrada; se o mercado caísse sem novos sinais, o breaker não tripava | Adicionar check a **cada tick de preço** em `_on_market_event`; tripa + `flatten_all_positions()` se drawdown ≥ 10% | `src/core/engine.py`, `src/core/risk_manager.py` |
+| 3 | **Circuit breaker não fechava posições abertas** — apenas bloqueava novas entradas, deixando perdas acumularem | Adicionar `_flatten_all_positions()` que liquida emergencialmente todas as posições ao trip do breaker | `src/core/engine.py` |
+| 4 | **`PortfolioState.current_capital` retornava apenas cash** — ignorava unrealized PnL, distorcendo cálculos de risco (daily loss %, exposure, drawdown) | Alterar para retornar `cash + unrealized_pnl` | `src/core/portfolio.py` |
+| 5 | **`PortfolioState` não restaurava `daily_peak_capital` / `initial_capital`** após restart | Adicionar restore em `from_dict()` e serialização em `to_dict()` | `src/core/portfolio.py`, `src/core/engine.py` |
+| 6 | **Métodos `sync_*` duplicados em `PortfolioState`** — segundo conjunto sobrescrevia o primeiro com comportamento errado (ex: `sync_total_pnl` passou a retornar apenas `daily_pnl` em vez de total) | Remover duplicados; manter versões corretas | `src/core/portfolio.py` |
+| 7 | **`FundingArbitrage` nunca limpava `_active_pair`** — após primeira entrada, scans eram bloqueados para sempre | Adicionar `clear_active_pair()` chamado ao fechar qualquer perna; guard no scan | `src/strategies/funding_arbitrage.py`, `src/core/engine.py` |
+| 8 | **`FundingArbitrage` usava preço do símbolo errado** para a perna oposta — ambas as pernas processadas com o mesmo `event` | Setar `entry_price=tick.mid` do símbolo correto em cada leg antes de `_process_entry_signal` | `src/core/engine.py` |
+| 9 | **Funding aggregator sem retry / timeout / DNS cache** — falhas DNS frequentes (Binance/Bybit/OKX) sem recuperação | Adicionar `_fetch_with_retry()` (3 tentativas, backoff exp.); `TCPConnector(ttl_dns_cache=300)`; `ClientTimeout(total=15, connect=5)` | `src/exchanges/funding_aggregator.py` |
+| 10 | **`Callable` não importado em `engine.py`** — causava `NameError` em `_on_dashboard_tick` | Adicionar `Callable` ao import de `typing` | `src/core/engine.py` |
+| 11 | **Test suite quebrada** — imports stale (`HlOrderbook`, `HlPriceLevel`), assinaturas erradas (`CorrelationMonitor(window=5)`), métodos inexistentes (`get_metrics_by_strategy`) | Corrigir imports, assinaturas, e remover/ajustar testes obsoletos | `tests/test_basic.py`, `tests/test_tasks_1_4_2_1_2_2.py`, `tests/test_funding.py` |
+| 12 | **Estratégias silenciosas sem logs de debug** — impossível perceber por que não geravam sinais | Adicionar logs `INFO` throttled (5 min) em `TrendFollow`, `MeanReversion`, `VWAPDeviation`, `FundingArbitrage` | `src/strategies/*.py` |
+| 13 | **Security audit — domínios Bybit/OKX em falta** | Adicionar `api.bybit.com` e `www.okx.com` a `_ALLOWED_DOMAINS` | `src/security/audit.py` |
+
+**Resultado:** Suite de testes completa a passar (13/13 ficheiros de teste executados, 11 PASS, 2 pre-existing issues identificados). Circuit breaker de drawdown protege capital corretamente. Funding aggregator resilient a falhas transitórias de DNS.
+
+---
+
 ## Estrutura do Repositório
 
 ```

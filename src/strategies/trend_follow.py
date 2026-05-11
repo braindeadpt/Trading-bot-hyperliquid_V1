@@ -272,19 +272,32 @@ class TrendFollow(Strategy):
 
         signal: Optional[Signal] = None
 
+        # Log confluence score for debugging silent strategies
+        logger.debug(
+            "TrendFollow %s confluence: long=%d/%d, short=%d/%d",
+            event.symbol, long_met, total_conditions, short_met, total_conditions,
+        )
+
         if long_met >= MIN_CONFLUENCE and long_met > short_met:
             confidence = self._calculate_confidence(long_conditions)
             signal = self._build_signal(event, "long", confidence, atr, long_conditions)
             state.last_signal_side = "long"
             state.last_signal_ts = event.timestamp_ms
             logger.info("TrendFollow LONG signal for %s (confidence=%.2f)", event.symbol, confidence)
-
         elif short_met >= MIN_CONFLUENCE and short_met > long_met:
             confidence = self._calculate_confidence(short_conditions)
             signal = self._build_signal(event, "short", confidence, atr, short_conditions)
             state.last_signal_side = "short"
             state.last_signal_ts = event.timestamp_ms
             logger.info("TrendFollow SHORT signal for %s (confidence=%.2f)", event.symbol, confidence)
+        else:
+            # Log why no signal was generated (INFO every 5 min per symbol to avoid spam)
+            if event.timestamp_ms - getattr(state, "_last_no_signal_log_ms", 0) > 300_000:
+                state._last_no_signal_log_ms = event.timestamp_ms
+                logger.info(
+                    "TrendFollow %s NO SIGNAL — long=%d/%d, short=%d/%d conditions met",
+                    event.symbol, long_met, total_conditions, short_met, total_conditions,
+                )
 
         return signal
 

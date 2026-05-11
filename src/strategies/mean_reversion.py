@@ -212,6 +212,13 @@ class MeanReversion(Strategy):
         is_strong = funding_abs >= strong_threshold
 
         if not is_strong:
+            # Throttled logging for debugging silent strategies
+            if event.timestamp_ms - getattr(state, "_last_no_signal_log_ms", 0) > 300_000:
+                state._last_no_signal_log_ms = event.timestamp_ms
+                logger.info(
+                    "FundingExtreme %s NO SIGNAL — funding_abs=%.4f < strong_threshold=%.4f",
+                    event.symbol, funding_abs, strong_threshold,
+                )
             return None  # Not extreme enough for contrarian play
 
         # Cross-exchange confirmation (not just a HL outlier)

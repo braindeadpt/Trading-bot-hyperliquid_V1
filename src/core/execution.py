@@ -313,14 +313,14 @@ class ExecutionEngine:
         self._db.update_trade_exit(exit_record)
 
         if self._mode in ("testnet", "mainnet"):
-            await self._submit_live_close(position, exit_price_f)
+            await self._submit_live_close(position, fill_exit)
 
         result = TradeResult(
             trade_id=open_trade.trade_id,
             symbol=position.symbol,
             side=position.side,
             entry_price=position.entry_price,
-            exit_price=exit_price_f,
+            exit_price=fill_exit,
             size=position.size,
             pnl_usd=pnl_usd,
             pnl_pct=pnl_pct,

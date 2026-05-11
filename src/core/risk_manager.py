@@ -406,6 +406,20 @@ it is not used directly in the current implementation.
             return False
         return True
 
+    def check_drawdown(self, drawdown_pct: float) -> bool:
+        """Evaluate drawdown and trip circuit breaker if threshold breached.
+
+        Returns True if the breaker was tripped by this call.
+        """
+        if self.is_circuit_breaker_tripped():
+            return False
+        if drawdown_pct >= self._circuit_breaker_drawdown_pct:
+            self._trip_circuit_breaker(
+                f"Max drawdown breached ({drawdown_pct * 100:.2f}%)",
+            )
+            return True
+        return False
+
     def reset_circuit_breaker(self) -> None:
         """Manually reset the circuit breaker (owner override)."""
         logger.warning("Circuit breaker manually reset")
