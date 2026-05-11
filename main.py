@@ -57,6 +57,7 @@ from strategies.funding_arbitrage import FundingArbitrage
 from strategies.vwap_deviation import VWAPDeviation
 from strategies.liquidation_catcher import LiquidationCatcher
 
+from strategies.base import Position
 from core.portfolio import PortfolioState
 from core.risk_manager import RiskManager
 from core.execution import ExecutionEngine
@@ -327,8 +328,43 @@ async def main() -> None:
     # Load open trades from DB into executor + portfolio
     open_trades = db.get_open_trades()
     if open_trades:
-        await executor.load_open_trades()
+        loaded = await executor.load_open_trades()
         logger.info(f"Recovered {len(open_trades)} open trades from DB")
+
+        # --- SYNC: mirror executor open trades into PortfolioState ---
+        # Without this, the portfolio thinks it has 0 positions while
+        # the executor tracks N open trades → dashboard / risk mismatch.
+        for trade in loaded:
+            notional = trade.entry_price * trade.size
+            # entry_fee may be 0 if not persisted in DB schema (acceptable)
+            total_cost = notional + getattr(trade, 'entry_fee', 0.0)
+            pos = Position(
+                symbol=trade.symbol,
+                side=trade.side,
+                entry_price=trade.entry_price,
+                size=trade.size,
+                entry_time_ms=int(trade.timestamp_ms),
+                stop_loss_price=None,
+                take_profit_price=None,
+                unrealized_pnl=0.0,
+                metadata={
+                    "strategy": trade.reason.replace("restored_from_db", "unknown"),
+                    "trade_id": trade.trade_id,
+                    "restored_from_db": True,
+                },
+            )
+            try:
+                await portfolio.add_position(pos, cost=total_cost)
+                logger.info(
+                    "Restored position into portfolio: %s %s size=%.6f @ %.2f (id=%d)",
+                    trade.symbol, trade.side, trade.size,
+                    trade.entry_price, trade.trade_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to restore position %s into portfolio: %s",
+                    trade.symbol, exc,
+                )
 
     # -----------------------------------------------------------------------
     # 8. Start data pipeline (WS + CandleBuilder BEFORE engine)

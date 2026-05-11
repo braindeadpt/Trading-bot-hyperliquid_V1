@@ -424,13 +424,17 @@ class ExecutionEngine:
     # State recovery
     # ------------------------------------------------------------------
 
-    async def load_open_trades(self) -> None:
+    async def load_open_trades(self) -> list:
         """Load open trades from the DB into the in-memory index.
 
         Called once by the engine during startup so that positions opened
         in a previous session are tracked correctly.
+
+        Returns the list of loaded TradeResult objects so callers can
+        sync them into PortfolioState.
         """
         rows = self._db.get_open_trades()
+        loaded: list = []
         async with self._lock:
             for row in rows:
                 symbol = row["symbol"]
@@ -446,6 +450,9 @@ class ExecutionEngine:
                     status="open",
                     reason="restored_from_db",
                     timestamp_ms=safe_float(row["entry_time"]),
+                    entry_fee=safe_float(row.get("entry_fee", 0.0)),
                 )
                 self._open_trades[symbol] = result
-        logger.info("Loaded %d open trades from DB", len(rows))
+                loaded.append(result)
+        logger.info("Loaded %d open trades from DB", len(loaded))
+        return loaded
