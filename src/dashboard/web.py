@@ -1,5 +1,5 @@
 """
-Hyperliquid Premium — Real-Time Operations Dashboard v2
+Hyperliquid Premium - Real-Time Operations Dashboard v2
 Complete rewrite for maximum visibility into bot internals.
 """
 
@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Callable
 
-from flask import Flask, jsonify, request, abort
+from flask import Flask, jsonify, request, abort, render_template
 from flask_socketio import SocketIO, emit
 
 logger = logging.getLogger(__name__)
@@ -31,8 +31,15 @@ def get_engine() -> Optional[Any]:
     return _engine
 
 
+def _get_db():
+    """Safely get the database instance from the engine."""
+    if _engine is None:
+        return None
+    return getattr(_engine, "_db", None)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
-# Background emitter — pushes real-time data every second
+# Background emitter - pushes real-time data every second
 # ═════════════════════════════════════════════════════════════════════════════
 
 class DashboardEmitter:
@@ -101,7 +108,7 @@ class DashboardEmitter:
         })
 
     def _emit_live_data(self) -> None:
-        """Raw market data feed — prices, funding, OI, volume, imbalance."""
+        """Raw market data feed - prices, funding, OI, volume, imbalance."""
         rows = []
         symbols = getattr(_engine, "_symbols", [])
         prices = getattr(_engine, "_latest_price", {})
@@ -138,7 +145,7 @@ class DashboardEmitter:
         self._safe_emit("live_data", rows)
 
     def _emit_engine_monitor(self) -> None:
-        """Engine health — ticks/sec, total ticks, last error."""
+        """Engine health - ticks/sec, total ticks, last error."""
         stats = getattr(_engine, "_tick_stats", {})
         last_err = getattr(_engine, "_last_error", None)
         last_events = getattr(_engine, "_last_market_events", {})
@@ -162,7 +169,7 @@ class DashboardEmitter:
         })
 
     def _emit_candles(self) -> None:
-        """Candle status — which timeframes have data, OHLCV if available."""
+        """Candle status - which timeframes have data, OHLCV if available."""
         symbols = getattr(_engine, "_symbols", [])
         candles = getattr(_engine, "_latest_candles", {})
         result = []
@@ -188,7 +195,7 @@ class DashboardEmitter:
         self._safe_emit("candles", result)
 
     def _emit_strategies(self) -> None:
-        """Strategy state — params, last signal, signals today."""
+        """Strategy state - params, last signal, signals today."""
         strategies = getattr(_engine, "_strategies", [])
         sig_hist = getattr(_engine, "_signal_history", [])
 
@@ -329,19 +336,24 @@ class DashboardEmitter:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def create_app(config: Dict[str, Any]) -> tuple:
-    app = Flask(__name__)
+    # DASHBOARD LAYOUT FIX: Configure template and static folders so the
+    # reorganized 12-column grid dashboard (index.html + dashboard.css)
+    # is served correctly instead of the old inline INDEX_HTML string.
+    template_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "templates"))
+    static_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "static"))
+    app = Flask(__name__, template_folder=template_dir, static_folder=static_dir)
 
-    # CRIT-001: SECRET_KEY — generate random if not configured (no hardcoded fallback)
+    # CRIT-001: SECRET_KEY - generate random if not configured (no hardcoded fallback)
     secret_key = config.get("secret_key")
     if not secret_key:
         secret_key = secrets.token_urlsafe(32)
         logger.warning(
-            "Dashboard SECRET_KEY not configured — generated one-time key. "
+            "Dashboard SECRET_KEY not configured - generated one-time key. "
             "Set dashboard.secret_key in config for persistence across restarts."
         )
     app.config["SECRET_KEY"] = secret_key
 
-    # CRIT-002: CORS — restrict to localhost by default
+    # CRIT-002: CORS - restrict to localhost by default
     allowed_origins = config.get("cors_allowed_origins", ["http://localhost:5000", "http://127.0.0.1:5000"])
     if isinstance(allowed_origins, str):
         allowed_origins = [allowed_origins]
@@ -350,7 +362,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
     global _socketio
     _socketio = socketio
 
-    # CRIT-003: Dashboard auth — simple token-based guard
+    # CRIT-003: Dashboard auth - simple token-based guard
     _dashboard_password = config.get("dashboard_password")
     if _dashboard_password:
         @app.before_request
@@ -376,7 +388,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Hyperliquid Bot — Live Ops</title>
+    <title>Hyperliquid Bot - Live Ops</title>
     <style>
         :root {
             --bg: #0a0a0a;
@@ -574,7 +586,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
     <div class="header">
         <div style="display:flex;align-items:center;gap:10px;">
             <span class="badge badge-green" id="conn-badge">LIVE</span>
-            <h1>Hyperliquid Bot — Operations Dashboard</h1>
+            <h1>Hyperliquid Bot - Operations Dashboard</h1>
         </div>
         <div class="badges">
             <span class="badge badge-blue" id="mode-badge">PAPER</span>
@@ -1063,15 +1075,15 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 const pnlClass = isOpen ? "" : (pnl > 0 ? "up" : pnl < 0 ? "down" : "");
                 const sideClass = t.side === "long" ? "up" : "down";
                 const entryTime = t.entry_time ? new Date(t.entry_time).toLocaleString("pt-PT", {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"}) : "--";
-                const pnlDisplay = isOpen ? "<span class='muted'>—</span>" : ((pnl >= 0 ? "+" : "") + "$" + Math.abs(pnl).toFixed(2));
-                const pnlPctDisplay = isOpen ? "<span class='muted'>—</span>" : ((t.pnl_pct >= 0 ? "+" : "") + (t.pnl_pct || 0).toFixed(2) + "%");
+                const pnlDisplay = isOpen ? "<span class='muted'>-</span>" : ((pnl >= 0 ? "+" : "") + "$" + Math.abs(pnl).toFixed(2));
+                const pnlPctDisplay = isOpen ? "<span class='muted'>-</span>" : ((t.pnl_pct >= 0 ? "+" : "") + (t.pnl_pct || 0).toFixed(2) + "%");
                 const statusBadge = isOpen ? '<span class="pill pill-pending">OPEN</span>' : '<span class="pill pill-executed">CLOSED</span>';
                 return `<tr style="${isOpen ? 'background:rgba(0,229,255,0.03);' : ''}">
                     <td class="muted tiny">${entryTime}</td>
                     <td><span class="highlight">${t.symbol}</span></td>
                     <td class="${sideClass}">${t.side ? t.side.toUpperCase() : "--"}</td>
                     <td class="num">$${fmtNum(t.entry_price)}</td>
-                    <td class="num">${t.exit_price != null ? "$" + fmtNum(t.exit_price) : "<span class='muted'>—</span>"}</td>
+                    <td class="num">${t.exit_price != null ? "$" + fmtNum(t.exit_price) : "<span class='muted'>-</span>"}</td>
                     <td class="num ${pnlClass}">${pnlDisplay}</td>
                     <td class="num ${pnlClass}">${pnlPctDisplay}</td>
                     <td class="muted tiny">${t.strategy || "?"}</td>
@@ -1174,7 +1186,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
     @app.route("/")
     def index():
-        return INDEX_HTML
+        # DASHBOARD LAYOUT FIX: Serve the reorganized 12-column grid template
+        # instead of the old inline INDEX_HTML string.
+        return render_template("index.html")
 
     # ── REST API (fallback + initial load) ──
 
@@ -1289,6 +1303,8 @@ def create_app(config: Dict[str, Any]) -> tuple:
     @app.route("/api/metrics")
     def api_metrics():
         db = _get_db()
+        if db is None:
+            return jsonify({"error": "Database not available"}), 503
         since_ms = int((time.time() - 30 * 86400) * 1000)
         strategy_metrics = db.get_metrics_by_strategy(since_ms)
         daily_pnl = db.get_daily_pnl_series(30)
@@ -1313,7 +1329,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
     @app.route("/api/logs")
     def api_logs():
-        # HIGH-010: Path validation — prevent directory traversal
+        # HIGH-010: Path validation - prevent directory traversal
         logs_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "logs"))
         log_path = os.path.abspath(os.path.join(logs_dir, "bot.log"))
         # Ensure the resolved path is still inside the logs directory
