@@ -13,9 +13,9 @@
 <!-- HEADER                                                         -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="header">
-    <div style="display:flex;align-items:center;gap:10px;">
+    <div style="display:flex;align-items:center;gap:8px;">
         <span class="badge badge-green" id="conn-badge">LIVE</span>
-        <h1>Hyperliquid Bot — Operations Dashboard</h1>
+        <h1>Hyperliquid Bot</h1>
     </div>
     <div class="badges">
         <span class="badge badge-blue" id="mode-badge">PAPER</span>
@@ -27,147 +27,92 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- DASHBOARD — 12 Column Grid                                     -->
+<!-- KPI BAR — all key numbers in one horizontal row               -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="dashboard-grid">
-
-    <!-- ── Row 1: KPI Cards ── -->
-    <!-- Portfolio KPIs (4 cols) -->
-    <div class="col-4">
-        <div class="panel">
-            <div class="panel-header">Portfolio <span class="dim" id="portfolio-time"></span></div>
-            <div class="panel-body">
-                <div class="kpi-grid">
-                    <div class="kpi-item">
-                        <div class="kpi-label">Capital</div>
-                        <div class="kpi-value" id="capital-val">$--</div>
-                    </div>
-                    <div class="kpi-item">
-                        <div class="kpi-label">Daily PnL</div>
-                        <div class="kpi-value" id="daily-pnl-val">$--</div>
-                    </div>
-                    <div class="kpi-item">
-                        <div class="kpi-label">Open Pos</div>
-                        <div class="kpi-value" id="open-positions-val">--</div>
-                    </div>
-                    <div class="kpi-item">
-                        <div class="kpi-label">Max DD</div>
-                        <div class="kpi-value" id="drawdown-val">--%</div>
-                    </div>
-                </div>
-                <div class="metric-row" style="margin-top:8px;">
-                    <span class="metric-label">Daily Trades</span>
-                    <span class="metric-value" id="daily-trades-val">--</span>
-                </div>
-                <div class="metric-row">
-                    <span class="metric-label">Total Trades</span>
-                    <span class="metric-value" id="total-trades-val">--</span>
-                </div>
-            </div>
-        </div>
+<div class="kpi-bar" id="kpi-bar">
+    <div class="kpi-cell">
+        <span class="label">Capital</span>
+        <span class="value" id="kpi-capital">$--</span>
     </div>
-
-    <!-- Engine Status (4 cols) -->
-    <div class="col-4">
-        <div class="panel">
-            <div class="panel-header">Engine <span class="dim">Health</span></div>
-            <div class="panel-body">
-                <div class="mini-stats" id="engine-status">
-                    <div class="mini-stat"><span class="label">State</span><span class="value highlight" id="engine-state">--</span></div>
-                    <div class="mini-stat"><span class="label">Uptime</span><span class="value" id="engine-uptime">--</span></div>
-                    <div class="mini-stat"><span class="label">Ticks/s</span><span class="value" id="engine-ticks">--</span></div>
-                    <div class="mini-stat"><span class="label">Total Ticks</span><span class="value" id="engine-total-ticks">--</span></div>
-                    <div class="mini-stat"><span class="label">Memory</span><span class="value" id="engine-memory">--</span></div>
-                    <div class="mini-stat"><span class="label">Circuit</span><span class="value" id="engine-circuit">OFF</span></div>
-                </div>
-                <div class="tick-bar" id="tick-bar">
-                    <div class="tick-cell"></div><div class="tick-cell"></div><div class="tick-cell"></div>
-                    <div class="tick-cell"></div><div class="tick-cell"></div><div class="tick-cell"></div>
-                    <div class="tick-cell"></div><div class="tick-cell"></div><div class="tick-cell"></div>
-                    <div class="tick-cell"></div>
-                </div>
-            </div>
-        </div>
+    <div class="kpi-cell">
+        <span class="label">Daily PnL</span>
+        <span class="value" id="kpi-daily-pnl">$--</span>
     </div>
-
-    <!-- Market Overview (4 cols) -->
-    <div class="col-4">
-        <div class="panel">
-            <div class="panel-header">Market <span class="dim" id="market-time"></span></div>
-            <div class="panel-body">
-                <div class="mini-stats" id="market-stats">
-                    <div class="mini-stat"><span class="label">Price</span><span class="value highlight" id="market-price">--</span></div>
-                    <div class="mini-stat"><span class="label">Funding</span><span class="value" id="market-funding">--</span></div>
-                    <div class="mini-stat"><span class="label">OI</span><span class="value" id="market-oi">--</span></div>
-                    <div class="mini-stat"><span class="label">24h Vol</span><span class="value" id="market-volume">--</span></div>
-                </div>
-                <div style="margin-top:8px; font-size:10px; color:var(--muted);">
-                    Strategy signals: <span id="strategy-signals" class="highlight">--</span>
-                </div>
-                <div style="margin-top:4px; font-size:10px; color:var(--muted);">
-                    Data latency: <span id="data-latency" class="highlight">--</span>
-                </div>
-            </div>
-        </div>
+    <div class="kpi-cell">
+        <span class="label">Open Pos</span>
+        <span class="value" id="kpi-open-pos">--</span>
     </div>
+    <div class="kpi-cell">
+        <span class="label">Daily Trades</span>
+        <span class="value" id="kpi-daily-trades">--</span>
+    </div>
+    <div class="kpi-cell">
+        <span class="label">Max DD</span>
+        <span class="value" id="kpi-max-dd">--%</span>
+    </div>
+    <div class="kpi-cell">
+        <span class="label">Ticks/s</span>
+        <span class="value" id="kpi-ticks">--</span>
+    </div>
+    <div class="kpi-cell">
+        <span class="label">Memory</span>
+        <span class="value" id="kpi-memory">--</span>
+    </div>
+    <div class="kpi-cell">
+        <span class="label">Data Lat</span>
+        <span class="value" id="kpi-data-lat">--</span>
+    </div>
+    <div class="kpi-cell">
+        <span class="label">Socket</span>
+        <span class="value" id="kpi-socket-lat">--</span>
+    </div>
+</div>
 
-    <!-- ── Row 2: Live Market Data (full width) ── -->
-    <!-- LATENCY POINT #1: Age column shows time since last_update -->
-    <div class="col-12">
-        <div class="panel">
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- MAIN LAYOUT — 2 columns, fills viewport, no page scroll        -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="main-layout">
+
+    <!-- ═══════ LEFT COLUMN (wider) ═══════ -->
+    <div style="display:flex;flex-direction:column;gap:var(--gap);min-height:0;overflow:hidden;">
+
+        <!-- Live Market Data — full width, compact height -->
+        <div class="panel" style="flex:0 0 auto;max-height:200px;">
             <div class="panel-header">
-                <span>Live Market Data <span class="dim">All Symbols — Real-time</span></span>
+                <span>Live Market <span class="dim">All Symbols</span></span>
                 <span class="live-dot"></span>
             </div>
             <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:240px;">
-                    <table class="live-data-table">
+                <div style="overflow:auto;max-height:174px;">
+                    <table>
                         <thead>
                             <tr>
-                                <th>Sym</th>
-                                <th class="num">Price</th>
-                                <th class="num">Bid</th>
-                                <th class="num">Ask</th>
-                                <th class="num">Spr%</th>
-                                <th class="num">Funding</th>
-                                <th class="num">Pred</th>
-                                <th class="num">OI (M)</th>
-                                <th class="num">Vol 1m</th>
-                                <th class="num">Imbal</th>
-                                <th class="num">OIR</th>
-                                <th class="num">Depth</th>
-                                <th class="num">RVol</th>
-                                <th class="num">VWAP</th>
-                                <th class="num">Age</th>
+                                <th>Sym</th><th class="num">Price</th><th class="num">Bid</th><th class="num">Ask</th>
+                                <th class="num">Spr%</th><th class="num">Fund</th><th class="num">Pred</th>
+                                <th class="num">OI(M)</th><th class="num">Vol1m</th><th class="num">Imbal</th>
+                                <th class="num">OIR</th><th class="num">Depth</th><th class="num">RVol</th>
+                                <th class="num">VWAP</th><th class="num">Age</th>
                             </tr>
                         </thead>
                         <tbody id="live-data-tbody">
-                            <tr><td colspan="15" class="muted" style="text-align:center;">Waiting for market data...</td></tr>
+                            <tr><td colspan="15" class="muted" style="text-align:center;">Waiting for data...</td></tr>
                         </tbody>
                     </table>
                 </div>
             </div>
         </div>
-    </div>
 
-    <!-- ── Row 3: Candle Watch + Signals + Decisions ── -->
-    <div class="col-5">
-        <div class="panel">
-            <div class="panel-header">Candle Watch <span class="dim">OHLCV + Buy%</span></div>
+        <!-- Candle Watch — compact -->
+        <div class="panel" style="flex:0 0 auto;max-height:160px;">
+            <div class="panel-header">Candles <span class="dim">OHLCV</span></div>
             <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:260px;">
+                <div style="overflow:auto;max-height:134px;">
                     <table>
                         <thead>
                             <tr>
-                                <th>Sym</th>
-                                <th>TF</th>
-                                <th class="num">Open</th>
-                                <th class="num">High</th>
-                                <th class="num">Low</th>
-                                <th class="num">Close</th>
-                                <th class="num">Vol</th>
-                                <th class="num">Buy%</th>
-                                <th class="num">VWAP</th>
+                                <th>Sym</th><th>TF</th><th class="num">Open</th><th class="num">High</th>
+                                <th class="num">Low</th><th class="num">Close</th><th class="num">Vol</th>
+                                <th class="num">Buy%</th><th class="num">VWAP</th>
                             </tr>
                         </thead>
                         <tbody id="candles-tbody">
@@ -177,86 +122,18 @@
                 </div>
             </div>
         </div>
-    </div>
 
-    <div class="col-3">
-        <div class="panel">
-            <div class="panel-header">Signal Stream <span class="dim">Last 20</span></div>
-            <div class="panel-body">
-                <div id="signals-list" class="stream-list"><span class="muted">No signals yet</span></div>
-            </div>
-        </div>
-    </div>
-
-    <div class="col-4">
-        <div class="panel">
-            <div class="panel-header">Decision Log <span class="dim">Risk + Execution</span></div>
-            <div class="panel-body">
-                <div id="decisions-list" class="stream-list"><span class="muted">No decisions yet</span></div>
-            </div>
-        </div>
-    </div>
-
-    <!-- ── Row 4: Strategies + Engine Monitor Detail ── -->
-    <div class="col-5">
-        <div class="panel">
-            <div class="panel-header">Strategies <span class="dim">Click for detail</span></div>
-            <div class="panel-body" id="strategies-panel"><span class="muted">Waiting...</span></div>
-        </div>
-    </div>
-
-    <!-- LATENCY POINT #2: Engine Monitor with recent events age_ms -->
-    <div class="col-7">
-        <div class="panel">
-            <div class="panel-header">Engine Monitor <span class="dim">Ticks · Memory · Latency</span></div>
-            <div class="panel-body">
-                <div class="mini-stats" style="grid-template-columns: repeat(3, 1fr);">
-                    <div class="mini-stat"><span class="label">Ticks/s</span><span class="value" id="mon-ticks">--</span></div>
-                    <div class="mini-stat"><span class="label">Total Ticks</span><span class="value" id="mon-total">--</span></div>
-                    <div class="mini-stat"><span class="label">Memory</span><span class="value" id="mon-memory">--</span></div>
-                    <div class="mini-stat"><span class="label">Assets</span><span class="value muted" id="mon-assets">--</span></div>
-                    <div class="mini-stat"><span class="label">Strategies</span><span class="value muted" id="mon-strats">--</span></div>
-                    <div class="mini-stat"><span class="label">Last Error</span><span class="value" id="mon-error">None</span></div>
-                </div>
-                <div style="margin-top:10px; font-size:10px; color:var(--dim); font-weight:600;">Recent Events (latency):</div>
-                <div id="recent-events" style="font-size:10px; color:var(--muted); margin-top:4px; line-height:1.6; max-height:90px; overflow-y:auto;">No events yet</div>
-            </div>
-        </div>
-    </div>
-
-    <!-- ── Row 5: Risk + Positions ── -->
-    <div class="col-4">
-        <div class="panel">
-            <div class="panel-header">Risk Metrics <span class="dim">Live</span></div>
-            <div class="panel-body" id="risk-panel">
-                <div class="mini-stats">
-                    <div class="mini-stat"><span class="label">Daily DD</span><span class="value" id="risk-daily-dd">--</span></div>
-                    <div class="mini-stat"><span class="label">Max DD</span><span class="value" id="risk-max-dd">--</span></div>
-                    <div class="mini-stat"><span class="label">Exposure</span><span class="value" id="risk-exposure">--</span></div>
-                    <div class="mini-stat"><span class="label">Open Risk</span><span class="value" id="risk-open-risk">--</span></div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div class="col-8">
-        <div class="panel">
-            <div class="panel-header">Open Positions <span class="dim">Active</span></div>
+        <!-- Open Positions — moderate height -->
+        <div class="panel" style="flex:1 1 auto;min-height:120px;">
+            <div class="panel-header">Positions <span class="dim">Active</span></div>
             <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:200px;">
+                <div style="overflow:auto;max-height:100%;">
                     <table>
                         <thead>
                             <tr>
-                                <th>Sym</th>
-                                <th>Side</th>
-                                <th class="num">Size</th>
-                                <th class="num">Entry</th>
-                                <th class="num">Current</th>
-                                <th class="num">PnL%</th>
-                                <th class="num">Unrealized</th>
-                                <th>Strat</th>
-                                <th>SL</th>
-                                <th>TP</th>
+                                <th>Sym</th><th>Side</th><th class="num">Size</th><th class="num">Entry</th>
+                                <th class="num">Current</th><th class="num">PnL%</th><th class="num">Unreal</th>
+                                <th>Strat</th><th>SL</th><th>TP</th>
                             </tr>
                         </thead>
                         <tbody id="positions-tbody">
@@ -266,50 +143,105 @@
                 </div>
             </div>
         </div>
-    </div>
 
-    <!-- ── Row 6: Trade History (full width) ── -->
-    <div class="col-12">
-        <div class="panel">
-            <div class="panel-header">Trade History <span class="dim">Last 50 — Open + Closed</span></div>
+        <!-- Trade History — moderate height -->
+        <div class="panel" style="flex:1 1 auto;min-height:140px;">
+            <div class="panel-header">Trades <span class="dim">Last 50</span></div>
             <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:260px;">
+                <div style="overflow:auto;max-height:100%;">
                     <table>
                         <thead>
                             <tr>
-                                <th>Time</th>
-                                <th>Sym</th>
-                                <th>Side</th>
-                                <th class="num">Entry</th>
-                                <th class="num">Exit</th>
-                                <th class="num">Size</th>
-                                <th class="num">PnL</th>
-                                <th class="num">PnL%</th>
-                                <th>Strat</th>
-                                <th>Reason</th>
-                                <th>Status</th>
+                                <th>Time</th><th>Sym</th><th>Side</th><th class="num">Entry</th>
+                                <th class="num">Exit</th><th class="num">Size</th><th class="num">PnL</th>
+                                <th class="num">PnL%</th><th>Strat</th><th>Reason</th><th>Sts</th>
                             </tr>
                         </thead>
                         <tbody id="trades-tbody">
-                            <tr><td colspan="11" class="muted" style="text-align:center;">Loading trades...</td></tr>
+                            <tr><td colspan="11" class="muted" style="text-align:center;">Loading...</td></tr>
                         </tbody>
                     </table>
                 </div>
             </div>
         </div>
+
     </div>
 
-    <!-- ── Row 7: Live Logs (full width) ── -->
-    <div class="col-12">
-        <div class="panel">
-            <div class="panel-header">Live Logs <span class="dim">Last 50 lines</span></div>
+    <!-- ═══════ RIGHT COLUMN (narrower, stacked info) ═══════ -->
+    <div style="display:flex;flex-direction:column;gap:var(--gap);min-height:0;overflow:hidden;">
+
+        <!-- Engine Monitor + Risk — compact combined panel -->
+        <div class="panel" style="flex:0 0 auto;max-height:170px;">
+            <div class="panel-header">Engine <span class="dim">Health · Risk</span></div>
             <div class="panel-body">
-                <div id="logs-container" class="log-container"><span class="muted">Waiting for logs...</span></div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+                    <div>
+                        <div class="metric-row"><span class="metric-label">Ticks/s</span><span class="metric-value" id="eng-ticks">--</span></div>
+                        <div class="metric-row"><span class="metric-label">Total</span><span class="metric-value" id="eng-total">--</span></div>
+                        <div class="metric-row"><span class="metric-label">Mem</span><span class="metric-value" id="eng-mem">--</span></div>
+                        <div class="metric-row"><span class="metric-label">Assets</span><span class="metric-value muted" id="eng-assets">--</span></div>
+                        <div class="metric-row"><span class="metric-label">Strats</span><span class="metric-value muted" id="eng-strats">--</span></div>
+                    </div>
+                    <div>
+                        <div class="metric-row"><span class="metric-label">Daily DD</span><span class="metric-value" id="eng-daily-dd">--</span></div>
+                        <div class="metric-row"><span class="metric-label">Max DD</span><span class="metric-value" id="eng-max-dd">--</span></div>
+                        <div class="metric-row"><span class="metric-label">Exposure</span><span class="metric-value" id="eng-exposure">--</span></div>
+                        <div class="metric-row"><span class="metric-label">Open Risk</span><span class="metric-value" id="eng-open-risk">--</span></div>
+                        <div class="metric-row"><span class="metric-label">Last Err</span><span class="metric-value" id="eng-error" style="color:var(--down);">--</span></div>
+                    </div>
+                </div>
+                <div style="margin-top:4px; font-size:9px; color:var(--dim);">Recent:</div>
+                <div id="recent-events" style="font-size:9px; color:var(--muted); line-height:1.5; max-height:40px; overflow-y:auto;">No events yet</div>
+                <div class="tick-bar" id="tick-bar">
+                    <div class="tick-cell"></div><div class="tick-cell"></div><div class="tick-cell"></div>
+                    <div class="tick-cell"></div><div class="tick-cell"></div><div class="tick-cell"></div>
+                    <div class="tick-cell"></div><div class="tick-cell"></div><div class="tick-cell"></div>
+                    <div class="tick-cell"></div>
+                </div>
             </div>
         </div>
+
+        <!-- Strategies — clickable cards, scrollable -->
+        <div class="panel" style="flex:1 1 auto;min-height:100px;">
+            <div class="panel-header">Strategies <span class="dim">Click for detail</span></div>
+            <div class="panel-body" id="strategies-panel">
+                <span class="muted">Waiting...</span>
+            </div>
+        </div>
+
+        <!-- Signal Stream — compact list -->
+        <div class="panel" style="flex:0 0 auto;max-height:150px;">
+            <div class="panel-header">Signals <span class="dim">Last 20</span></div>
+            <div class="panel-body" style="padding:4px 6px;">
+                <div id="signals-list" class="stream-list" style="max-height:120px; overflow-y:auto;">
+                    <span class="muted">No signals yet</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Decision Log — compact list -->
+        <div class="panel" style="flex:0 0 auto;max-height:130px;">
+            <div class="panel-header">Decisions <span class="dim">Risk + Exec</span></div>
+            <div class="panel-body" style="padding:4px 6px;">
+                <div id="decisions-list" class="stream-list" style="max-height:100px; overflow-y:auto;">
+                    <span class="muted">No decisions yet</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Live Logs — bottom, fills remaining -->
+        <div class="panel" style="flex:1 1 auto;min-height:80px;">
+            <div class="panel-header">Logs <span class="dim">Last 50</span></div>
+            <div class="panel-body" style="padding:4px 6px;">
+                <div id="logs-container" class="log-container" style="max-height:100%; overflow-y:auto;">
+                    <span class="muted">Waiting for logs...</span>
+                </div>
+            </div>
+        </div>
+
     </div>
 
-</div><!-- /dashboard-grid -->
+</div><!-- /main-layout -->
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <!-- STRATEGY DRILL-DOWN MODAL                                      -->
@@ -355,8 +287,8 @@ function fmtUptime(sec) {
     const h = Math.floor(sec / 3600);
     const m = Math.floor((sec % 3600) / 60);
     const s = sec % 60;
-    if (h > 0) return h + "h " + m + "m";
-    if (m > 0) return m + "m " + s + "s";
+    if (h > 0) return h + "h" + m + "m";
+    if (m > 0) return m + "m" + s + "s";
     return s + "s";
 }
 function fmtAge(seconds) {
@@ -365,71 +297,70 @@ function fmtAge(seconds) {
     if (seconds < 60) return seconds.toFixed(1) + "s";
     return (seconds / 60).toFixed(1) + "m";
 }
-function timeNow() {
-    return new Date().toTimeString().split(" ")[0];
-}
 
-// ── Tick bar animation ──
+// ── Tick bar ──
 let tickIdx = 0;
 function updateTickBar() {
     const cells = document.querySelectorAll("#tick-bar .tick-cell");
     if (!cells.length) return;
     cells[tickIdx].classList.add("active");
-    setTimeout(() => cells[tickIdx].classList.remove("active"), 200);
+    setTimeout(() => cells[tickIdx].classList.remove("active"), 150);
     tickIdx = (tickIdx + 1) % cells.length;
 }
 
-// ── Portfolio ──
-function renderPortfolio(data) {
-    if (!data) return;
+// ── KPI Bar ──
+function updateKPI(data) {
     const capital = data.capital || 0;
     const pnl = data.daily_pnl || 0;
-    const pnlEl = document.getElementById("daily-pnl-val");
-    document.getElementById("capital-val").textContent = "$" + fmtNum(capital);
+    const pnlEl = document.getElementById("kpi-daily-pnl");
+    document.getElementById("kpi-capital").textContent = "$" + fmtNum(capital);
     pnlEl.textContent = (pnl >= 0 ? "+" : "") + "$" + fmtNum(Math.abs(pnl));
     pnlEl.style.color = pnl >= 0 ? "var(--up)" : "var(--down)";
-    document.getElementById("open-positions-val").textContent = data.open_positions || 0;
-    document.getElementById("drawdown-val").textContent = (data.max_drawdown_pct || 0).toFixed(2) + "%";
-    document.getElementById("portfolio-time").textContent = fmtTime(data.timestamp_ms);
-    document.getElementById("daily-trades-val").textContent = data.daily_trades != null ? data.daily_trades : "--";
-    document.getElementById("total-trades-val").textContent = data.total_trades != null ? data.total_trades : "--";
-    // Also update risk panel from portfolio data
-    const dailyDD = document.getElementById("risk-daily-dd");
-    const maxDD = document.getElementById("risk-max-dd");
-    if (dailyDD) dailyDD.textContent = (data.daily_drawdown || 0).toFixed(2) + "%";
-    if (maxDD) maxDD.textContent = (data.max_drawdown_pct || 0).toFixed(2) + "%";
+    document.getElementById("kpi-open-pos").textContent = data.open_positions || 0;
+    document.getElementById("kpi-daily-trades").textContent = data.daily_trades != null ? data.daily_trades : "--";
+    document.getElementById("kpi-max-dd").textContent = (data.max_drawdown_pct || 0).toFixed(2) + "%";
+    document.getElementById("kpi-memory").textContent = (statusUpdate.memory_mb || 0).toFixed(1) + " MB";
 }
 
-// ── Engine (header KPI) ──
-function renderEngineKPI(data) {
+// ── Engine ──
+function renderEngine(data) {
     if (!data) return;
-    const ticks = data.ticks_per_second || "--";
-    const symbols = data.symbols || [];
-    const strategies = data.strategies || [];
-    const lastErr = data.last_error || "None";
     const state = statusUpdate.running ? "RUNNING" : (statusUpdate.uptime_sec ? "RUNNING" : "STOPPED");
-    document.getElementById("engine-state").textContent = state;
-    document.getElementById("engine-state").className = "value " + (statusUpdate.running ? "up" : "muted");
-    document.getElementById("engine-uptime").textContent = fmtUptime(statusUpdate.uptime_sec || 0);
-    document.getElementById("engine-ticks").textContent = typeof ticks === "number" ? ticks.toFixed(1) : ticks;
-    document.getElementById("engine-total-ticks").textContent = data.total_ticks != null ? data.total_ticks.toLocaleString() : "--";
-    document.getElementById("engine-memory").textContent = statusUpdate.memory_mb != null ? statusUpdate.memory_mb.toFixed(1) + " MB" : "--";
-    document.getElementById("engine-circuit").textContent = statusUpdate.circuit_breaker ? "ON" : "OFF";
-    document.getElementById("engine-circuit").className = statusUpdate.circuit_breaker ? "value down" : "value muted";
+    document.getElementById("eng-ticks").textContent = data.ticks_per_second != null ? data.ticks_per_second.toFixed(1) : "--";
+    document.getElementById("eng-total").textContent = data.total_ticks != null ? data.total_ticks.toLocaleString() : "--";
+    document.getElementById("eng-mem").textContent = (statusUpdate.memory_mb || 0).toFixed(1) + " MB";
+    document.getElementById("eng-assets").textContent = (data.symbols || []).join(", ") || "--";
+    document.getElementById("eng-strats").textContent = (data.strategies || []).join(", ") || "--";
+    const errEl = document.getElementById("eng-error");
+    if (data.last_error) {
+        errEl.textContent = data.last_error.substring(0, 40);
+        errEl.style.color = "var(--down)";
+    } else {
+        errEl.textContent = "None";
+        errEl.style.color = "var(--up)";
+    }
+    // Recent events with latency
+    const recentEl = document.getElementById("recent-events");
+    if (data.recent_events && data.recent_events.length > 0) {
+        recentEl.innerHTML = data.recent_events.map(e => {
+            const ageClass = e.age_ms > 5000 ? "down" : e.age_ms > 1000 ? "yellow" : "up";
+            return `<span class="highlight">${e.symbol}</span> @ $${fmtNum(e.price)} <span class="${ageClass}">${e.age_ms}ms</span>`;
+        }).join("<br>");
+    } else {
+        recentEl.textContent = "No events yet";
+    }
 }
 
-// ── Market ──
-function renderMarket(data) {
+// ── Risk — also from engine_monitor risk payload ──
+function renderRisk(data) {
     if (!data) return;
-    document.getElementById("market-price").textContent = "$" + fmtNum(data.price);
-    document.getElementById("market-funding").textContent = (data.funding || 0).toFixed(4) + "%";
-    document.getElementById("market-oi").textContent = fmtM(data.open_interest || 0);
-    document.getElementById("market-volume").textContent = fmtM(data.volume_24h || 0);
-    document.getElementById("market-time").textContent = fmtTime(data.timestamp_ms);
-    document.getElementById("strategy-signals").textContent = data.strategy_signals || "--";
+    document.getElementById("eng-daily-dd").textContent = (data.daily_drawdown || 0).toFixed(2) + "%";
+    document.getElementById("eng-max-dd").textContent = (data.max_drawdown_pct || 0).toFixed(2) + "%";
+    document.getElementById("eng-exposure").textContent = (data.directional_exposure || 0).toFixed(1) + "%";
+    document.getElementById("eng-open-risk").textContent = (data.open_trade_risk || 0).toFixed(2) + "%";
 }
 
-// ── Live Data (all symbols) — LATENCY POINT #1 ──
+// ── Live Data — LATENCY POINT #1 ──
 function renderLiveData(rows) {
     const tbody = document.getElementById("live-data-tbody");
     if (!rows || rows.length === 0) {
@@ -437,8 +368,7 @@ function renderLiveData(rows) {
         return;
     }
     const now = Date.now() / 1000;
-    let totalLatency = 0;
-    let count = 0;
+    let totalLatency = 0, count = 0;
     tbody.innerHTML = rows.map(r => {
         const priceClass = r.price > r.vwap ? "up" : r.price < r.vwap ? "down" : "";
         const age = r.last_update ? now - r.last_update : null;
@@ -464,12 +394,11 @@ function renderLiveData(rows) {
             <td class="num tiny ${ageClass}">${fmtAge(age)}</td>
         </tr>`;
     }).join('');
-    // Update average latency badge
     const avg = count > 0 ? Math.round(totalLatency / count) : null;
-    const latEl = document.getElementById("data-latency");
+    const latEl = document.getElementById("kpi-data-lat");
     if (latEl && avg != null) {
-        latEl.textContent = avg + "ms avg";
-        latEl.className = avg > 5000 ? "down" : avg > 1000 ? "yellow" : "up";
+        latEl.textContent = avg + "ms";
+        latEl.style.color = avg > 5000 ? "var(--down)" : avg > 1000 ? "var(--yellow)" : "var(--up)";
     }
 }
 
@@ -490,52 +419,40 @@ function renderCandles(rows) {
             <td class="num">${fmtNum(r.open)}</td>
             <td class="num">${fmtNum(r.high)}</td>
             <td class="num">${fmtNum(r.low)}</td>
-            <td class="num ${chgClass}">${fmtNum(r.close)}</td>
+            <td class="num ${chgClass}">$${fmtNum(r.close)}</td>
             <td class="num">${fmtNum(r.volume)}</td>
             <td class="num ${buyPct > 60 ? 'up' : buyPct < 40 ? 'down' : ''}">${buyPct != null ? buyPct.toFixed(0) + "%" : "--"}</td>
-            <td class="num">${fmtNum(r.vwap)}</td>
+            <td class="num">$${fmtNum(r.vwap)}</td>
         </tr>`;
     }).join('');
 }
 
-// ── Engine Monitor Detail — LATENCY POINT #2 ──
-function renderEngineMonitor(data) {
-    if (!data) return;
-    document.getElementById("mon-ticks").textContent = data.ticks_per_second != null ? data.ticks_per_second.toFixed(1) : "--";
-    document.getElementById("mon-total").textContent = data.total_ticks != null ? data.total_ticks.toLocaleString() : "--";
-    document.getElementById("mon-memory").textContent = statusUpdate.memory_mb != null ? statusUpdate.memory_mb.toFixed(1) + " MB" : "--";
-    document.getElementById("mon-assets").textContent = (data.symbols || []).join(", ") || "--";
-    document.getElementById("mon-strats").textContent = (data.strategies || []).join(", ") || "--";
-    const errEl = document.getElementById("mon-error");
-    if (data.last_error) {
-        errEl.textContent = data.last_error.substring(0, 60);
-        errEl.style.color = "var(--down)";
-    } else {
-        errEl.textContent = "None";
-        errEl.style.color = "var(--up)";
-    }
-
-    // Recent events with latency (age_ms)
-    const recentEl = document.getElementById("recent-events");
-    if (data.recent_events && data.recent_events.length > 0) {
-        recentEl.innerHTML = data.recent_events.map(e => {
-            const ageClass = e.age_ms > 5000 ? "down" : e.age_ms > 1000 ? "yellow" : "up";
-            return `<div><span class="highlight">${e.symbol}</span> @ $${fmtNum(e.price)} — <span class="${ageClass}">${e.age_ms}ms</span> ago</div>`;
-        }).join("");
-    } else {
-        recentEl.textContent = "No events yet";
-    }
+// ── Strategies ──
+function renderStrategies(data) {
+    const div = document.getElementById("strategies-panel");
+    if (!data || data.length === 0) { div.innerHTML = '<span class="muted">No strategies</span>'; return; }
+    div.innerHTML = data.map(s => {
+        const enabled = s.enabled !== false;
+        const statusClass = s.last_signal_status === "executed" ? "pill-executed" : s.last_signal_status === "approved" ? "pill-approved" : s.last_signal_status === "rejected" ? "pill-rejected" : "pill-pending";
+        return `<div class="strategy-card ${enabled ? 'active' : 'inactive'}" onclick="showStrategyDetail('${s.name}')">
+            <div class="strategy-name">${s.name} ${enabled ? "●" : "○"}</div>
+            <div class="strategy-desc">${s.description || ""}</div>
+            <div style="margin-top:2px; font-size:9px; color:var(--dim);">
+                Last: <span class="${s.last_signal_side === 'long' ? 'up' : s.last_signal_side === 'short' ? 'down' : ''}">${s.last_signal_side ? s.last_signal_side.toUpperCase() : "never"}</span>
+                ${s.last_signal_confidence != null ? `(${(s.last_signal_confidence * 100).toFixed(0)}%)` : ""}
+                <span class="pill ${statusClass}">${s.last_signal_status || "PENDING"}</span>
+                | Today: ${s.signals_today || 0}
+            </div>
+        </div>`;
+    }).join('');
 }
 
 // ── Signals ──
 function renderSignals(data) {
     const div = document.getElementById("signals-list");
-    if (!data || data.length === 0) {
-        div.innerHTML = '<span class="muted">No signals yet</span>';
-        return;
-    }
-    div.innerHTML = data.map(s => {
-        const sideClass = s.side === "long" ? "up" : "down";
+    if (!data || data.length === 0) { div.innerHTML = '<span class="muted">No signals yet</span>'; return; }
+    div.innerHTML = data.slice(0, 20).map(s => {
+        const sideClass = s.side === "long" ? "up" : s.side === "short" ? "down" : "";
         const statusClass = s.status === "executed" ? "pill-executed" : s.status === "approved" ? "pill-approved" : s.status === "rejected" ? "pill-rejected" : "pill-pending";
         return `<div class="stream-item">
             <span class="stream-time">${s.time || fmtTime(s.timestamp_ms)}</span>
@@ -551,60 +468,17 @@ function renderSignals(data) {
 // ── Decisions ──
 function renderDecisions(data) {
     const div = document.getElementById("decisions-list");
-    if (!data || data.length === 0) {
-        div.innerHTML = '<span class="muted">No decisions yet</span>';
-        return;
-    }
-    div.innerHTML = data.map(d => {
+    if (!data || data.length === 0) { div.innerHTML = '<span class="muted">No decisions yet</span>'; return; }
+    div.innerHTML = data.slice(0, 20).map(d => {
         const resultClass = d.result === "approved" || d.result === "executed" ? "up" : d.result === "rejected" ? "down" : "";
         return `<div class="stream-item">
             <span class="stream-time">${d.time || fmtTime(d.timestamp_ms)}</span>
             <span class="stream-symbol">${d.symbol}</span>
             <span class="${d.side === 'long' ? 'up' : d.side === 'short' ? 'down' : ''}">${d.side ? d.side.toUpperCase() : "--"}</span>
             <span class="${resultClass}">${d.result || d.status || "--"}</span>
-            <span class="muted tiny">${d.reason ? d.reason.substring(0, 50) : ""}</span>
+            <span class="muted tiny">${d.reason ? d.reason.substring(0, 40) : ""}</span>
         </div>`;
     }).join('');
-}
-
-// ── Strategies ──
-function renderStrategies(data) {
-    const div = document.getElementById("strategies-panel");
-    if (!data || data.length === 0) {
-        div.innerHTML = '<span class="muted">No strategies</span>';
-        return;
-    }
-    div.innerHTML = data.map(s => {
-        const enabled = s.enabled !== false;
-        const sigCount = s.signals_today || 0;
-        const statusClass = s.last_signal_status === "executed" ? "pill-executed" : s.last_signal_status === "approved" ? "pill-approved" : s.last_signal_status === "rejected" ? "pill-rejected" : "pill-pending";
-        return `<div class="strategy-card ${enabled ? 'active' : 'inactive'}" onclick="showStrategyDetail('${s.name}')">
-            <div class="strategy-name">${s.name} ${enabled ? "●" : "○"}</div>
-            <div class="strategy-desc">${s.description || "No description"}</div>
-            <div class="strategy-params">${s.params || ""}</div>
-            <div style="margin-top:4px; font-size:10px; color:var(--dim);">
-                Last: <span class="${s.last_signal_side === 'long' ? 'up' : s.last_signal_side === 'short' ? 'down' : ''}">
-                    ${s.last_signal_side ? s.last_signal_side.toUpperCase() : "never"}
-                </span>
-                ${s.last_signal_confidence != null ? `(${(s.last_signal_confidence * 100).toFixed(0)}%)` : ""}
-                <span class="pill ${statusClass}">${s.last_signal_status || "PENDING"}</span>
-                | Today: ${sigCount}
-            </div>
-        </div>`;
-    }).join('');
-}
-
-// ── Risk ──
-function renderRisk(data) {
-    if (!data) return;
-    const dailyDD = document.getElementById("risk-daily-dd");
-    const maxDD = document.getElementById("risk-max-dd");
-    const exposure = document.getElementById("risk-exposure");
-    const openRisk = document.getElementById("risk-open-risk");
-    if (dailyDD) dailyDD.textContent = (data.daily_drawdown || 0).toFixed(2) + "%";
-    if (maxDD) maxDD.textContent = (data.max_drawdown_pct || 0).toFixed(2) + "%";
-    if (exposure) exposure.textContent = (data.directional_exposure || 0).toFixed(1) + "%";
-    if (openRisk) openRisk.textContent = (data.open_trade_risk || 0).toFixed(2) + "%";
 }
 
 // ── Positions ──
@@ -629,8 +503,8 @@ function renderPositions(data) {
             <td class="num ${pnlClass}">${pnl.toFixed(2)}%</td>
             <td class="num ${unrealClass}">${(unreal >= 0 ? "+" : "") + "$" + fmtNum(Math.abs(unreal))}</td>
             <td class="muted tiny">${p.strategy || "?"}</td>
-            <td class="num">${p.stop_loss != null ? "$" + fmtNum(p.stop_loss) : "<span class='muted'>—</span>"}</td>
-            <td class="num">${p.take_profit != null ? "$" + fmtNum(p.take_profit) : "<span class='muted'>—</span>"}</td>
+            <td class="num tiny">${p.stop_loss != null ? "$" + fmtNum(p.stop_loss) : "—"}</td>
+            <td class="num tiny">${p.take_profit != null ? "$" + fmtNum(p.take_profit) : "—"}</td>
         </tr>`;
     }).join('');
 }
@@ -667,15 +541,11 @@ function renderTrades(data) {
     }).join('');
 }
 
-// ── Logs — parse objects {time, level, module, message} ──
+// ── Logs — parse objects or strings ──
 function renderLogs(data) {
     const div = document.getElementById("logs-container");
-    if (!data || data.length === 0) {
-        div.innerHTML = '<span class="muted">Waiting for logs...</span>';
-        return;
-    }
+    if (!data || data.length === 0) { div.innerHTML = '<span class="muted">Waiting for logs...</span>'; return; }
     div.innerHTML = data.map(l => {
-        // Support both object format and string format
         if (typeof l === "string") {
             const cls = l.includes("WARNING") ? "log-warn" : l.includes("ERROR") || l.includes("CRITICAL") ? "log-error" : "";
             return `<div class="log-entry ${cls}">${l}</div>`;
@@ -689,18 +559,16 @@ function renderLogs(data) {
     div.scrollTop = div.scrollHeight;
 }
 
-// ── Socket.IO handlers ──
+// ── Socket.IO ──
 socket.on("connect", () => {
     document.getElementById("conn-badge").textContent = "LIVE";
     document.getElementById("conn-badge").className = "badge badge-green";
-    document.getElementById("status-bar-text") && (document.getElementById("status-bar-text").textContent = "Connected to bot");
 });
 socket.on("disconnect", () => {
     document.getElementById("conn-badge").textContent = "OFFLINE";
     document.getElementById("conn-badge").className = "badge badge-red";
 });
 
-// Track socket latency
 socket.on("status", (data) => {
     statusUpdate = data;
     if (data.mode) document.getElementById("mode-badge").textContent = data.mode.toUpperCase();
@@ -710,22 +578,21 @@ socket.on("status", (data) => {
     const cbEl = document.getElementById("circuit-badge");
     cbEl.textContent = "CB: " + (data.circuit_breaker || "OFF");
     cbEl.className = "badge " + (data.circuit_breaker === "ON" ? "badge-red" : "badge-yellow");
-    // Uptime
     const uptime = data.uptime_sec || 0;
     const h = Math.floor(uptime / 3600).toString().padStart(2, "0");
     const m = Math.floor((uptime % 3600) / 60).toString().padStart(2, "0");
     const s = (uptime % 60).toString().padStart(2, "0");
     document.getElementById("uptime-badge").textContent = `${h}:${m}:${s}`;
-    // Latency badge
+    document.getElementById("kpi-memory").textContent = (data.memory_mb || 0).toFixed(1) + " MB";
     if (lastSocketLatency != null) {
         document.getElementById("latency-badge").textContent = lastSocketLatency + "ms";
     }
     updateTickBar();
 });
 
-socket.on("portfolio", (data) => renderPortfolio(data));
-socket.on("engine_monitor", (data) => { renderEngineKPI(data); renderEngineMonitor(data); });
-socket.on("live_data", (data) => { renderLiveData(data); if (data && data.length > 0) renderMarket(data[0]); });
+socket.on("portfolio", (data) => updateKPI(data));
+socket.on("engine_monitor", (data) => renderEngine(data));
+socket.on("live_data", (data) => renderLiveData(data));
 socket.on("candles", (data) => renderCandles(data));
 socket.on("signals", (data) => renderSignals(data));
 socket.on("decisions", (data) => renderDecisions(data));
@@ -734,41 +601,37 @@ socket.on("positions", (data) => renderPositions(data));
 socket.on("trades", (data) => renderTrades(data));
 socket.on("logs", (data) => renderLogs(data));
 
-// Latency tracking: measure round-trip on each emit
+// Latency ping every 5s
 let _pingStart = null;
 setInterval(() => {
     if (socket.connected) {
         _pingStart = Date.now();
         socket.emit("ping", () => {
             lastSocketLatency = Date.now() - _pingStart;
-            const latEl = document.getElementById("latency-badge");
-            if (latEl) {
-                latEl.textContent = lastSocketLatency + "ms";
-                latEl.className = "badge " + (lastSocketLatency > 500 ? "badge-yellow" : "badge-blue");
+            const el = document.getElementById("kpi-socket-lat");
+            if (el) {
+                el.textContent = lastSocketLatency + "ms";
+                el.style.color = lastSocketLatency > 500 ? "var(--yellow)" : "var(--up)";
             }
+            document.getElementById("latency-badge").textContent = lastSocketLatency + "ms";
         });
     }
 }, 5000);
 
-// ── REST fallback + initial load ──
+// ── REST fallback ──
 function pollAll() {
     fetch("/api/status").then(r => r.json()).then(d => {
         if (d.mode) document.getElementById("mode-badge").textContent = d.mode.toUpperCase();
         const statusEl = document.getElementById("status-badge");
         statusEl.textContent = d.running ? "RUNNING" : "STOPPED";
         statusEl.className = "badge " + (d.running ? "badge-green" : "badge-red");
-        const cbEl = document.getElementById("circuit-badge");
-        cbEl.textContent = "CB: " + (d.circuit_breaker || "OFF");
-        cbEl.className = "badge " + (d.circuit_breaker === "ON" ? "badge-red" : "badge-yellow");
     }).catch(() => {});
-
     fetch("/api/trades").then(r => r.json()).then(d => renderTrades(d)).catch(() => {});
 }
-
 pollAll();
 setInterval(pollAll, 5000);
 
-// ── Uptime ticker ──
+// Uptime ticker
 setInterval(() => {
     if (statusUpdate.uptime_sec) {
         const s = statusUpdate.uptime_sec;
@@ -779,7 +642,7 @@ setInterval(() => {
     }
 }, 1000);
 
-// ── Strategy Drill-down Modal ──
+// ── Strategy Modal ──
 async function showStrategyDetail(name) {
     const modal = document.getElementById('strategy-modal');
     const content = document.getElementById('modal-content');
@@ -789,25 +652,21 @@ async function showStrategyDetail(name) {
     try {
         const res = await fetch('/api/strategy/' + encodeURIComponent(name));
         const data = await res.json();
-        if (data.error) {
-            content.innerHTML = '<div class="muted" style="text-align:center;color:var(--down)">' + data.error + '</div>';
-            return;
-        }
+        if (data.error) { content.innerHTML = '<div class="muted" style="text-align:center;color:var(--down)">' + data.error + '</div>'; return; }
         const s = data.stats || {};
         let html = '<div class="stat-row"><span class="stat-label">Enabled</span><span class="stat-value" style="color:' + (data.enabled ? 'var(--up)' : 'var(--muted)') + '">' + (data.enabled ? 'YES' : 'NO') + '</span></div>';
         html += '<div class="stat-row"><span class="stat-label">Description</span><span class="stat-value" style="font-weight:400;max-width:300px;text-align:right;">' + (data.description || "—") + '</span></div>';
-        html += '<div class="stat-row"><span class="stat-label">Params</span><span class="stat-value" style="font-weight:400;max-width:300px;text-align:right;font-family:monospace;font-size:10px;">' + JSON.stringify(data.params || {}) + '</span></div>';
-        html += '<div style="margin-top:12px; font-weight:600; font-size:11px; color:var(--accent);">Performance</div>';
-        html += '<div class="stat-row"><span class="stat-label">Signals (total / approved / rejected)</span><span class="stat-value">' + (s.total_signals || 0) + ' / ' + (s.approved_signals || 0) + ' / ' + (s.rejected_signals || 0) + '</span></div>';
+        html += '<div class="stat-row"><span class="stat-label">Params</span><span class="stat-value" style="font-weight:400;max-width:300px;text-align:right;font-family:monospace;font-size:9px;">' + JSON.stringify(data.params || {}) + '</span></div>';
+        html += '<div style="margin-top:10px; font-weight:600; font-size:10px; color:var(--accent);">Performance</div>';
+        html += '<div class="stat-row"><span class="stat-label">Signals (tot/app/rej)</span><span class="stat-value">' + (s.total_signals || 0) + ' / ' + (s.approved_signals || 0) + ' / ' + (s.rejected_signals || 0) + '</span></div>';
         html += '<div class="stat-row"><span class="stat-label">Trades (win / loss)</span><span class="stat-value">' + (s.winning_trades || 0) + ' / ' + (s.losing_trades || 0) + '</span></div>';
         html += '<div class="stat-row"><span class="stat-label">Win Rate</span><span class="stat-value" style="color:' + ((s.win_rate || 0) >= 0.5 ? 'var(--up)' : 'var(--down)') + '">' + ((s.win_rate || 0) * 100).toFixed(1) + '%</span></div>';
         html += '<div class="stat-row"><span class="stat-label">Total PnL</span><span class="stat-value" style="color:' + ((s.total_pnl_pct || 0) >= 0 ? 'var(--up)' : 'var(--down)') + '">' + ((s.total_pnl_pct || 0) >= 0 ? '+' : '') + (s.total_pnl_pct || 0).toFixed(2) + '%</span></div>';
-        html += '<div class="stat-row"><span class="stat-label">Avg PnL per trade</span><span class="stat-value">' + ((s.avg_pnl_pct || 0) >= 0 ? '+' : '') + (s.avg_pnl_pct || 0).toFixed(2) + '%</span></div>';
-
+        html += '<div class="stat-row"><span class="stat-label">Avg PnL/trade</span><span class="stat-value">' + ((s.avg_pnl_pct || 0) >= 0 ? '+' : '') + (s.avg_pnl_pct || 0).toFixed(2) + '%</span></div>';
         const hist = data.signal_history || [];
         if (hist.length > 0) {
-            html += '<div style="margin-top:12px;font-weight:600;font-size:11px;color:var(--accent);">Recent Signals</div>';
-            html += '<table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Conf</th><th>Status</th></tr></thead><tbody>';
+            html += '<div style="margin-top:10px;font-weight:600;font-size:10px;color:var(--accent);">Recent Signals</div>';
+            html += '<table><thead><tr><th>Time</th><th>Sym</th><th>Side</th><th>Conf</th><th>Status</th></tr></thead><tbody>';
             html += hist.map(sig => '<tr><td class="muted tiny">' + (sig.time || '--') + '</td><td><span class="highlight">' + sig.symbol + '</span></td><td class="' + (sig.side === 'long' ? 'up' : 'down') + '">' + (sig.side || '--').toUpperCase() + '</td><td class="num">' + (sig.confidence != null ? Math.round(sig.confidence * 100) + '%' : '--') + '</td><td><span class="pill pill-' + (sig.status || 'pending') + '">' + (sig.status || 'PENDING') + '</span></td></tr>').join('');
             html += '</tbody></table>';
         }
@@ -821,12 +680,8 @@ function closeStrategyModal(e) {
         document.getElementById('strategy-modal').classList.remove('active');
     }
 }
-
-// ── Keyboard: ESC closes modal ──
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-        document.getElementById('strategy-modal').classList.remove('active');
-    }
+    if (e.key === 'Escape') document.getElementById('strategy-modal').classList.remove('active');
 });
 </script>
 
