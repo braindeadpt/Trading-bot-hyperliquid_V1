@@ -159,13 +159,22 @@ class DashboardEmitter:
                 "age_ms": int((time.time() - evt.get("processed_at", 0)) * 1000),
             })
 
+        # Collect all strategy names (ensemble + sub-strategies)
+        all_strategy_names = []
+        for s in getattr(_engine, "_strategies", []):
+            all_strategy_names.append(getattr(s, "name", "unknown"))
+            sub_strategies = getattr(s, "_strategies", None)
+            if sub_strategies and isinstance(sub_strategies, dict):
+                for sub_name, sub in sub_strategies.items():
+                    all_strategy_names.append(getattr(sub, "name", sub_name))
+
         self._safe_emit("engine_monitor", {
             "ticks_per_second": stats.get("per_second", 0),
             "total_ticks": stats.get("total", 0),
             "last_error": last_err,
             "recent_events": recent,
             "symbols": getattr(_engine, "_symbols", []),
-            "strategies": [getattr(s, "name", "unknown") for s in getattr(_engine, "_strategies", [])],
+            "strategies": all_strategy_names,
         })
 
     def _emit_candles(self) -> None:
@@ -195,22 +204,19 @@ class DashboardEmitter:
         self._safe_emit("candles", result)
 
     def _emit_strategies(self) -> None:
-        """Strategy state - params, last signal, signals today."""
+        """Strategy state — ensemble + sub-strategies, params, last signal, signals today."""
         strategies = getattr(_engine, "_strategies", [])
         sig_hist = getattr(_engine, "_signal_history", [])
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-        result = []
-        for s in strategies:
+        def _build_strategy_info(s):
             name = getattr(s, "name", "unknown")
-            # Count signals today for this strategy
             today_count = sum(
                 1 for sig in sig_hist
-                if sig.get("strategy") == name and sig.get("time", "").startswith(datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+                if sig.get("strategy") == name and sig.get("time", "").startswith(today_str)
             )
-            # Last signal
             last = next((sig for sig in sig_hist if sig.get("strategy") == name), None)
-
-            result.append({
+            return {
                 "name": name,
                 "enabled": getattr(s, "enabled", True),
                 "description": (getattr(s, "__doc__", "") or "No description").split("\n")[0][:80],
@@ -220,7 +226,17 @@ class DashboardEmitter:
                 "last_signal_confidence": last.get("confidence") if last else None,
                 "last_signal_status": last.get("status") if last else None,
                 "signals_today": today_count,
-            })
+            }
+
+        result = []
+        for s in strategies:
+            result.append(_build_strategy_info(s))
+            # If this is an ensemble, also emit its sub-strategies
+            sub_strategies = getattr(s, "_strategies", None)
+            if sub_strategies and isinstance(sub_strategies, dict):
+                for sub in sub_strategies.values():
+                    result.append(_build_strategy_info(sub))
+
         self._safe_emit("strategies", result)
 
     def _emit_signals(self) -> None:
