@@ -68,7 +68,7 @@ strategy:
     max_hold_hours: 4
     stop_loss_atr_multiplier: 2.0
     overcrowded_penalty: 0.2        # reduce confidence by 20%
-    min_confidence: 0.5
+    min_confidence: 0.40           # reduced from 0.50
     # Microstructure filters (Task 2.2)
     oir_long_threshold: 0.6         # OIR > 0.6 confirms long
     oir_short_threshold: -0.6       # OIR < -0.6 confirms short
@@ -95,8 +95,8 @@ strategy:
     enabled: true
     timeframe: "15m"
     context_timeframe: "1h"
-    extreme_threshold: 0.008        # 0.8% predicted funding (fallback if dynamic off)
-    strong_threshold: 0.005         # 0.5% predicted funding (fallback if dynamic off)
+    extreme_threshold: 0.003        # 0.3% predicted funding (reduced from 0.8%)
+    strong_threshold: 0.002         # 0.2% predicted funding (reduced from 0.5%)
     overcrowded_oi_pct: 65.0        # OI concentration on one side
     max_hold_minutes: 60
     stop_loss_pct: 2.0
@@ -116,8 +116,8 @@ strategy:
   # ═══════════════════════════════════════════════════════════
   funding_arbitrage:
     enabled: true
-    min_funding_spread: 0.012        # 1.2% spread between long and short legs
-    min_individual_funding: 0.005    # each leg must have |funding| > 0.5%
+    min_funding_spread: 0.004        # 0.4% spread between long and short legs (reduced from 1.2%)
+    min_individual_funding: 0.002    # each leg must have |funding| > 0.2% (reduced from 0.5%)
     exit_threshold: 0.002            # exit when funding reverts to <0.2%
     max_hold_hours: 8                # max hold until next funding payment
     pair_size_pct: 0.02              # 2% of capital per leg
@@ -131,9 +131,9 @@ strategy:
   # ═══════════════════════════════════════════════════════════
   vwap_deviation:
     enabled: true
-    z_threshold: 2.5                # |Z-score| > 2.5σ from VWAP
+    z_threshold: 1.8                # |Z-score| > 1.8σ from VWAP (reduced from 2.5)
     volume_surge: 1.5               # volume > 150% of 24h average
-    max_adx: 25.0                   # only trade when ADX < 25 (non-trending)
+    max_adx: 35.0                   # only trade when ADX < 35 (increased from 25)
     require_oir_confirm: true       # OIR must confirm the one-sided move
     oir_threshold: 0.4              # |OIR| > 0.4
     max_funding_opposite: 0.005     # avoid if funding extreme in signal direction
@@ -150,8 +150,8 @@ strategy:
   # ═══════════════════════════════════════════════════════════
   liquidation_catcher:
     enabled: true
-    min_notional_usd: 50000000     # $50M in 5min to trigger
-    min_liquidation_count: 10       # avoid single large liquidation
+    min_notional_usd: 10000000     # $10M in 5min to trigger (reduced from $50M)
+    min_liquidation_count: 5       # avoid single large liquidation (reduced from 10)
     require_oi_decreasing: true    # confirm positions were wiped out
     oi_delta_max: 0.0              # OI must be decreasing
     max_adx: 40.0                   # avoid in strong trends (cascades may continue)
@@ -191,6 +191,13 @@ strategy:
     base_minutes: 60                # 1h base cooldown after any trade
     max_minutes: 240                # 4h max cooldown after consecutive losses
     multiplier: 2.0                 # double after each loss (1h → 2h → 4h)
+
+  # ═══════════════════════════════════════════════════════════
+  # Ensemble Configuration
+  # ═══════════════════════════════════════════════════════════
+  ensemble:
+    threshold: 0.40                 # reduced from 0.55 for more signals
+    min_agreeing: 1                 # reduced from 2 for more flexibility
 
 # ═══════════════════════════════════════════════════════════
 # Backtest

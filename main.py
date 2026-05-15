@@ -56,6 +56,7 @@ from strategies.mean_reversion import MeanReversion
 from strategies.funding_arbitrage import FundingArbitrage
 from strategies.vwap_deviation import VWAPDeviation
 from strategies.liquidation_catcher import LiquidationCatcher
+from strategies.ensemble import StrategyEnsemble, StrategyWeight
 
 from strategies.base import Position
 from core.portfolio import PortfolioState
@@ -124,10 +125,13 @@ async def _run_backtest(cfg: Config, db: Database, logger: Any) -> Dict[str, Any
     logger.info("BACKTEST MODE")
     logger.info("=" * 60)
 
-    initial_capital = cfg.get("backtest.initial_capital", 100_000.0)
+    initial_capital = cfg.get("backtest.initial_capital", cfg.get("risk.initial_capital", 10_000.0))
     commission_pct = cfg.get("backtest.commission_pct", 0.04)
     slippage_bps = cfg.get("backtest.slippage_bps", 2.0)
     symbols = cfg.get("assets", ["BTC", "ETH", "SOL"])
+
+    logger.info("Backtest config: capital=$%.2f, commission=%.3f%%, slippage=%.1fbps",
+        initial_capital, commission_pct, slippage_bps)
 
     # Build strategies
     strategies = [
@@ -281,14 +285,39 @@ async def main() -> None:
     # -----------------------------------------------------------------------
     # 6. Initialize strategies
     # -----------------------------------------------------------------------
-    strategies = [
+    # Individual sub-strategies for ensemble composition
+    sub_strategies = [
         TrendFollow(cfg.get("strategy.trend_follow", {})),
         MeanReversion(cfg.get("strategy.mean_reversion", {})),
         FundingArbitrage(cfg.get("strategy.funding_arbitrage", {})),
         VWAPDeviation(cfg.get("strategy.vwap_deviation", {})),
         LiquidationCatcher(cfg.get("strategy.liquidation_catcher", {})),
     ]
-    logger.info(f"Loaded {len(strategies)} strategies: {[s.name for s in strategies]}")
+
+    # Ensemble with professional weighting
+    ensemble_weights = [
+        StrategyWeight("TrendFollow",         0.25, min_confidence=0.40),
+        StrategyWeight("FundingExtreme",      0.25, min_confidence=0.40),
+        StrategyWeight("VWAPDeviation",        0.20, min_confidence=0.40),
+        StrategyWeight("FundingArbitrage",    0.15, min_confidence=0.35),
+        StrategyWeight("LiquidationCatcher",  0.15, min_confidence=0.40),
+    ]
+
+    strategies = [
+        StrategyEnsemble(
+            strategies=sub_strategies,
+            weights=ensemble_weights,
+            threshold=cfg.get("strategy.ensemble.threshold", 0.40),
+            min_strategies_agreeing=cfg.get("strategy.ensemble.min_agreeing", 1),
+        ),
+    ]
+    logger.info(
+        "StrategyEnsemble loaded: %d sub-strategies, threshold=%.2f, min_agreeing=%d",
+        len(sub_strategies),
+        cfg.get("strategy.ensemble.threshold", 0.40),
+        cfg.get("strategy.ensemble.min_agreeing", 1),
+    )
+    logger.info("Sub-strategies: %s", [s.name for s in sub_strategies])
 
     # -----------------------------------------------------------------------
     # 7. Initialize portfolio, risk, execution

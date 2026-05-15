@@ -68,6 +68,17 @@ class FundingArbitrage(Strategy):
         self._state: Dict[str, _FundingArbState] = {}
         self._active_pair: Optional[Tuple[str, str]] = None  # (long_symbol, short_symbol)
         self._pair_entry_ms: int = 0
+        
+        # CRIT-008 FIX: Cache latest funding data across all symbols so
+        # on_data can trigger pair scans when enough symbols are known.
+        # This replaces the broken engine integration that never called scan_pair_opportunity.
+        self._latest_funding: Dict[str, float] = {}
+        self._latest_oi_delta: Dict[str, Optional[float]] = {}
+        self._latest_timestamp: int = 0
+        self._last_scan_ms: int = 0
+        self._scan_interval_ms: int = 60_000  # scan every 60 seconds
+        self._pending_signals: List[Signal] = []  # queue of signals to emit
+        self._pending_exit: Optional[ExitSignal] = None
 
     @property
     def name(self) -> str:
@@ -80,42 +91,85 @@ class FundingArbitrage(Strategy):
     def on_data(self, event: MarketEvent) -> Optional[Signal]:
         """Evaluate funding arbitrage opportunity.
 
-        This strategy produces signals per symbol, but the engine
-        will see them individually. We need to coordinate the pair
-        entry — the engine doesn't natively support pair trades.
-
-        Approach: produce signals for both legs separately, tagging
-        them as part of the same pair. The engine's conflict resolution
-        will pick one at a time, but cooldown + our coordination
-        ensures both legs get entered.
+        CRIT-008 FIX: Accumulate funding data in a cross-symbol cache.
+        Every scan_interval_ms, trigger a pair scan across all known symbols.
+        If a pair is found, queue both leg signals and emit them on subsequent
+        on_data calls for the respective symbols.
         """
-        # We need funding data
         funding = event.predicted_funding or event.funding
         if funding is None:
             return None
 
+        # Update cross-symbol cache
+        self._latest_funding[event.symbol] = funding
+        self._latest_oi_delta[event.symbol] = event.oi_delta
+        self._latest_timestamp = event.timestamp_ms
+
         state = self._get_state(event.symbol)
         state.funding_history.append(funding)
+        state.last_signal_ms = event.timestamp_ms
 
-        # Don't re-signal too frequently for the same symbol
-        if event.timestamp_ms - state.last_signal_ms < 300_000:  # 5 min throttle
+        # --- Emit queued signals for this symbol ---
+        # If we have pending signals from a previous pair scan, emit when
+        # the matching symbol's event arrives.
+        for i, sig in enumerate(self._pending_signals):
+            if sig.symbol == event.symbol:
+                self._pending_signals.pop(i)
+                logger.info(
+                    "FundingArbitrage EMIT %s signal for %s (funding=%.4f%%)",
+                    sig.side, event.symbol, funding * 100,
+                )
+                return sig
+
+        # --- Periodic pair scan ---
+        if event.timestamp_ms - self._last_scan_ms < self._scan_interval_ms:
+            return None
+        self._last_scan_ms = event.timestamp_ms
+
+        # Only scan if no active pair
+        if self._active_pair is not None:
+            logger.debug(
+                "FundingArbitrage scan skipped — active pair %s still open",
+                self._active_pair,
+            )
             return None
 
-        # If we already have an active pair, only produce exit signals
-        if self._active_pair is not None:
-            return None  # exits handled in on_position
+        # Need at least 2 symbols with funding data
+        if len(self._latest_funding) < 2:
+            logger.info(
+                "FundingArbitrage scan skipped — only %d symbol(s) with funding data",
+                len(self._latest_funding),
+            )
+            return None
 
-        # Need enough symbols with funding data to find a pair
-        # This is a per-symbol callback — we can't see other symbols here.
-        # The pair selection happens in a separate scan that we simulate
-        # by keeping a global cache of latest funding per symbol.
-        # However, the engine calls on_data per symbol individually.
-        #
-        # WORKAROUND: We maintain _latest_funding cache and only
-        # produce the LONG leg signal from the most-negative symbol.
-        # The SHORT leg signal is produced when that symbol's event
-        # comes through. We use a delayed pair entry mechanism.
-        return None  # Pair logic is handled differently — see below
+        # Run pair scan
+        result = self.scan_pair_opportunity(
+            funding_map=self._latest_funding,
+            oi_delta_map=self._latest_oi_delta,
+            timestamp_ms=event.timestamp_ms,
+        )
+        if result is None:
+            return None
+
+        long_sig, short_sig = result
+        # Queue both signals — they will be emitted when their respective
+        # symbol events arrive.
+        self._pending_signals = [long_sig, short_sig]
+        logger.info(
+            "FundingArbitrage PAIR FOUND — long=%s (%.4f%%) short=%s (%.4f%%) "
+            "spread=%.4f%%",
+            long_sig.symbol, self._latest_funding.get(long_sig.symbol, 0) * 100,
+            short_sig.symbol, self._latest_funding.get(short_sig.symbol, 0) * 100,
+            (self._latest_funding.get(short_sig.symbol, 0) - self._latest_funding.get(long_sig.symbol, 0)) * 100,
+        )
+
+        # Try to emit immediately if the current symbol matches one of the pair
+        for i, sig in enumerate(self._pending_signals):
+            if sig.symbol == event.symbol:
+                self._pending_signals.pop(i)
+                return sig
+
+        return None
 
     # ------------------------------------------------------------------
     # Exit logic

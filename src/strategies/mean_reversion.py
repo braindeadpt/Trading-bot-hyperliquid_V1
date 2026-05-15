@@ -176,6 +176,16 @@ class MeanReversion(Strategy):
             state.last_atr = atr
         else:
             atr = None
+            # Periodic warm-up logging
+            n_15m = len(state.candles_15m)
+            n_1h = len(state.candles_1h)
+            if event.timestamp_ms - getattr(state, "_last_warmup_log_ms", 0) > 300_000:
+                state._last_warmup_log_ms = event.timestamp_ms
+                logger.info(
+                    "FundingExtreme %s WARM-UP: %d/%d 15m candles, %d/%d 1h candles",
+                    event.symbol, n_15m, self.ATR_PERIOD + 1,
+                    n_1h, self.VOLATILITY_PERIOD + 1,
+                )
 
         # Calculate realized volatility from 1h candles (20 days)
         if len(state.candles_1h) >= self.VOLATILITY_PERIOD + 1:

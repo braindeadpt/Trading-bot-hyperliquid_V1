@@ -93,6 +93,10 @@ class VWAPDeviation(Strategy):
         """Evaluate VWAP deviation opportunity."""
         state = self._get_state(event.symbol)
 
+        # Update candles
+        if event.candle_1h:
+            state.candles_1h.append(event.candle_1h)
+
         # Throttle signals
         if event.timestamp_ms - state.last_signal_ms < self.SIGNAL_THROTTLE_MS:
             return None
@@ -100,6 +104,13 @@ class VWAPDeviation(Strategy):
         # Need 1h candles
         candles_1h = list(state.candles_1h)
         if len(candles_1h) < 24:
+            # Periodic warm-up logging
+            if event.timestamp_ms - getattr(state, "_last_warmup_log_ms", 0) > 300_000:
+                state._last_warmup_log_ms = event.timestamp_ms
+                logger.info(
+                    "VWAPDeviation %s WARM-UP: %d/24 1h candles collected",
+                    event.symbol, len(candles_1h),
+                )
             return None  # Need 24h of 1h data
 
         # --- Calculate VWAP + Z-score ---
@@ -112,6 +123,14 @@ class VWAPDeviation(Strategy):
         # --- Check volume surge ---
         _, vol_ratio = calculate_volume_ratio(candles_1h, lookback=24)
         if vol_ratio is None or vol_ratio < self.VOLUME_SURGE:
+            if event.timestamp_ms - getattr(state, "_last_skip_log_ms", 0) > 300_000:
+                state._last_skip_log_ms = event.timestamp_ms
+                logger.info(
+                    "VWAPDeviation %s SKIP — vol_ratio=%s (need >= %.1f)",
+                    event.symbol,
+                    f"{vol_ratio:.2f}" if vol_ratio is not None else "N/A",
+                    self.VOLUME_SURGE,
+                )
             return None
 
         # --- ADX filter (only trade in non-trending markets) ---

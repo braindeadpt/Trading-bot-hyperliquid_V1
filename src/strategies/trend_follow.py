@@ -98,6 +98,14 @@ class TrendFollow(Strategy):
         if event.candle_1h:
             state.candles_1h.append(event.candle_1h)
 
+        # Log warm-up progress every 10 candles
+        n_15m = len(state.candles_15m)
+        if n_15m % 10 == 0:
+            logger.info(
+                "SmartMoneyFlow %s warm-up: 15m=%d/20, 1h=%d/%d",
+                event.symbol, n_15m, len(state.candles_1h), self.VOLATILITY_PERIOD
+            )
+
         # Calculate realized volatility from 1h candles (20 days)
         if len(state.candles_1h) >= self.VOLATILITY_PERIOD + 1:
             rv = calculate_realized_volatility(list(state.candles_1h), self.VOLATILITY_PERIOD)
@@ -105,6 +113,7 @@ class TrendFollow(Strategy):
 
         # Need at least enough 15m candles for indicators
         if len(state.candles_15m) < self.EMA_PERIOD:
+            logger.debug("SMF %s SKIP: not enough 15m candles (%d < %d)", event.symbol, n_15m, self.EMA_PERIOD)
             return None
 
         candles_15m = list(state.candles_15m)
@@ -115,7 +124,8 @@ class TrendFollow(Strategy):
         vwap = calculate_vwap(candles_15m)
         ema20 = calculate_ema(closes, self.EMA_PERIOD)
         # EMA 50 for trend confirmation (README condition #2)
-        ema50 = calculate_ema(closes, 50) if len(closes) >= 50 else None
+        # Reduced from 50 to 35 candles for faster warm-up (was 12.5h, now ~8.75h)
+        ema50 = calculate_ema(closes, 50) if len(closes) >= 35 else None
         atr = calculate_atr(candles_15m, self.ATR_PERIOD)
         # MACD histogram for momentum confirmation (README condition #4)
         macd_hist = self._calculate_macd_histogram(candles_15m)
@@ -139,11 +149,19 @@ class TrendFollow(Strategy):
 
         # Need all key indicators
         if vwap is None or ema20 is None or atr is None or volume_avg is None:
+            missing = []
+            if vwap is None: missing.append("vwap")
+            if ema20 is None: missing.append("ema20")
+            if atr is None: missing.append("atr")
+            if volume_avg is None: missing.append("volume_avg")
+            logger.info("SMF %s SKIP: missing indicators: %s", event.symbol, missing)
             return None
         if atr == 0.0:
-            return None  # Can't size a position without volatility
+            logger.info("SMF %s SKIP: ATR=0 (no volatility)", event.symbol)
+            return None
         if ema50 is None:
-            return None  # Need EMA 50 for trend confirmation
+            logger.info("SMF %s SKIP: not enough candles for EMA50 (%d < 35)", event.symbol, len(closes))
+            return None
 
         current_candle = candles_15m[-1]
         current_volume = current_candle.volume
