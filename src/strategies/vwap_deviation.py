@@ -243,7 +243,7 @@ class VWAPDeviation(Strategy):
             size_pct=size_pct,
             entry_price=event.price,
             stop_loss_pct=stop_loss_pct,
-            take_profit_pct=None,  # Exit on VWAP cross
+            take_profit_pct=stop_loss_pct * 1.5,  # 1.5R take-profit
             reason=f"vwap_dev_{target_side}_z{zscore:.1f}_v{vol_ratio:.1f}",
             metadata={
                 "vwap": vwap,

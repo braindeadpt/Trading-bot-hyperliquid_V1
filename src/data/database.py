@@ -120,6 +120,11 @@ class Database:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
+        # CRIT-005 FIX: Serialize all DB write operations to prevent
+        # interleaved coroutine access from corrupting WAL transactions.
+        # SQLite WAL allows one writer + many readers; the lock ensures
+        # a single writer at a time from the async event loop.
+        self._write_lock = threading.Lock()
         self._init_db()
 
     # ------------------------------------------------------------------
@@ -281,8 +286,10 @@ class Database:
         """Persist a single candle to the correct timeframe table."""
         table = self._resolve_table(timeframe)
         sql = CANDLE_INSERT_SQL.format(table=table)
-        with self._conn():
-            self._conn().execute(sql, self._candle_tuple(candle))
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, self._candle_tuple(candle))
+            conn.commit()
 
     def save_candles(self, candles: List[Candle], timeframe: str) -> None:
         """Batch insert candles for performance during backfills."""
@@ -291,8 +298,10 @@ class Database:
         table = self._resolve_table(timeframe)
         sql = CANDLE_INSERT_SQL.format(table=table)
         rows = [self._candle_tuple(c) for c in candles]
-        with self._conn():
-            self._conn().executemany(sql, rows)
+        with self._write_lock:
+            conn = self._conn()
+            conn.executemany(sql, rows)
+            conn.commit()
 
     def get_candles(
         self,
@@ -378,12 +387,14 @@ class Database:
             INSERT INTO trades (symbol, side, entry_price, entry_time, size, strategy, status)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """
-        with self._conn():
-            cur = self._conn().execute(sql, (
+        with self._write_lock:
+            conn = self._conn()
+            cur = conn.execute(sql, (
                 entry.symbol, entry.side, entry.entry_price, entry.entry_time,
                 entry.size, entry.strategy, entry.status,
             ))
             trade_id = cur.lastrowid
+            conn.commit()
         if trade_id is None:
             raise RuntimeError("Failed to retrieve lastrowid after trade insert")
         return trade_id
@@ -400,13 +411,15 @@ class Database:
                 status = ?
             WHERE id = ?
         """
-        with self._conn():
-            self._conn().execute(sql, (
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, (
                 exit_update.exit_price, exit_update.exit_time,
                 exit_update.pnl_usd, exit_update.pnl_pct,
                 exit_update.exit_reason, exit_update.status,
                 exit_update.trade_id,
             ))
+            conn.commit()
 
     def get_open_trades(self, strategy: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return all currently open trades as dicts."""
@@ -443,11 +456,13 @@ class Database:
             INSERT INTO signals (symbol, side, confidence, strategy, price, timestamp, reason)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """
-        with self._conn():
-            self._conn().execute(sql, (
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, (
                 signal.symbol, signal.side, signal.confidence, signal.strategy,
                 signal.price, signal.timestamp, signal.reason,
             ))
+            conn.commit()
 
     def get_signals(
         self,
@@ -482,8 +497,10 @@ class Database:
             INSERT OR REPLACE INTO funding_history (symbol, current, predicted, timestamp)
             VALUES (?, ?, ?, ?)
         """
-        with self._conn():
-            self._conn().execute(sql, (record.symbol, record.current, record.predicted, record.timestamp))
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, (record.symbol, record.current, record.predicted, record.timestamp))
+            conn.commit()
 
     def get_funding_history(self, symbol: str, limit: int = 500) -> List[Dict[str, Any]]:
         sql = """
@@ -506,8 +523,10 @@ class Database:
             INSERT OR REPLACE INTO oi_history (symbol, oi_total, oi_delta, timestamp)
             VALUES (?, ?, ?, ?)
         """
-        with self._conn():
-            self._conn().execute(sql, (record.symbol, record.oi_total, record.oi_delta, record.timestamp))
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, (record.symbol, record.oi_total, record.oi_delta, record.timestamp))
+            conn.commit()
 
     def get_oi_history(self, symbol: str, limit: int = 500) -> List[Dict[str, Any]]:
         sql = """
@@ -530,10 +549,12 @@ class Database:
             INSERT OR REPLACE INTO portfolio_snapshots (timestamp, capital, peak_capital, daily_pnl, positions_json)
             VALUES (?, ?, ?, ?, ?)
         """
-        with self._conn():
-            self._conn().execute(sql, (
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, (
                 snapshot.timestamp, snapshot.capital, snapshot.peak_capital, snapshot.daily_pnl, snapshot.positions_json,
             ))
+            conn.commit()
 
     def get_portfolio_history(self, limit: int = 500) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM portfolio_snapshots ORDER BY timestamp DESC LIMIT ?"
@@ -541,11 +562,6 @@ class Database:
             cur = self._conn().execute(sql, (limit,))
             rows = cur.fetchall()
         return [dict(row) for row in rows]
-
-    def get_latest_portfolio_snapshot(self) -> Optional[Dict[str, Any]]:
-        """Return the most recent portfolio snapshot, or None if none exists."""
-        history = self.get_portfolio_history(limit=1)
-        return history[0] if history else None
 
     def get_latest_portfolio_snapshot(self) -> Optional[Dict[str, Any]]:
         """Return the most recent portfolio snapshot, or None if none exists."""

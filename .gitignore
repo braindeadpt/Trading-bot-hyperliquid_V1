@@ -7,6 +7,7 @@ logs/*.err
 data/live/*.db
 data/live/*.db-shm
 data/live/*.db-wal
+data/test_health.db
 
 # Python cache
 __pycache__/

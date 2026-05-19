@@ -358,6 +358,15 @@ def create_app(config: Dict[str, Any]) -> tuple:
     template_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "templates"))
     static_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "static"))
     app = Flask(__name__, template_folder=template_dir, static_folder=static_dir)
+    app.config["TEMPLATES_AUTO_RELOAD"] = True
+    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+
+    @app.after_request
+    def add_header(response):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     # CRIT-001: SECRET_KEY - generate random if not configured (no hardcoded fallback)
     secret_key = config.get("secret_key")
@@ -1243,29 +1252,47 @@ def create_app(config: Dict[str, Any]) -> tuple:
     def api_strategies():
         if _engine is None:
             return jsonify([])
-        return jsonify([
-            {
+        result = []
+        for s in getattr(_engine, "_strategies", []):
+            result.append({
                 "name": getattr(s, "name", "unknown"),
                 "enabled": getattr(s, "enabled", True),
-            }
-            for s in getattr(_engine, "_strategies", [])
-        ])
+            })
+            sub = getattr(s, "_strategies", None)
+            if isinstance(sub, dict):
+                for sub_s in sub.values():
+                    result.append({
+                        "name": getattr(sub_s, "name", "unknown"),
+                        "enabled": getattr(sub_s, "enabled", True),
+                    })
+        return jsonify(result)
 
     @app.route("/api/strategy/<name>")
     def api_strategy_detail(name):
         """Drill-down endpoint for a single strategy (Task 5.3).
 
         Returns signals, win rate, PnL, and parameters.
+        Searches both top-level and sub-strategies (e.g. within ensemble).
         """
         if _engine is None:
             return jsonify({"error": "Engine not running"}), 503
 
-        # Find strategy
-        strategy = None
-        for s in getattr(_engine, "_strategies", []):
-            if getattr(s, "name", "") == name:
-                strategy = s
-                break
+        def _search_strategies(strategies, target_name):
+            for s in strategies:
+                if getattr(s, "name", "") == target_name:
+                    return s
+                sub = getattr(s, "_strategies", None)
+                if isinstance(sub, dict):
+                    result = _search_strategies(sub.values(), target_name)
+                    if result is not None:
+                        return result
+                elif isinstance(sub, (list, tuple)):
+                    result = _search_strategies(sub, target_name)
+                    if result is not None:
+                        return result
+            return None
+
+        strategy = _search_strategies(getattr(_engine, "_strategies", []), name)
         if strategy is None:
             return jsonify({"error": f"Strategy {name} not found"}), 404
 

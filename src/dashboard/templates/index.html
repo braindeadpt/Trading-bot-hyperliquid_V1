@@ -5,17 +5,116 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Hyperliquid Trading Bot Dashboard</title>
 <script src="/socket.io.min.js"></script>
-<link rel="stylesheet" href="/static/dashboard.css">
+<link rel="stylesheet" href="/static/dashboard.css?v=6">
+<style>
+/* Inline fallback — guaranteed to apply */
+:root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-hover: #1c2128;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --dim: #6e7681;
+    --up: #3fb950;
+    --down: #f85149;
+    --accent: #58a6ff;
+    --accent2: #a371f7;
+    --warn: #d29922;
+    --yellow: #fbbf24;
+    --radius: 6px;
+    --gap: 10px;
+    --pad: 10px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); font-size: 12px; line-height: 1.3; padding: 10px; min-height: 100vh; }
+.header { display: flex; justify-content: space-between; align-items: center; height: 32px; margin-bottom: var(--gap); padding: 0 2px; }
+h1 { font-size: 14px; margin: 0; color: var(--accent); font-weight: 600; }
+.badges { display: flex; gap: 6px; align-items: center; }
+.badge { padding: 2px 8px; border-radius: 4px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+.badge-green { background: #1a472a; color: var(--up); }
+.badge-yellow { background: #451a03; color: var(--yellow); }
+.badge-red { background: #450a0a; color: var(--down); }
+.badge-blue { background: #1e3a5f; color: var(--accent); }
+.badge-purple { background: #2e1065; color: var(--accent2); }
+.kpi-bar { display: flex; gap: var(--gap); margin-bottom: var(--gap); overflow-x: auto; }
+.kpi-bar::-webkit-scrollbar { height: 3px; }
+.kpi-cell { flex: 1; min-width: 140px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+.kpi-cell .label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.3px; }
+.kpi-cell .value { font-size: 18px; font-weight: 700; font-family: 'SF Mono', 'Consolas', monospace; letter-spacing: -0.5px; }
+.kpi-cell .sub { font-size: 9px; color: var(--dim); margin-top: 1px; }
+.grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: var(--gap); max-width: 1920px; margin: 0 auto; }
+.g-3 { grid-column: span 3; }
+.g-4 { grid-column: span 4; }
+.g-5 { grid-column: span 5; }
+.g-6 { grid-column: span 6; }
+.g-8 { grid-column: span 8; }
+.g-12 { grid-column: span 12; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); display: flex; flex-direction: column; overflow: hidden; }
+.panel-header { height: 24px; min-height: 24px; padding: 0 8px; background: rgba(88,166,255,0.06); border-bottom: 1px solid rgba(48,54,61,0.5); display: flex; justify-content: space-between; align-items: center; font-size: 10px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
+.panel-header .dim { font-size: 9px; color: var(--muted); font-weight: 400; text-transform: none; }
+.panel-header .live-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--up); animation: blink 1s infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+.panel-body { padding: 6px 8px; overflow: auto; flex: 1; }
+table { width: 100%; border-collapse: collapse; font-size: 10px; }
+th { text-align: left; padding: 4px 4px; color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 500; font-size: 9px; text-transform: uppercase; letter-spacing: 0.3px; position: sticky; top: 0; background: var(--panel); z-index: 2; }
+td { padding: 3px 4px; border-bottom: 1px solid rgba(48,54,61,0.3); vertical-align: middle; }
+tr:hover td { background: var(--panel-hover); }
+.num { text-align: right; font-family: 'SF Mono', 'Consolas', monospace; }
+.up { color: var(--up); font-weight: 600; }
+.down { color: var(--down); font-weight: 600; }
+.muted { color: var(--muted); }
+.dim { color: var(--dim); }
+.highlight { color: var(--accent2); font-weight: 600; }
+.tiny { font-size: 9px; }
+.yellow { color: var(--yellow); font-weight: 600; }
+.pill { display: inline-block; padding: 0px 4px; border-radius: 3px; font-size: 8px; font-weight: 700; text-transform: uppercase; }
+.pill-pending { background: rgba(217,119,6,0.15); color: #d97706; }
+.pill-approved { background: rgba(26,71,42,0.3); color: var(--up); }
+.pill-rejected { background: rgba(239,68,68,0.15); color: #ef4444; }
+.pill-executed { background: rgba(59,130,246,0.15); color: #3b82f6; }
+.mini-stats { display: flex; flex-direction: column; gap: 1px; }
+.mini-row { display: flex; justify-content: space-between; align-items: baseline; font-size: 10px; padding: 2px 0; border-bottom: 1px dotted rgba(48,54,61,0.2); }
+.mini-row:last-child { border-bottom: none; }
+.mini-label { color: var(--muted); font-size: 9px; }
+.mini-value { font-family: 'SF Mono', monospace; }
+.strategy-card { padding: 6px 8px; margin-bottom: 4px; background: var(--panel-hover); border-radius: 4px; border-left: 2px solid var(--border); cursor: pointer; transition: filter 0.2s; }
+.strategy-card.active { border-left-color: var(--up); }
+.strategy-card.inactive { border-left-color: var(--muted); opacity: 0.6; }
+.strategy-card:hover { filter: brightness(1.15); }
+.strategy-name { font-weight: 600; font-size: 11px; margin-bottom: 1px; }
+.strategy-desc { color: var(--dim); font-size: 9px; line-height: 1.3; }
+.stream-list { font-size: 10px; line-height: 1.4; }
+.stream-item { padding: 2px 0; border-bottom: 1px dotted rgba(48,54,61,0.3); display: flex; gap: 6px; align-items: baseline; }
+.stream-item:last-child { border-bottom: none; }
+.stream-time { color: var(--muted); font-size: 9px; min-width: 50px; font-family: 'SF Mono', monospace; }
+.stream-symbol { color: var(--accent2); font-weight: 600; }
+.log-container { font-size: 9px; font-family: 'SF Mono', 'Consolas', monospace; line-height: 1.4; }
+.log-warn { color: var(--warn); }
+.log-error { color: var(--down); }
+.tick-bar { display: flex; gap: 2px; margin-top: 4px; }
+.tick-cell { flex: 1; height: 8px; background: #1a1a1a; border-radius: 2px; transition: background 0.3s; }
+.tick-cell.active { background: var(--up); }
+.modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; justify-content: center; align-items: center; }
+.modal-overlay.active { display: flex; }
+.modal-box { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); width: 90%; max-width: 700px; max-height: 85vh; overflow-y: auto; padding: 14px; }
+.modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.modal-title { font-size: 13px; font-weight: 600; color: var(--accent); }
+.modal-close { cursor: pointer; font-size: 18px; color: var(--muted); line-height: 1; }
+.stat-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.stat-label { color: var(--dim); font-size: 10px; }
+.stat-value { font-weight: 600; font-size: 10px; }
+</style>
 </head>
 <body>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- HEADER: Status badges                                           -->
+<!-- HEADER                                                           -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="header">
-    <div style="display:flex;align-items:center;gap:10px;">
+    <div style="display:flex;align-items:center;gap:8px;">
         <span class="badge badge-green" id="conn-badge">LIVE</span>
-        <h1>Hyperliquid Bot — Operations Dashboard</h1>
+        <h1>Hyperliquid Bot</h1>
     </div>
     <div class="badges">
         <span class="badge badge-blue" id="mode-badge">PAPER</span>
@@ -27,99 +126,77 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- ROW 1: KPIs — 4 key cards                                       -->
+<!-- KPI BAR — 5 compact cells                                        -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="grid" style="margin-bottom:var(--gap);">
-    <div class="g-3">
-        <div class="kpi-card">
-            <div class="kpi-label">Capital</div>
-            <div class="kpi-value" id="kpi-capital">$--</div>
-            <div class="kpi-sub" id="kpi-capital-time">--</div>
-        </div>
+<div class="kpi-bar" id="kpi-bar">
+    <div class="kpi-cell">
+        <span class="label">Capital</span>
+        <span class="value" id="kpi-capital">$--</span>
+        <span class="sub" id="kpi-capital-time">--</span>
     </div>
-    <div class="g-3">
-        <div class="kpi-card">
-            <div class="kpi-label">Daily PnL</div>
-            <div class="kpi-value" id="kpi-daily-pnl">$--</div>
-            <div class="kpi-sub" id="kpi-daily-pnl-pct">--</div>
-        </div>
+    <div class="kpi-cell">
+        <span class="label">Daily PnL</span>
+        <span class="value" id="kpi-daily-pnl">$--</span>
+        <span class="sub" id="kpi-pnl-pct">--%</span>
     </div>
-    <div class="g-3">
-        <div class="kpi-card">
-            <div class="kpi-label">Open Positions / Trades</div>
-            <div class="kpi-value" id="kpi-open-pos">--</div>
-            <div class="kpi-sub" id="kpi-daily-trades">Daily: -- | Total: --</div>
-        </div>
+    <div class="kpi-cell">
+        <span class="label">Open Positions</span>
+        <span class="value" id="kpi-open-pos">--</span>
+        <span class="sub" id="kpi-trades-count">Daily: -- | Total: --</span>
     </div>
-    <div class="g-3">
-        <div class="kpi-card">
-            <div class="kpi-label">Engine / Data Latency</div>
-            <div class="kpi-value" id="kpi-engine">--</div>
-            <div class="kpi-sub" id="kpi-latency">Socket: -- | Data: --</div>
-        </div>
+    <div class="kpi-cell">
+        <span class="label">Max Drawdown</span>
+        <span class="value" id="kpi-max-dd">--%</span>
+        <span class="sub">Risk limit</span>
+    </div>
+    <div class="kpi-cell">
+        <span class="label">Engine / Latency</span>
+        <span class="value" id="kpi-engine">--</span>
+        <span class="sub" id="kpi-latency">Socket: -- | Data: --</span>
     </div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- ROW 2: Market Data — Live prices + Candles                      -->
+<!-- ROW 1: Market Data — Live (wide) + Candles (narrow)              -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="grid">
-    <!-- Live Market Data — wide panel -->
     <div class="g-8">
-        <div class="panel" style="min-height:280px;">
+        <div class="panel" style="max-height:210px;">
             <div class="panel-header">
-                <span>Live Market Data <span class="dim">All Symbols — Real-time</span></span>
+                <span>Live Market Data <span class="dim">All Symbols</span></span>
                 <span class="live-dot"></span>
             </div>
             <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:252px;">
+                <div style="overflow:auto; max-height:186px;">
                     <table>
                         <thead>
                             <tr>
-                                <th>Sym</th>
-                                <th class="num">Price</th>
-                                <th class="num">Bid</th>
-                                <th class="num">Ask</th>
-                                <th class="num">Spr%</th>
-                                <th class="num">Funding</th>
-                                <th class="num">Pred</th>
-                                <th class="num">OI (M)</th>
-                                <th class="num">Vol 1m</th>
-                                <th class="num">Imbal</th>
-                                <th class="num">OIR</th>
-                                <th class="num">Depth</th>
-                                <th class="num">RVol</th>
-                                <th class="num">VWAP</th>
-                                <th class="num">Age</th>
+                                <th>Sym</th><th class="num">Price</th><th class="num">Bid</th><th class="num">Ask</th>
+                                <th class="num">Spr%</th><th class="num">Fund</th><th class="num">Pred</th>
+                                <th class="num">OI(M)</th><th class="num">Vol1m</th><th class="num">Imbal</th>
+                                <th class="num">OIR</th><th class="num">Depth</th><th class="num">RVol</th>
+                                <th class="num">VWAP</th><th class="num">Age</th>
                             </tr>
                         </thead>
                         <tbody id="live-data-tbody">
-                            <tr><td colspan="15" class="muted" style="text-align:center;">Waiting for market data...</td></tr>
+                            <tr><td colspan="15" class="muted" style="text-align:center;">Waiting for data...</td></tr>
                         </tbody>
                     </table>
                 </div>
             </div>
         </div>
     </div>
-
-    <!-- Candle Watch — narrower -->
     <div class="g-4">
-        <div class="panel" style="min-height:280px;">
-            <div class="panel-header">Candle Watch <span class="dim">OHLCV + Buy%</span></div>
+        <div class="panel" style="max-height:210px;">
+            <div class="panel-header">Candle Watch <span class="dim">OHLCV</span></div>
             <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:252px;">
+                <div style="overflow:auto; max-height:186px;">
                     <table>
                         <thead>
                             <tr>
-                                <th>Sym</th>
-                                <th>TF</th>
-                                <th class="num">Open</th>
-                                <th class="num">High</th>
-                                <th class="num">Low</th>
-                                <th class="num">Close</th>
-                                <th class="num">Vol</th>
-                                <th class="num">Buy%</th>
-                                <th class="num">VWAP</th>
+                                <th>Sym</th><th>TF</th><th class="num">Open</th><th class="num">High</th>
+                                <th class="num">Low</th><th class="num">Close</th><th class="num">Vol</th>
+                                <th class="num">Buy%</th><th class="num">VWAP</th>
                             </tr>
                         </thead>
                         <tbody id="candles-tbody">
@@ -133,28 +210,20 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- ROW 3: Execution — Positions + Trades                           -->
+<!-- ROW 2: Execution — Positions + Trades                            -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="grid">
-    <!-- Open Positions -->
+<div class="grid" style="margin-top:var(--gap);">
     <div class="g-6">
-        <div class="panel" style="min-height:220px;">
+        <div class="panel" style="max-height:180px;">
             <div class="panel-header">Open Positions <span class="dim">Active</span></div>
             <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:192px;">
+                <div style="overflow:auto; max-height:156px;">
                     <table>
                         <thead>
                             <tr>
-                                <th>Sym</th>
-                                <th>Side</th>
-                                <th class="num">Size</th>
-                                <th class="num">Entry</th>
-                                <th class="num">Current</th>
-                                <th class="num">PnL%</th>
-                                <th class="num">Unrealized</th>
-                                <th>Strat</th>
-                                <th>SL</th>
-                                <th>TP</th>
+                                <th>Sym</th><th>Side</th><th class="num">Size</th><th class="num">Entry</th>
+                                <th class="num">Current</th><th class="num">PnL%</th><th class="num">Unreal</th>
+                                <th>Strat</th><th>SL</th><th>TP</th>
                             </tr>
                         </thead>
                         <tbody id="positions-tbody">
@@ -165,31 +234,21 @@
             </div>
         </div>
     </div>
-
-    <!-- Trade History -->
     <div class="g-6">
-        <div class="panel" style="min-height:220px;">
-            <div class="panel-header">Trade History <span class="dim">Last 50 — Open + Closed</span></div>
+        <div class="panel" style="max-height:180px;">
+            <div class="panel-header">Trade History <span class="dim">Last 50</span></div>
             <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:192px;">
+                <div style="overflow:auto; max-height:156px;">
                     <table>
                         <thead>
                             <tr>
-                                <th>Time</th>
-                                <th>Sym</th>
-                                <th>Side</th>
-                                <th class="num">Entry</th>
-                                <th class="num">Exit</th>
-                                <th class="num">Size</th>
-                                <th class="num">PnL</th>
-                                <th class="num">PnL%</th>
-                                <th>Strat</th>
-                                <th>Reason</th>
-                                <th>Sts</th>
+                                <th>Time</th><th>Sym</th><th>Side</th><th class="num">Entry</th>
+                                <th class="num">Exit</th><th class="num">Size</th><th class="num">PnL</th>
+                                <th class="num">PnL%</th><th>Strat</th><th>Reason</th><th>Sts</th>
                             </tr>
                         </thead>
                         <tbody id="trades-tbody">
-                            <tr><td colspan="11" class="muted" style="text-align:center;">Loading trades...</td></tr>
+                            <tr><td colspan="11" class="muted" style="text-align:center;">Loading...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -199,30 +258,25 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- ROW 4: Intelligence — Engine + Strategies + Signals               -->
+<!-- ROW 3: Intelligence — Engine + Strategies + Signals/Decisions  -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="grid">
-    <!-- Engine Monitor -->
-    <div class="g-4">
-        <div class="panel" style="min-height:240px;">
-            <div class="panel-header">Engine Monitor <span class="dim">Health · Ticks · Latency</span></div>
-            <div class="panel-body">
+<div class="grid" style="margin-top:var(--gap);">
+    <div class="g-3">
+        <div class="panel" style="max-height:240px;">
+            <div class="panel-header">Engine <span class="dim">Health</span></div>
+            <div class="panel-body" style="padding:6px 8px;">
                 <div class="mini-stats">
                     <div class="mini-row"><span class="mini-label">State</span><span class="mini-value highlight" id="eng-state">--</span></div>
                     <div class="mini-row"><span class="mini-label">Uptime</span><span class="mini-value" id="eng-uptime">--</span></div>
                     <div class="mini-row"><span class="mini-label">Ticks/s</span><span class="mini-value" id="eng-ticks">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Total Ticks</span><span class="mini-value" id="eng-total">--</span></div>
+                    <div class="mini-row"><span class="mini-label">Total</span><span class="mini-value" id="eng-total">--</span></div>
                     <div class="mini-row"><span class="mini-label">Memory</span><span class="mini-value" id="eng-mem">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Assets</span><span class="mini-value muted" id="eng-assets">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Strategies</span><span class="mini-value muted" id="eng-strats">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Last Error</span><span class="mini-value" id="eng-error" style="color:var(--down);">--</span></div>
                     <div class="mini-row"><span class="mini-label">Daily DD</span><span class="mini-value" id="eng-daily-dd">--</span></div>
                     <div class="mini-row"><span class="mini-label">Max DD</span><span class="mini-value" id="eng-max-dd">--</span></div>
                     <div class="mini-row"><span class="mini-label">Exposure</span><span class="mini-value" id="eng-exposure">--</span></div>
                     <div class="mini-row"><span class="mini-label">Open Risk</span><span class="mini-value" id="eng-open-risk">--</span></div>
+                    <div class="mini-row"><span class="mini-label">Last Error</span><span class="mini-value" id="eng-error" style="color:var(--down);">--</span></div>
                 </div>
-                <div style="margin-top:8px; font-size:10px; color:var(--dim); font-weight:600;">Recent Events (latency):</div>
-                <div id="recent-events" style="font-size:10px; color:var(--muted); margin-top:4px; line-height:1.6; max-height:60px; overflow-y:auto;">No events yet</div>
                 <div class="tick-bar" id="tick-bar">
                     <div class="tick-cell"></div><div class="tick-cell"></div><div class="tick-cell"></div>
                     <div class="tick-cell"></div><div class="tick-cell"></div><div class="tick-cell"></div>
@@ -232,31 +286,25 @@
             </div>
         </div>
     </div>
-
-    <!-- Strategies -->
-    <div class="g-4">
-        <div class="panel" style="min-height:240px;">
+    <div class="g-5">
+        <div class="panel" style="max-height:240px;">
             <div class="panel-header">Strategies <span class="dim">Click for detail</span></div>
-            <div class="panel-body" id="strategies-panel" style="max-height:216px; overflow-y:auto;">
+            <div class="panel-body" id="strategies-panel" style="padding:6px 8px; max-height:216px; overflow-y:auto;">
                 <span class="muted">Waiting...</span>
             </div>
         </div>
     </div>
-
-    <!-- Signals + Decisions stacked -->
     <div class="g-4">
-        <div style="display:flex; flex-direction:column; gap:var(--gap); min-height:240px;">
-            <!-- Signal Stream -->
-            <div class="panel" style="flex:1;">
-                <div class="panel-header">Signal Stream <span class="dim">Last 20</span></div>
-                <div class="panel-body" style="max-height:100px; overflow-y:auto; padding:8px;">
+        <div style="display:flex; flex-direction:column; gap:var(--gap); max-height:240px;">
+            <div class="panel" style="flex:1; max-height:115px;">
+                <div class="panel-header">Signals <span class="dim">Last 20</span></div>
+                <div class="panel-body" style="padding:4px 6px; max-height:91px; overflow-y:auto;">
                     <div id="signals-list" class="stream-list"><span class="muted">No signals yet</span></div>
                 </div>
             </div>
-            <!-- Decision Log -->
-            <div class="panel" style="flex:1;">
-                <div class="panel-header">Decision Log <span class="dim">Risk + Execution</span></div>
-                <div class="panel-body" style="max-height:80px; overflow-y:auto; padding:8px;">
+            <div class="panel" style="flex:1; max-height:115px;">
+                <div class="panel-header">Decisions <span class="dim">Risk + Exec</span></div>
+                <div class="panel-body" style="padding:4px 6px; max-height:91px; overflow-y:auto;">
                     <div id="decisions-list" class="stream-list"><span class="muted">No decisions yet</span></div>
                 </div>
             </div>
@@ -265,14 +313,14 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- ROW 5: Logs — full width                                          -->
+<!-- ROW 4: Logs — compact, full width                                  -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="grid">
+<div class="grid" style="margin-top:var(--gap);">
     <div class="g-12">
-        <div class="panel" style="min-height:160px;">
-            <div class="panel-header">Live Logs <span class="dim">Last 50 lines</span></div>
-            <div class="panel-body" style="padding:8px 10px;">
-                <div id="logs-container" class="log-container" style="max-height:136px; overflow-y:auto;">
+        <div class="panel" style="max-height:120px;">
+            <div class="panel-header">Live Logs <span class="dim">Last 50</span></div>
+            <div class="panel-body" style="padding:4px 8px;">
+                <div id="logs-container" class="log-container" style="max-height:96px; overflow-y:auto;">
                     <span class="muted">Waiting for logs...</span>
                 </div>
             </div>
@@ -281,7 +329,7 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- STRATEGY DRILL-DOWN MODAL                                         -->
+<!-- STRATEGY DRILL-DOWN MODAL                                        -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div id="strategy-modal" class="modal-overlay" onclick="closeStrategyModal(event)">
     <div class="modal-box" onclick="event.stopPropagation()">
@@ -334,24 +382,23 @@ function fmtAge(seconds) {
     return (seconds / 60).toFixed(1) + "m";
 }
 
-// ── KPI Bar ──
+// ── KPIs ──
 function updateKPIs(portfolio, engine) {
     if (!portfolio) return;
     const capital = portfolio.capital || 0;
     const pnl = portfolio.daily_pnl || 0;
+    const pnlPct = capital > 0 ? (pnl / capital * 100) : 0;
     document.getElementById("kpi-capital").textContent = "$" + fmtNum(capital);
     document.getElementById("kpi-capital-time").textContent = fmtTime(portfolio.timestamp_ms);
     const pnlEl = document.getElementById("kpi-daily-pnl");
     pnlEl.textContent = (pnl >= 0 ? "+" : "") + "$" + fmtNum(Math.abs(pnl));
     pnlEl.style.color = pnl >= 0 ? "var(--up)" : "var(--down)";
-    document.getElementById("kpi-daily-pnl-pct").textContent = (portfolio.max_drawdown_pct || 0).toFixed(2) + "% max DD";
+    document.getElementById("kpi-pnl-pct").textContent = (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "%";
     document.getElementById("kpi-open-pos").textContent = portfolio.open_positions || 0;
-    document.getElementById("kpi-daily-trades").textContent = "Daily: " + (portfolio.daily_trades || "--") + " | Total: " + (portfolio.total_trades || "--");
-
-    // Engine KPI
+    document.getElementById("kpi-trades-count").textContent = "Daily: " + (portfolio.daily_trades || "--") + " | Total: " + (portfolio.total_trades || "--");
+    document.getElementById("kpi-max-dd").textContent = (portfolio.max_drawdown_pct || 0).toFixed(2) + "%";
     const ticks = engine && engine.ticks_per_second != null ? engine.ticks_per_second.toFixed(1) : "--";
-    const mem = statusUpdate.memory_mb != null ? statusUpdate.memory_mb.toFixed(1) + " MB" : "--";
-    document.getElementById("kpi-engine").textContent = ticks + " ticks/s";
+    document.getElementById("kpi-engine").textContent = ticks + " t/s";
     const lat = lastSocketLatency != null ? lastSocketLatency + "ms" : "--";
     const dataLat = document.getElementById("kpi-data-lat") ? document.getElementById("kpi-data-lat").textContent : "--";
     document.getElementById("kpi-latency").textContent = "Socket: " + lat + " | Data: " + dataLat;
@@ -363,7 +410,7 @@ function updateTickBar() {
     const cells = document.querySelectorAll("#tick-bar .tick-cell");
     if (!cells.length) return;
     cells[tickIdx].classList.add("active");
-    setTimeout(() => cells[tickIdx].classList.remove("active"), 200);
+    setTimeout(() => cells[tickIdx].classList.remove("active"), 150);
     tickIdx = (tickIdx + 1) % cells.length;
 }
 
@@ -402,18 +449,14 @@ function renderLiveData(rows) {
         </tr>`;
     }).join('');
     const avg = count > 0 ? Math.round(totalLatency / count) : null;
-    const latEl = document.getElementById("kpi-data-lat");
-    if (!latEl) {
-        // Create a hidden element to store data latency for KPI
-        const hidden = document.createElement("span");
-        hidden.id = "kpi-data-lat";
-        hidden.style.display = "none";
-        document.body.appendChild(hidden);
+    let dataLatEl = document.getElementById("kpi-data-lat");
+    if (!dataLatEl) {
+        dataLatEl = document.createElement("span");
+        dataLatEl.id = "kpi-data-lat";
+        dataLatEl.style.display = "none";
+        document.body.appendChild(dataLatEl);
     }
-    const dataLatEl = document.getElementById("kpi-data-lat");
-    if (dataLatEl && avg != null) {
-        dataLatEl.textContent = avg + "ms";
-    }
+    if (avg != null) dataLatEl.textContent = avg + "ms";
 }
 
 // ── Candles ──
@@ -452,30 +495,17 @@ function renderEngine(data) {
     document.getElementById("eng-ticks").textContent = data.ticks_per_second != null ? data.ticks_per_second.toFixed(1) : "--";
     document.getElementById("eng-total").textContent = data.total_ticks != null ? data.total_ticks.toLocaleString() : "--";
     document.getElementById("eng-mem").textContent = (statusUpdate.memory_mb || 0).toFixed(1) + " MB";
-    document.getElementById("eng-assets").textContent = (data.symbols || []).join(", ") || "--";
-    document.getElementById("eng-strats").textContent = (data.strategies || []).join(", ") || "--";
-    const errEl = document.getElementById("eng-error");
-    if (data.last_error) {
-        errEl.textContent = data.last_error.substring(0, 60);
-        errEl.style.color = "var(--down)";
-    } else {
-        errEl.textContent = "None";
-        errEl.style.color = "var(--up)";
-    }
-    // Risk
     document.getElementById("eng-daily-dd").textContent = (data.daily_drawdown || 0).toFixed(2) + "%";
     document.getElementById("eng-max-dd").textContent = (data.max_drawdown_pct || 0).toFixed(2) + "%";
     document.getElementById("eng-exposure").textContent = (data.directional_exposure || 0).toFixed(1) + "%";
     document.getElementById("eng-open-risk").textContent = (data.open_trade_risk || 0).toFixed(2) + "%";
-    // Recent events
-    const recentEl = document.getElementById("recent-events");
-    if (data.recent_events && data.recent_events.length > 0) {
-        recentEl.innerHTML = data.recent_events.map(e => {
-            const ageClass = e.age_ms > 5000 ? "down" : e.age_ms > 1000 ? "yellow" : "up";
-            return `<div><span class="highlight">${e.symbol}</span> @ $${fmtNum(e.price)} — <span class="${ageClass}">${e.age_ms}ms</span> ago</div>`;
-        }).join("");
+    const errEl = document.getElementById("eng-error");
+    if (data.last_error) {
+        errEl.textContent = data.last_error.substring(0, 40);
+        errEl.style.color = "var(--down)";
     } else {
-        recentEl.textContent = "No events yet";
+        errEl.textContent = "None";
+        errEl.style.color = "var(--up)";
     }
 }
 
@@ -489,7 +519,7 @@ function renderStrategies(data) {
         return `<div class="strategy-card ${enabled ? 'active' : 'inactive'}" onclick="showStrategyDetail('${s.name}')">
             <div class="strategy-name">${s.name} ${enabled ? "●" : "○"}</div>
             <div class="strategy-desc">${s.description || ""}</div>
-            <div style="margin-top:4px; font-size:10px; color:var(--dim);">
+            <div style="margin-top:2px; font-size:9px; color:var(--dim);">
                 Last: <span class="${s.last_signal_side === 'long' ? 'up' : s.last_signal_side === 'short' ? 'down' : ''}">${s.last_signal_side ? s.last_signal_side.toUpperCase() : "never"}</span>
                 ${s.last_signal_confidence != null ? `(${(s.last_signal_confidence * 100).toFixed(0)}%)` : ""}
                 <span class="pill ${statusClass}">${s.last_signal_status || "PENDING"}</span>
@@ -528,7 +558,7 @@ function renderDecisions(data) {
             <span class="stream-symbol">${d.symbol}</span>
             <span class="${d.side === 'long' ? 'up' : d.side === 'short' ? 'down' : ''}">${d.side ? d.side.toUpperCase() : "--"}</span>
             <span class="${resultClass}">${d.result || d.status || "--"}</span>
-            <span class="muted tiny">${d.reason ? d.reason.substring(0, 50) : ""}</span>
+            <span class="muted tiny">${d.reason ? d.reason.substring(0, 40) : ""}</span>
         </div>`;
     }).join('');
 }
@@ -638,7 +668,7 @@ socket.on("status", (data) => {
     if (lastSocketLatency != null) {
         document.getElementById("latency-badge").textContent = lastSocketLatency + "ms";
     }
-    updateKPIs(null, null); // refresh KPI display
+    updateKPIs(null, null);
     updateTickBar();
 });
 
@@ -708,7 +738,7 @@ async function showStrategyDetail(name) {
         let html = '<div class="stat-row"><span class="stat-label">Enabled</span><span class="stat-value" style="color:' + (data.enabled ? 'var(--up)' : 'var(--muted)') + '">' + (data.enabled ? 'YES' : 'NO') + '</span></div>';
         html += '<div class="stat-row"><span class="stat-label">Description</span><span class="stat-value" style="font-weight:400;max-width:300px;text-align:right;">' + (data.description || "—") + '</span></div>';
         html += '<div class="stat-row"><span class="stat-label">Params</span><span class="stat-value" style="font-weight:400;max-width:300px;text-align:right;font-family:monospace;font-size:10px;">' + JSON.stringify(data.params || {}) + '</span></div>';
-        html += '<div style="margin-top:12px; font-weight:600; font-size:11px; color:var(--accent);">Performance</div>';
+        html += '<div style="margin-top:10px; font-weight:600; font-size:11px; color:var(--accent);">Performance</div>';
         html += '<div class="stat-row"><span class="stat-label">Signals (tot/app/rej)</span><span class="stat-value">' + (s.total_signals || 0) + ' / ' + (s.approved_signals || 0) + ' / ' + (s.rejected_signals || 0) + '</span></div>';
         html += '<div class="stat-row"><span class="stat-label">Trades (win / loss)</span><span class="stat-value">' + (s.winning_trades || 0) + ' / ' + (s.losing_trades || 0) + '</span></div>';
         html += '<div class="stat-row"><span class="stat-label">Win Rate</span><span class="stat-value" style="color:' + ((s.win_rate || 0) >= 0.5 ? 'var(--up)' : 'var(--down)') + '">' + ((s.win_rate || 0) * 100).toFixed(1) + '%</span></div>';
@@ -716,7 +746,7 @@ async function showStrategyDetail(name) {
         html += '<div class="stat-row"><span class="stat-label">Avg PnL/trade</span><span class="stat-value">' + ((s.avg_pnl_pct || 0) >= 0 ? '+' : '') + (s.avg_pnl_pct || 0).toFixed(2) + '%</span></div>';
         const hist = data.signal_history || [];
         if (hist.length > 0) {
-            html += '<div style="margin-top:12px;font-weight:600;font-size:11px;color:var(--accent);">Recent Signals</div>';
+            html += '<div style="margin-top:10px;font-weight:600;font-size:11px;color:var(--accent);">Recent Signals</div>';
             html += '<table><thead><tr><th>Time</th><th>Sym</th><th>Side</th><th>Conf</th><th>Status</th></tr></thead><tbody>';
             html += hist.map(sig => '<tr><td class="muted tiny">' + (sig.time || '--') + '</td><td><span class="highlight">' + sig.symbol + '</span></td><td class="' + (sig.side === 'long' ? 'up' : 'down') + '">' + (sig.side || '--').toUpperCase() + '</td><td class="num">' + (sig.confidence != null ? Math.round(sig.confidence * 100) + '%' : '--') + '</td><td><span class="pill pill-' + (sig.status || 'pending') + '">' + (sig.status || 'PENDING') + '</span></td></tr>').join('');
             html += '</tbody></table>';

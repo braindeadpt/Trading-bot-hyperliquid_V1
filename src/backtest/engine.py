@@ -371,20 +371,14 @@ class BacktestEngine:
         else:
             gross_pnl = (pos.entry_price - exit_price) * pos.size
 
-        notional = pos.size * exit_price
-        commission = notional * (self.cfg.commission_pct / 100.0)
         net_pnl = gross_pnl - commission
-        capital += (pos.size * exit_price) + net_pnl - (pos.size * pos.entry_price)
-        # Actually simpler: capital = old capital + entry_notional + pnl
-        # But we already deducted entry notional from capital on open,
-        # so we add back: exit_notional + pnl
-        # Re-calculate properly:
-        entry_notional = pos.size * pos.entry_price
-        exit_notional = pos.size * exit_price
-        pnl_pct = (exit_price - pos.entry_price) / pos.entry_price if pos.side == "long" else (pos.entry_price - exit_price) / pos.entry_price
-        net_pnl = (exit_notional - entry_notional) if pos.side == "long" else (entry_notional - exit_notional)
-        net_pnl -= commission
-        capital = capital + entry_notional + net_pnl
+        pnl_pct = safe_divide(net_pnl, entry_notional, 0.0)
+
+        # CRIT-007 FIX: Correct capital update after closing position
+        # We already deducted entry_notional from capital on open,
+        # so we add back: exit_notional (which includes PnL)
+        # Actually: capital += exit_notional - entry_notional - commission
+        capital = capital + net_pnl
 
         self.closed_trades.append({
             "id": pos.id,

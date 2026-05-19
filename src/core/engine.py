@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from src.data.database import (
+    Candle as DBCandle,
     Database,
     PortfolioSnapshot,
     SignalRecord,
@@ -172,6 +173,12 @@ class TradingEngine:
         self._latest_orderbook_raw: Dict[str, Any] = {}  # HlOrderbook
 
         # ── Latest funding + liquidation tracking (Task 3.3) ──
+        # WS health check
+        self._hl_ws_client: Optional[Any] = None
+        self._ws_health_check_task: Optional[asyncio.Task] = None
+        self._last_ws_healthy_time: float = time.time()
+        self._ws_health_warned: bool = False
+
         self._latest_funding: Dict[str, float] = {}
         self._latest_oi_delta: Dict[str, Optional[float]] = {}
         self._liquidation_acc: Dict[str, Any] = {
@@ -251,6 +258,10 @@ class TradingEngine:
         return self._executor
 
     # CRIT-004: Validated setter for dashboard callback
+    def set_ws_client(self, ws_client: Any) -> None:
+        """Store reference to the Hyperliquid WS client for health monitoring."""
+        self._hl_ws_client = ws_client
+
     @property
     def on_dashboard_tick(self) -> Optional[Callable[[], Any]]:
         return self._on_dashboard_tick
@@ -339,6 +350,37 @@ class TradingEngine:
         self._funding_poll_task = asyncio.create_task(self._poll_funding_loop())
         logger.info("FundingAggregator polling started (interval=30s)")
 
+        # 5. Start WS health check
+        self._ws_health_check_task = asyncio.create_task(self._ws_health_loop())
+        logger.info("WS health check started")
+
+    async def _ws_health_loop(self) -> None:
+        """Background task: check WS health every 30s and log warnings."""
+        while self._running:
+            try:
+                await asyncio.sleep(30)
+                if self._hl_ws_client is None:
+                    continue
+                healthy = getattr(self._hl_ws_client, 'is_healthy', True)
+                now = time.time()
+                if not healthy:
+                    if not self._ws_health_warned:
+                        logger.warning("WS health check FAILED — no data for >90s")
+                        self._ws_health_warned = True
+                    if self._notifier is not None:
+                        await self._notifier.send_alert("⚠️ WS disconnected — market data stalled")
+                else:
+                    self._last_ws_healthy_time = now
+                    if self._ws_health_warned:
+                        logger.info("WS health RESTORED")
+                        self._ws_health_warned = False
+                        if self._notifier is not None:
+                            await self._notifier.send_alert("✅ WS reconnected")
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("WS health check error")
+
     async def _poll_funding_loop(self) -> None:
         """Background task: poll cross-exchange funding + OI every 30s."""
         while self._running:
@@ -380,13 +422,15 @@ class TradingEngine:
         if self._shutdown_event is not None:
             self._shutdown_event.set()
 
-        # Cancel funding poll task
-        if self._funding_poll_task and not self._funding_poll_task.done():
-            self._funding_poll_task.cancel()
-            try:
-                await self._funding_poll_task
-            except asyncio.CancelledError:
-                pass
+        # Cancel background tasks
+        for task_name in ("_funding_poll_task", "_ws_health_check_task"):
+            task = getattr(self, task_name, None)
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         # 1. Unsubscribe from DataBus
         for topic, callback in self._subscribed_callbacks.items():
@@ -456,6 +500,8 @@ class TradingEngine:
 
     def _make_candle_callback(self, symbol: str, timeframe: int):
         """Factory: returns an async callback for candle_complete:* topics."""
+        tf_name = {60: "1m", 300: "5m", 900: "15m", 3600: "1h"}.get(timeframe, f"{timeframe}s")
+
         async def _on_candle(candle: Candle) -> None:
             self._latest_candles[symbol][timeframe] = candle
             # Append 15m candles to history for ADX (regime filter)
@@ -468,6 +514,23 @@ class TradingEngine:
                 if prev is not None and prev > 0:
                     self._correlation_monitor.add_candle_return(symbol, prev, curr)
                 self._last_candle_close[symbol] = curr
+            # Persist candle to DB (FIX: candles table was staying empty)
+            try:
+                db_candle = DBCandle(
+                    symbol=symbol,
+                    timestamp_ms=getattr(candle, 'timestamp_ms', getattr(candle, 'close_time_ms', 0)),
+                    open=float(getattr(candle, 'open', getattr(candle, 'open_price', 0))),
+                    high=float(getattr(candle, 'high', getattr(candle, 'high_price', 0))),
+                    low=float(getattr(candle, 'low', getattr(candle, 'low_price', 0))),
+                    close=float(getattr(candle, 'close', getattr(candle, 'close_price', 0))),
+                    volume=float(getattr(candle, 'volume', 0)),
+                    funding_rate=float(getattr(candle, 'funding', 0)),
+                    oi_total=float(getattr(candle, 'oi_close', 0)),
+                    oi_delta=float(getattr(candle, 'oi_delta', 0)),
+                )
+                self._db.save_candle(db_candle, tf_name)
+            except Exception as exc:
+                logger.warning("Failed to persist candle for %s %s: %s", symbol, tf_name, exc)
         return _on_candle
 
     # ------------------------------------------------------------------
@@ -485,6 +548,14 @@ class TradingEngine:
           5. Persist everything to the DB.
         """
         logger.info("Processing market event for %s", symbol)
+
+        # Check if WS is healthy — warn if stale data
+        if self._hl_ws_client is not None:
+            ws_ok = getattr(self._hl_ws_client, 'is_healthy', True)
+            if not ws_ok and not self._ws_health_warned:
+                logger.warning("WS appears unhealthy — market data may be stale")
+                self._ws_health_warned = True
+
         async with self._event_lock:
             if not self._running:
                 return
@@ -567,8 +638,10 @@ class TradingEngine:
                     "DRAWDOWN CIRCUIT BREAKER TRIPPED at %.2f%% — halting new entries",
                     max_dd * 100.0,
                 )
-                # Flatten all open positions immediately
+                # CRIT-010 FIX: Flatten all open positions immediately when circuit breaker trips
                 await self._flatten_all_positions(event.price)
+                # Also reset the circuit breaker notification flag so it can re-trigger
+                self._circuit_breaker_notified = True
 
             # --- Update executor price tracking ---
             await self._executor.update_position_prices({symbol: event.price})
@@ -1504,6 +1577,9 @@ class TradingEngine:
         )
         await self._portfolio.add_position(position, cost=total_cost)
 
+        # CRIT-011 FIX: Persist portfolio snapshot after every trade entry
+        await self._maybe_save_snapshot(force=True)
+
         # --- Record entry timestamp for debounce ---
         self._last_entry_signal_ms[signal.symbol] = result.timestamp_ms
 
@@ -1591,6 +1667,9 @@ class TradingEngine:
             reason=reason,
         )
 
+        # CRIT-011 FIX: Persist portfolio snapshot after every trade exit
+        await self._maybe_save_snapshot(force=True)
+
         # Update risk manager metrics
         self._risk.on_trade_closed(result)
 
@@ -1654,15 +1733,23 @@ class TradingEngine:
                 strategy=position.metadata.get("strategy", "unknown"),
             )
 
-    async def _flatten_all_positions(self, current_price: float) -> None:
-        """Emergency liquidation of all open positions (circuit breaker)."""
+    async def _flatten_all_positions(self, _current_price: float) -> None:
+        """Emergency liquidation of all open positions (circuit breaker).
+
+        Uses per-symbol prices from _latest_price cache to avoid
+        cross-symbol price corruption (FIX: trade #22 bug).
+        """
         positions = await self._portfolio.positions
         if not positions:
             return
         logger.critical("FLATTENING %d position(s) due to circuit breaker", len(positions))
         for pos in positions.values():
             try:
-                await self._execute_exit(pos, current_price, reason="circuit_breaker_drawdown")
+                tick = self._latest_price.get(pos.symbol)
+                if tick is None or tick.mid <= 0:
+                    logger.warning("No price for %s — skipping flatten", pos.symbol)
+                    continue
+                await self._execute_exit(pos, tick.mid, reason="circuit_breaker_drawdown")
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Flatten failed for %s: %s", pos.symbol, exc)
 
@@ -1696,6 +1783,47 @@ class TradingEngine:
         else:
             logger.info("No prior portfolio snapshot found - starting fresh")
 
+        # 3. Restore recent candles from DB for faster strategy warm-up
+        await self._restore_candles_from_db()
+
+    async def _restore_candles_from_db(self) -> None:
+        """Load recent candle history from DB into in-memory caches.
+
+        This gives strategies instant access to historical candles on startup
+        instead of waiting for live WebSocket data to accumulate.
+        """
+        tf_map = {60: "1m", 300: "5m", 900: "15m", 3600: "1h"}
+        for symbol in self._symbols:
+            for tf_s, tf_name in tf_map.items():
+                try:
+                    rows = self._db.get_candles(symbol, tf_name, limit=100)
+                    if rows:
+                        candles = []
+                        for row in rows:
+                            candle = Candle(
+                                open=row.open,
+                                high=row.high,
+                                low=row.low,
+                                close=row.close,
+                                volume=row.volume,
+                                timestamp_ms=row.timestamp_ms,
+                                open_interest=row.oi_total,
+                            )
+                            candles.append(candle)
+                        if candles:
+                            self._latest_candles[symbol][tf_s] = candles[-1]
+                            if tf_s == 900:
+                                self._candles_15m_history[symbol].extend(candles)
+                            logger.info(
+                                "Restored %d %s candles for %s from DB",
+                                len(candles), tf_name, symbol,
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to restore %s candles for %s: %s",
+                        tf_name, symbol, exc,
+                    )
+
     async def _save_portfolio_snapshot(self) -> None:
         """Persist the current portfolio state to the DB."""
         state = await self._portfolio.to_dict()
@@ -1712,13 +1840,16 @@ class TradingEngine:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to save portfolio snapshot: %s", exc)
 
-    async def _maybe_save_snapshot(self) -> None:
-        """Save portfolio snapshot every ~60 seconds (simple throttle)."""
-        # Use a simple time-based throttle stored on the instance
+    async def _maybe_save_snapshot(self, force: bool = False) -> None:
+        """Save portfolio snapshot every ~60 seconds (simple throttle).
+
+        CRIT-011 FIX: Accept force=True to bypass throttle for critical
+        events (trade entry/exit).
+        """
         now = utc_timestamp_ms()
         if not hasattr(self, "_last_snapshot_ms"):
             self._last_snapshot_ms = 0
-        if now - self._last_snapshot_ms >= 60_000:
+        if force or now - self._last_snapshot_ms >= 60_000:
             await self._save_portfolio_snapshot()
             self._last_snapshot_ms = now
 

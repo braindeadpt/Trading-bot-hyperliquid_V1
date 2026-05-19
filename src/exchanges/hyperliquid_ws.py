@@ -37,7 +37,8 @@ INITIAL_BACKOFF_SECONDS = 1.0
 MAX_BACKOFF_SECONDS = 60.0
 RECONNECT_JITTER_MAX = 1.0
 HEARTBEAT_INTERVAL_SECONDS = 30.0
-MAX_RECONNECT_ATTEMPTS = 20  # Alert after this many consecutive failures
+MAX_RECONNECT_ATTEMPTS = 999999  # Never give up — keep trying forever
+MAX_RECONNECT_WARN_INTERVAL = 20  # Log a warning every this many attempts
 
 Data = Union[str, bytes]
 
@@ -165,6 +166,16 @@ class HyperliquidWSClient:
         self.reconnect_count = 0
         self.connected_at = 0.0
         self.messages_received = 0
+        self.last_message_time = 0.0
+
+    @property
+    def is_healthy(self) -> bool:
+        """True if connected and received a message in the last 90 seconds."""
+        if not self._connected:
+            return False
+        if self.last_message_time > 0 and time.time() - self.last_message_time > 90:
+            return False
+        return True
 
     async def start(self) -> None:
         """Main connection loop with exponential backoff reconnect."""
@@ -205,11 +216,12 @@ class HyperliquidWSClient:
             wait = min(self._backoff + jitter, MAX_BACKOFF_SECONDS)
             self.reconnect_count += 1
             if self.reconnect_count >= MAX_RECONNECT_ATTEMPTS:
-                logger.error("WS reconnect exceeded max attempts (%d) — giving up. Manual restart required.", MAX_RECONNECT_ATTEMPTS)
-                # TODO: send Telegram/Discord alert here
+                logger.error("WS reconnect exceeded max attempts (%d) — should never happen with MAX_RECONNECT_ATTEMPTS=%d", MAX_RECONNECT_ATTEMPTS, MAX_RECONNECT_ATTEMPTS)
                 return
-            if self.reconnect_count % 5 == 0:
-                logger.warning("WS reconnect attempt #%d/%d — possible network issue", self.reconnect_count, MAX_RECONNECT_ATTEMPTS)
+            if self.reconnect_count % MAX_RECONNECT_WARN_INTERVAL == 0:
+                logger.warning("WS reconnect attempt #%d — possible network issue", self.reconnect_count)
+            elif self.reconnect_count == 1:
+                logger.warning("WS reconnect attempt #1")
             logger.info("Reconnecting in %.1fs (attempt #%d)", wait, self.reconnect_count)
             await asyncio.sleep(wait)
             self._backoff = min(self._backoff * 2, MAX_BACKOFF_SECONDS)
@@ -233,7 +245,8 @@ class HyperliquidWSClient:
             while True:
                 raw = await self._ws.recv()
                 self.messages_received += 1
-                self._last_heartbeat = time.time()
+                self.last_message_time = time.time()
+                self._last_heartbeat = self.last_message_time
                 try:
                     self._on_message(raw)
                 except Exception:

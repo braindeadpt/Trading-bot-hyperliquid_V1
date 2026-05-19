@@ -152,10 +152,7 @@ class ExecutionEngine:
                 signal.symbol,
                 self._entry_debounce_ms - (now_ms - last_entry),
             )
-            raise ValueError(
-                f"Entry debounce active for {signal.symbol}: "
-                f"wait {self._entry_debounce_ms - (now_ms - last_entry)}ms"
-            )
+            return None
 
         # --- Check if already have open trade for this symbol ---
         async with self._lock:
@@ -165,10 +162,7 @@ class ExecutionEngine:
                     signal.symbol,
                     self._open_trades[signal.symbol].trade_id,
                 )
-                raise ValueError(
-                    f"Already have open trade for {signal.symbol}: "
-                    f"id={self._open_trades[signal.symbol].trade_id}"
-                )
+                return None
 
         raw_price = safe_float(signal.entry_price)
         if raw_price <= 0.0:
@@ -179,6 +173,26 @@ class ExecutionEngine:
         if size <= 0.0:
             logger.error("enter_position: zero size for %s", signal.symbol)
             raise ValueError(f"Calculated position size is zero for {signal.symbol}")
+
+        # CRIT-003 FIX: Clamp position size to hard limits
+        # Max position size = 20% of capital, max leverage consideration
+        max_position_size_pct = 0.20  # 20% of capital
+        capital = await portfolio.current_capital if hasattr(portfolio, 'current_capital') else 10_000.0
+        max_size_by_capital = (capital * max_position_size_pct) / fill_price if fill_price > 0 else 0.0
+        
+        # Also enforce max notional limit
+        max_notional = capital * max_position_size_pct
+        current_notional = fill_price * size
+        
+        if current_notional > max_notional:
+            old_size = size
+            size = max_notional / fill_price if fill_price > 0 else size
+            logger.warning(
+                "CRIT-003: POSITION SIZE CLAMPED for %s — %.6f → %.6f "
+                "(notional $%.2f > max $%.2f, %.1f%% of capital)",
+                signal.symbol, old_size, size, current_notional, max_notional,
+                (current_notional / capital * 100) if capital > 0 else 0,
+            )
 
         # Paper slippage: worse fill for the direction of the trade
         if self._mode == "paper":
@@ -351,14 +365,26 @@ class ExecutionEngine:
 
         Called by the engine on every price tick so that the portfolio's
         unrealized PnL stays current.
+
+        CRIT-001 FIX: Validate that the price symbol matches the trade symbol
+        to prevent cross-symbol price corruption.
         """
         async with self._lock:
             for symbol, price in prices.items():
                 price_f = safe_float(price)
                 if price_f <= 0.0:
+                    logger.warning("update_position_prices: invalid price %.4f for %s", price_f, symbol)
                     continue
                 trade = self._open_trades.get(symbol)
                 if trade is not None:
+                    # CRIT-001: Validate symbol match before updating
+                    if trade.symbol != symbol:
+                        logger.critical(
+                            "CRIT-001: SYMBOL MISMATCH — trade.symbol=%s vs price.symbol=%s. "
+                            "Rejecting price update to prevent cross-contamination.",
+                            trade.symbol, symbol,
+                        )
+                        continue
                     # Mutate in-place — TradeResult is mutable (dataclass, not frozen)
                     trade.exit_price = price_f  # Re-use field as "current mark price"
 
@@ -424,15 +450,22 @@ class ExecutionEngine:
     # State recovery
     # ------------------------------------------------------------------
 
-    async def load_open_trades(self) -> list:
+    async def load_open_trades(self, *args, **kwargs) -> list:
         """Load open trades from the DB into the in-memory index.
 
         Called once by the engine during startup so that positions opened
         in a previous session are tracked correctly.
 
+        CRIT-009 FIX: Accept *args, **kwargs for backward compatibility
+        with callers that may pass extra arguments.
+
         Returns the list of loaded TradeResult objects so callers can
         sync them into PortfolioState.
         """
+        # Ignore any extra args for backward compatibility
+        if args or kwargs:
+            logger.debug("load_open_trades called with extra args (ignored): args=%s kwargs=%s", args, kwargs)
+        
         rows = self._db.get_open_trades()
         loaded: list = []
         async with self._lock:

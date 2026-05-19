@@ -56,6 +56,7 @@ from strategies.mean_reversion import MeanReversion
 from strategies.funding_arbitrage import FundingArbitrage
 from strategies.vwap_deviation import VWAPDeviation
 from strategies.liquidation_catcher import LiquidationCatcher
+from strategies.orderbook_scalper import OrderBookScalper
 from strategies.ensemble import StrategyEnsemble, StrategyWeight
 
 from strategies.base import Position
@@ -139,6 +140,8 @@ async def _run_backtest(cfg: Config, db: Database, logger: Any) -> Dict[str, Any
         MeanReversion(cfg.get("strategy.mean_reversion", {})),
         FundingArbitrage(cfg.get("strategy.funding_arbitrage", {})),
         VWAPDeviation(cfg.get("strategy.vwap_deviation", {})),
+        LiquidationCatcher(cfg.get("strategy.liquidation_catcher", {})),
+        OrderBookScalper(cfg.get("strategy.orderbook_scalper", {})),
     ]
 
     bt = BacktestEngine(
@@ -292,15 +295,17 @@ async def main() -> None:
         FundingArbitrage(cfg.get("strategy.funding_arbitrage", {})),
         VWAPDeviation(cfg.get("strategy.vwap_deviation", {})),
         LiquidationCatcher(cfg.get("strategy.liquidation_catcher", {})),
+        OrderBookScalper(cfg.get("strategy.orderbook_scalper", {})),
     ]
 
     # Ensemble with professional weighting
     ensemble_weights = [
-        StrategyWeight("TrendFollow",         0.25, min_confidence=0.40),
-        StrategyWeight("FundingExtreme",      0.25, min_confidence=0.40),
-        StrategyWeight("VWAPDeviation",        0.20, min_confidence=0.40),
-        StrategyWeight("FundingArbitrage",    0.15, min_confidence=0.35),
+        StrategyWeight("TrendFollow",         0.20, min_confidence=0.40),
+        StrategyWeight("FundingExtreme",      0.20, min_confidence=0.40),
+        StrategyWeight("VWAPDeviation",        0.15, min_confidence=0.40),
+        StrategyWeight("FundingArbitrage",    0.10, min_confidence=0.35),
         StrategyWeight("LiquidationCatcher",  0.15, min_confidence=0.40),
+        StrategyWeight("OrderBookScalper",    0.10, min_confidence=0.50),
     ]
 
     strategies = [

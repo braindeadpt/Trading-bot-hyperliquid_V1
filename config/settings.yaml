@@ -84,9 +84,17 @@ strategy:
     trend:
       SmartMoneyFlow: 1.3           # boost trend following
       FundingExtreme: 0.7           # penalize mean reversion
+      VWAPDeviation: 0.5            # penalize VWAP fade in trends
+      LiquidationCatcher: 1.0       # neutral — liquidation can cascade in trends
+      FundingArbitrage: 1.0         # neutral
+      OrderBookScalper: 0.7         # penalize — trends override micro-imbalances
     range:
       SmartMoneyFlow: 0.7           # penalize trend following
       FundingExtreme: 1.3           # boost mean reversion
+      VWAPDeviation: 1.5            # boost — range is ideal for VWAP fade
+      LiquidationCatcher: 1.0       # neutral
+      FundingArbitrage: 1.0         # neutral
+      OrderBookScalper: 1.3         # boost — micro-patterns shine in range
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: Mean Reversion (Funding Extreme)
@@ -95,12 +103,12 @@ strategy:
     enabled: true
     timeframe: "15m"
     context_timeframe: "1h"
-    extreme_threshold: 0.003        # 0.3% predicted funding (reduced from 0.8%)
-    strong_threshold: 0.002         # 0.2% predicted funding (reduced from 0.5%)
+    extreme_threshold: 0.0003       # 0.03% predicted funding (was 0.3% — funding is near zero)
+    strong_threshold: 0.0002        # 0.02% predicted funding (was 0.2%)
     overcrowded_oi_pct: 65.0        # OI concentration on one side
     max_hold_minutes: 60
     stop_loss_pct: 2.0
-    min_confidence: 0.65
+    min_confidence: 0.55            # reduced from 0.65 for more signals
     # ── Task 2.3: Dynamic upgrades ──
     use_dynamic_percentile: true    # use rolling p90 instead of fixed thresholds
     funding_percentile_lookback: 90 # ~90 funding observations (30 days of 8h funding)
@@ -116,9 +124,9 @@ strategy:
   # ═══════════════════════════════════════════════════════════
   funding_arbitrage:
     enabled: true
-    min_funding_spread: 0.004        # 0.4% spread between long and short legs (reduced from 1.2%)
-    min_individual_funding: 0.002    # each leg must have |funding| > 0.2% (reduced from 0.5%)
-    exit_threshold: 0.002            # exit when funding reverts to <0.2%
+    min_funding_spread: 0.00005      # 0.005% spread (was 0.4% — adapt to near-zero funding)
+    min_individual_funding: 0.00001  # each leg must have |funding| > 0.001% (was 0.2%)
+    exit_threshold: 0.00001          # exit when funding reverts to <0.001%
     max_hold_hours: 8                # max hold until next funding payment
     pair_size_pct: 0.02              # 2% of capital per leg
     stop_loss_pct: 0.03              # 3% stop on each leg
@@ -131,37 +139,52 @@ strategy:
   # ═══════════════════════════════════════════════════════════
   vwap_deviation:
     enabled: true
-    z_threshold: 1.8                # |Z-score| > 1.8σ from VWAP (reduced from 2.5)
-    volume_surge: 1.5               # volume > 150% of 24h average
-    max_adx: 35.0                   # only trade when ADX < 35 (increased from 25)
-    require_oir_confirm: true       # OIR must confirm the one-sided move
-    oir_threshold: 0.4              # |OIR| > 0.4
+    z_threshold: 1.2                # |Z-score| > 1.2σ from VWAP (was 1.8 — more sensitive)
+    volume_surge: 1.2               # volume > 120% of 24h average (was 150%)
+    max_adx: 40.0                   # only trade when ADX < 40 (was 35)
+    require_oir_confirm: false      # OIR confirmation optional (was required)
+    oir_threshold: 0.3              # |OIR| > 0.3 (was 0.4)
     max_funding_opposite: 0.005     # avoid if funding extreme in signal direction
     base_size_pct: 0.01             # 1% base size
     max_size_pct: 0.03             # 3% max size
     stop_loss_atr_multiplier: 2.0   # ATR-based stop
     max_hold_hours: 4               # mean reversion is quick or wrong
-    min_confidence: 0.65
-    confidence_extreme: 0.85
-    signal_throttle_ms: 300000      # 5 min between signals
+    min_confidence: 0.55            # reduced from 0.65
+    confidence_extreme: 0.75        # reduced from 0.85
+    signal_throttle_ms: 180000      # 3 min between signals (was 5 min)
+
+  # ═══════════════════════════════════════════════════════════
+  # Strategy: OrderBook Imbalance Scalper
+  # ═══════════════════════════════════════════════════════════
+  orderbook_scalper:
+    enabled: true
+    bid_ask_ratio_long: 1.5          # bid_depth / ask_depth > 1.5 → excess bids → long
+    bid_ask_ratio_short: 0.67        # bid_depth / ask_depth < 0.67 → excess asks → short
+    take_profit_pct: 0.15            # 0.15% tight take-profit
+    stop_loss_pct: 0.30              # 0.30% tight stop-loss
+    base_size_pct: 0.005             # 0.5% capital
+    max_size_pct: 0.01              # 1% max
+    max_hold_seconds: 300            # 5 min max hold
+    min_confidence: 0.55
+    signal_throttle_ms: 60000        # 60s between signals per symbol
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: Liquidation Catcher (Task 3.3)
   # ═══════════════════════════════════════════════════════════
   liquidation_catcher:
     enabled: true
-    min_notional_usd: 10000000     # $10M in 5min to trigger (reduced from $50M)
-    min_liquidation_count: 5       # avoid single large liquidation (reduced from 10)
-    require_oi_decreasing: true    # confirm positions were wiped out
+    min_notional_usd: 5000000      # $5M in 5min to trigger (was $10M)
+    min_liquidation_count: 3       # avoid single large liquidation (was 5)
+    require_oi_decreasing: false   # OI check optional (was required — not always reliable)
     oi_delta_max: 0.0              # OI must be decreasing
-    max_adx: 40.0                   # avoid in strong trends (cascades may continue)
+    max_adx: 45.0                  # avoid in strong trends (was 40)
     base_size_pct: 0.005            # 0.5% — small size, catching a knife
     max_size_pct: 0.01              # 1% max
     stop_loss_atr_multiplier: 1.0  # tight stop
     max_hold_minutes: 30            # liquidation cascades resolve quickly
-    take_profit_r: 2.0              # 2R take profit
-    min_confidence: 0.70
-    signal_throttle_ms: 7200000     # 2h cooldown between catches
+    take_profit_r: 1.5              # 1.5R take profit (was 2.0 — tighter target)
+    min_confidence: 0.60            # reduced from 0.70
+    signal_throttle_ms: 3600000     # 1h cooldown (was 2h)
 
   # ═══════════════════════════════════════════════════════════
   # Kelly Criterion Sizing (Task 4.4)
@@ -196,8 +219,8 @@ strategy:
   # Ensemble Configuration
   # ═══════════════════════════════════════════════════════════
   ensemble:
-    threshold: 0.40                 # reduced from 0.55 for more signals
-    min_agreeing: 1                 # reduced from 2 for more flexibility
+    threshold: 0.35                 # increased from 0.20 — require stronger consensus
+    min_agreeing: 2                 # increased from 1 — need at least 2 strategies
 
 # ═══════════════════════════════════════════════════════════
 # Backtest

@@ -496,7 +496,7 @@ class TrendFollow(Strategy):
             size_pct=risk_pct,
             entry_price=event.price,
             stop_loss_pct=stop_loss_pct,
-            take_profit_pct=None,  # Trend follow rides until exit rule hits
+            take_profit_pct=stop_loss_pct * 1.5,  # 1.5R take-profit
             reason=f"trend_{side}_" + "_".join(met_reasons),
             metadata={
                 "met_conditions": met_reasons,

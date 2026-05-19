@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from src.strategies.base import MarketEvent, Signal
+from src.strategies.base import ExitSignal, Position
 from src.utils.helpers import safe_float, safe_divide
 
 logger = logging.getLogger(__name__)
@@ -165,7 +166,7 @@ class StrategyEnsemble:
             size_pct=min_size_pct,
             entry_price=event.price,
             stop_loss_pct=max_stop,
-            take_profit_pct=None,  # Managed by individual strategies or trailing stop
+            take_profit_pct=min((s.take_profit_pct for s in agreeing_signals if s.take_profit_pct is not None), default=None),  # most conservative TP
             reason=f"Ensemble [{winning_score:.2f}]: {reasons}",
             metadata=combined_meta,
         )
@@ -179,28 +180,32 @@ class StrategyEnsemble:
 
         return signal
 
-    def on_position_update(self, event: MarketEvent, position: "Position") -> Optional["ExitSignal"]:
-        """Forward exit decisions to the originating strategy."""
-        # For simplicity, let each sub-strategy decide on its own exits
-        # The strategy that opened the position should decide when to close
+    def on_position(self, position: Position, event: MarketEvent) -> Optional[ExitSignal]:
+        """Engine entry point for exit signals.
+
+        Delegates to the sub-strategy that opened the position.
+        """
         strategy_name = position.metadata.get("strategy", "unknown")
         if strategy_name == self.name:
-            # Ensemble position — check if ensemble score has flipped
-            # This is a simplified version; full version would re-evaluate ensemble
-            sig = self.on_market_event(event)
-            if sig and sig.side != position.side:
-                from src.strategies.base import ExitSignal
-                return ExitSignal(
-                    strategy=self.name,
-                    symbol=position.symbol,
-                    side="close",
-                    confidence=sig.confidence,
-                    reason=f"Ensemble flipped: {sig.reason}",
-                )
-            return None
-        else:
-            # Delegate to the original strategy
-            strategy = self._strategies.get(strategy_name)
-            if strategy and hasattr(strategy, 'on_position_update'):
-                return strategy.on_position_update(event, position)
-            return None
+            return self._on_ensemble_position(position, event)
+        strategy = self._strategies.get(strategy_name)
+        if strategy and hasattr(strategy, 'on_position'):
+            return strategy.on_position(position, event)
+        return None
+
+    def _on_ensemble_position(self, position: Position, event: MarketEvent) -> Optional[ExitSignal]:
+        """Evaluate exits for an ensemble-opened position."""
+        sig = self.on_market_event(event)
+        if sig and sig.side != position.side:
+            return ExitSignal(
+                strategy=self.name,
+                symbol=position.symbol,
+                side="close",
+                confidence=sig.confidence,
+                reason=f"Ensemble flipped: {sig.reason}",
+            )
+        return None
+
+    def on_position_update(self, event: MarketEvent, position: "Position") -> Optional["ExitSignal"]:
+        """Deprecated — kept for backward compatibility."""
+        return self.on_position(position, event)

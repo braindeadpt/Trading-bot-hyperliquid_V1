@@ -307,7 +307,7 @@ class FundingArbitrage(Strategy):
             size_pct=self.PAIR_SIZE_PCT,
             entry_price=None,
             stop_loss_pct=self.STOP_LOSS_PCT,
-            take_profit_pct=None,
+            take_profit_pct=self.STOP_LOSS_PCT * 1.5,  # 1.5R take-profit
             reason=f"funding_arb_long_{long_funding:.4f}",
             metadata={
                 "pair": "funding_arb",
@@ -325,7 +325,7 @@ class FundingArbitrage(Strategy):
             size_pct=self.PAIR_SIZE_PCT,
             entry_price=None,
             stop_loss_pct=self.STOP_LOSS_PCT,
-            take_profit_pct=None,
+            take_profit_pct=self.STOP_LOSS_PCT * 1.5,  # 1.5R take-profit
             reason=f"funding_arb_short_{short_funding:.4f}",
             metadata={
                 "pair": "funding_arb",

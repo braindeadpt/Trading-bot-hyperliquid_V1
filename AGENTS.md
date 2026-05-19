@@ -8,7 +8,7 @@
 
 This is **Hyperliquid Premium Trading Bot v3.1** — an async Python trading bot for the Hyperliquid perpetuals exchange. It supports **paper trading** (default), **testnet**, and **mainnet** execution modes.
 
-The bot is built around a **WebSocket-first event architecture**: real-time market data from Hyperliquid (and optional Binance feeds) flows through an async pub/sub `DataBus`, gets aggregated into multi-timeframe candles, and is consumed by five strategy modules. A central `TradingEngine` orchestrates signal generation, risk gating, position sizing, and execution. All state is persisted to a local SQLite database, and a Flask + Socket.IO dashboard provides real-time monitoring.
+The bot is built around a **WebSocket-first event architecture**: real-time market data from Hyperliquid (and optional Binance feeds) flows through an async pub/sub `DataBus`, gets aggregated into multi-timeframe candles, and is consumed by six strategy modules (including the OrderBook Imbalance Scalper for tick-level orderbook micro-patterns). A central `TradingEngine` orchestrates signal generation, risk gating, position sizing, and execution. All state is persisted to a local SQLite database, and a Flask + Socket.IO dashboard provides real-time monitoring.
 
 **Key characteristics:**
 - Fully async (`asyncio`) with auto-reconnecting WebSocket clients.
@@ -48,7 +48,7 @@ trading-bot-hyperliquid/
 │   └── .env.example           # Template for API secrets
 ├── src/                       # All application code
 │   ├── core/                  # Engine, portfolio, risk, execution, Kelly sizer, correlation monitor
-│   ├── strategies/            # 5 strategies + base ABC + indicators
+│   ├── strategies/            # 6 strategies + base ABC + indicators + ensemble
 │   ├── exchanges/             # Hyperliquid WS/REST, Binance API, funding aggregator
 │   ├── data/                  # SQLite DB, candle builder, orderbook metrics, historical fetcher
 │   ├── dashboard/             # Flask + Socket.IO server + embedded HTML UI
@@ -67,6 +67,8 @@ trading-bot-hyperliquid/
 ├── quickstart.bat             # One-click paper trading launcher
 ├── stop.bat                   # Kill running python.exe processes
 ├── service.bat                # Background service wrapper with recovery
+├── scripts/
+│   └── backfill_candles.py    # Binance historical candle backfill (run before bot start)
 └── audit_all.py               # Component health-check script (imports every module)
 ```
 
@@ -98,6 +100,13 @@ python main.py --audit
 
 # Disable dashboard
 python main.py --mode paper --no-dashboard
+```
+
+### Backfill historical candles (recommended before first run)
+```bash
+python scripts/backfill_candles.py
+# or with custom parameters
+python scripts/backfill_candles.py --symbols BTC,ETH,SOL --days 7
 ```
 
 ### Override config path
@@ -329,7 +338,10 @@ Backtest and live modes share the **exact same** strategy and risk logic. The on
 | `src/core/execution.py` | `ExecutionEngine` — paper simulation and live order submission. |
 | `src/strategies/base.py` | `Strategy` ABC, `MarketEvent`, `Signal`, `Position`, `ExitSignal`. |
 | `src/exchanges/hyperliquid_ws.py` | WebSocket client and `DataBus` pub/sub implementation. |
+| `src/strategies/orderbook_scalper.py` | OrderBookScalper — scalps bid_ask_ratio micro-imbalances with tight TP/SL. |
+| `src/strategies/ensemble.py` | StrategyEnsemble — weighted consensus across all 6 sub-strategies. |
 | `src/data/database.py` | SQLite schema and all persistence queries. |
+| `scripts/backfill_candles.py` | Binance historical candle backfill to populate candle tables before bot start. |
 | `src/security/audit.py` | Static security scanner. If you add new file-I/O or HTTP patterns, update the auditor. |
 | `config/settings.yaml` | All tunable parameters. Add new strategy params here and in `DEFAULT_CONFIG`. |
 

@@ -365,7 +365,7 @@ class MeanReversion(Strategy):
             size_pct=risk_pct,
             entry_price=current_price,
             stop_loss_pct=stop_loss_pct,
-            take_profit_pct=None,  # Exit on funding reversion
+            take_profit_pct=stop_loss_pct * 1.5,  # 1.5R take-profit
             reason=f"funding_extreme_{target_side}_f{funding:.4f}",
             metadata={
                 "funding": event.funding,
