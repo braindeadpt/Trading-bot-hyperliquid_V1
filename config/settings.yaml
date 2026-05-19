@@ -254,4 +254,4 @@ logging:
   json: false
   file: "logs/bot.log"
   max_bytes: 10_485_760            # 10 MB
-  backup_count: 5
+  backup_count: 30                # keep last 30 rotated logs
