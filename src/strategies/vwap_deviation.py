@@ -93,8 +93,8 @@ class VWAPDeviation(Strategy):
         """Evaluate VWAP deviation opportunity."""
         state = self._get_state(event.symbol)
 
-        # Update candles
-        if event.candle_1h:
+        # Update candles (deduplicate by timestamp)
+        if event.candle_1h and (not state.candles_1h or state.candles_1h[-1].timestamp_ms != event.candle_1h.timestamp_ms):
             state.candles_1h.append(event.candle_1h)
 
         # Throttle signals

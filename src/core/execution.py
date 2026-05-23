@@ -174,10 +174,20 @@ class ExecutionEngine:
             logger.error("enter_position: zero size for %s", signal.symbol)
             raise ValueError(f"Calculated position size is zero for {signal.symbol}")
 
+        # Compute fill price (with paper slippage)
+        if self._mode == "paper":
+            slippage = self._paper_slippage_pct
+            if signal.side == "long":
+                fill_price = raw_price * (1.0 + slippage)
+            else:
+                fill_price = raw_price * (1.0 - slippage)
+        else:
+            fill_price = raw_price
+
         # CRIT-003 FIX: Clamp position size to hard limits
         # Max position size = 20% of capital, max leverage consideration
         max_position_size_pct = 0.20  # 20% of capital
-        capital = await portfolio.current_capital if hasattr(portfolio, 'current_capital') else 10_000.0
+        capital = await portfolio.current_capital
         max_size_by_capital = (capital * max_position_size_pct) / fill_price if fill_price > 0 else 0.0
         
         # Also enforce max notional limit
@@ -193,16 +203,6 @@ class ExecutionEngine:
                 signal.symbol, old_size, size, current_notional, max_notional,
                 (current_notional / capital * 100) if capital > 0 else 0,
             )
-
-        # Paper slippage: worse fill for the direction of the trade
-        if self._mode == "paper":
-            slippage = self._paper_slippage_pct
-            if signal.side == "long":
-                fill_price = raw_price * (1.0 + slippage)
-            else:
-                fill_price = raw_price * (1.0 - slippage)
-        else:
-            fill_price = raw_price
 
         notional = fill_price * size
         entry_fee = notional * self._taker_fee_pct

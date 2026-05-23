@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class _TrendState:
     """Internal state for trend following calculations."""
-    candles_15m: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=40))
+    candles_15m: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=55))
     candles_5m: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=40))
     candles_1h: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=500))  # 20+ days for vol
     last_vwap: Optional[float] = None
@@ -90,12 +90,12 @@ class TrendFollow(Strategy):
         """Evaluate entry conditions on every market event."""
         state = self._get_state(event.symbol)
 
-        # Update candle histories
-        if event.candle_15m:
+        # Update candle histories (deduplicate by timestamp)
+        if event.candle_15m and (not state.candles_15m or state.candles_15m[-1].timestamp_ms != event.candle_15m.timestamp_ms):
             state.candles_15m.append(event.candle_15m)
-        if event.candle_5m:
+        if event.candle_5m and (not state.candles_5m or state.candles_5m[-1].timestamp_ms != event.candle_5m.timestamp_ms):
             state.candles_5m.append(event.candle_5m)
-        if event.candle_1h:
+        if event.candle_1h and (not state.candles_1h or state.candles_1h[-1].timestamp_ms != event.candle_1h.timestamp_ms):
             state.candles_1h.append(event.candle_1h)
 
         # Log warm-up progress every 10 candles

@@ -50,11 +50,13 @@ class StrategyEnsemble:
         weights: List[StrategyWeight],
         threshold: float = 0.65,
         min_strategies_agreeing: int = 2,
+        high_conviction_threshold: float = 0.80,
     ):
         self._strategies = {s.name: s for s in strategies}
         self._weights = {w.name: w for w in weights}
         self._threshold = threshold
         self._min_strategies_agreeing = min_strategies_agreeing
+        self._high_conviction_threshold = high_conviction_threshold
         self._last_decision_log: List[Dict] = []
 
     @property
@@ -112,19 +114,61 @@ class StrategyEnsemble:
             event.symbol, long_score, long_count, short_score, short_count, self._threshold
         )
 
-        # Determine winning side
-        if long_score > short_score and long_score >= self._threshold:
+        # Determine winning side (without threshold check yet)
+        if long_score > short_score:
             winning_side = "long"
             winning_score = long_score
             winning_count = long_count
-        elif short_score > long_score and short_score >= self._threshold:
+        elif short_score > long_score:
             winning_side = "short"
             winning_score = short_score
             winning_count = short_count
         else:
             logger.info(
+                "Ensemble NO SIGNAL %s: no clear side (long=%.3f short=%.3f)",
+                event.symbol, long_score, short_score
+            )
+            return None
+
+        agreeing_signals = [s for s in signals if s.side == winning_side]
+
+        # High-conviction bypass: single strategy with raw confidence >= threshold
+        high_conviction = (
+            winning_count == 1
+            and len(agreeing_signals) == 1
+            and agreeing_signals[0].confidence >= self._high_conviction_threshold
+        )
+        if high_conviction:
+            single_sig = agreeing_signals[0]
+            logger.info(
+                "Ensemble HIGH-CONVICTION %s %s | %s conf=%.2f score=%.3f (single strategy bypass)",
+                event.symbol, winning_side, single_sig.strategy,
+                single_sig.confidence, winning_score
+            )
+            signal = Signal(
+                strategy=self.name,
+                symbol=event.symbol,
+                side=winning_side,
+                confidence=single_sig.confidence,
+                size_pct=single_sig.size_pct,
+                entry_price=event.price,
+                stop_loss_pct=single_sig.stop_loss_pct,
+                take_profit_pct=single_sig.take_profit_pct,
+                reason=f"Ensemble [HighConviction] [{single_sig.strategy}]: {single_sig.reason}",
+                metadata={**single_sig.metadata, "ensemble_score": winning_score, "high_conviction_bypass": True},
+            )
+            logger.info(
+                "Ensemble SIGNAL %s %s | score=%.3f | conf=%.2f | size=%.2f%% | strategy=%s",
+                event.symbol, winning_side, winning_score, signal.confidence,
+                signal.size_pct * 100, single_sig.strategy,
+            )
+            return signal
+
+        # Normal threshold check
+        if winning_score < self._threshold:
+            logger.info(
                 "Ensemble NO SIGNAL %s: best_score=%.3f < threshold=%.2f",
-                event.symbol, max(long_score, short_score), self._threshold
+                event.symbol, winning_score, self._threshold
             )
             return None
 
@@ -135,9 +179,6 @@ class StrategyEnsemble:
                 event.symbol, winning_count, self._min_strategies_agreeing
             )
             return None
-
-        # Build composite signal from the agreeing strategies
-        agreeing_signals = [s for s in signals if s.side == winning_side]
 
         # Average confidence
         avg_confidence = sum(s.confidence for s in agreeing_signals) / len(agreeing_signals)

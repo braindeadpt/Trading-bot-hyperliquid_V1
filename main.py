@@ -314,6 +314,7 @@ async def main() -> None:
             weights=ensemble_weights,
             threshold=cfg.get("strategy.ensemble.threshold", 0.40),
             min_strategies_agreeing=cfg.get("strategy.ensemble.min_agreeing", 1),
+            high_conviction_threshold=cfg.get("strategy.ensemble.high_conviction_threshold", 0.70),
         ),
     ]
     logger.info(

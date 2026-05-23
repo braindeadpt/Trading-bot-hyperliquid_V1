@@ -164,10 +164,10 @@ class MeanReversion(Strategy):
         """Evaluate contrarian entry on extreme funding + overcrowded OI."""
         state = self._get_state(event.symbol)
 
-        # Update candle histories
-        if event.candle_1h:
+        # Update candle histories (deduplicate by timestamp)
+        if event.candle_1h and (not state.candles_1h or state.candles_1h[-1].timestamp_ms != event.candle_1h.timestamp_ms):
             state.candles_1h.append(event.candle_1h)
-        if event.candle_15m:
+        if event.candle_15m and (not state.candles_15m or state.candles_15m[-1].timestamp_ms != event.candle_15m.timestamp_ms):
             state.candles_15m.append(event.candle_15m)
 
         # Calculate ATR from 15m candles for stop sizing

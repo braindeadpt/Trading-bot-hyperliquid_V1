@@ -160,8 +160,8 @@ strategy:
     enabled: true
     bid_ask_ratio_long: 1.5          # bid_depth / ask_depth > 1.5 → excess bids → long
     bid_ask_ratio_short: 0.67        # bid_depth / ask_depth < 0.67 → excess asks → short
-    take_profit_pct: 0.15            # 0.15% tight take-profit
-    stop_loss_pct: 0.30              # 0.30% tight stop-loss
+    take_profit_pct: 0.0025          # 0.25% take-profit
+    stop_loss_pct: 0.002             # 0.20% stop-loss (R:R 1.25:1)
     base_size_pct: 0.005             # 0.5% capital
     max_size_pct: 0.01              # 1% max
     max_hold_seconds: 300            # 5 min max hold
@@ -221,6 +221,7 @@ strategy:
   ensemble:
     threshold: 0.35                 # increased from 0.20 — require stronger consensus
     min_agreeing: 2                 # increased from 1 — need at least 2 strategies
+    high_conviction_threshold: 0.65 # single strategy with >= 0.65 confidence bypasses threshold/min_agreeing
 
 # ═══════════════════════════════════════════════════════════
 # Backtest

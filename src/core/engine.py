@@ -1486,7 +1486,7 @@ class TradingEngine:
                 self._decision_history = self._decision_history[:100]
                 return
             logger.info(
-                "Slippage OK %s %s - %.3f%% ≤ %.2f%% (size=%.6f)",
+                "Slippage OK %s %s - %.3f%% <= %.2f%% (size=%.6f)",
                 signal.symbol,
                 signal.side,
                 slippage * 100,
@@ -1787,12 +1787,17 @@ class TradingEngine:
         await self._restore_candles_from_db()
 
     async def _restore_candles_from_db(self) -> None:
-        """Load recent candle history from DB into in-memory caches.
-
-        This gives strategies instant access to historical candles on startup
-        instead of waiting for live WebSocket data to accumulate.
+        """Load recent candle history from DB into in-memory caches
+        and inject into all strategy states for instant warm-up.
         """
         tf_map = {60: "1m", 300: "5m", 900: "15m", 3600: "1h"}
+        all_strategies: List[Any] = []
+        for s in self._strategies:
+            all_strategies.append(s)
+            sub = getattr(s, "_strategies", None)
+            if isinstance(sub, dict):
+                all_strategies.extend(sub.values())
+
         for symbol in self._symbols:
             for tf_s, tf_name in tf_map.items():
                 try:
@@ -1814,6 +1819,7 @@ class TradingEngine:
                             self._latest_candles[symbol][tf_s] = candles[-1]
                             if tf_s == 900:
                                 self._candles_15m_history[symbol].extend(candles)
+                            self._inject_candles(symbol, tf_s, candles, all_strategies)
                             logger.info(
                                 "Restored %d %s candles for %s from DB",
                                 len(candles), tf_name, symbol,
@@ -1823,6 +1829,30 @@ class TradingEngine:
                         "Failed to restore %s candles for %s: %s",
                         tf_name, symbol, exc,
                     )
+
+    def _inject_candles(
+        self, symbol: str, tf_s: int, candles: List, strategies: List[Any]
+    ) -> None:
+        """Inject historical candles into strategy candle buffers."""
+        tf_attr = {60: "candles_1m", 300: "candles_5m", 900: "candles_15m", 3600: "candles_1h"}
+        attr_name = tf_attr.get(tf_s)
+        if attr_name is None:
+            return
+        for s in strategies:
+            try:
+                # Strategy has on_candle method (VWAPDeviation, LiquidationCatcher)
+                if hasattr(s, "on_candle") and tf_s == 3600:
+                    for c in candles:
+                        s.on_candle(c, symbol)  # type: ignore
+                    continue
+                # Strategy has internal candle state via _get_state
+                if hasattr(s, "_get_state"):
+                    state = s._get_state(symbol)
+                    deq = getattr(state, attr_name, None)
+                    if deq is not None and hasattr(deq, "extend"):
+                        deq.extend(candles)
+            except Exception:
+                pass
 
     async def _save_portfolio_snapshot(self) -> None:
         """Persist the current portfolio state to the DB."""
