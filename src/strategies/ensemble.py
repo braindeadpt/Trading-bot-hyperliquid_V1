@@ -155,7 +155,7 @@ class StrategyEnsemble:
                 stop_loss_pct=single_sig.stop_loss_pct,
                 take_profit_pct=single_sig.take_profit_pct,
                 reason=f"Ensemble [HighConviction] [{single_sig.strategy}]: {single_sig.reason}",
-                metadata={**single_sig.metadata, "ensemble_score": winning_score, "high_conviction_bypass": True},
+                metadata={**single_sig.metadata, "ensemble_score": winning_score, "high_conviction_bypass": True, "original_strategy": single_sig.strategy},
             )
             logger.info(
                 "Ensemble SIGNAL %s %s | score=%.3f | conf=%.2f | size=%.2f%% | strategy=%s",
@@ -235,7 +235,37 @@ class StrategyEnsemble:
         return None
 
     def _on_ensemble_position(self, position: Position, event: MarketEvent) -> Optional[ExitSignal]:
-        """Evaluate exits for an ensemble-opened position."""
+        """Evaluate exits for an ensemble-opened position.
+
+        Delegates to the original sub-strategy that triggered the entry,
+        falling back to the ensemble flip check.
+        """
+        meta = position.metadata or {}
+        original = meta.get("original_strategy")
+        agreeing = meta.get("strategies_agreeing", [])
+
+        # Try original sub-strategy first
+        candidates = []
+        if original and original in self._strategies:
+            candidates.append(original)
+        candidates.extend(agreeing)
+
+        # If no candidates known (e.g. restored from DB without metadata),
+        # try ALL sub-strategies so positions can still be closed.
+        if not candidates:
+            candidates = list(self._strategies.keys())
+
+        for name in candidates:
+            sub = self._strategies.get(name)
+            if sub and hasattr(sub, "on_position"):
+                try:
+                    exit_sig = sub.on_position(position, event)
+                    if exit_sig is not None:
+                        return exit_sig
+                except Exception:
+                    logger.exception("Sub-strategy %s exit error", name)
+
+        # Fallback: ensemble flip check
         sig = self.on_market_event(event)
         if sig and sig.side != position.side:
             return ExitSignal(

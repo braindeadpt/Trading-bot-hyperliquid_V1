@@ -1573,6 +1573,7 @@ class TradingEngine:
                 "trade_id": result.trade_id,
                 "stop_loss_pct": stop_distance_pct,
                 "entry_price": result.entry_price,
+                **signal.metadata,
             },
         )
         await self._portfolio.add_position(position, cost=total_cost)

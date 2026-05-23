@@ -481,7 +481,7 @@ class ExecutionEngine:
                     pnl_usd=safe_float(row.get("pnl_usd", 0.0)),
                     pnl_pct=safe_float(row.get("pnl_pct", 0.0)),
                     status="open",
-                    reason="restored_from_db",
+                    reason=f"restored_from_db:{row.get('strategy', 'unknown')}",
                     timestamp_ms=safe_float(row["entry_time"]),
                     entry_fee=safe_float(row.get("entry_fee", 0.0)),
                 )

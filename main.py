@@ -60,7 +60,6 @@ from strategies.orderbook_scalper import OrderBookScalper
 from strategies.ensemble import StrategyEnsemble, StrategyWeight
 
 from strategies.base import Position
-from core.portfolio import PortfolioState
 from core.risk_manager import RiskManager
 from core.execution import ExecutionEngine
 from core.engine import TradingEngine
@@ -300,7 +299,7 @@ async def main() -> None:
 
     # Ensemble with professional weighting
     ensemble_weights = [
-        StrategyWeight("TrendFollow",         0.20, min_confidence=0.40),
+        StrategyWeight("SmartMoneyFlow",      0.20, min_confidence=0.40),
         StrategyWeight("FundingExtreme",      0.20, min_confidence=0.40),
         StrategyWeight("VWAPDeviation",        0.15, min_confidence=0.40),
         StrategyWeight("FundingArbitrage",    0.10, min_confidence=0.35),
@@ -326,16 +325,9 @@ async def main() -> None:
     logger.info("Sub-strategies: %s", [s.name for s in sub_strategies])
 
     # -----------------------------------------------------------------------
-    # 7. Initialize portfolio, risk, execution
+    # 7. Initialize risk, execution (portfolio is owned by TradingEngine)
     # -----------------------------------------------------------------------
     initial_capital = cfg.get("risk.initial_capital", 10_000.0)
-    portfolio = PortfolioState(initial_capital=initial_capital)
-
-    # Attempt DB recovery of portfolio state
-    last_snapshot = db.get_latest_portfolio_snapshot()
-    if last_snapshot:
-        await portfolio.from_dict(last_snapshot)
-        logger.info(f"Recovered portfolio from DB: capital={portfolio.sync_capital():.2f}")
 
     # Alert notifier (telegram / discord)
     alert_cfg = AlertConfig(
@@ -360,19 +352,55 @@ async def main() -> None:
         mode=mode,
     )
 
-    # Load open trades from DB into executor + portfolio
+    # Load open trades from DB into executor (MUST be before engine start)
     open_trades = db.get_open_trades()
     if open_trades:
-        loaded = await executor.load_open_trades()
+        await executor.load_open_trades()
         logger.info(f"Recovered {len(open_trades)} open trades from DB")
 
-        # --- SYNC: mirror executor open trades into PortfolioState ---
-        # Without this, the portfolio thinks it has 0 positions while
-        # the executor tracks N open trades → dashboard / risk mismatch.
-        for trade in loaded:
+    # -----------------------------------------------------------------------
+    # 8. Start data pipeline (WS + CandleBuilder BEFORE engine)
+    # -----------------------------------------------------------------------
+    hl_ws_task = asyncio.create_task(hl_ws.start())
+    logger.info("Hyperliquid WebSocket task started")
+
+    if binance_ws is not None:
+        binance_ws_task = asyncio.create_task(binance_ws.start())
+        logger.info("Binance WebSocket task started")
+
+    await candle_builder.start()
+    logger.info("CandleBuilder started")
+
+    # -----------------------------------------------------------------------
+    # 9. Start TradingEngine (this creates & loads the portfolio snapshot)
+    # -----------------------------------------------------------------------
+    engine = TradingEngine(
+        config=cfg,
+        db=db,
+        data_bus=data_bus,
+        strategies=strategies,
+        risk_manager=risk_mgr,
+        executor=executor,
+        notifier=notifier,
+    )
+    global _engine
+    _engine = engine
+
+    await engine.start()
+    logger.info("TradingEngine started")
+
+    # --- SYNC: mirror executor open trades into PortfolioState ---
+    # Must happen AFTER engine.start() so the engine's portfolio snapshot
+    # is loaded first, then we inject open trades from the executor.
+    # We use engine._portfolio here because the engine owns the portfolio
+    # (created in __init__ at line 151 of engine.py).
+    if open_trades:
+        portfolio = engine._portfolio
+        for trade in list(executor._open_trades.values()):
             notional = trade.entry_price * trade.size
-            # entry_fee may be 0 if not persisted in DB schema (acceptable)
             total_cost = notional + getattr(trade, 'entry_fee', 0.0)
+            parts = trade.reason.split(":", 1)
+            restored_strategy = parts[1] if len(parts) == 2 else "unknown"
             pos = Position(
                 symbol=trade.symbol,
                 side=trade.side,
@@ -383,7 +411,7 @@ async def main() -> None:
                 take_profit_price=None,
                 unrealized_pnl=0.0,
                 metadata={
-                    "strategy": trade.reason.replace("restored_from_db", "unknown"),
+                    "strategy": restored_strategy,
                     "trade_id": trade.trade_id,
                     "restored_from_db": True,
                 },
@@ -400,38 +428,6 @@ async def main() -> None:
                     "Failed to restore position %s into portfolio: %s",
                     trade.symbol, exc,
                 )
-
-    # -----------------------------------------------------------------------
-    # 8. Start data pipeline (WS + CandleBuilder BEFORE engine)
-    # -----------------------------------------------------------------------
-    # Run WS clients as background tasks (Python 3.14 work-around)
-    hl_ws_task = asyncio.create_task(hl_ws.start())
-    logger.info("Hyperliquid WebSocket task started")
-
-    if binance_ws is not None:
-        binance_ws_task = asyncio.create_task(binance_ws.start())
-        logger.info("Binance WebSocket task started")
-
-    await candle_builder.start()
-    logger.info("CandleBuilder started")
-
-    # -----------------------------------------------------------------------
-    # 9. Start TradingEngine
-    # -----------------------------------------------------------------------
-    engine = TradingEngine(
-        config=cfg,
-        db=db,
-        data_bus=data_bus,
-        strategies=strategies,
-        risk_manager=risk_mgr,
-        executor=executor,
-        notifier=notifier,
-    )
-    global _engine
-    _engine = engine
-
-    await engine.start()
-    logger.info("TradingEngine started")
 
     # -----------------------------------------------------------------------
     # 9. Start Dashboard (optional)

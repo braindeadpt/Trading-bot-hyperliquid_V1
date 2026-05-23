@@ -334,8 +334,10 @@ class PortfolioState:
                         "side": p.side,
                         "entry_price": p.entry_price,
                         "size": p.size,
+                        "entry_time_ms": p.entry_time_ms,
                         "unrealized_pnl": p.unrealized_pnl,
                         "current_price": p.current_price,
+                        "metadata": p.metadata,
                     }
                     for sym, p in self._positions.items()
                 },
@@ -366,6 +368,7 @@ class PortfolioState:
                     size=safe_float(p_data["size"]),
                     entry_time_ms=int(p_data.get("entry_time_ms", 0)),
                     unrealized_pnl=safe_float(p_data.get("unrealized_pnl", 0.0)),
+                    metadata=dict(p_data.get("metadata", {})),
                 )
                 snap.current_price = safe_float(p_data.get("current_price", snap.entry_price))
                 self._positions[sym] = snap
