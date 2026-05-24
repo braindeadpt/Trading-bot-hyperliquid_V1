@@ -9,6 +9,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src
 
     steps:
       - name: Checkout
@@ -24,13 +26,9 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Security audit
-        env:
-          PYTHONPATH: src
         run: python -m security.audit --src-dir src
 
       - name: Component health check
-        env:
-          PYTHONPATH: src:.
         run: python audit_all.py
 
       - name: Critical fixes tests

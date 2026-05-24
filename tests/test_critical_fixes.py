@@ -109,10 +109,10 @@ def test_execution_close_uses_fill_exit():
     print("TEST: Execution exit price fix")
     print("=" * 60)
 
-    import re
-    with open("src/core/execution.py", "r") as f:
-        src = f.read()
-    # Ensure exit_price_f bug is gone
+    from pathlib import Path
+
+    execution_path = Path(__file__).resolve().parents[1] / "src" / "core" / "execution.py"
+    src = execution_path.read_text(encoding="utf-8")
     assert "exit_price_f" not in src, "exit_price_f should have been removed"
     assert "fill_exit" in src, "fill_exit should be used"
     print("[PASS] Execution engine uses fill_exit correctly\n")
