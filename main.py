@@ -21,22 +21,30 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Path bootstrap (project root + src/ for mixed import styles)
+# ---------------------------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# Fast-path: security audit without loading the full trading stack (CI + CLI)
+if __name__ == "__main__" and "--audit" in sys.argv:
+    from security.audit import main as audit_main
+
+    raise SystemExit(audit_main(["--src-dir", str(PROJECT_ROOT / "src")]))
+
 import argparse
 import asyncio
 import logging
 import os
 import signal
-import sys
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, Optional
-
-# ---------------------------------------------------------------------------
-# Ensure src/ is on the path
-# ---------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 # ---------------------------------------------------------------------------
 # Imports
@@ -204,14 +212,6 @@ async def main() -> None:
     parser.add_argument("--audit", action="store_true", help="Run security audit and exit")
     parser.add_argument("--no-dashboard", action="store_true", help="Disable web dashboard")
     args = parser.parse_args()
-
-    # -----------------------------------------------------------------------
-    # 0. Security audit (optional standalone)
-    # -----------------------------------------------------------------------
-    if args.audit:
-        from security.audit import main as audit_main
-        exit_code = audit_main(["--src-dir", str(PROJECT_ROOT / "src")])
-        sys.exit(exit_code)
 
     # -----------------------------------------------------------------------
     # 1. Load configuration

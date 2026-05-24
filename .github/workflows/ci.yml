@@ -24,9 +24,13 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Security audit
-        run: python main.py --audit
+        env:
+          PYTHONPATH: src
+        run: python -m security.audit --src-dir src
 
       - name: Component health check
+        env:
+          PYTHONPATH: src:.
         run: python audit_all.py
 
       - name: Critical fixes tests
