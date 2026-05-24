@@ -1,13 +1,12 @@
-# Logs
-logs/*.log
-logs/*.log.*
-logs/*.err
+# Logs (runtime only — never commit)
+logs/
 
-# SQLite
+# SQLite runtime DB
 data/live/*.db
 data/live/*.db-shm
 data/live/*.db-wal
 data/test_health.db
+data/vault.enc
 
 # Python cache
 __pycache__/
@@ -16,9 +15,8 @@ __pycache__/
 *.pyd
 .Python
 
-# Temporary test / audit scripts (root-level dev/debug only)
+# Temporary root-level dev/debug scripts
 /test_*.py
-/audit_*.py
 /final_test.py
 main.py.bak
 
@@ -45,10 +43,15 @@ build/
 dist/
 *.egg-info/
 
-# Test artifacts
+# Test / local artifacts
 .pytest_cache/
 htmlcov/
 .coverage
+test_output.log
+backtest_results.json
 
 # Backtest data
 tests/data/
+
+# Ad-hoc local debug scripts (keep scripts/backfill_candles.py etc. tracked)
+scripts/check_candles.py

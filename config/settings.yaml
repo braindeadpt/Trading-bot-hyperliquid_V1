@@ -77,6 +77,28 @@ strategy:
     rsi_min: 40.0                    # no long if RSI < 40
     rsi_max: 70.0                    # no short if RSI > 70
 
+  # ═══════════════════════════════════════════════════════════
+  # Strategy: Volatility Breakout (Bollinger squeeze)
+  # ═══════════════════════════════════════════════════════════
+  volatility_breakout:
+    enabled: true
+    bb_period: 20
+    bb_std: 2.0
+    squeeze_lookback: 20           # bars for BB-width percentile
+    squeeze_percentile: 25.0       # width in bottom 25% = squeeze
+    min_squeeze_bars: 3            # consecutive tight bars before break
+    volume_surge: 1.3              # volume vs 24-bar average
+    min_adx: 12.0                  # need some momentum building
+    max_adx: 38.0                  # avoid exhausted trends
+    require_oi_confirm: false      # optional OI delta direction filter
+    base_size_pct: 0.01
+    max_size_pct: 0.025
+    stop_loss_atr_multiplier: 1.5
+    take_profit_atr_multiplier: 3.0
+    max_hold_hours: 6
+    min_confidence: 0.55
+    signal_throttle_ms: 900000     # 15 min between signals per symbol
+
   # Regime filter (ADX-based strategy weighting)
   adx_period: 14
   adx_trend_threshold: 25.0       # ADX > 25 = trending regime
@@ -84,6 +106,7 @@ strategy:
   regime_weights:
     trend:
       SmartMoneyFlow: 1.3           # boost trend following
+      VolatilityBreakout: 1.4       # boost — squeeze breaks start trends
       FundingExtreme: 0.7           # penalize mean reversion
       VWAPDeviation: 0.5            # penalize VWAP fade in trends
       LiquidationCatcher: 1.0       # neutral — liquidation can cascade in trends
@@ -91,6 +114,7 @@ strategy:
       OrderBookScalper: 0.7         # penalize — trends override micro-imbalances
     range:
       SmartMoneyFlow: 0.7           # penalize trend following
+      VolatilityBreakout: 0.6       # penalize — false breaks common in chop
       FundingExtreme: 1.3           # boost mean reversion
       VWAPDeviation: 1.5            # boost — range is ideal for VWAP fade
       LiquidationCatcher: 1.0       # neutral

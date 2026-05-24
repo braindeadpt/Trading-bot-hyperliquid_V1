@@ -11,10 +11,12 @@ from src.strategies.liquidation_catcher import LiquidationCatcher
 from src.strategies.mean_reversion import MeanReversion
 from src.strategies.orderbook_scalper import OrderBookScalper
 from src.strategies.trend_follow import TrendFollow
+from src.strategies.volatility_breakout import VolatilityBreakout
 from src.strategies.vwap_deviation import VWAPDeviation
 
 _STRATEGY_REGISTRY = (
     ("strategy.trend_follow", TrendFollow),
+    ("strategy.volatility_breakout", VolatilityBreakout),
     ("strategy.mean_reversion", MeanReversion),
     ("strategy.funding_arbitrage", FundingArbitrage),
     ("strategy.vwap_deviation", VWAPDeviation),
@@ -26,11 +28,12 @@ _STRATEGY_REGISTRY = (
 def default_ensemble_weights() -> List[StrategyWeight]:
     """Default ensemble weight table."""
     return [
-        StrategyWeight("SmartMoneyFlow", 0.20, min_confidence=0.40),
-        StrategyWeight("FundingExtreme", 0.20, min_confidence=0.40),
-        StrategyWeight("VWAPDeviation", 0.15, min_confidence=0.40),
-        StrategyWeight("FundingArbitrage", 0.10, min_confidence=0.35),
-        StrategyWeight("LiquidationCatcher", 0.15, min_confidence=0.40),
+        StrategyWeight("SmartMoneyFlow", 0.18, min_confidence=0.40),
+        StrategyWeight("VolatilityBreakout", 0.15, min_confidence=0.50),
+        StrategyWeight("FundingExtreme", 0.16, min_confidence=0.40),
+        StrategyWeight("VWAPDeviation", 0.12, min_confidence=0.40),
+        StrategyWeight("FundingArbitrage", 0.08, min_confidence=0.35),
+        StrategyWeight("LiquidationCatcher", 0.13, min_confidence=0.40),
         StrategyWeight("OrderBookScalper", 0.10, min_confidence=0.50),
     ]
 

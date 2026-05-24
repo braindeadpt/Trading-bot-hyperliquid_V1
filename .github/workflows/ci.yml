@@ -44,5 +44,8 @@ jobs:
       - name: Phase 5 tests (live signing + dashboard auth)
         run: python tests/test_phase5_live_auth.py
 
+      - name: VolatilityBreakout tests
+        run: python tests/test_volatility_breakout.py
+
       - name: Unit tests
         run: python -m unittest tests.test_basic
