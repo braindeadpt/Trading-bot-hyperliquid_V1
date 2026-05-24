@@ -8,8 +8,10 @@ Covers:
 """
 
 import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 import asyncio
 from src.core.portfolio import PortfolioState
@@ -119,10 +121,17 @@ def test_execution_close_uses_fill_exit():
 
 
 if __name__ == "__main__":
-    test_drawdown_circuit_breaker()
-    test_portfolio_restore()
-    test_funding_arbitrage_lifecycle()
-    test_execution_close_uses_fill_exit()
-    print("=" * 60)
-    print("ALL CRITICAL FIX TESTS PASSED [OK]")
-    print("=" * 60)
+    try:
+        test_drawdown_circuit_breaker()
+        test_portfolio_restore()
+        test_funding_arbitrage_lifecycle()
+        test_execution_close_uses_fill_exit()
+        print("=" * 60)
+        print("ALL CRITICAL FIX TESTS PASSED [OK]")
+        print("=" * 60)
+    except Exception as exc:
+        import traceback
+
+        print("CRITICAL FIX TESTS FAILED", file=sys.stderr)
+        traceback.print_exc()
+        raise SystemExit(1) from exc

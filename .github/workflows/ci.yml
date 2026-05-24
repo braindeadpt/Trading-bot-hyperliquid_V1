@@ -19,7 +19,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
           cache: pip
 
       - name: Install dependencies
@@ -31,23 +31,5 @@ jobs:
       - name: Component health check
         run: python audit_all.py
 
-      - name: Critical fixes tests
-        run: python tests/test_critical_fixes.py
-
-      - name: Phase 2 tests
-        run: python tests/test_phase2.py
-
-      - name: Phase 3 tests
-        run: python tests/test_phase3.py
-
-      - name: Phase 4 tests (maker orders)
-        run: python tests/test_phase4.py
-
-      - name: Phase 5 tests (live signing + dashboard auth)
-        run: python tests/test_phase5_live_auth.py
-
-      - name: VolatilityBreakout tests
-        run: python tests/test_volatility_breakout.py
-
-      - name: Unit tests
-        run: python -m unittest tests.test_basic
+      - name: Run test suite
+        run: python scripts/run_ci_tests.py
