@@ -58,6 +58,14 @@ class MarketEvent:
     liquidation_notional_5m: Optional[float] = None  # USD notional liquidated in last 5min
     liquidation_side_5m: Optional[str] = None  # "long" (longs liquidated = price down) or "short"
     liquidation_count_5m: Optional[int] = None  # number of liquidation events
+    liquidation_data_source: Optional[str] = None  # "binance" | "proxy" | None
+
+    # Feed health (engine sets when Binance liquidation WS is validated)
+    liquidation_feed_ready: bool = False
+
+    # Cross-exchange positioning (Binance global long/short account ratio)
+    oi_long_ratio: Optional[float] = None   # 0–1 fraction of accounts long
+    oi_short_ratio: Optional[float] = None  # 0–1 fraction of accounts short
 
 
 @dataclass(frozen=True)

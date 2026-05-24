@@ -170,6 +170,23 @@ class PortfolioState:
                     pos.unrealized_pnl = self._calc_unrealized_pnl(pos, price_f)
             self._update_peak_and_drawdown()
 
+    async def update_stop_loss(
+        self,
+        symbol: str,
+        stop_loss_price: float,
+        side: str,
+    ) -> None:
+        """Ratchet stop-loss for trailing stop (long: higher, short: lower)."""
+        async with self._lock:
+            pos = self._positions.get(symbol)
+            if pos is None:
+                return
+            if side == "long":
+                if pos.stop_loss_price is None or stop_loss_price > pos.stop_loss_price:
+                    pos.stop_loss_price = stop_loss_price
+            elif pos.stop_loss_price is None or stop_loss_price < pos.stop_loss_price:
+                pos.stop_loss_price = stop_loss_price
+
     def _calc_unrealized_pnl(self, pos: _PositionSnapshot, price: float) -> float:
         """Compute unrealized PnL in USD for a single position."""
         if pos.side == "long":

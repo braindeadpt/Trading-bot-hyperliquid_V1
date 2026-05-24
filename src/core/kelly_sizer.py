@@ -93,7 +93,8 @@ class KellySizer:
 
         kelly = win_rate - (loss_rate * avg_loss / avg_win)
 
-        kelly = win_rate - (loss_rate * avg_loss / avg_win)
+        if self._half_kelly:
+            kelly = kelly * 0.5
 
         # Convert Kelly fraction to a safe size multiplier.
         # Kelly fraction is the optimal % of capital to risk.

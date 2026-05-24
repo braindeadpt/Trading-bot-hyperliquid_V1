@@ -52,6 +52,12 @@ six==1.17.0               # Required by python-dateutil
 pyyaml==6.0.2             # YAML config parsing
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Hyperliquid live signing (testnet / mainnet)
+# ═════════════════════════════════════════════════════════════════════════════
+hyperliquid-python-sdk==0.23.0   # EIP-712 order signing
+eth-account==0.13.7              # Wallet / private key handling
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Security & encryption
 # ═════════════════════════════════════════════════════════════════════════════
 cryptography==44.0.2      # Encryption / signing

@@ -16,10 +16,10 @@ __pycache__/
 *.pyd
 .Python
 
-# Temporary test / audit scripts (created during dev/debug)
-test_*.py
-audit_*.py
-final_test.py
+# Temporary test / audit scripts (root-level dev/debug only)
+/test_*.py
+/audit_*.py
+/final_test.py
 main.py.bak
 
 # Virtual environments

@@ -39,6 +39,7 @@ class TradeEntry:
     size: float
     strategy: str
     status: str = "open"
+    sub_strategy: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +171,7 @@ class Database:
             self._create_oi_table()
             self._create_portfolio_table()
             self._migrate_portfolio_table()
+            self._migrate_trades_table()
             self._create_indexes()
 
     def _create_candle_tables(self) -> None:
@@ -266,6 +268,14 @@ class Database:
         except sqlite3.OperationalError:
             # Column already exists — ignore
             pass
+
+    def _migrate_trades_table(self) -> None:
+        cols = {
+            row[1]
+            for row in self._conn().execute("PRAGMA table_info(trades)").fetchall()
+        }
+        if "sub_strategy" not in cols:
+            self._conn().execute("ALTER TABLE trades ADD COLUMN sub_strategy TEXT")
 
     def _create_indexes(self) -> None:
         cur = self._cursor()
@@ -384,14 +394,16 @@ class Database:
     def save_trade_entry(self, entry: TradeEntry) -> int:
         """Insert a new open trade and return its auto-generated id."""
         sql = """
-            INSERT INTO trades (symbol, side, entry_price, entry_time, size, strategy, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO trades (
+                symbol, side, entry_price, entry_time, size, strategy, sub_strategy, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """
         with self._write_lock:
             conn = self._conn()
             cur = conn.execute(sql, (
                 entry.symbol, entry.side, entry.entry_price, entry.entry_time,
-                entry.size, entry.strategy, entry.status,
+                entry.size, entry.strategy, entry.sub_strategy, entry.status,
             ))
             trade_id = cur.lastrowid
             conn.commit()
@@ -567,6 +579,109 @@ class Database:
         """Return the most recent portfolio snapshot, or None if none exists."""
         history = self.get_portfolio_history(limit=1)
         return history[0] if history else None
+
+    def get_strategy_returns(
+        self,
+        since_ms: int,
+        strategy: Optional[str] = None,
+    ) -> Dict[str, List[float]]:
+        """Return per-trade pnl_pct lists keyed by attribution strategy name."""
+        conditions = ["status = 'closed'", "exit_time >= ?"]
+        params: List[Any] = [since_ms]
+        if strategy:
+            conditions.append("(sub_strategy = ? OR (sub_strategy IS NULL AND strategy = ?))")
+            params.extend([strategy, strategy])
+
+        sql = f"""
+            SELECT strategy, sub_strategy, pnl_pct
+            FROM trades
+            WHERE {' AND '.join(conditions)}
+            ORDER BY exit_time ASC
+        """
+        out: Dict[str, List[float]] = {}
+        with self._conn():
+            cur = self._conn().execute(sql, tuple(params))
+            for row in cur.fetchall():
+                name = row["sub_strategy"] or row["strategy"]
+                if name in ("StrategyEnsemble",):
+                    continue
+                out.setdefault(name, []).append(float(row["pnl_pct"] or 0.0))
+        return out
+
+    def get_metrics_by_strategy(self, since_ms: int) -> Dict[str, Dict[str, Any]]:
+        """Aggregate closed-trade metrics per attribution strategy since *since_ms*."""
+        import math
+
+        returns_map = self.get_strategy_returns(since_ms)
+        metrics: Dict[str, Dict[str, Any]] = {}
+
+        def _trade_sharpe(returns_pct: List[float]) -> float:
+            if len(returns_pct) < 2:
+                return 0.0
+            mean = sum(returns_pct) / len(returns_pct)
+            var = sum((r - mean) ** 2 for r in returns_pct) / (len(returns_pct) - 1)
+            stdev = math.sqrt(var) if var > 0 else 0.0
+            if stdev <= 0:
+                return 0.0
+            return (mean / stdev) * math.sqrt(len(returns_pct))
+
+        sql = """
+            SELECT
+                COALESCE(sub_strategy, strategy) AS attr_strategy,
+                COUNT(*) AS total_trades,
+                SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) AS wins,
+                SUM(COALESCE(pnl_usd, 0)) AS total_pnl,
+                AVG(COALESCE(pnl_pct, 0)) AS avg_pnl_pct
+            FROM trades
+            WHERE status = 'closed' AND exit_time >= ?
+            GROUP BY attr_strategy
+        """
+        with self._conn():
+            cur = self._conn().execute(sql, (since_ms,))
+            for row in cur.fetchall():
+                name = row["attr_strategy"]
+                if name in ("StrategyEnsemble",):
+                    continue
+                total = int(row["total_trades"] or 0)
+                wins = int(row["wins"] or 0)
+                rets = returns_map.get(name, [])
+                metrics[name] = {
+                    "total_trades": total,
+                    "wins": wins,
+                    "losses": total - wins,
+                    "win_rate": round((wins / total * 100.0) if total else 0.0, 2),
+                    "total_pnl": round(float(row["total_pnl"] or 0.0), 4),
+                    "avg_pnl_pct": round(float(row["avg_pnl_pct"] or 0.0), 4),
+                    "sharpe_ratio": round(_trade_sharpe(rets), 4),
+                }
+        return metrics
+
+    def get_daily_pnl_series(self, days: int = 30) -> List[Dict[str, Any]]:
+        """Daily realised PnL from closed trades over the last *days*."""
+        import time
+
+        since_ms = int((time.time() - days * 86400) * 1000)
+        sql = """
+            SELECT
+                date(exit_time / 1000, 'unixepoch') AS day,
+                SUM(COALESCE(pnl_usd, 0)) AS pnl_usd,
+                COUNT(*) AS trades
+            FROM trades
+            WHERE status = 'closed' AND exit_time >= ?
+            GROUP BY day
+            ORDER BY day ASC
+        """
+        with self._conn():
+            cur = self._conn().execute(sql, (since_ms,))
+            rows = cur.fetchall()
+        return [
+            {
+                "day": row["day"],
+                "pnl_usd": round(float(row["pnl_usd"] or 0.0), 2),
+                "trades": int(row["trades"] or 0),
+            }
+            for row in rows
+        ]
 
     # ------------------------------------------------------------------
     # Maintenance

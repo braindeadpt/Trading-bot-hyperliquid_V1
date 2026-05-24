@@ -387,20 +387,53 @@ def create_app(config: Dict[str, Any]) -> tuple:
     global _socketio
     _socketio = socketio
 
-    # CRIT-003: Dashboard auth - simple token-based guard
-    _dashboard_password = config.get("dashboard_password")
-    if _dashboard_password:
+    # CRIT-003: Dashboard auth - token-based guard (REST + Socket.IO)
+    from src.dashboard.auth import (
+        DashboardAuthConfig,
+        resolve_dashboard_auth,
+        validate_dashboard_token,
+    )
+
+    auth_cfg: DashboardAuthConfig = resolve_dashboard_auth(config)
+    _dashboard_token = auth_cfg.token
+    _auth_enabled = auth_cfg.enabled
+
+    def _extract_token() -> Optional[str]:
+        auth_header = request.headers.get("X-Dashboard-Token", "")
+        if auth_header.startswith("Bearer "):
+            return auth_header[7:].strip() or None
+        return (
+            auth_header.strip()
+            or request.args.get("token")
+            or None
+        )
+
+    if _auth_enabled and _dashboard_token:
+        logger.info("Dashboard auth enabled (token required for API and WebSocket)")
+
+    if _auth_enabled and _dashboard_token:
+
         @app.before_request
         def _require_auth():
-            # Skip auth for Socket.IO handshake (auth via connection params)
+            if request.path in ("/health", "/api/auth/check"):
+                return None
             if request.path.startswith("/socket.io"):
                 return None
-            # Skip for static health checks
-            if request.path == "/health":
-                return None
-            token = request.headers.get("X-Dashboard-Token") or request.args.get("token")
-            if not token or token != _dashboard_password:
+            token = _extract_token()
+            if not validate_dashboard_token(token, _dashboard_token):
                 abort(401)
+
+        @socketio.on("connect")
+        def _socket_connect(auth=None):
+            token = None
+            if isinstance(auth, dict):
+                token = auth.get("token")
+            if not token:
+                token = request.args.get("token")
+            if not validate_dashboard_token(token, _dashboard_token):
+                logger.warning("Socket.IO connect rejected — invalid or missing token")
+                return False
+            return True
 
     # Start background emitter
     emitter = DashboardEmitter(socketio)
@@ -1211,9 +1244,27 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
     @app.route("/")
     def index():
-        # DASHBOARD LAYOUT FIX: Serve the reorganized 12-column grid template
-        # instead of the old inline INDEX_HTML string.
-        return render_template("index.html")
+        return render_template(
+            "index.html",
+            auth_required=_auth_enabled and bool(_dashboard_token),
+        )
+
+    @app.route("/health")
+    def health():
+        return jsonify({"status": "ok"})
+
+    @app.route("/api/auth/check", methods=["GET", "POST"])
+    def api_auth_check():
+        if not _auth_enabled or not _dashboard_token:
+            return jsonify({"ok": True, "auth_required": False})
+        token = _extract_token()
+        if request.method == "POST" and request.is_json:
+            body = request.get_json(silent=True) or {}
+            token = token or body.get("token")
+        ok = validate_dashboard_token(token, _dashboard_token)
+        if not ok:
+            abort(401)
+        return jsonify({"ok": True, "auth_required": True})
 
     # ── REST API (fallback + initial load) ──
 

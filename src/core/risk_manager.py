@@ -73,6 +73,21 @@ it is not used directly in the current implementation.
             config.get("risk.circuit_breaker_drawdown_pct", self.CIRCUIT_BREAKER_DRAWDOWN_PCT * 100.0)
         ) / 100.0
 
+        self._max_daily_trades = int(
+            config.get("risk.max_daily_trades", self.MAX_DAILY_TRADES)
+        )
+
+        gov = config.get("strategy.portfolio_governance", {})
+        self._max_directional_exposure_pct = safe_float(
+            gov.get("max_directional_exposure_pct", self.MAX_DIRECTIONAL_EXPOSURE_PCT * 100.0)
+        ) / 100.0
+        self._max_sector_exposure_pct = safe_float(
+            gov.get("max_sector_exposure_pct", self.MAX_SECTOR_EXPOSURE_PCT * 100.0)
+        ) / 100.0
+        self._daily_drawdown_circuit_pct = safe_float(
+            gov.get("daily_drawdown_circuit_pct", self.DAILY_DRAWDOWN_CIRCUIT_PCT * 100.0)
+        ) / 100.0
+
         # Mutable circuit-breaker state
         self._circuit_breaker_tripped: bool = False
         self._circuit_breaker_reason: str = ""
@@ -111,8 +126,8 @@ it is not used directly in the current implementation.
 
         # --- 3. Max trades per day ---
         daily_trades = portfolio.daily_trades  # type: ignore
-        if daily_trades >= self.MAX_DAILY_TRADES:
-            return False, f"Daily trade limit reached ({daily_trades}/{self.MAX_DAILY_TRADES})"
+        if daily_trades >= self._max_daily_trades:
+            return False, f"Daily trade limit reached ({daily_trades}/{self._max_daily_trades})"
 
         # --- 4. Max positions per asset ---
         positions = portfolio.positions  # type: ignore
@@ -160,18 +175,18 @@ it is not used directly in the current implementation.
         # Calculate daily drawdown
         if self._daily_peak_capital > 0.0:
             daily_dd = (self._daily_peak_capital - capital) / self._daily_peak_capital
-            if daily_dd >= self.DAILY_DRAWDOWN_CIRCUIT_PCT:
+            if daily_dd >= self._daily_drawdown_circuit_pct:
                 self._daily_drawdown_circuit_tripped = True
                 logger.error(
                     "DAILY DRAWDOWN CIRCUIT: %.2f%% (limit %.2f%%). "
                     "Closing positions and stopping entries.",
                     daily_dd * 100,
-                    self.DAILY_DRAWDOWN_CIRCUIT_PCT * 100,
+                    self._daily_drawdown_circuit_pct * 100,
                 )
                 return (
                     False,
                     f"Daily drawdown circuit: {daily_dd * 100:.2f}% >= "
-                    f"{self.DAILY_DRAWDOWN_CIRCUIT_PCT * 100:.2f}%",
+                    f"{self._daily_drawdown_circuit_pct * 100:.2f}%",
                 )
 
         # --- 9. Directional exposure limit (FASE 4.1) ---
@@ -180,29 +195,29 @@ it is not used directly in the current implementation.
             positions, capital
         )
         if signal.side == "long":
-            if long_exposure + (signal.size_pct * 100) > self.MAX_DIRECTIONAL_EXPOSURE_PCT * 100:
+            if long_exposure + (signal.size_pct * 100) > self._max_directional_exposure_pct * 100:
                 return (
                     False,
                     f"Directional exposure limit: long={long_exposure:.1f}% + "
-                    f"{signal.size_pct * 100:.1f}% > {self.MAX_DIRECTIONAL_EXPOSURE_PCT * 100:.0f}%",
+                    f"{signal.size_pct * 100:.1f}% > {self._max_directional_exposure_pct * 100:.0f}%",
                 )
         else:
-            if short_exposure + (signal.size_pct * 100) > self.MAX_DIRECTIONAL_EXPOSURE_PCT * 100:
+            if short_exposure + (signal.size_pct * 100) > self._max_directional_exposure_pct * 100:
                 return (
                     False,
                     f"Directional exposure limit: short={short_exposure:.1f}% + "
-                    f"{signal.size_pct * 100:.1f}% > {self.MAX_DIRECTIONAL_EXPOSURE_PCT * 100:.0f}%",
+                    f"{signal.size_pct * 100:.1f}% > {self._max_directional_exposure_pct * 100:.0f}%",
                 )
 
         # --- 10. Sector exposure cap (FASE 4.2) ---
         # Max 30% of capital in crypto (if we had other asset classes)
         # For now, all positions are crypto so this is a total book cap
         total_exposure = long_exposure + short_exposure
-        if total_exposure + (signal.size_pct * 100) > self.MAX_SECTOR_EXPOSURE_PCT * 100:
+        if total_exposure + (signal.size_pct * 100) > self._max_sector_exposure_pct * 100:
             return (
                 False,
                 f"Sector exposure limit: total={total_exposure:.1f}% + "
-                f"{signal.size_pct * 100:.1f}% > {self.MAX_SECTOR_EXPOSURE_PCT * 100:.0f}%",
+                f"{signal.size_pct * 100:.1f}% > {self._max_sector_exposure_pct * 100:.0f}%",
             )
 
         # --- 11. Confidence after overcrowded penalty ---
@@ -479,4 +494,4 @@ it is not used directly in the current implementation.
     @property
     def max_daily_trades(self) -> int:
         """Maximum allowed trades per day."""
-        return self.MAX_DAILY_TRADES
+        return self._max_daily_trades

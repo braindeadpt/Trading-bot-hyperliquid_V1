@@ -49,15 +49,10 @@ from data.database import Database
 from exchanges.hyperliquid_ws import HyperliquidWSClient, DataBus
 from exchanges.hyperliquid_rest import HyperliquidRESTClient
 from exchanges.binance_api import BinanceRESTClient, BinanceWSClient
+from exchanges.binance_futures_feed import BinanceFuturesFeed
 from data.candle_builder import CandleBuilder
 
-from strategies.trend_follow import TrendFollow
-from strategies.mean_reversion import MeanReversion
-from strategies.funding_arbitrage import FundingArbitrage
-from strategies.vwap_deviation import VWAPDeviation
-from strategies.liquidation_catcher import LiquidationCatcher
-from strategies.orderbook_scalper import OrderBookScalper
-from strategies.ensemble import StrategyEnsemble, StrategyWeight
+from strategies.factory import build_ensemble, build_sub_strategies
 
 from strategies.base import Position
 from core.risk_manager import RiskManager
@@ -76,6 +71,7 @@ _dashboard_socketio: Optional[Any] = None
 _hl_ws: Optional[HyperliquidWSClient] = None
 _binance_ws: Optional[BinanceWSClient] = None
 _candle_builder: Optional[CandleBuilder] = None
+_binance_futures_feed: Optional[BinanceFuturesFeed] = None
 _logger = None
 
 
@@ -116,53 +112,83 @@ def _shutdown(signum: int, frame: Any) -> None:
     sys.exit(0)
 
 
-async def _run_backtest(cfg: Config, db: Database, logger: Any) -> Dict[str, Any]:
+async def _run_backtest(
+    cfg: Config,
+    db: Database,
+    logger: Any,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+) -> Dict[str, Any]:
     """Run a historical backtest using the backtest engine."""
-    from backtest.engine import BacktestEngine
-    from backtest.metrics import calculate_metrics
+    from backtest.engine import BacktestEngine, BacktestConfig
+    from datetime import datetime, timezone
 
     logger.info("=" * 60)
     logger.info("BACKTEST MODE")
     logger.info("=" * 60)
 
     initial_capital = cfg.get("backtest.initial_capital", cfg.get("risk.initial_capital", 10_000.0))
-    commission_pct = cfg.get("backtest.commission_pct", 0.04)
+    commission_pct = cfg.get("backtest.commission_pct", cfg.get("risk.taker_fee_pct", 0.035))
     slippage_bps = cfg.get("backtest.slippage_bps", 2.0)
     symbols = cfg.get("assets", ["BTC", "ETH", "SOL"])
 
-    logger.info("Backtest config: capital=$%.2f, commission=%.3f%%, slippage=%.1fbps",
-        initial_capital, commission_pct, slippage_bps)
+    start_ms: Optional[int] = None
+    end_ms: Optional[int] = None
+    if from_date:
+        start_ms = int(
+            datetime.strptime(from_date, "%Y-%m-%d")
+            .replace(tzinfo=timezone.utc)
+            .timestamp() * 1000
+        )
+    if to_date:
+        end_ms = int(
+            datetime.strptime(to_date, "%Y-%m-%d")
+            .replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+            .timestamp() * 1000
+        )
 
-    # Build strategies
-    strategies = [
-        TrendFollow(cfg.get("strategy.trend_follow", {})),
-        MeanReversion(cfg.get("strategy.mean_reversion", {})),
-        FundingArbitrage(cfg.get("strategy.funding_arbitrage", {})),
-        VWAPDeviation(cfg.get("strategy.vwap_deviation", {})),
-        LiquidationCatcher(cfg.get("strategy.liquidation_catcher", {})),
-        OrderBookScalper(cfg.get("strategy.orderbook_scalper", {})),
-    ]
+    logger.info(
+        "Backtest config: capital=$%.2f, commission=%.3f%%, slippage=%.1fbps, symbols=%s",
+        initial_capital, commission_pct, slippage_bps, symbols,
+    )
+    if from_date or to_date:
+        logger.info("Date range: %s → %s", from_date or "start", to_date or "end")
+
+    ensemble = build_ensemble(cfg)
+    bt_config = BacktestConfig(
+        initial_capital=float(initial_capital),
+        commission_pct=float(commission_pct),
+        slippage_bps=float(slippage_bps),
+        max_positions=int(cfg.get("risk.max_positions", 5)),
+        tca_enabled=bool(cfg.get("execution.tca_enabled", True)),
+        min_edge_buffer_pct=float(cfg.get("execution.min_edge_buffer_pct", 0.05)),
+        paper_slippage_pct=float(cfg.get("risk.paper_slippage_pct", 0.05)),
+        use_regime_weights=bool(cfg.get("backtest.use_regime_weights", True)),
+        use_cooldown=bool(cfg.get("backtest.use_cooldown", True)),
+        use_kelly=bool(cfg.get("backtest.use_kelly", True)),
+        use_microstructure_proxy=bool(cfg.get("backtest.use_microstructure_proxy", True)),
+        regime_weights=cfg.get("strategy.regime_weights", {}),
+        adx_trend_threshold=float(cfg.get("strategy.adx_trend_threshold", 25.0)),
+        adx_range_threshold=float(cfg.get("strategy.adx_range_threshold", 20.0)),
+        cooldown_base_ms=int(cfg.get("strategy.cooldown.base_minutes", 60) * 60_000),
+        max_daily_trades=int(cfg.get("risk.max_daily_trades", 5)),
+    )
 
     bt = BacktestEngine(
-        db=db,
-        strategies=strategies,
-        initial_capital=initial_capital,
-        commission_pct=commission_pct,
-        slippage_bps=slippage_bps,
+        database=db,
+        strategy=ensemble,
+        config=bt_config,
         symbols=symbols,
     )
 
-    # Run
-    equity_curve, trades = await bt.run()
+    result = bt.run(start_ms=start_ms, end_ms=end_ms)
+    metrics = result["metrics"]
 
-    # Metrics
-    metrics = calculate_metrics(equity_curve, trades)
-
-    logger.info(f"Backtest complete — {metrics['n_trades']} trades")
-    logger.info(f"Total return: {metrics['total_return']:.2%}")
-    logger.info(f"Sharpe: {metrics['sharpe_ratio']:.3f}")
-    logger.info(f"Max DD: {metrics['max_drawdown']:.2%}")
-    logger.info(f"Win rate: {metrics['win_rate']:.1%}")
+    logger.info("Backtest complete — %d trades", metrics.get("n_trades", 0))
+    logger.info("Total return: %.2f%%", metrics.get("total_return", 0) * 100)
+    logger.info("Sharpe: %.3f", metrics.get("sharpe_ratio", 0))
+    logger.info("Max DD: %.2f%%", metrics.get("max_drawdown", 0) * 100)
+    logger.info("Win rate: %.1f%%", metrics.get("win_rate", 0) * 100)
 
     return metrics
 
@@ -239,7 +265,7 @@ async def main() -> None:
     # 4. Backtest mode (early exit after run)
     # -----------------------------------------------------------------------
     if args.backtest:
-        metrics = await _run_backtest(cfg, db, logger)
+        metrics = await _run_backtest(cfg, db, logger, args.from_date, args.to_date)
         # Print summary
         print("\n" + "=" * 60)
         print("BACKTEST RESULTS")
@@ -285,37 +311,10 @@ async def main() -> None:
     _candle_builder = candle_builder
 
     # -----------------------------------------------------------------------
-    # 6. Initialize strategies
+    # 6. Initialize strategies (same ensemble as backtest)
     # -----------------------------------------------------------------------
-    # Individual sub-strategies for ensemble composition
-    sub_strategies = [
-        TrendFollow(cfg.get("strategy.trend_follow", {})),
-        MeanReversion(cfg.get("strategy.mean_reversion", {})),
-        FundingArbitrage(cfg.get("strategy.funding_arbitrage", {})),
-        VWAPDeviation(cfg.get("strategy.vwap_deviation", {})),
-        LiquidationCatcher(cfg.get("strategy.liquidation_catcher", {})),
-        OrderBookScalper(cfg.get("strategy.orderbook_scalper", {})),
-    ]
-
-    # Ensemble with professional weighting
-    ensemble_weights = [
-        StrategyWeight("SmartMoneyFlow",      0.20, min_confidence=0.40),
-        StrategyWeight("FundingExtreme",      0.20, min_confidence=0.40),
-        StrategyWeight("VWAPDeviation",        0.15, min_confidence=0.40),
-        StrategyWeight("FundingArbitrage",    0.10, min_confidence=0.35),
-        StrategyWeight("LiquidationCatcher",  0.15, min_confidence=0.40),
-        StrategyWeight("OrderBookScalper",    0.10, min_confidence=0.50),
-    ]
-
-    strategies = [
-        StrategyEnsemble(
-            strategies=sub_strategies,
-            weights=ensemble_weights,
-            threshold=cfg.get("strategy.ensemble.threshold", 0.40),
-            min_strategies_agreeing=cfg.get("strategy.ensemble.min_agreeing", 1),
-            high_conviction_threshold=cfg.get("strategy.ensemble.high_conviction_threshold", 0.70),
-        ),
-    ]
+    sub_strategies = build_sub_strategies(cfg)
+    strategies = [build_ensemble(cfg)]
     logger.info(
         "StrategyEnsemble loaded: %d sub-strategies, threshold=%.2f, min_agreeing=%d",
         len(sub_strategies),
@@ -370,6 +369,19 @@ async def main() -> None:
 
     await candle_builder.start()
     logger.info("CandleBuilder started")
+
+    # Binance USD-M futures feed (liquidations + long/short ratio)
+    global _binance_futures_feed
+    liq_source = str(cfg.get("market_data.liquidation_source", "auto")).lower()
+    ls_enabled = bool(cfg.get("market_data.long_short_ratio_enabled", True))
+    if liq_source != "proxy" or ls_enabled:
+        _binance_futures_feed = BinanceFuturesFeed(
+            bus=data_bus,
+            symbols=cfg.get("assets", ["BTC", "ETH", "SOL"]),
+            poll_interval_sec=float(cfg.get("market_data.long_short_poll_sec", 300)),
+        )
+        await _binance_futures_feed.start()
+        logger.info("BinanceFuturesFeed started (liquidation_source=%s)", liq_source)
 
     # -----------------------------------------------------------------------
     # 9. Start TradingEngine (this creates & loads the portfolio snapshot)
@@ -436,11 +448,12 @@ async def main() -> None:
         dashboard_cfg = {
             "mode": mode.upper(),
             "version": cfg.get("version", "1.0.0"),
-            # CRIT-003: Default to localhost only (was 0.0.0.0 = all interfaces)
             "host": cfg.get("dashboard.host", "127.0.0.1"),
             "port": cfg.get("dashboard.port", 5000),
             "secret_key": cfg.get("dashboard.secret_key"),
-            "dashboard_password": cfg.get("dashboard.password"),
+            "password": cfg.get("dashboard.password"),
+            "token": cfg.get("dashboard.token"),
+            "auth_enabled": cfg.get("dashboard.auth_enabled"),
         }
         from dashboard.web import create_app as create_dashboard, set_engine
         app, socketio, emit_fn = create_dashboard(config=dashboard_cfg)
@@ -464,10 +477,14 @@ async def main() -> None:
         dashboard_thread = threading.Thread(target=_run_dashboard, daemon=True)
         dashboard_thread.start()
         logger.info(f"Dashboard started at http://{dashboard_cfg['host']}:{dashboard_cfg['port']}")
-        if not dashboard_cfg.get("dashboard_password"):
+        from dashboard.auth import resolve_dashboard_auth
+        _dash_auth = resolve_dashboard_auth(dashboard_cfg)
+        if _dash_auth.enabled and _dash_auth.token:
+            logger.info("Dashboard auth: token required (set BOT_DASHBOARD_TOKEN or dashboard.password)")
+        elif not _dash_auth.enabled:
             logger.warning(
                 "Dashboard has NO password protection. "
-                "Set dashboard.password in config to secure access."
+                "Set dashboard.password or dashboard.auth_enabled=true to secure access."
             )
 
     # -----------------------------------------------------------------------
@@ -490,6 +507,8 @@ async def main() -> None:
             await engine.stop()
         if candle_builder is not None:
             await candle_builder.stop()
+        if _binance_futures_feed is not None:
+            await _binance_futures_feed.stop()
         if hl_ws is not None:
             hl_ws._shutdown = True
             if hl_ws._ws:

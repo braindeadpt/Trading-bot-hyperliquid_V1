@@ -94,7 +94,7 @@ echo.
 echo [MODE] Mainnet — REAL MONEY
 echo Dashboard: http://localhost:5000
 echo.
-python main.py --mode live 2>logs\mainnet_errors.log
+python main.py --mode mainnet 2>logs\mainnet_errors.log
 if errorlevel 1 (
     echo [ERROR] Bot crashed. Check logs\mainnet_errors.log
     pause
@@ -128,7 +128,7 @@ echo [UPDATE] Pulling latest from GitHub...
 git pull origin main
 echo.
 echo Installing/updating dependencies...
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 echo.
 echo Done. Press any key to return.
 pause

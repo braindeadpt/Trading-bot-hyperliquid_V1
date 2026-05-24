@@ -52,6 +52,11 @@ from .portfolio import PortfolioState
 from .risk_manager import RiskManager
 from .kelly_sizer import KellySizer
 from .correlation_monitor import CorrelationMonitor
+from .strategy_governor import StrategyGovernor
+from .regime import apply_regime_weights as apply_regime_weights_fn
+from .regime import regime_strategy_name
+from .order_router import resolve_order_routing
+from .tca import passes_tca_check
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +98,16 @@ class TradingEngine:
             min_multiplier=safe_float(kelly_cfg.get("min_multiplier", 0.25)),
             lookback_trades=int(kelly_cfg.get("lookback_trades", 50)),
         )
+
+        self._strategy_governor = StrategyGovernor(config, db)
+        for strat in self._strategies:
+            if hasattr(strat, "set_governor"):
+                strat.set_governor(self._strategy_governor)
+
+        trail = config.get("execution.trailing_stop", {}) or {}
+        self._trailing_enabled = bool(trail.get("enabled", True))
+        self._trailing_activation_pct = safe_float(trail.get("activation_pct", 0.005))
+        self._trailing_distance_pct = safe_float(trail.get("trail_pct", 0.003))
 
         # Symbols to trade (from config)
         self._symbols: List[str] = list(config.get("symbols", ["BTC", "ETH", "SOL"]))
@@ -146,12 +161,15 @@ class TradingEngine:
 
         # Portfolio state (creates fresh; DB recovery happens in start())
         initial_capital = safe_float(
-            config.get("backtest.initial_capital", 100_000.0)
+            config.get("risk.initial_capital", config.get("backtest.initial_capital", 10_000.0))
         )
         self._portfolio = PortfolioState(initial_capital)
 
         # Realized correlation monitor (positions heat)
-        corr_lookback = int(config.get("portfolio.max_correlation_lookback", 60))
+        _gov = config.get("strategy.portfolio_governance", {})
+        corr_lookback = int(
+            _gov.get("max_correlation_lookback", config.get("portfolio.max_correlation_lookback", 60))
+        )
         self._correlation_monitor = CorrelationMonitor(lookback=corr_lookback)
         # Last close per symbol for return calc
         self._last_candle_close: Dict[str, float] = {}
@@ -185,9 +203,31 @@ class TradingEngine:
             sym: {
                 "window_ms": 5 * 60_000,  # 5 min window
                 "events": collections.deque(),  # (timestamp_ms, notional, side)
+                "source": None,
             }
             for sym in self._symbols
         }
+        self._liquidation_source_mode = str(
+            config.get("market_data.liquidation_source", "auto")
+        ).lower()
+        self._liquidation_feed_warmup = int(
+            config.get("strategy.liquidation_catcher.feed_warmup_events", 1)
+        )
+        self._binance_liquidation_events = 0
+        self._liquidation_feed_ready = False
+        self._liquidation_feed_ready_logged = False
+        self._latest_long_short_ratio: Dict[str, float] = {}
+        self._latest_short_ratio: Dict[str, float] = {}
+
+        # TCA (transaction cost analysis)
+        self._tca_enabled = bool(config.get("execution.tca_enabled", True))
+        self._tca_min_buffer = safe_float(
+            config.get("execution.min_edge_buffer_pct", 0.05)
+        ) / 100.0
+        self._taker_fee_pct = safe_float(config.get("risk.taker_fee_pct", 0.035)) / 100.0
+        self._paper_slippage_pct = safe_float(
+            config.get("risk.paper_slippage_pct", 0.05)
+        ) / 100.0
         self._last_prices: Dict[str, float] = {}
         self._last_price_ts: Dict[str, int] = {}
 
@@ -339,6 +379,14 @@ class TradingEngine:
                 cb_candle = self._make_candle_callback(symbol, tf)
                 await self._bus.subscribe(f"candle_complete:{tf}:{symbol}", cb_candle)
                 self._subscribed_callbacks[f"candle_complete:{tf}:{symbol}"] = cb_candle
+
+            cb_liq = self._make_liquidation_callback(symbol)
+            await self._bus.subscribe(f"liquidation:{symbol}", cb_liq)
+            self._subscribed_callbacks[f"liquidation:{symbol}"] = cb_liq
+
+            cb_ls = self._make_ls_ratio_callback(symbol)
+            await self._bus.subscribe(f"ls_ratio:{symbol}", cb_ls)
+            self._subscribed_callbacks[f"ls_ratio:{symbol}"] = cb_ls
 
         logger.info(
             "TradingEngine running - symbols=%s strategies=%s",
@@ -533,6 +581,31 @@ class TradingEngine:
                 logger.warning("Failed to persist candle for %s %s: %s", symbol, tf_name, exc)
         return _on_candle
 
+    def _make_liquidation_callback(self, symbol: str):
+        """Factory: Binance force-order liquidation events."""
+
+        async def _on_liquidation(event: Any) -> None:
+            notional = safe_float(getattr(event, "notional_usd", 0.0))
+            side = getattr(event, "side", None)
+            ts = int(getattr(event, "timestamp_ms", utc_timestamp_ms()))
+            if notional > 0 and side:
+                self._record_liquidation(symbol, ts, notional, side, "binance")
+
+        return _on_liquidation
+
+    def _make_ls_ratio_callback(self, symbol: str):
+        """Factory: Binance global long/short account ratio updates."""
+
+        async def _on_ls_ratio(snap: Any) -> None:
+            long_r = getattr(snap, "long_ratio", None)
+            short_r = getattr(snap, "short_ratio", None)
+            if long_r is not None:
+                self._latest_long_short_ratio[symbol] = safe_float(long_r)
+            if short_r is not None:
+                self._latest_short_ratio[symbol] = safe_float(short_r)
+
+        return _on_ls_ratio
+
     # ------------------------------------------------------------------
     # Core event loop (per-symbol)
     # ------------------------------------------------------------------
@@ -574,6 +647,8 @@ class TradingEngine:
             event = self._build_market_event(symbol)
             if event is None:
                 return
+
+            self._strategy_governor.evaluate(event.timestamp_ms)
 
             # --- Dashboard tracking ---
             now = time.time()
@@ -653,8 +728,13 @@ class TradingEngine:
                 self._latest_funding[symbol] = event.predicted_funding
             self._latest_oi_delta[symbol] = event.oi_delta
 
-            # --- Liquidation proxy accumulation (Task 3.3) ---
-            self._accumulate_liquidation_proxy(symbol, event)
+            # --- Liquidation stats (Task 3.3) ---
+            if self._liquidation_source_mode == "proxy":
+                self._accumulate_liquidation_proxy(symbol, event)
+            elif self._liquidation_source_mode == "auto":
+                pre_stats = self._get_liquidation_stats(symbol)
+                if pre_stats[0] is None:
+                    self._accumulate_liquidation_proxy(symbol, event)
             liq_notional, liq_side, liq_count = self._get_liquidation_stats(symbol)
 
             # --- FundingArbitrage pair scan (after all symbols have been seen) ---
@@ -787,6 +867,10 @@ class TradingEngine:
             liquidation_notional_5m=liq_notional,
             liquidation_side_5m=liq_side,
             liquidation_count_5m=liq_count,
+            liquidation_data_source=self._get_liquidation_source(symbol),
+            liquidation_feed_ready=self._liquidation_feed_ready,
+            oi_long_ratio=self._latest_long_short_ratio.get(symbol),
+            oi_short_ratio=self._latest_short_ratio.get(symbol),
         )
 
         # Log orderflow metrics for debugging
@@ -879,6 +963,44 @@ class TradingEngine:
         self._last_prices[symbol] = event.price
         self._last_price_ts[symbol] = now
 
+    def _record_liquidation(
+        self,
+        symbol: str,
+        timestamp_ms: int,
+        notional: float,
+        side: str,
+        source: str,
+    ) -> None:
+        """Append a liquidation event to the rolling 5-minute window."""
+        acc = self._liquidation_acc.get(symbol)
+        if acc is None:
+            return
+        while acc["events"] and acc["events"][0][0] < timestamp_ms - acc["window_ms"]:
+            acc["events"].popleft()
+        acc["events"].append((timestamp_ms, notional, side))
+        acc["source"] = source
+        if source == "binance":
+            self._binance_liquidation_events += 1
+            if (
+                not self._liquidation_feed_ready
+                and self._binance_liquidation_events >= self._liquidation_feed_warmup
+            ):
+                self._liquidation_feed_ready = True
+                if not self._liquidation_feed_ready_logged:
+                    self._liquidation_feed_ready_logged = True
+                    logger.info(
+                        "Liquidation feed READY — %d Binance event(s) received "
+                        "(warmup=%d). Auto-enable strategies may activate.",
+                        self._binance_liquidation_events,
+                        self._liquidation_feed_warmup,
+                    )
+
+    def _get_liquidation_source(self, symbol: str) -> Optional[str]:
+        acc = self._liquidation_acc.get(symbol)
+        if acc is None or not acc["events"]:
+            return None
+        return acc.get("source")
+
     def _get_liquidation_stats(
         self,
         symbol: str,
@@ -934,39 +1056,54 @@ class TradingEngine:
         elif adx < self._adx_range_threshold:
             regime = "range"
         else:
-            return signals  # neutral — no weighting
+            return signals
 
-        weights = self._regime_weights.get(regime, {})
-        adjusted: List[Signal] = []
-        for sig in signals:
-            w = weights.get(sig.strategy, 1.0)
-            new_conf = min(sig.confidence * w, 1.0)
+        adjusted = apply_regime_weights_fn(
+            signals,
+            adx,
+            self._regime_weights,
+            self._adx_trend_threshold,
+            self._adx_range_threshold,
+        )
+        result: List[Signal] = []
+        for sig in adjusted:
+            meta = dict(sig.metadata or {})
+            w = meta.get("regime_multiplier", 1.0)
             if w != 1.0:
+                raw = meta.get("confidence_raw", sig.confidence)
                 logger.info(
                     "Regime %s (ADX=%.1f) — %s confidence %.2f → %.2f (weight %.2f)",
-                    regime, adx, sig.strategy, sig.confidence, new_conf, w,
+                    regime, adx, regime_strategy_name(sig), raw, sig.confidence, w,
                 )
-            adjusted.append(
+            result.append(
                 Signal(
                     strategy=sig.strategy,
                     symbol=sig.symbol,
                     side=sig.side,
-                    confidence=new_conf,
+                    confidence=sig.confidence,
                     size_pct=sig.size_pct,
                     entry_price=sig.entry_price,
                     stop_loss_pct=sig.stop_loss_pct,
                     take_profit_pct=sig.take_profit_pct,
                     reason=sig.reason,
-                    metadata={
-                        **sig.metadata,
-                        "regime": regime,
-                        "adx": adx,
-                        "confidence_raw": sig.confidence,
-                        "confidence_weight": w,
-                    },
+                    metadata={**meta, "regime": regime, "adx": adx},
                 )
             )
-        return adjusted
+        return result
+
+    @staticmethod
+    def _regime_strategy_name(sig: Signal) -> str:
+        return regime_strategy_name(sig)
+
+    def _find_strategy(self, name: str) -> Optional[Any]:
+        """Return a registered strategy by name, searching inside StrategyEnsemble."""
+        for s in self._strategies:
+            if s.name == name:
+                return s
+            sub_map = getattr(s, "_strategies", None)
+            if isinstance(sub_map, dict) and name in sub_map:
+                return sub_map[name]
+        return None
 
     def _estimate_fill_ratio(
         self,
@@ -1018,14 +1155,12 @@ class TradingEngine:
         Only runs when we have funding data for all configured symbols.
         Produces paired signals (long + short) for the engine.
         """
-        # Find the FundingArbitrage strategy instance
-        arb_strategy = None
-        for s in self._strategies:
-            if s.name == "FundingArbitrage":
-                arb_strategy = s
-                break
+        # Find the FundingArbitrage strategy instance (direct or inside ensemble)
+        arb_strategy = self._find_strategy("FundingArbitrage")
         if arb_strategy is None:
             return  # Strategy not enabled
+        if hasattr(arb_strategy, "is_active") and not arb_strategy.is_active():
+            return
 
         # Throttle: only scan every 60 seconds
         now = event.timestamp_ms
@@ -1331,8 +1466,9 @@ class TradingEngine:
         daily_trades = await self._portfolio.daily_trades
 
         # --- Correlation check (max realized correlation) ---
+        _gov = self._config.get("strategy.portfolio_governance", {})
         corr_threshold = safe_float(
-            self._config.get("portfolio.max_correlation", 0.70)
+            _gov.get("max_correlation", self._config.get("portfolio.max_correlation", 0.70))
         )
         if corr_threshold > 0 and positions:
             existing_syms = list(positions.keys())
@@ -1429,9 +1565,21 @@ class TradingEngine:
             metadata={**signal.metadata, "calculated_size": size, "atr_pct": atr_pct},
         )
 
-        # --- Slippage estimation (L2 book) ---
         ob_raw = self._latest_orderbook_raw.get(signal.symbol)
-        if ob_raw is not None:
+        signal, order_spec = resolve_order_routing(signal, self._config, ob_raw)
+
+        slippage_for_tca = self._paper_slippage_pct
+        if order_spec.order_type == "limit_maker":
+            logger.info(
+                "Maker route %s %s — limit @ %.4f (fee entry=%.4f%% exit=%.4f%%)",
+                signal.symbol,
+                signal.side,
+                order_spec.limit_price or 0.0,
+                order_spec.entry_fee_pct * 100,
+                order_spec.exit_fee_pct * 100,
+            )
+            slippage_for_tca = order_spec.exit_slippage_pct
+        elif ob_raw is not None:
             # 1. Fill ratio check — can the book cover enough of the size?
             fill_ratio = self._estimate_fill_ratio(signal, size, ob_raw)
             if fill_ratio < self._min_fill_ratio:
@@ -1493,11 +1641,44 @@ class TradingEngine:
                 self._max_slippage_pct * 100,
                 size,
             )
+            slippage_for_tca = slippage
         else:
             logger.warning(
                 "Slippage check skipped %s - no L2 book available",
                 signal.symbol,
             )
+
+        # --- TCA: reject if expected edge does not cover fees + slippage ---
+        if self._tca_enabled:
+            tca_ok, tca_reason = passes_tca_check(
+                signal,
+                self._taker_fee_pct,
+                slippage_for_tca,
+                self._tca_min_buffer,
+                entry_fee_pct=order_spec.entry_fee_pct,
+                exit_fee_pct=order_spec.exit_fee_pct,
+                entry_slippage_pct=order_spec.entry_slippage_pct,
+                exit_slippage_pct=order_spec.exit_slippage_pct,
+            )
+            if not tca_ok:
+                logger.info(
+                    "Signal REJECTED %s %s — %s",
+                    signal.symbol, signal.side, tca_reason,
+                )
+                sig_record["status"] = "rejected"
+                sig_record["risk_reason"] = tca_reason
+                self._decision_history.insert(0, {
+                    "time": sig_time,
+                    "type": "tca",
+                    "symbol": signal.symbol,
+                    "side": signal.side,
+                    "result": "rejected",
+                    "reason": tca_reason,
+                })
+                self._decision_history = self._decision_history[:100]
+                return
+            if tca_reason != "tca_skipped_no_edge_estimate":
+                logger.info("TCA %s %s — %s", signal.symbol, signal.side, tca_reason)
 
         # --- Compute stop distance ---
         # Use strategy's ATR-based stop if provided, else fall back to engine calc
@@ -1616,7 +1797,12 @@ class TradingEngine:
         await self._execute_exit(position, last_price.mid, reason=exit_signal.reason)
 
     async def _check_hard_stops(self, position: Position, current_price: float) -> None:
-        """Check stop-loss and take-profit levels and exit if breached."""
+        """Check trailing stop, stop-loss and take-profit levels."""
+        if self._trailing_enabled and position.entry_price > 0:
+            await self._maybe_update_trailing_stop(position, current_price)
+            positions = await self._portfolio.positions
+            position = positions.get(position.symbol, position)
+
         if position.stop_loss_price is not None:
             if position.side == "long" and current_price <= position.stop_loss_price:
                 await self._execute_exit(position, current_price, reason="stop_loss")
@@ -1632,6 +1818,36 @@ class TradingEngine:
             if position.side == "short" and current_price <= position.take_profit_price:
                 await self._execute_exit(position, current_price, reason="take_profit")
                 return
+
+    async def _maybe_update_trailing_stop(
+        self,
+        position: Position,
+        current_price: float,
+    ) -> None:
+        """Ratchet stop-loss once unrealised profit exceeds activation threshold."""
+        entry = position.entry_price
+        if entry <= 0:
+            return
+
+        if position.side == "long":
+            pnl_pct = (current_price - entry) / entry
+        else:
+            pnl_pct = (entry - current_price) / entry
+
+        if pnl_pct < self._trailing_activation_pct:
+            return
+
+        trail = self._trailing_data.setdefault(position.symbol, {})
+        if position.side == "long":
+            peak = max(trail.get("peak_price", entry), current_price)
+            trail["peak_price"] = peak
+            new_stop = peak * (1.0 - self._trailing_distance_pct)
+            await self._portfolio.update_stop_loss(position.symbol, new_stop, "long")
+        else:
+            trough = min(trail.get("trough_price", entry), current_price)
+            trail["trough_price"] = trough
+            new_stop = trough * (1.0 + self._trailing_distance_pct)
+            await self._portfolio.update_stop_loss(position.symbol, new_stop, "short")
 
     async def _execute_exit(
         self,

@@ -328,6 +328,18 @@ tr:hover td { background: var(--panel-hover); }
     </div>
 </div>
 
+<div id="auth-gate" class="modal-overlay">
+    <div class="modal-box" style="max-width:360px;">
+        <div class="modal-header">
+            <span class="modal-title">Dashboard Access</span>
+        </div>
+        <p class="muted" style="margin-bottom:10px;">Enter your dashboard token to continue.</p>
+        <input id="auth-token-input" type="password" placeholder="Token" style="width:100%;padding:8px;margin-bottom:10px;background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);">
+        <button id="auth-submit-btn" style="width:100%;padding:8px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;font-weight:600;">Connect</button>
+        <p id="auth-error" class="muted" style="margin-top:8px;color:var(--down);display:none;"></p>
+    </div>
+</div>
+
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <!-- STRATEGY DRILL-DOWN MODAL                                        -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -342,7 +354,96 @@ tr:hover td { background: var(--panel-hover); }
 </div>
 
 <script>
-const socket = io();
+const AUTH_REQUIRED = {{ auth_required|default(false)|tojson }};
+
+function getDashboardToken() {
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get("token");
+    if (fromUrl) {
+        sessionStorage.setItem("dashboard_token", fromUrl);
+        return fromUrl;
+    }
+    return sessionStorage.getItem("dashboard_token") || "";
+}
+
+function setDashboardToken(token) {
+    sessionStorage.setItem("dashboard_token", token);
+}
+
+function showAuthGate(msg) {
+    const gate = document.getElementById("auth-gate");
+    gate.classList.add("active");
+    if (msg) {
+        const err = document.getElementById("auth-error");
+        err.textContent = msg;
+        err.style.display = "block";
+    }
+}
+
+function hideAuthGate() {
+    document.getElementById("auth-gate").classList.remove("active");
+    document.getElementById("auth-error").style.display = "none";
+}
+
+async function authFetch(url, opts) {
+    opts = opts || {};
+    const headers = Object.assign({}, opts.headers || {});
+    const token = getDashboardToken();
+    if (token) headers["X-Dashboard-Token"] = token;
+    const res = await fetch(url, Object.assign({}, opts, { headers }));
+    if (res.status === 401 && AUTH_REQUIRED) {
+        showAuthGate("Invalid or missing token.");
+    }
+    return res;
+}
+
+async function verifyAuthAndConnect() {
+    if (!AUTH_REQUIRED) {
+        hideAuthGate();
+        connectSocket();
+        pollAll();
+        return;
+    }
+    const token = getDashboardToken();
+    if (!token) {
+        showAuthGate();
+        return;
+    }
+    try {
+        const res = await authFetch("/api/auth/check", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token }),
+        });
+        if (!res.ok) {
+            showAuthGate("Invalid token.");
+            return;
+        }
+        hideAuthGate();
+        connectSocket();
+        pollAll();
+    } catch (e) {
+        showAuthGate("Connection failed.");
+    }
+}
+
+document.getElementById("auth-submit-btn").addEventListener("click", async () => {
+    const input = document.getElementById("auth-token-input");
+    const token = (input.value || "").trim();
+    if (!token) return;
+    setDashboardToken(token);
+    await verifyAuthAndConnect();
+});
+
+let socket = null;
+function connectSocket() {
+    if (socket && socket.connected) return;
+    const token = getDashboardToken();
+    socket = io({ auth: token ? { token } : {} });
+    bindSocketHandlers();
+}
+
+function bindSocketHandlers() {
 let statusUpdate = {};
 let lastSocketLatency = null;
 
@@ -684,11 +785,12 @@ socket.on("strategies", (data) => renderStrategies(data));
 socket.on("positions", (data) => renderPositions(data));
 socket.on("trades", (data) => renderTrades(data));
 socket.on("logs", (data) => renderLogs(data));
+}
 
 // Latency ping
 let _pingStart = null;
 setInterval(() => {
-    if (socket.connected) {
+    if (socket && socket.connected) {
         _pingStart = Date.now();
         socket.emit("ping", () => {
             lastSocketLatency = Date.now() - _pingStart;
@@ -701,16 +803,16 @@ setInterval(() => {
 
 // REST fallback
 function pollAll() {
-    fetch("/api/status").then(r => r.json()).then(d => {
+    authFetch("/api/status").then(r => r.json()).then(d => {
         if (d.mode) document.getElementById("mode-badge").textContent = d.mode.toUpperCase();
         const statusEl = document.getElementById("status-badge");
         statusEl.textContent = d.running ? "RUNNING" : "STOPPED";
         statusEl.className = "badge " + (d.running ? "badge-green" : "badge-red");
     }).catch(() => {});
-    fetch("/api/trades").then(r => r.json()).then(d => renderTrades(d)).catch(() => {});
+    authFetch("/api/trades").then(r => r.json()).then(d => renderTrades(d)).catch(() => {});
 }
-pollAll();
 setInterval(pollAll, 5000);
+verifyAuthAndConnect();
 
 // Uptime ticker
 setInterval(() => {
@@ -731,7 +833,7 @@ async function showStrategyDetail(name) {
     modal.classList.add('active');
     content.innerHTML = '<div class="muted" style="text-align:center;">Loading...</div>';
     try {
-        const res = await fetch('/api/strategy/' + encodeURIComponent(name));
+        const res = await authFetch('/api/strategy/' + encodeURIComponent(name));
         const data = await res.json();
         if (data.error) { content.innerHTML = '<div class="muted" style="text-align:center;color:var(--down)">' + data.error + '</div>'; return; }
         const s = data.stats || {};

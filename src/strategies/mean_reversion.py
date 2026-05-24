@@ -49,9 +49,9 @@ class MeanReversion(Strategy):
         self._state: Dict[str, _MeanRevState] = {}
         cfg = config or {}
         # Thresholds (overridable via config)
-        self.FUNDING_EXTREME = cfg.get("extreme_threshold", 0.008)
-        self.FUNDING_STRONG = cfg.get("strong_threshold", 0.005)
-        self.FUNDING_REVERTED = cfg.get("funding_reverted", 0.003)
+        self.FUNDING_EXTREME = cfg.get("extreme_threshold", 0.0003)
+        self.FUNDING_STRONG = cfg.get("strong_threshold", 0.0002)
+        self.FUNDING_REVERTED = cfg.get("funding_reverted", 0.0003)
         self.OI_CONCENTRATION = cfg.get("overcrowded_oi_pct", 65) / 100.0
         self.MAX_HOLD_MINUTES = cfg.get("max_hold_minutes", 60)
         # ATR-based stop loss
@@ -75,6 +75,7 @@ class MeanReversion(Strategy):
         self.REQUIRE_OI_DECREASING = cfg.get("require_oi_decreasing", True)
         self.OI_DELTA_THRESHOLD = cfg.get("oi_delta_threshold", 0.0)  # OI must be decreasing
         self.USE_PREDICTED_PRIMARY = cfg.get("use_predicted_primary", True)
+        self.REQUIRE_REAL_OI_RATIO = cfg.get("require_real_oi_ratio", False)
 
     @property
     def name(self) -> str:
@@ -494,12 +495,18 @@ class MeanReversion(Strategy):
         return None
 
     def _estimate_oi_ratio(self, event: MarketEvent) -> Optional[float]:
-        """Estimate long/short ratio from available OI data.
+        """Estimate long/(long+short) positioning ratio.
 
         Priority:
-        1. Use oi_total + oi_delta + price direction for proxy estimate
-        2. Fallback to calculate_oi_concentration if we have history
+        1. Binance global long/short account ratio (real data)
+        2. Heuristic from OI delta + price direction (fallback)
         """
+        if event.oi_long_ratio is not None:
+            return float(event.oi_long_ratio)
+
+        if self.REQUIRE_REAL_OI_RATIO:
+            return None
+
         if event.oi_total is None:
             return None
 

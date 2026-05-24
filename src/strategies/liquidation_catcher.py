@@ -77,10 +77,46 @@ class LiquidationCatcher(Strategy):
         self.SIGNAL_THROTTLE_MS = cfg.get("signal_throttle_ms", 7_200_000)  # 2h
 
         self._state: Dict[str, _LiqCatcherState] = {}
+        self.REQUIRE_REAL_LIQUIDATION = cfg.get("require_real_liquidation_data", True)
+        self.MANUAL_ENABLED = bool(cfg.get("enabled", True))
+        self.AUTO_ENABLE = bool(cfg.get("auto_enable", False))
+        self._auto_active = self.MANUAL_ENABLED
+        self._auto_activate_logged = False
 
     @property
     def name(self) -> str:
         return "LiquidationCatcher"
+
+    def is_active(self) -> bool:
+        """True when the strategy is allowed to generate signals."""
+        return self._auto_active
+
+    def _update_auto_activation(self, event: MarketEvent) -> None:
+        """Turn on automatically when the engine reports a validated Binance feed."""
+        if self._auto_active:
+            return
+        if self.MANUAL_ENABLED:
+            self._auto_active = True
+            return
+        if not self.AUTO_ENABLE:
+            return
+        if not event.liquidation_feed_ready:
+            return
+        self._auto_active = True
+        if not self._auto_activate_logged:
+            self._auto_activate_logged = True
+            logger.info(
+                "LiquidationCatcher AUTO-ENABLED — Binance liquidation feed validated "
+                "(require_real=%s)",
+                self.REQUIRE_REAL_LIQUIDATION,
+            )
+
+    def _operational_gate(self, event: MarketEvent) -> bool:
+        """Return False if strategy should stay dormant."""
+        self._update_auto_activation(event)
+        if not self._auto_active:
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Entry logic
@@ -88,16 +124,26 @@ class LiquidationCatcher(Strategy):
 
     def on_data(self, event: MarketEvent) -> Optional[Signal]:
         """Evaluate liquidation cascade fade opportunity."""
+        if not self._operational_gate(event):
+            return None
+
         liq_notional = event.liquidation_notional_5m
         liq_side = event.liquidation_side_5m
         liq_count = event.liquidation_count_5m
 
         # Check if we have liquidation data
         if liq_notional is None or liq_side is None:
-            # No liquidation feed available — skip
             logger.debug(
                 "LiquidationCatcher SKIP %s — no liquidation data available",
                 event.symbol,
+            )
+            return None
+
+        if self.REQUIRE_REAL_LIQUIDATION and event.liquidation_data_source != "binance":
+            logger.debug(
+                "LiquidationCatcher SKIP %s — require binance liquidations (source=%s)",
+                event.symbol,
+                event.liquidation_data_source,
             )
             return None
 

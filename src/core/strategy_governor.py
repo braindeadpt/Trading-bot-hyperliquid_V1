@@ -1,0 +1,108 @@
+"""Rolling performance governance — auto-disable weak sub-strategies."""
+
+from __future__ import annotations
+
+import logging
+import math
+from typing import Any, Dict, Optional, Set
+
+from src.data.database import Database
+from src.utils.helpers import safe_float
+
+logger = logging.getLogger(__name__)
+
+
+class StrategyGovernor:
+    """Disable sub-strategies with negative rolling Sharpe after enough trades."""
+
+    def __init__(self, config: Any, db: Database) -> None:
+        gov = config.get("strategy.strategy_governance", {}) or {}
+        self._enabled = bool(gov.get("enabled", True))
+        self._lookback_days = int(gov.get("lookback_days", 30))
+        self._min_trades = int(gov.get("min_trades", 10))
+        self._min_sharpe = safe_float(gov.get("min_sharpe", 0.0))
+        self._eval_interval_ms = int(gov.get("eval_interval_ms", 3_600_000))
+        self._db = db
+        self._disabled: Set[str] = set()
+        self._last_eval_ms: int = 0
+        self._last_metrics: Dict[str, Dict[str, float]] = {}
+
+    @property
+    def disabled_strategies(self) -> Set[str]:
+        return set(self._disabled)
+
+    def is_enabled(self, strategy_name: str) -> bool:
+        if not self._enabled:
+            return True
+        return strategy_name not in self._disabled
+
+    def evaluate(self, now_ms: int) -> None:
+        """Recompute disabled set from closed trades in the lookback window."""
+        if not self._enabled:
+            return
+        if now_ms - self._last_eval_ms < self._eval_interval_ms:
+            return
+        self._last_eval_ms = now_ms
+
+        since_ms = now_ms - self._lookback_days * 86_400_000
+        by_strategy = self._db.get_metrics_by_strategy(since_ms)
+
+        newly_disabled: Set[str] = set()
+        newly_enabled: Set[str] = set()
+        metrics_out: Dict[str, Dict[str, float]] = {}
+
+        for name, m in by_strategy.items():
+            if name in ("StrategyEnsemble", "unknown"):
+                continue
+            trades = int(m.get("total_trades", 0))
+            sharpe = safe_float(m.get("sharpe_ratio", 0.0))
+            metrics_out[name] = {
+                "trades": float(trades),
+                "sharpe": sharpe,
+                "total_pnl": safe_float(m.get("total_pnl", 0.0)),
+                "win_rate": safe_float(m.get("win_rate", 0.0)),
+            }
+            if trades < self._min_trades:
+                if name in self._disabled:
+                    newly_enabled.add(name)
+                continue
+            if sharpe < self._min_sharpe:
+                newly_disabled.add(name)
+            elif name in self._disabled:
+                newly_enabled.add(name)
+
+        for name in newly_disabled:
+            if name not in self._disabled:
+                self._disabled.add(name)
+                logger.warning(
+                    "StrategyGovernor DISABLED %s — Sharpe %.3f < %.3f over %d trades (%dd)",
+                    name,
+                    metrics_out[name]["sharpe"],
+                    self._min_sharpe,
+                    int(metrics_out[name]["trades"]),
+                    self._lookback_days,
+                )
+
+        for name in newly_enabled:
+            if name in self._disabled:
+                self._disabled.discard(name)
+                logger.info(
+                    "StrategyGovernor RE-ENABLED %s — Sharpe %.3f (%d trades)",
+                    name,
+                    metrics_out.get(name, {}).get("sharpe", 0.0),
+                    int(metrics_out.get(name, {}).get("trades", 0)),
+                )
+
+        self._last_metrics = metrics_out
+
+    @staticmethod
+    def trade_sharpe(returns_pct: list[float]) -> float:
+        """Simplified Sharpe on per-trade return series (percent units)."""
+        if len(returns_pct) < 2:
+            return 0.0
+        mean = sum(returns_pct) / len(returns_pct)
+        var = sum((r - mean) ** 2 for r in returns_pct) / (len(returns_pct) - 1)
+        stdev = math.sqrt(var) if var > 0 else 0.0
+        if stdev <= 0:
+            return 0.0
+        return (mean / stdev) * math.sqrt(len(returns_pct))

@@ -61,7 +61,7 @@ class TrendFollow(Strategy):
         self.VOLUME_LOOKBACK = cfg.get("volume_lookback", 20)
         self.EMA_PERIOD = cfg.get("ema_period", 20)
         self.ATR_PERIOD = cfg.get("atr_period", 14)
-        self.FUNDING_EXTREME = cfg.get("extreme_threshold", 0.008)
+        self.FUNDING_EXTREME = cfg.get("extreme_threshold", cfg.get("funding_extreme", 0.0003))
         self.IMBALANCE_THRESHOLD = cfg.get("imbalance_threshold", 0.02)
         self.OVERCROWDED_PENALTY = cfg.get("overcrowded_penalty", 0.2)
         # Microstructure filters (Task 2.2)
@@ -70,6 +70,7 @@ class TrendFollow(Strategy):
         self.WALL_PROXIMITY_PCT = cfg.get("wall_proximity_pct", 0.005)    # avoid walls within 0.5%
         self.RSI_MIN = cfg.get("rsi_min", 40.0)                           # no long if RSI < 40
         self.RSI_MAX = cfg.get("rsi_max", 70.0)                           # no short if RSI > 70
+        self.MIN_CONFIDENCE = cfg.get("min_confidence", 0.40)
         # Volatility targeting
         self.TARGET_VOL_ANNUAL = cfg.get("target_vol_annual", 0.20)  # 20% target volatility
         self.VOLATILITY_PERIOD = cfg.get("volatility_period", 480)   # 480 1h candles = 20 days
@@ -298,16 +299,28 @@ class TrendFollow(Strategy):
 
         if long_met >= MIN_CONFLUENCE and long_met > short_met:
             confidence = self._calculate_confidence(long_conditions)
-            signal = self._build_signal(event, "long", confidence, atr, long_conditions)
-            state.last_signal_side = "long"
-            state.last_signal_ts = event.timestamp_ms
-            logger.info("TrendFollow LONG signal for %s (confidence=%.2f)", event.symbol, confidence)
+            if confidence < self.MIN_CONFIDENCE:
+                logger.debug(
+                    "TrendFollow %s LONG skipped — confidence %.2f < min %.2f",
+                    event.symbol, confidence, self.MIN_CONFIDENCE,
+                )
+            else:
+                signal = self._build_signal(event, "long", confidence, atr, long_conditions)
+                state.last_signal_side = "long"
+                state.last_signal_ts = event.timestamp_ms
+                logger.info("TrendFollow LONG signal for %s (confidence=%.2f)", event.symbol, confidence)
         elif short_met >= MIN_CONFLUENCE and short_met > long_met:
             confidence = self._calculate_confidence(short_conditions)
-            signal = self._build_signal(event, "short", confidence, atr, short_conditions)
-            state.last_signal_side = "short"
-            state.last_signal_ts = event.timestamp_ms
-            logger.info("TrendFollow SHORT signal for %s (confidence=%.2f)", event.symbol, confidence)
+            if confidence < self.MIN_CONFIDENCE:
+                logger.debug(
+                    "TrendFollow %s SHORT skipped — confidence %.2f < min %.2f",
+                    event.symbol, confidence, self.MIN_CONFIDENCE,
+                )
+            else:
+                signal = self._build_signal(event, "short", confidence, atr, short_conditions)
+                state.last_signal_side = "short"
+                state.last_signal_ts = event.timestamp_ms
+                logger.info("TrendFollow SHORT signal for %s (confidence=%.2f)", event.symbol, confidence)
         else:
             # Log why no signal was generated (INFO every 5 min per symbol to avoid spam)
             if event.timestamp_ms - getattr(state, "_last_no_signal_log_ms", 0) > 300_000:

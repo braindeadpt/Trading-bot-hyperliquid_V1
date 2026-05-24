@@ -14,8 +14,9 @@ Risk: 0.3% stop, 0.15% take-profit, 0.5% capital.
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
+from src.core.tca import round_trip_cost_pct
 from src.strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
 
 logger = logging.getLogger(__name__)
@@ -47,11 +48,125 @@ class OrderBookScalper(Strategy):
         self.MIN_CONFIDENCE = cfg.get("min_confidence", 0.55)
         self.SIGNAL_THROTTLE_MS = cfg.get("signal_throttle_ms", 60_000)
 
+        self.MANUAL_ENABLED = bool(cfg.get("enabled", True))
+        self.AUTO_ENABLE = bool(cfg.get("auto_enable", False))
+        self.AUTO_ENABLE_TAKER_FEE = cfg.get("auto_enable_taker_fee_pct", 0.00035)
+        self.AUTO_ENABLE_SLIPPAGE = cfg.get("auto_enable_slippage_pct", 0.0005)
+        self.AUTO_ENABLE_MIN_EDGE_BUFFER = cfg.get("auto_enable_min_edge_buffer_pct", 0.0005)
+        self.AUTO_ENABLE_USE_BOOK_SPREAD = bool(cfg.get("auto_enable_use_book_spread", True))
+        self.AUTO_ENABLE_MAX_BOOK_SPREAD = cfg.get("auto_enable_max_book_spread_pct", 0.0004)
+        self.AUTO_DISABLE_MAX_BOOK_SPREAD = cfg.get("auto_disable_max_book_spread_pct", 0.0008)
+        self.AUTO_ENABLE_MIN_SYMBOLS_WITH_BOOK = int(
+            cfg.get("auto_enable_min_symbols_with_book", 1)
+        )
+        self._viability_check_interval_ms = int(cfg.get("viability_check_interval_ms", 60_000))
+        self._auto_active = self.MANUAL_ENABLED
+        self._auto_activate_logged = False
+        self._auto_deactivate_logged = False
+        self._last_viability_check_ms: int = 0
+        self._hold_until_ms: int = 0
+        self._latest_book_spread: Dict[str, float] = {}
+
         self._state: Dict[str, _ScalperState] = {}
 
     @property
     def name(self) -> str:
         return "OrderBookScalper"
+
+    def is_active(self) -> bool:
+        """True when expected scalp edge exceeds round-trip costs on a tight book."""
+        return self._auto_active
+
+    def _effective_slippage_per_side(self, book_spread_pct: Optional[float]) -> float:
+        """Estimate one-side slippage; prefer observed half-spread when tighter."""
+        if not self.AUTO_ENABLE_USE_BOOK_SPREAD or book_spread_pct is None:
+            return self.AUTO_ENABLE_SLIPPAGE
+        spread_slip = book_spread_pct / 2.0
+        if spread_slip <= 0:
+            return self.AUTO_ENABLE_SLIPPAGE
+        return min(self.AUTO_ENABLE_SLIPPAGE, spread_slip)
+
+    def _edge_viability(
+        self,
+        book_spread_pct: Optional[float],
+    ) -> Tuple[bool, float, float, float]:
+        """Return (viable, edge, required, round_trip_cost)."""
+        slip = self._effective_slippage_per_side(book_spread_pct)
+        cost = round_trip_cost_pct(self.AUTO_ENABLE_TAKER_FEE, slip)
+        required = cost + self.AUTO_ENABLE_MIN_EDGE_BUFFER
+        edge = self.TAKE_PROFIT_PCT
+        return edge > required, edge, required, cost
+
+    def _best_book_spread(self) -> Optional[float]:
+        if not self._latest_book_spread:
+            return None
+        return min(self._latest_book_spread.values())
+
+    def _update_auto_activation(self, event: MarketEvent) -> None:
+        """Enable when TP edge clears fees on a tight book; disable with hysteresis."""
+        if self.MANUAL_ENABLED:
+            self._auto_active = True
+            return
+        if not self.AUTO_ENABLE:
+            self._auto_active = False
+            return
+
+        if event.orderbook_spread_pct is not None:
+            self._latest_book_spread[event.symbol] = event.orderbook_spread_pct
+
+        if event.timestamp_ms - self._last_viability_check_ms < self._viability_check_interval_ms:
+            return
+        self._last_viability_check_ms = event.timestamp_ms
+
+        if len(self._latest_book_spread) < self.AUTO_ENABLE_MIN_SYMBOLS_WITH_BOOK:
+            return
+
+        best_spread = self._best_book_spread()
+        if best_spread is None:
+            return
+
+        viable, edge, required, cost = self._edge_viability(best_spread)
+
+        if not self._auto_active:
+            if viable and best_spread <= self.AUTO_ENABLE_MAX_BOOK_SPREAD:
+                self._auto_active = True
+                if not self._auto_activate_logged:
+                    self._auto_activate_logged = True
+                    self._auto_deactivate_logged = False
+                    logger.info(
+                        "OrderBookScalper AUTO-ENABLED — edge %.4f%% > required %.4f%% "
+                        "(RT cost %.4f%%, best book spread %.4f%%)",
+                        edge * 100,
+                        required * 100,
+                        cost * 100,
+                        best_spread * 100,
+                    )
+            return
+
+        if event.timestamp_ms < self._hold_until_ms:
+            return
+
+        if not viable or best_spread > self.AUTO_DISABLE_MAX_BOOK_SPREAD:
+            self._auto_active = False
+            if not self._auto_deactivate_logged:
+                self._auto_deactivate_logged = True
+                self._auto_activate_logged = False
+                reason = (
+                    f"edge {edge * 100:.4f}% <= required {required * 100:.4f}%"
+                    if not viable
+                    else f"book spread {best_spread * 100:.4f}% > "
+                    f"{self.AUTO_DISABLE_MAX_BOOK_SPREAD * 100:.4f}%"
+                )
+                logger.info(
+                    "OrderBookScalper AUTO-DISABLED — %s (RT cost %.4f%%)",
+                    reason,
+                    cost * 100,
+                )
+
+    def _operational_gate(self, event: MarketEvent) -> bool:
+        """Return False if strategy should stay dormant (monitoring only)."""
+        self._update_auto_activation(event)
+        return self._auto_active
 
     def _get_state(self, symbol: str) -> _ScalperState:
         if symbol not in self._state:
@@ -66,6 +181,10 @@ class OrderBookScalper(Strategy):
         """Check bid/ask ratio for scalping opportunity."""
         if event is None:
             return None
+
+        if not self._operational_gate(event):
+            return None
+
         ratio = event.orderbook_bid_ask_ratio
         if ratio is None:
             logger.debug("OrderBookScalper SKIP %s — no bid_ask_ratio data", event.symbol)
@@ -74,7 +193,10 @@ class OrderBookScalper(Strategy):
         state = self._get_state(event.symbol)
 
         # Throttle signals per symbol
-        if event.timestamp_ms - state.last_signal_ms < self.SIGNAL_THROTTLE_MS:
+        if (
+            state.last_signal_ms > 0
+            and event.timestamp_ms - state.last_signal_ms < self.SIGNAL_THROTTLE_MS
+        ):
             return None
 
         # Check for imbalance
@@ -93,6 +215,10 @@ class OrderBookScalper(Strategy):
 
         state.last_signal_ms = event.timestamp_ms
         state.entry_ratio = ratio
+        self._hold_until_ms = max(
+            self._hold_until_ms,
+            event.timestamp_ms + self.MAX_HOLD_MS,
+        )
 
         # Confidence scales with deviation magnitude
         confidence = min(self.MIN_CONFIDENCE + deviation * 0.2, 0.85)

@@ -76,6 +76,13 @@ class ExecutionEngine:
             config.get("risk.paper_slippage_pct", 0.05)
         ) / 100.0
 
+        maker_cfg = config.get("execution.maker_orders", {}) or {}
+        self._maker_orders_enabled = bool(maker_cfg.get("enabled", False))
+        self._maker_fee_pct: float = safe_float(
+            maker_cfg.get("maker_fee_pct", 0.01)
+        ) / 100.0
+        self._maker_timeout_ms: int = int(maker_cfg.get("timeout_ms", 30_000))
+
         # Mainnet safety gate — HIGH-007: require explicit env var + config flag
         env_mainnet = os.environ.get("HYPERLIQUID_MAINNET_ENABLED", "").lower() in ("1", "true", "yes")
         cfg_mainnet = bool(config.get("exchange.mainnet_enabled", False))
@@ -93,6 +100,8 @@ class ExecutionEngine:
 
         # REST client (lazy-initialised for testnet / mainnet)
         self._rest_client: Optional[Any] = None
+        self._live_client: Optional[Any] = None
+        self._live_signing_ready: bool = False
 
         # In-memory open trade index: symbol → TradeResult
         self._open_trades: Dict[str, TradeResult] = {}
@@ -112,14 +121,38 @@ class ExecutionEngine:
         """Prepare the execution engine (open REST session if needed)."""
         if self._mode in ("testnet", "mainnet"):
             from src.exchanges.hyperliquid_rest import HyperliquidRESTClient
+            from src.exchanges.hyperliquid_live import HyperliquidLiveClient, resolve_private_key
 
             use_testnet = self._mode == "testnet"
             self._rest_client = HyperliquidRESTClient(use_testnet=use_testnet)
             await self._rest_client.open()
             logger.info("ExecutionEngine REST client opened (mode=%s)", self._mode)
 
+            private_key = resolve_private_key()
+            if private_key:
+                self._live_client = HyperliquidLiveClient(
+                    private_key,
+                    use_testnet=use_testnet,
+                )
+                await self._live_client.open()
+                self._live_signing_ready = True
+                logger.info(
+                    "ExecutionEngine live signing ready (wallet=%s)",
+                    self._live_client.wallet_address,
+                )
+            else:
+                logger.warning(
+                    "Live mode=%s but no signing key — set %s or vault key '%s'. "
+                    "Orders will be logged only.",
+                    self._mode,
+                    "HYPERLIQUID_PRIVATE_KEY",
+                    "hyperliquid_private_key",
+                )
+
     async def close(self) -> None:
         """Gracefully close any open REST session."""
+        self._live_client = None
+        self._live_signing_ready = False
         if self._rest_client is not None:
             await self._rest_client.close()
             self._rest_client = None
@@ -169,13 +202,21 @@ class ExecutionEngine:
             logger.error("enter_position: invalid price %.4f for %s", raw_price, signal.symbol)
             raise ValueError(f"Invalid entry price for {signal.symbol}: {raw_price}")
 
+        meta = signal.metadata or {}
+        order_type = str(meta.get("order_type", "market"))
+        entry_fee_pct = safe_float(meta.get("entry_fee_pct"), self._taker_fee_pct)
+
         size = safe_float(signal.metadata.get("calculated_size", 0.0))
         if size <= 0.0:
             logger.error("enter_position: zero size for %s", signal.symbol)
             raise ValueError(f"Calculated position size is zero for {signal.symbol}")
 
-        # Compute fill price (with paper slippage)
-        if self._mode == "paper":
+        # Compute fill price (paper slippage for market; limit at bid/ask for maker)
+        if order_type == "limit_maker":
+            fill_price = safe_float(meta.get("limit_price"), raw_price)
+            if fill_price <= 0.0:
+                fill_price = raw_price
+        elif self._mode == "paper":
             slippage = self._paper_slippage_pct
             if signal.side == "long":
                 fill_price = raw_price * (1.0 + slippage)
@@ -205,9 +246,13 @@ class ExecutionEngine:
             )
 
         notional = fill_price * size
-        entry_fee = notional * self._taker_fee_pct
+        entry_fee = notional * entry_fee_pct
 
         # Persist entry to DB
+        sub_strategy = meta.get("original_strategy")
+        if signal.strategy != "StrategyEnsemble":
+            sub_strategy = signal.strategy
+
         entry_record = TradeEntry(
             symbol=signal.symbol,
             side=signal.side,
@@ -215,12 +260,13 @@ class ExecutionEngine:
             entry_time=now_ms,
             size=size,
             strategy=signal.strategy,
+            sub_strategy=str(sub_strategy) if sub_strategy else None,
             status="open",
         )
         trade_id = self._db.save_trade_entry(entry_record)
 
         if self._mode in ("testnet", "mainnet"):
-            await self._submit_live_order(signal, size, raw_price)
+            await self._submit_live_order(signal, size, fill_price)
 
         result = TradeResult(
             trade_id=trade_id,
@@ -242,14 +288,15 @@ class ExecutionEngine:
             self._last_entry_ms[signal.symbol] = now_ms
 
         logger.info(
-            "ENTER  mode=%s id=%d %s %s size=%.6f @ %.4f (slippage=%.4f%%) fee=$%.2f (%s)",
+            "ENTER  mode=%s id=%d %s %s size=%.6f @ %.4f order=%s fee=%.4f%% ($%.2f) (%s)",
             self._mode,
             trade_id,
             signal.symbol,
             signal.side,
             size,
             fill_price,
-            self._paper_slippage_pct * 100.0 if self._mode == "paper" else 0.0,
+            order_type,
+            entry_fee_pct * 100.0,
             entry_fee,
             signal.reason,
         )
@@ -276,18 +323,22 @@ class ExecutionEngine:
             logger.error("close_position: invalid exit price %.4f for %s", raw_exit, position.symbol)
             raise ValueError(f"Invalid exit price for {position.symbol}: {raw_exit}")
 
-        # Paper slippage: worse fill for the direction of the trade
-        if self._mode == "paper":
-            slippage = self._paper_slippage_pct
+        # Paper slippage: worse fill for market exits; maker exits at touch
+        pos_meta = position.metadata or {}
+        exit_fee_pct = safe_float(pos_meta.get("exit_fee_pct"), self._taker_fee_pct)
+        exit_slip = safe_float(pos_meta.get("exit_slippage_pct"), self._paper_slippage_pct)
+
+        if self._mode == "paper" and exit_slip > 0:
             if position.side == "long":
-                fill_exit = raw_exit * (1.0 - slippage)
+                fill_exit = raw_exit * (1.0 - exit_slip)
             else:
-                fill_exit = raw_exit * (1.0 + slippage)
+                fill_exit = raw_exit * (1.0 + exit_slip)
         else:
             fill_exit = raw_exit
 
         notional = position.entry_price * position.size
-        exit_fee = notional * self._taker_fee_pct
+        exit_notional = fill_exit * position.size
+        exit_fee = exit_notional * exit_fee_pct
 
         async with self._lock:
             open_trade = self._open_trades.pop(position.symbol, None)
@@ -404,34 +455,65 @@ class ExecutionEngine:
         size: float,
         price: float,
     ) -> None:
-        """Submit an order to Hyperliquid (testnet or mainnet).
-
-        This is a thin wrapper around the REST client.  Full signing and
-        order construction are delegated to the exchange layer because
-        Hyperliquid requires EIP-712 signatures.
-
-        For now we log the intent; the signing infrastructure can be
-        plugged in here without changing the ExecutionEngine contract.
-        """
+        """Submit a signed order to Hyperliquid (testnet or mainnet)."""
         if self._rest_client is None:
             logger.error("REST client not available in live mode")
             return
 
-        logger.info(
-            "LIVE ORDER (submit) %s %s size=%.6f @ %.4f",
-            signal.symbol,
-            signal.side,
-            size,
-            price,
-        )
-        # TODO: integrate vault.py signing + nonce management
+        meta = signal.metadata or {}
+        order_type = str(meta.get("order_type", "market"))
+        post_only = bool(meta.get("post_only", False))
+        limit_price = safe_float(meta.get("limit_price"), price)
+
+        if order_type == "limit_maker":
+            logger.info(
+                "LIVE LIMIT MAKER (Alo) %s %s size=%.6f @ %.4f post_only=%s",
+                signal.symbol,
+                signal.side,
+                size,
+                limit_price,
+                post_only,
+            )
+        else:
+            logger.info(
+                "LIVE MARKET ORDER %s %s size=%.6f @ ~%.4f",
+                signal.symbol,
+                signal.side,
+                size,
+                price,
+            )
+
+        if not self._live_signing_ready or self._live_client is None:
+            logger.warning(
+                "Skipping live order submission for %s — signing not configured",
+                signal.symbol,
+            )
+            return
+
+        try:
+            await self._live_client.place_entry(
+                signal.symbol,
+                signal.side,
+                size,
+                order_type=order_type,
+                limit_price=limit_price,
+                post_only=post_only,
+            )
+        except Exception as exc:
+            logger.error(
+                "Live order failed %s %s: %s",
+                signal.symbol,
+                signal.side,
+                exc,
+                exc_info=True,
+            )
 
     async def _submit_live_close(
         self,
         position: Position,
         exit_price: float,
     ) -> None:
-        """Submit a closing order to Hyperliquid."""
+        """Submit a signed closing order to Hyperliquid."""
         if self._rest_client is None:
             logger.error("REST client not available in live mode")
             return
@@ -444,7 +526,23 @@ class ExecutionEngine:
             position.size,
             exit_price,
         )
-        # TODO: integrate vault.py signing + nonce management
+
+        if not self._live_signing_ready or self._live_client is None:
+            logger.warning(
+                "Skipping live close for %s — signing not configured",
+                position.symbol,
+            )
+            return
+
+        try:
+            await self._live_client.close_position(position.symbol, position.size)
+        except Exception as exc:
+            logger.error(
+                "Live close failed %s: %s",
+                position.symbol,
+                exc,
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # State recovery

@@ -58,6 +58,11 @@ class StrategyEnsemble:
         self._min_strategies_agreeing = min_strategies_agreeing
         self._high_conviction_threshold = high_conviction_threshold
         self._last_decision_log: List[Dict] = []
+        self._governor: Optional[Any] = None
+
+    def set_governor(self, governor: Any) -> None:
+        """Attach rolling performance governor (Phase 3)."""
+        self._governor = governor
 
     @property
     def name(self) -> str:
@@ -74,6 +79,12 @@ class StrategyEnsemble:
 
         # Collect signals from all sub-strategies
         for name, strategy in self._strategies.items():
+            if self._governor is not None and not self._governor.is_enabled(name):
+                logger.debug("Ensemble: %s — disabled by strategy governor", name)
+                continue
+            if hasattr(strategy, "is_active") and not strategy.is_active():
+                logger.debug("Ensemble: %s — dormant (auto-enable)", name)
+                continue
             try:
                 # Sub-strategies use on_data, not on_market_event
                 sig = strategy.on_data(event)

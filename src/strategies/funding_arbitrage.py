@@ -63,7 +63,20 @@ class FundingArbitrage(Strategy):
         self.CONFIDENCE = cfg.get("confidence", 0.75)
         # OI filter: avoid if OI is surging (crowd still entering)
         self.REQUIRE_OI_STABLE = cfg.get("require_oi_stable", True)
-        self.OI_DELTA_MAX = cfg.get("oi_delta_max", 1000.0)  # max OI increase
+        self.OI_DELTA_MAX = cfg.get("oi_delta_max", 1000.0)
+        self.MIN_NET_SPREAD = cfg.get("min_net_spread", 0.0007)  # spread must exceed ~0.07% RT costs
+
+        self.MANUAL_ENABLED = bool(cfg.get("enabled", True))
+        self.AUTO_ENABLE = bool(cfg.get("auto_enable", False))
+        self.AUTO_ENABLE_MIN_NET_SPREAD = cfg.get("auto_enable_min_net_spread", 0.0008)
+        self.AUTO_DISABLE_NET_SPREAD = cfg.get("auto_disable_net_spread", 0.0005)
+        self.AUTO_ENABLE_MIN_SYMBOLS = int(cfg.get("auto_enable_min_symbols", 2))
+        self._auto_active = self.MANUAL_ENABLED
+        self._auto_activate_logged = False
+        self._auto_deactivate_logged = False
+        self._last_spread_check_ms: int = 0
+        self._spread_check_interval_ms: int = int(cfg.get("spread_check_interval_ms", 60_000))
+        self._last_observed_spread: Optional[float] = None
 
         self._state: Dict[str, _FundingArbState] = {}
         self._active_pair: Optional[Tuple[str, str]] = None  # (long_symbol, short_symbol)
@@ -84,6 +97,85 @@ class FundingArbitrage(Strategy):
     def name(self) -> str:
         return "FundingArbitrage"
 
+    def is_active(self) -> bool:
+        """True when the strategy may scan for pairs and emit entry signals."""
+        return self._auto_active
+
+    def _best_spread(
+        self,
+        funding_map: Dict[str, float],
+    ) -> Optional[Tuple[float, str, str, float, float]]:
+        """Return (spread, long_sym, short_sym, long_funding, short_funding)."""
+        if len(funding_map) < self.AUTO_ENABLE_MIN_SYMBOLS:
+            return None
+        sorted_by_funding = sorted(funding_map.items(), key=lambda x: x[1])
+        long_sym, long_funding = sorted_by_funding[0]
+        short_sym, short_funding = sorted_by_funding[-1]
+        spread = short_funding - long_funding
+        return spread, long_sym, short_sym, long_funding, short_funding
+
+    def _update_auto_activation(self, event: MarketEvent) -> None:
+        """Enable when cross-asset funding spread covers round-trip costs; disable with hysteresis."""
+        if self.MANUAL_ENABLED:
+            self._auto_active = True
+            return
+        if not self.AUTO_ENABLE:
+            self._auto_active = False
+            return
+
+        if event.timestamp_ms - self._last_spread_check_ms < self._spread_check_interval_ms:
+            return
+        self._last_spread_check_ms = event.timestamp_ms
+
+        spread_info = self._best_spread(self._latest_funding)
+        if spread_info is None:
+            return
+
+        spread, long_sym, short_sym, long_funding, short_funding = spread_info
+        self._last_observed_spread = spread
+
+        if not self._auto_active and spread >= self.AUTO_ENABLE_MIN_NET_SPREAD:
+            self._auto_active = True
+            if not self._auto_activate_logged:
+                self._auto_activate_logged = True
+                self._auto_deactivate_logged = False
+                logger.info(
+                    "FundingArbitrage AUTO-ENABLED — net spread %.4f%% >= threshold %.4f%% "
+                    "(long=%s %.4f%%, short=%s %.4f%%)",
+                    spread * 100,
+                    self.AUTO_ENABLE_MIN_NET_SPREAD * 100,
+                    long_sym,
+                    long_funding * 100,
+                    short_sym,
+                    short_funding * 100,
+                )
+            return
+
+        if (
+            self._auto_active
+            and self._active_pair is None
+            and spread < self.AUTO_DISABLE_NET_SPREAD
+        ):
+            self._auto_active = False
+            if not self._auto_deactivate_logged:
+                self._auto_deactivate_logged = True
+                self._auto_activate_logged = False
+                logger.info(
+                    "FundingArbitrage AUTO-DISABLED — net spread %.4f%% < threshold %.4f%% "
+                    "(long=%s %.4f%%, short=%s %.4f%%)",
+                    spread * 100,
+                    self.AUTO_DISABLE_NET_SPREAD * 100,
+                    long_sym,
+                    long_funding * 100,
+                    short_sym,
+                    short_funding * 100,
+                )
+
+    def _operational_gate(self, event: MarketEvent) -> bool:
+        """Return False if strategy should stay dormant (monitoring only)."""
+        self._update_auto_activation(event)
+        return self._auto_active
+
     # ------------------------------------------------------------------
     # Entry logic
     # ------------------------------------------------------------------
@@ -100,10 +192,13 @@ class FundingArbitrage(Strategy):
         if funding is None:
             return None
 
-        # Update cross-symbol cache
+        # Update cross-symbol cache (always — powers spread monitoring when dormant)
         self._latest_funding[event.symbol] = funding
         self._latest_oi_delta[event.symbol] = event.oi_delta
         self._latest_timestamp = event.timestamp_ms
+
+        if not self._operational_gate(event):
+            return None
 
         state = self._get_state(event.symbol)
         state.funding_history.append(funding)
@@ -256,7 +351,7 @@ class FundingArbitrage(Strategy):
         long_sym, long_funding = most_negative
         short_sym, short_funding = most_positive
 
-        # Check spread
+        # Check spread (must exceed transaction costs when enabled)
         spread = short_funding - long_funding
         if spread < self.MIN_FUNDING_SPREAD:
             logger.info(
@@ -265,8 +360,14 @@ class FundingArbitrage(Strategy):
                 long_sym, long_funding * 100, short_sym, short_funding * 100,
             )
             return None
+        if spread < self.MIN_NET_SPREAD:
+            logger.info(
+                "FundingArbitrage scan — spread %.4f%% < min net %.4f%% after fees",
+                spread * 100, self.MIN_NET_SPREAD * 100,
+            )
+            return None
 
-        # Check individual extremes
+        # Check individual extremes (duplicate spread check removed below)
         if abs(long_funding) < self.MIN_INDIVIDUAL_FUNDING:
             logger.info(
                 "FundingArbitrage scan — long leg %s funding %.4f%% < min %.4f%%",
@@ -343,8 +444,3 @@ class FundingArbitrage(Strategy):
             spread * 100,
         )
         return long_sig, short_sig
-
-    def clear_active_pair(self) -> None:
-        """Clear active pair tracking (call when pair is fully closed)."""
-        self._active_pair = None
-        self._pair_entry_ms = 0

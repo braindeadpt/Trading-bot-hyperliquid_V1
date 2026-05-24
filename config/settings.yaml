@@ -69,6 +69,7 @@ strategy:
     stop_loss_atr_multiplier: 2.0
     overcrowded_penalty: 0.2        # reduce confidence by 20%
     min_confidence: 0.40           # reduced from 0.50
+    extreme_threshold: 0.0003        # align with near-zero funding regime (0.03%)
     # Microstructure filters (Task 2.2)
     oir_long_threshold: 0.6         # OIR > 0.6 confirms long
     oir_short_threshold: -0.6       # OIR < -0.6 confirms short
@@ -118,12 +119,19 @@ strategy:
     require_oi_decreasing: true     # only enter when OI is decreasing
     oi_delta_threshold: 0.0         # OI_delta must be < 0 (decreasing)
     use_predicted_primary: true     # use predicted funding as primary signal
+    require_real_oi_ratio: false    # use Binance LS ratio when available; heuristic fallback
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: Funding Arbitrage (Task 3.1)
   # ═══════════════════════════════════════════════════════════
   funding_arbitrage:
-    enabled: true
+    enabled: false                  # manual force-on; leave false to use auto_enable
+    auto_enable: true               # activates when cross-asset funding spread covers costs
+    auto_enable_min_net_spread: 0.0008   # 0.08% spread to turn on (RT fees ~0.07%)
+    auto_disable_net_spread: 0.0005      # 0.05% hysteresis — avoid flicker when spread fades
+    auto_enable_min_symbols: 2
+    spread_check_interval_ms: 60000      # re-check spread every 60s
+    min_net_spread: 0.0007         # 0.07% min spread after round-trip fees
     min_funding_spread: 0.00005      # 0.005% spread (was 0.4% — adapt to near-zero funding)
     min_individual_funding: 0.00001  # each leg must have |funding| > 0.001% (was 0.2%)
     exit_threshold: 0.00001          # exit when funding reverts to <0.001%
@@ -157,7 +165,16 @@ strategy:
   # Strategy: OrderBook Imbalance Scalper
   # ═══════════════════════════════════════════════════════════
   orderbook_scalper:
-    enabled: true
+    enabled: false                  # manual force-on; leave false to use auto_enable
+    auto_enable: true               # activates when book spread + TP edge beat RT fees
+    auto_enable_taker_fee_pct: 0.0001   # maker fee when execution.maker_orders enabled
+    auto_enable_slippage_pct: 0.0005     # fallback slippage per side when book unknown
+    auto_enable_min_edge_buffer_pct: 0.0005
+    auto_enable_use_book_spread: true    # use half observed spread when tighter than fallback
+    auto_enable_max_book_spread_pct: 0.0004   # 0.04% — book must be this tight to enable
+    auto_disable_max_book_spread_pct: 0.0008  # 0.08% hysteresis — disable when book widens
+    auto_enable_min_symbols_with_book: 1
+    viability_check_interval_ms: 60000
     bid_ask_ratio_long: 1.5          # bid_depth / ask_depth > 1.5 → excess bids → long
     bid_ask_ratio_short: 0.67        # bid_depth / ask_depth < 0.67 → excess asks → short
     take_profit_pct: 0.0025          # 0.25% take-profit
@@ -172,7 +189,10 @@ strategy:
   # Strategy: Liquidation Catcher (Task 3.3)
   # ═══════════════════════════════════════════════════════════
   liquidation_catcher:
-    enabled: true
+    enabled: false                  # manual force-on; leave false to use auto_enable
+    auto_enable: true               # activates automatically when Binance feed is validated
+    feed_warmup_events: 1           # Binance liquidation events before auto-enable
+    require_real_liquidation_data: true
     min_notional_usd: 5000000      # $5M in 5min to trigger (was $10M)
     min_liquidation_count: 3       # avoid single large liquidation (was 5)
     require_oi_decreasing: false   # OI check optional (was required — not always reliable)
@@ -219,9 +239,48 @@ strategy:
   # Ensemble Configuration
   # ═══════════════════════════════════════════════════════════
   ensemble:
-    threshold: 0.35                 # increased from 0.20 — require stronger consensus
-    min_agreeing: 2                 # increased from 1 — need at least 2 strategies
-    high_conviction_threshold: 0.65 # single strategy with >= 0.65 confidence bypasses threshold/min_agreeing
+    threshold: 0.45                 # require stronger consensus (Phase 2)
+    min_agreeing: 2                 # need at least 2 strategies
+    high_conviction_threshold: 0.70 # single strategy bypass threshold
+
+  # ═══════════════════════════════════════════════════════════
+  # Strategy performance governance (Phase 3)
+  # ═══════════════════════════════════════════════════════════
+  strategy_governance:
+    enabled: true
+    lookback_days: 30
+    min_trades: 10                  # need N trades before disable decision
+    min_sharpe: 0.0                 # disable sub-strategy if rolling Sharpe below
+    eval_interval_ms: 3600000       # re-evaluate hourly
+
+# ═══════════════════════════════════════════════════════════
+# Execution & transaction cost analysis (Phase 2)
+# ═══════════════════════════════════════════════════════════
+execution:
+  tca_enabled: true
+  min_edge_buffer_pct: 0.05         # 0.05% buffer above round-trip costs
+  entry_debounce_ms: 5000
+  trailing_stop:
+    enabled: true
+    activation_pct: 0.005           # start trailing after +0.5% unrealised
+    trail_pct: 0.003                # stop trails 0.3% behind peak/trough
+  maker_orders:
+    enabled: true
+    maker_fee_pct: 0.01             # 0.01% per side (Hyperliquid maker tier)
+    limit_offset_pct: 0.0           # 0 = join best bid/ask
+    timeout_ms: 30000               # cancel unfilled limits after 30s (live)
+    exit_as_maker: false            # exits stay taker for speed
+    strategies:
+      - OrderBookScalper
+      - VWAPDeviation
+
+# ═══════════════════════════════════════════════════════════
+# External market data feeds (Phase 2)
+# ═══════════════════════════════════════════════════════════
+market_data:
+  liquidation_source: auto          # binance | proxy | auto
+  long_short_ratio_enabled: true
+  long_short_poll_sec: 300
 
 # ═══════════════════════════════════════════════════════════
 # Backtest
@@ -230,6 +289,10 @@ backtest:
   initial_capital: 100_000.0
   commission_pct: 0.04            # 4 bps (Hyperliquid taker)
   slippage_bps: 2.0               # 2 bps slippage
+  use_regime_weights: true        # Phase 2/3 parity with live
+  use_cooldown: true
+  use_kelly: true
+  use_microstructure_proxy: true  # proxy OIR/spread from candle range
 
 # ═══════════════════════════════════════════════════════════
 # Data & database
@@ -243,9 +306,12 @@ database:
 # ═══════════════════════════════════════════════════════════
 dashboard:
   enabled: true
-  host: "0.0.0.0"
+  host: "127.0.0.1"
   port: 5000
   push_interval_sec: 2.0
+  auth_enabled: false          # set true + password/token to require login
+  password: ""                 # or BOT_DASHBOARD_PASSWORD / BOT_DASHBOARD_TOKEN env
+  secret_key: ""               # Flask session secret (auto-generated if empty)
 
 # ═══════════════════════════════════════════════════════════
 # Logging
