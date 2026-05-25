@@ -11,6 +11,8 @@ jobs:
     timeout-minutes: 15
     env:
       PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
 
     steps:
       - name: Checkout

@@ -35,8 +35,14 @@ def main() -> int:
             cwd=str(ROOT),
             env=env,
             check=False,
+            capture_output=True,
+            text=True,
         )
+        if result.stdout:
+            print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
         if result.returncode != 0:
+            if result.stderr:
+                print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
             failed.append(rel)
             print(f"!!! FAILED {rel} (exit {result.returncode})")
 
@@ -46,8 +52,14 @@ def main() -> int:
         cwd=str(ROOT),
         env=env,
         check=False,
+        capture_output=True,
+        text=True,
     )
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
     if result.returncode != 0:
+        if result.stderr:
+            print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
         failed.append("tests.test_basic")
 
     if failed:
