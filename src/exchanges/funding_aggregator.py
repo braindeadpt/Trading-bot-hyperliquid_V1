@@ -5,10 +5,12 @@ from multiple free exchanges (Binance, Bybit, OKX) and aggregates.
 No API key required. Uses public REST endpoints.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 
