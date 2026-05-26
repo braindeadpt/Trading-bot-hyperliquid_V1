@@ -6,6 +6,7 @@ from typing import Any, List
 
 from src.strategies.base import Strategy
 from src.strategies.ensemble import StrategyEnsemble, StrategyWeight
+from src.strategies.donchian_breakout import DonchianBreakout
 from src.strategies.funding_arbitrage import FundingArbitrage
 from src.strategies.liquidation_catcher import LiquidationCatcher
 from src.strategies.mean_reversion import MeanReversion
@@ -18,6 +19,7 @@ _STRATEGY_REGISTRY = (
     ("strategy.trend_follow", TrendFollow),
     ("strategy.volatility_breakout", VolatilityBreakout),
     ("strategy.mean_reversion", MeanReversion),
+    ("strategy.donchian_breakout", DonchianBreakout),
     ("strategy.funding_arbitrage", FundingArbitrage),
     ("strategy.vwap_deviation", VWAPDeviation),
     ("strategy.liquidation_catcher", LiquidationCatcher),
@@ -31,6 +33,7 @@ def default_ensemble_weights() -> List[StrategyWeight]:
         StrategyWeight("SmartMoneyFlow", 0.18, min_confidence=0.40),
         StrategyWeight("VolatilityBreakout", 0.15, min_confidence=0.50),
         StrategyWeight("FundingExtreme", 0.16, min_confidence=0.40),
+        StrategyWeight("DonchianBreakout", 0.10, min_confidence=0.50),
         StrategyWeight("VWAPDeviation", 0.12, min_confidence=0.40),
         StrategyWeight("FundingArbitrage", 0.08, min_confidence=0.35),
         StrategyWeight("LiquidationCatcher", 0.13, min_confidence=0.40),

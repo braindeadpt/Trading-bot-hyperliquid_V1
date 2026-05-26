@@ -96,8 +96,24 @@ strategy:
     stop_loss_atr_multiplier: 1.5
     take_profit_atr_multiplier: 3.0
     max_hold_hours: 6
+    min_confidence: 0.60
+    signal_throttle_ms: 1800000    # 30 min between signals, reduce churn     # 15 min between signals per symbol
+
+  # ═══════════════════════════════════════════════════════════
+  # Strategy: Donchian Breakout (momentum breakout)
+  # ═══════════════════════════════════════════════════════════
+  donchian_breakout:
+    enabled: true
+    lookback: 20                   # channel lookback (15m candles)
+    min_adx: 22.0                  # ADX must be >= 22 (trending regime)
+    min_range_pct: 0.001           # 0.1% avg range minimum (anti-chop)
+    atr_period: 14
+    stop_atr_mult: 2.0
+    base_size_pct: 0.01
+    max_size_pct: 0.03
+    max_hold_hours: 6
+    signal_throttle_ms: 900000
     min_confidence: 0.55
-    signal_throttle_ms: 900000     # 15 min between signals per symbol
 
   # Regime filter (ADX-based strategy weighting)
   adx_period: 14
@@ -107,6 +123,7 @@ strategy:
     trend:
       SmartMoneyFlow: 1.3           # boost trend following
       VolatilityBreakout: 1.4       # boost — squeeze breaks start trends
+      DonchianBreakout: 1.3         # boost — breakout follows trend
       FundingExtreme: 0.7           # penalize mean reversion
       VWAPDeviation: 0.5            # penalize VWAP fade in trends
       LiquidationCatcher: 1.0       # neutral — liquidation can cascade in trends
@@ -115,6 +132,7 @@ strategy:
     range:
       SmartMoneyFlow: 0.7           # penalize trend following
       VolatilityBreakout: 0.6       # penalize — false breaks common in chop
+      DonchianBreakout: 0.5         # penalize — chop kills breakout reliability
       FundingExtreme: 1.3           # boost mean reversion
       VWAPDeviation: 1.5            # boost — range is ideal for VWAP fade
       LiquidationCatcher: 1.0       # neutral
