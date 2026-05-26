@@ -346,6 +346,16 @@ class Database:
             rows = cur.fetchall()
         return [self._row_to_candle(row) for row in rows]
 
+    def count_candles(self, symbol: str, timeframe: str) -> int:
+        """Return number of stored candles for a symbol/timeframe."""
+        table = self._resolve_table(timeframe)
+        with self._conn():
+            row = self._conn().execute(
+                f"SELECT COUNT(*) FROM {table} WHERE symbol = ?",
+                (symbol,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     def get_candles_df(self, symbol: str, timeframe: str, limit: int = 500):
         """Return candles as a pandas DataFrame (lazy import)."""
         import pandas as pd

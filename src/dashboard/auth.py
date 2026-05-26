@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -41,7 +44,18 @@ def resolve_dashboard_auth(config: Dict[str, Any]) -> DashboardAuthConfig:
 
     if enabled and not token:
         token = secrets.token_urlsafe(24)
-        # Ephemeral token when auth forced without config — log once at startup.
+        logger.info(
+            "Dashboard auth ON — ephemeral token generated (set BOT_DASHBOARD_TOKEN "
+            "or dashboard.password in config for persistence): %s",
+            token,
+        )
+    elif enabled and token:
+        logger.info("Dashboard auth ON — token configured, paste at login prompt")
+    else:
+        logger.warning(
+            "Dashboard auth OFF — anyone on the network can access the dashboard. "
+            "Set dashboard.auth_enabled=true or configure a token."
+        )
 
     return DashboardAuthConfig(enabled=enabled, token=token)
 

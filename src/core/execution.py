@@ -22,7 +22,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TradeResult:
-    """Result of an entry or exit operation."""
+    """Result of an entry or exit operation.
+
+    ``status`` is ``'open'`` for a live trade, ``'closed'`` for an exited
+    trade, or ``'rejected'`` when the entry was refused (debounce, duplicate,
+    risk gate, etc.).  Callers **must** check ``status`` before reading
+    trade-specific fields.
+    """
 
     trade_id: int
     symbol: str
@@ -185,17 +191,29 @@ class ExecutionEngine:
                 signal.symbol,
                 self._entry_debounce_ms - (now_ms - last_entry),
             )
-            return None
+            return TradeResult(
+                trade_id=0, symbol=signal.symbol, side=signal.side,
+                entry_price=0.0, exit_price=None, size=0.0,
+                pnl_usd=0.0, pnl_pct=0.0, status="rejected",
+                reason=f"debounce_{self._entry_debounce_ms}ms",
+                timestamp_ms=now_ms,
+            )
 
         # --- Check if already have open trade for this symbol ---
         async with self._lock:
             if signal.symbol in self._open_trades:
+                existing = self._open_trades[signal.symbol]
                 logger.warning(
                     "enter_position REJECTED %s — already have open trade (id=%d)",
-                    signal.symbol,
-                    self._open_trades[signal.symbol].trade_id,
+                    signal.symbol, existing.trade_id,
                 )
-                return None
+                return TradeResult(
+                    trade_id=0, symbol=signal.symbol, side=signal.side,
+                    entry_price=0.0, exit_price=None, size=0.0,
+                    pnl_usd=0.0, pnl_pct=0.0, status="rejected",
+                    reason="duplicate_position",
+                    timestamp_ms=now_ms,
+                )
 
         raw_price = safe_float(signal.entry_price)
         if raw_price <= 0.0:

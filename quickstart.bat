@@ -14,6 +14,7 @@ if not exist logs mkdir logs
 
 echo Starting Hyperliquid Premium Bot [Paper Mode]...
 echo Dashboard: http://localhost:5000
+echo [INFO] Candle backfill runs automatically on start if DB needs warm-up.
 echo.
 echo [TIP] If dashboard doesn't open automatically, go to http://localhost:5000 in your browser.
 echo [TIP] For background operation with auto-restart, use service.bat instead.

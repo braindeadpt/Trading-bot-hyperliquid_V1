@@ -55,6 +55,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "token": "",
         "secret_key": "",
     },
+    "database": {
+        "path": "data/live/bot.db",
+        "prune_days": 30,
+        "auto_backfill_on_start": True,
+        "backfill_days": 7,
+        "backfill_min_candles_15m": 80,
+        "backfill_timeframes": ["1m", "5m", "15m", "1h"],
+    },
     "symbols": ["BTC", "ETH", "SOL"],
     "timeframes": ["1m", "5m", "15m", "1h"],
     "strategies": {

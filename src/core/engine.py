@@ -109,8 +109,12 @@ class TradingEngine:
         self._trailing_activation_pct = safe_float(trail.get("activation_pct", 0.005))
         self._trailing_distance_pct = safe_float(trail.get("trail_pct", 0.003))
 
-        # Symbols to trade (from config)
-        self._symbols: List[str] = list(config.get("symbols", ["BTC", "ETH", "SOL"]))
+        # Symbols to trade (from config — "symbols" takes priority, falls back to "assets")
+        raw = config.get("symbols")
+        if raw is None:
+            raw = config.get("assets", ["BTC", "ETH", "SOL"])
+            logger.warning("config key 'symbols' not found — falling back to 'assets': %s", raw)
+        self._symbols: List[str] = list(raw)
 
         # Slippage threshold (fraction, e.g. 0.002 = 0.2%)
         self._max_slippage_pct = safe_float(
@@ -194,7 +198,9 @@ class TradingEngine:
         # WS health check
         self._hl_ws_client: Optional[Any] = None
         self._ws_health_check_task: Optional[asyncio.Task] = None
+        self._summary_task: Optional[asyncio.Task] = None
         self._last_ws_healthy_time: float = time.time()
+        self._ws_disconnect_start: float = time.time()
         self._ws_health_warned: bool = False
 
         self._latest_funding: Dict[str, float] = {}
@@ -398,12 +404,12 @@ class TradingEngine:
         self._funding_poll_task = asyncio.create_task(self._poll_funding_loop())
         logger.info("FundingAggregator polling started (interval=30s)")
 
-        # 5. Start WS health check
-        self._ws_health_check_task = asyncio.create_task(self._ws_health_loop())
-        logger.info("WS health check started")
+        # 6. Start periodic summary loop
+        self._summary_task = asyncio.create_task(self._periodic_summary_loop())
+        logger.info("Periodic summary loop started (interval=900s)")
 
     async def _ws_health_loop(self) -> None:
-        """Background task: check WS health every 30s and log warnings."""
+        """Background task: check WS health every 30s."""
         while self._running:
             try:
                 await asyncio.sleep(30)
@@ -413,21 +419,83 @@ class TradingEngine:
                 now = time.time()
                 if not healthy:
                     if not self._ws_health_warned:
+                        self._ws_disconnect_start = now
                         logger.warning("WS health check FAILED — no data for >90s")
                         self._ws_health_warned = True
+                    duration = now - self._ws_disconnect_start
                     if self._notifier is not None:
-                        await self._notifier.send_alert("⚠️ WS disconnected — market data stalled")
+                        await self._notifier.ws_disconnect(
+                            exchange="Hyperliquid", duration_sec=duration
+                        )
                 else:
-                    self._last_ws_healthy_time = now
                     if self._ws_health_warned:
-                        logger.info("WS health RESTORED")
+                        duration = now - self._ws_disconnect_start
+                        logger.info("WS health RESTORED after %.0fs", duration)
                         self._ws_health_warned = False
                         if self._notifier is not None:
-                            await self._notifier.send_alert("✅ WS reconnected")
+                            await self._notifier.send_alert("WS reconnected")
+                    self._last_ws_healthy_time = now
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.exception("WS health check error")
+
+    async def _periodic_summary_loop(self) -> None:
+        """Log a structured summary every 15 min: exposure, DD, PnL, active strategies."""
+        await asyncio.sleep(60)  # initial settle-in delay
+        while self._running:
+            try:
+                portfolio = self._portfolio
+                positions = await portfolio.positions
+                capital = await portfolio.capital
+                daily_pnl = await portfolio.daily_pnl
+                max_dd = portfolio.sync_max_drawdown_pct()
+                active_strategies = []
+                for s in self._strategies:
+                    active_strategies.append(getattr(s, "name", "?"))
+                    subs = getattr(s, "_strategies", None)
+                    if isinstance(subs, dict):
+                        active_strategies.extend(
+                            getattr(sub, "name", n) for n, sub in subs.items()
+                        )
+
+                long_exposure = 0.0
+                short_exposure = 0.0
+                for pos in positions.values():
+                    mid = getattr(pos, "current_price", 0) or 1
+                    notional = getattr(pos, "size", 0) * mid
+                    if getattr(pos, "side", "") == "long":
+                        long_exposure += notional
+                    else:
+                        short_exposure += notional
+                cb_tripped = self._risk.is_circuit_breaker_tripped()
+                daily_trades = await portfolio.daily_trades
+
+                logger.info(
+                    "=== PERIODIC SUMMARY === "
+                    "capital=%.2f | daily_pnl=%.2f | max_dd=%.2f%% | "
+                    "long_exposure=%.2f | short_exposure=%.2f | "
+                    "open_pos=%d | daily_trades=%d | cb=%s | "
+                    "strategies=%s",
+                    capital, daily_pnl, max_dd * 100,
+                    long_exposure, short_exposure,
+                    len(positions), daily_trades,
+                    "TRIPPED" if cb_tripped else "ok",
+                    ",".join(active_strategies),
+                )
+
+                if self._notifier is not None:
+                    pnl_emoji = "+" if daily_pnl >= 0 else ""
+                    await self._notifier.send(
+                        f"Summary: capital={capital:.0f} | daily_pnl={pnl_emoji}{daily_pnl:.2f} | "
+                        f"DD={max_dd*100:.1f}% | positions={len(positions)} | "
+                        f"cb={'TRIPPED' if cb_tripped else 'ok'}",
+                        level="info",
+                    )
+
+            except Exception:
+                logger.exception("Periodic summary error")
+            await asyncio.sleep(900)
 
     async def _poll_funding_loop(self) -> None:
         """Background task: poll cross-exchange funding + OI every 30s."""
@@ -471,7 +539,7 @@ class TradingEngine:
             self._shutdown_event.set()
 
         # Cancel background tasks
-        for task_name in ("_funding_poll_task", "_ws_health_check_task"):
+        for task_name in ("_funding_poll_task", "_ws_health_check_task", "_summary_task"):
             task = getattr(self, task_name, None)
             if task and not task.done():
                 task.cancel()
@@ -1718,6 +1786,25 @@ class TradingEngine:
             self._decision_history = self._decision_history[:100]
             return
 
+        # Handle rejection (debounce, duplicate, etc.)
+        if result.status == "rejected":
+            logger.info(
+                "Signal REJECTED %s %s — %s",
+                signal.symbol, signal.side, result.reason,
+            )
+            sig_record["status"] = "rejected"
+            sig_record["risk_reason"] = result.reason
+            self._decision_history.insert(0, {
+                "time": sig_time,
+                "type": "execution",
+                "symbol": signal.symbol,
+                "side": signal.side,
+                "result": "rejected",
+                "reason": result.reason,
+            })
+            self._decision_history = self._decision_history[:100]
+            return
+
         sig_record["status"] = "executed"
         sig_record["size"] = result.size
         # Update strategy stats
@@ -2008,6 +2095,7 @@ class TradingEngine:
         and inject into all strategy states for instant warm-up.
         """
         tf_map = {60: "1m", 300: "5m", 900: "15m", 3600: "1h"}
+        restore_limits = {60: 200, 300: 200, 900: 200, 3600: 250}
         all_strategies: List[Any] = []
         for s in self._strategies:
             all_strategies.append(s)
@@ -2018,7 +2106,9 @@ class TradingEngine:
         for symbol in self._symbols:
             for tf_s, tf_name in tf_map.items():
                 try:
-                    rows = self._db.get_candles(symbol, tf_name, limit=100)
+                    rows = self._db.get_candles(
+                        symbol, tf_name, limit=restore_limits.get(tf_s, 200)
+                    )
                     if rows:
                         candles = []
                         for row in rows:

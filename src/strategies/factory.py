@@ -72,9 +72,9 @@ def build_ensemble(cfg: Any) -> StrategyEnsemble:
     return StrategyEnsemble(
         strategies=subs,
         weights=active_weights,
-        threshold=float(cfg.get("strategy.ensemble.threshold", 0.40)),
-        min_strategies_agreeing=int(cfg.get("strategy.ensemble.min_agreeing", 1)),
+        threshold=float(cfg.get("strategy.ensemble.threshold", 0.18)),
+        min_strategies_agreeing=int(cfg.get("strategy.ensemble.min_agreeing", 2)),
         high_conviction_threshold=float(
-            cfg.get("strategy.ensemble.high_conviction_threshold", 0.70)
+            cfg.get("strategy.ensemble.high_conviction_threshold", 0.65)
         ),
     )

@@ -55,6 +55,10 @@ class AlertNotifier:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def send_alert(self, message: str, level: str = "info") -> None:
+        """Alias for send() — used by engine callers."""
+        await self.send(message, level)
+
     async def _send_telegram(self, message: str) -> None:
         """Send message via Telegram Bot API."""
         try:

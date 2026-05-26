@@ -46,7 +46,7 @@ class RiskManager:
     OVERCROWDED_THRESHOLD: float = 0.70
     # FASE 4: Portfolio Heat & Governance
     MAX_DIRECTIONAL_EXPOSURE_PCT: float = 0.60  # 4.1: max 60% book same direction
-    MAX_SECTOR_EXPOSURE_PCT: float = 0.30      # 4.2: max 30% in crypto (if mixed assets)
+    MAX_SECTOR_EXPOSURE_PCT: float = 1.0       # 4.2: disabled by default (crypto-only bot); set < 1.0 for multi-asset
     DAILY_DRAWDOWN_CIRCUIT_PCT: float = 0.05   # 4.3: daily drawdown > 5% = stop
 
     def __init__(self, config: Config, db: Any, notifier: Any = None) -> None:

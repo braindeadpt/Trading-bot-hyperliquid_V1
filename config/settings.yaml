@@ -246,7 +246,7 @@ strategy:
   # ═══════════════════════════════════════════════════════════
   portfolio_governance:
     max_directional_exposure_pct: 60   # 4.1: max 60% book same direction
-    max_sector_exposure_pct: 30        # 4.2: max 30% in crypto sector
+    max_sector_exposure_pct: 100       # 4.2: disabled (crypto-only bot); set <100 for multi-asset
     daily_drawdown_circuit_pct: 5      # 4.3: daily drawdown > 5% = circuit breaker
     max_correlation: 0.70              # max |r| between any two positions (0=off)
     max_correlation_lookback: 60       # 60 periods (15m candles = 15h history)
@@ -263,9 +263,17 @@ strategy:
   # Ensemble Configuration
   # ═══════════════════════════════════════════════════════════
   ensemble:
-    threshold: 0.45                 # require stronger consensus (Phase 2)
-    min_agreeing: 2                 # need at least 2 strategies
-    high_conviction_threshold: 0.70 # single strategy bypass threshold
+    # Option A (recommended): pure config — lower threshold to match realistic scores.
+    #   Normalized weights × confidence:
+    #     2 strong strategies (SMF+FundingExtreme, conf 0.50) = 0.185
+    #     3 moderate strategies (conf 0.40)             = 0.20
+    #     4+ strategies (conf 0.35)                     = 0.18+
+    #   Threshold 0.18 = 2 strong or 3+ moderate; no changes to min_agreeing.
+    threshold: 0.18
+    min_agreeing: 2
+    # High-conviction bypass: a single strategy at ≥0.65 confidence can enter alone.
+    # This fires when other strategies are flat but one has a strong edge.
+    high_conviction_threshold: 0.65
 
   # ═══════════════════════════════════════════════════════════
   # Strategy performance governance (Phase 3)
@@ -324,6 +332,10 @@ backtest:
 database:
   path: "data/live/bot.db"
   prune_days: 30                  # keep last 30 days of tick data
+  auto_backfill_on_start: true    # fetch Binance candles if DB is empty/stale
+  backfill_days: 7                # days of history per timeframe (Binance max 1000 bars)
+  backfill_min_candles_15m: 80    # trigger backfill when 15m count below this
+  backfill_timeframes: ["1m", "5m", "15m", "1h"]
 
 # ═══════════════════════════════════════════════════════════
 # Dashboard
@@ -333,9 +345,19 @@ dashboard:
   host: "127.0.0.1"
   port: 5000
   push_interval_sec: 2.0
-  auth_enabled: false          # set true + password/token to require login
+  auth_enabled: true           # default ON — set password or env BOT_DASHBOARD_TOKEN
   password: ""                 # or BOT_DASHBOARD_PASSWORD / BOT_DASHBOARD_TOKEN env
   secret_key: ""               # Flask session secret (auto-generated if empty)
+
+# ═══════════════════════════════════════════════════════════
+# Alerts (Telegram / Discord)
+# ═══════════════════════════════════════════════════════════
+alerts:
+  enabled: true                # send alerts to Telegram / Discord
+  min_level: "warning"         # only warning+error by default (info = trade entries, etc.)
+  telegram_bot_token: ""       # or TELEGRAM_BOT_TOKEN env
+  telegram_chat_id: ""         # or TELEGRAM_CHAT_ID env
+  discord_webhook_url: ""      # or DISCORD_WEBHOOK_URL env
 
 # ═══════════════════════════════════════════════════════════
 # Logging

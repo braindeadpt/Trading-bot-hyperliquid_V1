@@ -262,6 +262,16 @@ async def main() -> None:
     logger.info(f"Database ready: {db_path}")
 
     # -----------------------------------------------------------------------
+    # 3b. Candle backfill for fast strategy warm-up (live/paper/testnet)
+    # -----------------------------------------------------------------------
+    if not args.backtest:
+        from src.data.candle_backfill import ensure_candle_history
+
+        saved = ensure_candle_history(db, cfg, logger)
+        if saved:
+            logger.info("Candle backfill complete: %d bars stored", saved)
+
+    # -----------------------------------------------------------------------
     # 4. Backtest mode (early exit after run)
     # -----------------------------------------------------------------------
     if args.backtest:
@@ -477,15 +487,6 @@ async def main() -> None:
         dashboard_thread = threading.Thread(target=_run_dashboard, daemon=True)
         dashboard_thread.start()
         logger.info(f"Dashboard started at http://{dashboard_cfg['host']}:{dashboard_cfg['port']}")
-        from dashboard.auth import resolve_dashboard_auth
-        _dash_auth = resolve_dashboard_auth(dashboard_cfg)
-        if _dash_auth.enabled and _dash_auth.token:
-            logger.info("Dashboard auth: token required (set BOT_DASHBOARD_TOKEN or dashboard.password)")
-        elif not _dash_auth.enabled:
-            logger.warning(
-                "Dashboard has NO password protection. "
-                "Set dashboard.password or dashboard.auth_enabled=true to secure access."
-            )
 
     # -----------------------------------------------------------------------
     # 10. Signal handlers
