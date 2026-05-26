@@ -51,11 +51,6 @@ def resolve_dashboard_auth(config: Dict[str, Any]) -> DashboardAuthConfig:
         )
     elif enabled and token:
         logger.info("Dashboard auth ON — token configured, paste at login prompt")
-    else:
-        logger.warning(
-            "Dashboard auth OFF — anyone on the network can access the dashboard. "
-            "Set dashboard.auth_enabled=true or configure a token."
-        )
 
     return DashboardAuthConfig(enabled=enabled, token=token)
 

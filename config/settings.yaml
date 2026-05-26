@@ -363,7 +363,7 @@ dashboard:
   host: "127.0.0.1"
   port: 5000
   push_interval_sec: 2.0
-  auth_enabled: true           # default ON — set password or env BOT_DASHBOARD_TOKEN
+  auth_enabled: false          # set true + password/token to require login
   password: ""                 # or BOT_DASHBOARD_PASSWORD / BOT_DASHBOARD_TOKEN env
   secret_key: ""               # Flask session secret (auto-generated if empty)
 
