@@ -415,9 +415,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
         @app.before_request
         def _require_auth():
-            if request.path in ("/health", "/api/auth/check"):
+            if request.path in ("/", "/health", "/api/auth/check"):
                 return None
-            if request.path.startswith("/socket.io"):
+            if request.path.startswith(("/socket.io", "/static/")):
                 return None
             token = _extract_token()
             if not validate_dashboard_token(token, _dashboard_token):
