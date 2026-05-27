@@ -92,6 +92,10 @@ it is not used directly in the current implementation.
         self._circuit_breaker_tripped: bool = False
         self._circuit_breaker_reason: str = ""
         self._circuit_breaker_date: str = ""
+        self._last_drawdown_pct: float = 0.0
+        self._circuit_breaker_recovery_pct = safe_float(
+            config.get("risk.circuit_breaker_recovery_pct", 50.0)
+        ) / 100.0
 
         # FASE 4: Daily drawdown circuit (4.3)
         self._daily_peak_capital: float = 0.0  # set on first trade of day
@@ -408,16 +412,25 @@ it is not used directly in the current implementation.
     def is_circuit_breaker_tripped(self) -> bool:
         """Return True if the circuit breaker is currently active.
 
-        Auto-resets at 00:00 UTC so trading can resume the next day.
+        Auto-resets at 00:00 UTC or when drawdown recovers below recovery band.
         """
         if not self._circuit_breaker_tripped:
             return False
         today = utc_now().strftime("%Y-%m-%d")
         if today != self._circuit_breaker_date:
             logger.info("Circuit breaker auto-reset — new UTC day: %s", today)
-            self._circuit_breaker_tripped = False
-            self._circuit_breaker_reason = ""
-            self._circuit_breaker_date = ""
+            self.reset_circuit_breaker()
+            return False
+        recovery_level = (
+            self._circuit_breaker_drawdown_pct * self._circuit_breaker_recovery_pct
+        )
+        if self._last_drawdown_pct < recovery_level:
+            logger.info(
+                "Circuit breaker auto-reset — drawdown %.2f%% below recovery %.2f%%",
+                self._last_drawdown_pct * 100.0,
+                recovery_level * 100.0,
+            )
+            self.reset_circuit_breaker()
             return False
         return True
 
@@ -426,6 +439,7 @@ it is not used directly in the current implementation.
 
         Returns True if the breaker was tripped by this call.
         """
+        self._last_drawdown_pct = max(0.0, safe_float(drawdown_pct))
         if self.is_circuit_breaker_tripped():
             return False
         if drawdown_pct >= self._circuit_breaker_drawdown_pct:
@@ -436,8 +450,7 @@ it is not used directly in the current implementation.
         return False
 
     def reset_circuit_breaker(self) -> None:
-        """Manually reset the circuit breaker (owner override)."""
-        logger.warning("Circuit breaker manually reset")
+        """Reset the circuit breaker (manual or auto-recovery)."""
         self._circuit_breaker_tripped = False
         self._circuit_breaker_reason = ""
         self._circuit_breaker_date = ""

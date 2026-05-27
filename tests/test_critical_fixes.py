@@ -20,6 +20,36 @@ from src.strategies.funding_arbitrage import FundingArbitrage
 from src.utils.config import Config
 
 
+def test_equity_stable_on_position_open():
+    """Opening a position must not show phantom ~20% drawdown."""
+    print("=" * 60)
+    print("TEST: Equity stable on position open")
+    print("=" * 60)
+
+    portfolio = PortfolioState(10000.0)
+
+    async def _run():
+        from src.strategies.base import Position
+
+        pos = Position(
+            symbol="BTC",
+            side="long",
+            entry_price=50000.0,
+            size=0.04,
+            entry_time_ms=0,
+        )
+        cost = 50000.0 * 0.04 + 1.0
+        await portfolio.add_position(pos, cost=cost)
+        dd = await portfolio.get_max_drawdown()
+        equity = await portfolio.current_capital
+        print(f"Equity after open: {equity:.2f}, drawdown: {dd * 100:.4f}%")
+        assert dd < 0.02, f"Phantom drawdown on open: {dd * 100:.2f}%"
+        assert abs(equity - 10000.0) < 50.0, f"Equity should stay near 10k, got {equity}"
+        print("[PASS] No phantom drawdown on open\n")
+
+    asyncio.run(_run())
+
+
 def test_drawdown_circuit_breaker():
     """Simulate a 12% drawdown and verify circuit breaker trips."""
     print("=" * 60)
@@ -27,18 +57,20 @@ def test_drawdown_circuit_breaker():
     print("=" * 60)
 
     portfolio = PortfolioState(100000.0)
-    cfg = Config({})
+    cfg = Config({"risk": {"circuit_breaker_drawdown_pct": 10.0}})
     rm = RiskManager(cfg, None)
 
     async def _run():
-        # Open a position and let price drop 12%
         from src.strategies.base import Position
+
         pos = Position(
-            symbol="BTC", side="long", entry_price=50000.0,
-            size=1.0, entry_time_ms=0,
+            symbol="BTC",
+            side="long",
+            entry_price=50000.0,
+            size=2.0,
+            entry_time_ms=0,
         )
-        await portfolio.add_position(pos, cost=50000.0)
-        # Price drops 12% → unrealized = -6000
+        await portfolio.add_position(pos, cost=100000.0)
         await portfolio.update_price("BTC", 44000.0)
         dd = await portfolio.get_max_drawdown()
         print(f"Drawdown: {dd * 100:.2f}%")
@@ -122,6 +154,7 @@ def test_execution_close_uses_fill_exit():
 
 if __name__ == "__main__":
     try:
+        test_equity_stable_on_position_open()
         test_drawdown_circuit_breaker()
         test_portfolio_restore()
         test_funding_arbitrage_lifecycle()

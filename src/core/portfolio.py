@@ -90,10 +90,9 @@ class PortfolioState:
 
     @property
     async def current_capital(self) -> float:
-        """Return the current total capital (cash + unrealized PnL)."""
+        """Return current total equity (cash + mark-to-market positions)."""
         async with self._lock:
-            total = self._cash + sum(p.unrealized_pnl for p in self._positions.values())
-            return total
+            return self._total_equity()
 
     @property
     async def peak_capital(self) -> float:
@@ -194,18 +193,56 @@ class PortfolioState:
         else:
             return (pos.entry_price - price) * pos.size
 
+    def _position_equity(self, pos: _PositionSnapshot) -> float:
+        """Mark-to-market equity contribution of an open position.
+
+        Paper mode debits notional from cash on entry; equity must add back
+        position value (long: mark * size, short: entry notional + unrealized).
+        Using cash + unrealized_pnl alone falsely shows ~20% drawdown on open.
+        """
+        if pos.side == "long":
+            return pos.current_price * pos.size
+        return pos.entry_price * pos.size + pos.unrealized_pnl
+
+    def _total_equity(self) -> float:
+        """Total portfolio equity (cash + mark-to-market position value)."""
+        return self._cash + sum(
+            self._position_equity(p) for p in self._positions.values()
+        )
+
     def _update_peak_and_drawdown(self) -> None:
         """Update peak capital (global) and daily peak capital."""
-        total = self._cash + sum(p.unrealized_pnl for p in self._positions.values())
+        total = self._total_equity()
         if total > self._peak_capital:
             self._peak_capital = total
-        # Update daily peak as well
         if total > self._daily_peak_capital:
             self._daily_peak_capital = total
 
+    async def reconcile_peaks(self) -> None:
+        """Clamp peak capital after restore or phantom drawdown trips."""
+        async with self._lock:
+            total = self._total_equity()
+            if total > self._peak_capital:
+                self._peak_capital = total
+            if total > self._daily_peak_capital:
+                self._daily_peak_capital = total
+            # Peak left from bad accounting: equity stable but peak at initial
+            if self._peak_capital > total and total >= self._initial_capital * 0.5:
+                implied_dd = (self._peak_capital - total) / self._peak_capital
+                if implied_dd > 0.15 and len(self._positions) == 0:
+                    logger.warning(
+                        "Reconciling inflated peak_capital %.2f -> %.2f (phantom drawdown)",
+                        self._peak_capital,
+                        total,
+                    )
+                    self._peak_capital = max(total, self._initial_capital)
+                    self._daily_peak_capital = max(
+                        self._daily_peak_capital, total,
+                    )
+
     def sync_daily_max_drawdown_pct(self) -> float:
         """Synchronous read of daily max drawdown % (for dashboard only)."""
-        total = self._cash + sum(p.unrealized_pnl for p in self._positions.values())
+        total = self._total_equity()
         if self._daily_peak_capital <= 0.0:
             return 0.0
         dd = (self._daily_peak_capital - total) / self._daily_peak_capital
@@ -224,7 +261,7 @@ class PortfolioState:
         async with self._lock:
             await self._check_daily_reset()
             self._cash -= safe_float(cost)
-            self._positions[position.symbol] = _PositionSnapshot(
+            snap = _PositionSnapshot(
                 symbol=position.symbol,
                 side=position.side,
                 entry_price=position.entry_price,
@@ -235,6 +272,8 @@ class PortfolioState:
                 unrealized_pnl=0.0,
                 metadata=deepcopy(position.metadata),
             )
+            snap.current_price = position.entry_price
+            self._positions[position.symbol] = snap
             self._daily_trades += 1
             self._update_peak_and_drawdown()
 
@@ -285,10 +324,9 @@ class PortfolioState:
             return sum(p.unrealized_pnl for p in self._positions.values())
 
     async def get_total_value(self) -> float:
-        """Return cash + open position market value."""
+        """Return total equity (cash + mark-to-market positions)."""
         async with self._lock:
-            unrealized = sum(p.unrealized_pnl for p in self._positions.values())
-            return self._cash + unrealized
+            return self._total_equity()
 
     async def get_max_drawdown(self) -> float:
         """Return the maximum drawdown from peak as a percentage (0.0–1.0).
@@ -296,7 +334,7 @@ class PortfolioState:
         A value of 0.05 means a 5% drawdown from the all-time high.
         """
         async with self._lock:
-            total = self._cash + sum(p.unrealized_pnl for p in self._positions.values())
+            total = self._total_equity()
             if self._peak_capital <= 0.0:
                 return 0.0
             dd = (self._peak_capital - total) / self._peak_capital
@@ -312,8 +350,8 @@ class PortfolioState:
         if today != self._last_reset_date:
             self._daily_pnl = 0.0
             self._daily_trades = 0
-            total = self._cash + sum(p.unrealized_pnl for p in self._positions.values())
-            self._daily_peak_capital = total  # Reset daily peak to total capital
+            total = self._total_equity()
+            self._daily_peak_capital = total
             self._last_reset_date = today
             logger.info("Daily portfolio reset - date=%s, daily_peak=%.2f", today, self._daily_peak_capital)
 
@@ -332,7 +370,7 @@ class PortfolioState:
         """Return a snapshot of the entire portfolio state."""
         async with self._lock:
             unrealized = sum(p.unrealized_pnl for p in self._positions.values())
-            total = self._cash + unrealized
+            total = self._total_equity()
             return {
                 "cash": self._cash,
                 "initial_capital": self._initial_capital,
@@ -401,9 +439,8 @@ class PortfolioState:
     # ------------------------------------------------------------------
 
     def sync_capital(self) -> float:
-        """Return current total capital (cash + unrealized)."""
-        unrealized = sum(p.unrealized_pnl for p in self._positions.values())
-        return self._cash + unrealized
+        """Return current total equity (cash + mark-to-market positions)."""
+        return self._total_equity()
 
     def sync_initial_capital(self) -> float:
         """Return the initial capital."""
@@ -417,7 +454,7 @@ class PortfolioState:
 
     def sync_max_drawdown_pct(self) -> float:
         """Return max drawdown as percentage."""
-        total = self._cash + sum(p.unrealized_pnl for p in self._positions.values())
+        total = self._total_equity()
         if self._peak_capital <= 0.0:
             return 0.0
         dd = (self._peak_capital - total) / self._peak_capital

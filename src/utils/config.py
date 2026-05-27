@@ -31,8 +31,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_positions": 5,
         "max_daily_loss_pct": 3.0,
         "per_trade_risk_pct": 1.0,
+        "max_position_size_pct": 5.0,
         "leverage_max": 10.0,
         "circuit_breaker_drawdown_pct": 10.0,
+        "circuit_breaker_recovery_pct": 50.0,
     },
     "backtest": {
         "initial_capital": 100_000.0,

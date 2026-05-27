@@ -45,9 +45,10 @@ risk:
   max_positions: 5
   max_daily_trades: 5
   max_daily_loss_pct: 3.0           # circuit breaker trigger
-  circuit_breaker_drawdown_pct: 10.0 # from peak
+  circuit_breaker_drawdown_pct: 10.0 # from peak (real equity, not cash-only)
+  circuit_breaker_recovery_pct: 50.0  # auto-reset when DD < 50% of trip level
   per_trade_risk_pct: 1.0           # % of capital at risk per trade
-  max_position_size_pct: 20.0       # % of capital in one position
+  max_position_size_pct: 5.0        # % of capital in one position (was 20 — tripped phantom DD)
   leverage_max: 10.0
   max_slippage_pct: 0.2             # reject signal if L2 slippage > 0.2%
   min_fill_ratio: 0.8              # reject signal if book covers <80% of size
@@ -287,7 +288,7 @@ strategy:
     #     3 moderate strategies (conf 0.40)             = 0.20
     #     4+ strategies (conf 0.35)                     = 0.18+
     #   Threshold 0.18 = 2 strong or 3+ moderate; no changes to min_agreeing.
-    threshold: 0.18
+    threshold: 0.12
     min_agreeing: 2
     # High-conviction bypass: a single strategy at ≥0.65 confidence can enter alone.
     # This fires when other strategies are flat but one has a strong edge.

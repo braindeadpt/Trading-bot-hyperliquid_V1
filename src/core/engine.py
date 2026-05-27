@@ -361,6 +361,17 @@ class TradingEngine:
 
         # 2. Recover DB state
         await self._recover_state()
+        await self._portfolio.reconcile_peaks()
+        self._risk.reset_circuit_breaker()
+        dd0 = await self._portfolio.get_max_drawdown()
+        self._risk.check_drawdown(dd0)
+        equity0 = await self._portfolio.current_capital
+        logger.info(
+            "Portfolio ready: equity=%.2f drawdown=%.2f%% circuit_breaker=%s",
+            equity0,
+            dd0 * 100.0,
+            self._risk.is_circuit_breaker_tripped(),
+        )
 
         # 3. Subscribe to DataBus topics per symbol
         for symbol in self._symbols:
@@ -688,7 +699,7 @@ class TradingEngine:
           4. Execute approved entries / exits.
           5. Persist everything to the DB.
         """
-        logger.info("Processing market event for %s", symbol)
+        logger.debug("Processing market event for %s", symbol)
 
         # Check if WS is healthy — warn if stale data
         if self._hl_ws_client is not None:
@@ -941,8 +952,7 @@ class TradingEngine:
             oi_short_ratio=self._latest_short_ratio.get(symbol),
         )
 
-        # Log orderflow metrics for debugging
-        logger.info(
+        logger.debug(
             "MarketEvent %s: price=%.2f, funding=%.6f, predicted=%s, oi=%.2f, "
             "agg_funding=%s, agg_oi=%s, exchanges=%d, "
             "spread=%s, oir=%s, depth=%s, imbalance=%s, adx=%s",

@@ -212,7 +212,7 @@ class CandleBuilder:
             return
         if tick.symbol not in self.symbols:
             return
-        logger.info("CandleBuilder received price: %s = %.2f", tick.symbol, tick.mid)
+        logger.debug("CandleBuilder received price: %s = %.2f", tick.symbol, tick.mid)
         self._update(tick.symbol, getattr(tick, 'timestamp_ms', int(time.time() * 1000)), price=tick.mid)
 
     async def _on_trade(self, trade: Any) -> None:
