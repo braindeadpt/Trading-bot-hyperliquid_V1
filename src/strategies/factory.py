@@ -41,6 +41,16 @@ def default_ensemble_weights() -> List[StrategyWeight]:
     ]
 
 
+def _enrich_funding_strategy_config(cfg: Any, section: dict) -> dict:
+    """Inject market-data gates for funding-sensitive strategies."""
+    out = dict(section)
+    md = cfg.get("market_data", {}) or {}
+    if md.get("block_funding_strategies_on_red", True):
+        out.setdefault("require_feed_health", True)
+    out.setdefault("max_venue_spread", md.get("max_venue_spread", 0.001))
+    return out
+
+
 def _should_load_strategy(section: dict) -> bool:
     """Load strategy if manually enabled or configured for auto-enable."""
     if section.get("enabled", True):
@@ -55,6 +65,8 @@ def build_sub_strategies(cfg: Any) -> List[Strategy]:
     strategies: List[Strategy] = []
     for path, cls in _STRATEGY_REGISTRY:
         section = cfg.get(path, {}) or {}
+        if path in ("strategy.mean_reversion", "strategy.funding_arbitrage"):
+            section = _enrich_funding_strategy_config(cfg, section)
         if _should_load_strategy(section):
             strategies.append(cls(section))
     return strategies

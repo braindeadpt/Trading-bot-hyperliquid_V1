@@ -67,6 +67,13 @@ class MarketEvent:
     oi_long_ratio: Optional[float] = None   # 0–1 fraction of accounts long
     oi_short_ratio: Optional[float] = None  # 0–1 fraction of accounts short
 
+    # HL INFO predictedFundings — per-venue rates (8h-normalized)
+    predicted_funding_by_venue: Optional[Dict[str, float]] = None
+
+    # Market data feed quality (engine)
+    market_data_health: Optional[str] = None  # green | yellow | red
+    market_data_stale: bool = False
+
 
 @dataclass(frozen=True)
 class Signal:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -19,6 +20,12 @@ from src.data.database import (
     Database,
     PortfolioSnapshot,
     SignalRecord,
+)
+from src.data.market_data_health import (
+    MarketDataHealthSummary,
+    MarketDataHealthTracker,
+    SymbolFeedHealth,
+    compute_feed_status,
 )
 from src.data.orderbook_metrics import (
     OrderbookMetrics,
@@ -30,6 +37,11 @@ from src.exchanges.funding_aggregator import (
     AggregatedFundingOI,
     FundingOIAggregator,
 )
+from src.exchanges.funding_normalize import (
+    is_valid_funding,
+    normalize_funding_to_8h,
+)
+from src.exchanges.hl_predicted_funding import HyperliquidPredictedFundingClient
 from src.exchanges.hyperliquid_ws import (
     DataBus,
     HlAssetCtx,
@@ -238,9 +250,43 @@ class TradingEngine:
         self._last_price_ts: Dict[str, int] = {}
 
         # ── Cross-exchange funding + OI aggregator ──
-        self._funding_aggregator = FundingOIAggregator()
+        _coinalyze_key = (
+            config.get("market_data.coinalyze_api_key")
+            or os.environ.get("COINALYZE_API_KEY")
+        )
+        _md = config.get("market_data", {}) or {}
+        _stale_sec = float(_md.get("funding_stale_max_sec", 300))
+        _connect_t = float(_md.get("funding_connect_timeout_sec", 10))
+        _total_t = float(_md.get("funding_total_timeout_sec", 25))
+        self._min_exchanges_green = int(_md.get("min_exchanges_for_green", 2))
+        self._funding_aggregator = FundingOIAggregator(
+            coinalyze_key=str(_coinalyze_key) if _coinalyze_key else None,
+            stale_max_sec=_stale_sec,
+            connect_timeout=_connect_t,
+            total_timeout=_total_t,
+        )
         self._latest_agg_funding: Dict[str, AggregatedFundingOI] = {}
         self._funding_poll_task: Optional[asyncio.Task] = None
+        self._market_data_health: Dict[str, SymbolFeedHealth] = {}
+        _health_window = float(_md.get("health_history_window_sec", 3600))
+        self._health_tracker = MarketDataHealthTracker(window_sec=_health_window)
+        self._market_data_health_summary = MarketDataHealthSummary()
+        self._md_red_since: Optional[float] = None
+        self._md_alert_after_sec = float(_md.get("alert_red_after_sec", 300))
+        self._md_alert_cooldown_sec = float(_md.get("alert_red_cooldown_sec", 900))
+        self._last_md_alert_ts: float = 0.0
+        _hl_testnet = bool(config.get("exchange.hyperliquid.testnet", False))
+        self._hl_predicted = HyperliquidPredictedFundingClient(
+            use_testnet=_hl_testnet,
+            stale_max_sec=_stale_sec,
+            connect_timeout=_connect_t,
+            total_timeout=_total_t,
+        )
+        self._hl_predicted_poll_sec: int = int(
+            _md.get("hl_predicted_funding_poll_sec", 90)
+        )
+        self._funding_poll_sec: int = int(_md.get("funding_poll_sec", 30))
+        self._last_hl_predicted_poll: float = 0.0
 
         # ── Trailing stop management ──
         self._trailing_data: Dict[str, Dict] = {}  # symbol -> trailing stop state
@@ -508,16 +554,141 @@ class TradingEngine:
                 logger.exception("Periodic summary error")
             await asyncio.sleep(900)
 
+    def _refresh_market_data_health(self) -> None:
+        """Rebuild per-symbol feed health from latest polls."""
+        now_ms = int(time.time() * 1000)
+        for sym in self._symbols:
+            agg = self._latest_agg_funding.get(sym)
+            hl = self._hl_predicted.get(sym)
+            ctx = self._latest_ctx.get(sym)
+            cex_ok = agg is not None and agg.exchange_count > 0
+            cex_stale = bool(agg.stale) if agg else True
+            cex_age = agg.age_sec if agg else 9999.0
+            if agg and not agg.stale and agg.timestamp_ms:
+                cex_age = (now_ms - agg.timestamp_ms) / 1000.0
+            cex_exchanges = sorted(agg.by_exchange.keys()) if agg else []
+            hl_ok = hl is not None and bool(hl.venues)
+            hl_stale = bool(hl.stale) if hl else True
+            hl_age = hl.age_sec if hl else 9999.0
+            if hl and not hl.stale and hl.timestamp_ms:
+                hl_age = (now_ms - hl.timestamp_ms) / 1000.0
+            status = compute_feed_status(
+                cex_ok=cex_ok,
+                cex_stale=cex_stale,
+                cex_exchange_count=agg.exchange_count if agg else 0,
+                min_exchanges=self._min_exchanges_green,
+                hl_ok=hl_ok,
+                hl_stale=hl_stale,
+            )
+            self._health_tracker.record(
+                sym,
+                cex_ok=cex_ok,
+                hl_ok=hl_ok,
+                status=status,
+                timestamp_ms=now_ms,
+            )
+            polls, failed, fail_rate = self._health_tracker.symbol_stats(sym)
+            funding_hl_ws: Optional[float] = None
+            if ctx is not None and ctx.funding_rate is not None:
+                funding_hl_ws = normalize_funding_to_8h(
+                    ctx.funding_rate,
+                    float(ctx.funding_interval_hours or 1.0),
+                )
+            self._market_data_health[sym] = SymbolFeedHealth(
+                symbol=sym,
+                cex_ok=cex_ok,
+                cex_stale=cex_stale,
+                cex_age_sec=cex_age,
+                cex_exchanges=cex_exchanges,
+                cex_exchange_count=agg.exchange_count if agg else 0,
+                hl_predicted_ok=hl_ok,
+                hl_predicted_stale=hl_stale,
+                hl_predicted_age_sec=hl_age,
+                hl_venues=sorted(hl.venues.keys()) if hl else [],
+                status=status,
+                polls_1h=polls,
+                failed_polls_1h=failed,
+                failure_rate_1h=fail_rate,
+                funding_hl_ws=funding_hl_ws,
+                funding_hl_predicted_8h=(
+                    hl.predicted_funding_hl_8h if hl else None
+                ),
+                funding_cex_avg_8h=agg.funding_avg if agg else None,
+                oi_cex_usd=agg.oi_total if agg else None,
+                oi_hl=getattr(ctx, "open_interest", None) if ctx else None,
+            )
+
+        polls_all, failed_all, rate_all, _ = self._health_tracker.overall_stats()
+        statuses = [h.status for h in self._market_data_health.values()]
+        if not statuses:
+            overall = "red"
+        elif any(s == "red" for s in statuses):
+            overall = "red"
+        elif any(s == "yellow" for s in statuses):
+            overall = "yellow"
+        else:
+            overall = "green"
+        red_since = 0.0
+        if overall == "red":
+            if self._md_red_since is None:
+                self._md_red_since = time.time()
+            red_since = time.time() - self._md_red_since
+        else:
+            self._md_red_since = None
+
+        self._market_data_health_summary = MarketDataHealthSummary(
+            overall=overall,
+            symbols=dict(self._market_data_health),
+            polls_1h=polls_all,
+            failed_polls_1h=failed_all,
+            failure_rate_1h=rate_all,
+            red_since_sec=red_since,
+        )
+
+    async def _check_market_data_alerts(self) -> None:
+        """Telegram alert when fleet health stays red beyond threshold."""
+        if self._notifier is None:
+            return
+        summary = self._market_data_health_summary
+        if summary.overall != "red":
+            return
+        if summary.red_since_sec < self._md_alert_after_sec:
+            return
+        now = time.time()
+        if now - self._last_md_alert_ts < self._md_alert_cooldown_sec:
+            return
+        self._last_md_alert_ts = now
+        details_lines = []
+        for sym, h in summary.symbols.items():
+            if h.status == "red":
+                details_lines.append(
+                    f"{sym}: cex={h.cex_exchange_count} hl_ok={h.hl_predicted_ok}"
+                )
+        details = "\n".join(details_lines[:8]) or "all symbols degraded"
+        await self._notifier.market_data_health_red(
+            summary.overall,
+            details,
+            summary.red_since_sec / 60.0,
+        )
+
     async def _poll_funding_loop(self) -> None:
-        """Background task: poll cross-exchange funding + OI every 30s."""
+        """Background task: poll CEX funding/OI and HL predictedFundings."""
         while self._running:
             try:
                 results = await self._funding_aggregator.poll(self._symbols)
                 for sym, data in results.items():
                     if data:
                         self._latest_agg_funding[sym] = data
+                        if data.stale:
+                            logger.warning(
+                                "CEX funding %s is STALE (age=%.0fs, exchanges=%s)",
+                                sym,
+                                data.age_sec,
+                                ",".join(data.by_exchange.keys()),
+                            )
+                stale_count = sum(1 for d in results.values() if d.stale)
                 logger.info(
-                    "FundingAggregator updated for %d symbols (exchanges=%s)",
+                    "FundingAggregator updated for %d symbols (exchanges=%s, stale=%d)",
                     len(results),
                     ", ".join(
                         sorted(
@@ -528,13 +699,34 @@ class TradingEngine:
                             )
                         )
                     ) if results else "none",
+                    stale_count,
                 )
+                now = time.time()
+                if now - self._last_hl_predicted_poll >= self._hl_predicted_poll_sec:
+                    hl_results = await self._hl_predicted.poll(self._symbols)
+                    self._last_hl_predicted_poll = now
+                    for sym, snap in hl_results.items():
+                        hl = snap.predicted_funding_hl
+                        hl8 = snap.predicted_funding_hl_8h
+                        level = logger.warning if snap.stale else logger.info
+                        level(
+                            "HL predictedFundings %s%s: hl=%s hl_8h=%s venues=%s",
+                            sym,
+                            " STALE" if snap.stale else "",
+                            f"{hl:.8f}" if hl is not None else "N/A",
+                            f"{hl8:.8f}" if hl8 is not None else "N/A",
+                            ",".join(sorted(snap.venues.keys())),
+                        )
+                self._refresh_market_data_health()
+                await self._check_market_data_alerts()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("FundingAggregator poll failed: %s", exc)
             try:
                 await asyncio.wait_for(
-                    self._shutdown_event.wait() if self._shutdown_event else asyncio.sleep(30),
-                    timeout=30,
+                    self._shutdown_event.wait()
+                    if self._shutdown_event
+                    else asyncio.sleep(self._funding_poll_sec),
+                    timeout=self._funding_poll_sec,
                 )
             except asyncio.TimeoutError:
                 pass
@@ -897,6 +1089,40 @@ class TradingEngine:
 
         # Cross-exchange aggregated funding + OI (if available)
         agg = self._latest_agg_funding.get(symbol)
+        hl_pred = self._hl_predicted.get(symbol)
+
+        funding_hl_ws: Optional[float] = None
+        if ctx is not None and ctx.funding_rate is not None:
+            funding_hl_ws = normalize_funding_to_8h(
+                ctx.funding_rate,
+                float(ctx.funding_interval_hours or 1.0),
+            )
+
+        predicted_hl_8h: Optional[float] = None
+        hl_stale = False
+        if hl_pred is not None and not hl_pred.stale:
+            predicted_hl_8h = hl_pred.predicted_funding_hl_8h
+        elif hl_pred is not None and hl_pred.stale:
+            hl_stale = True
+            predicted_hl_8h = hl_pred.predicted_funding_hl_8h
+
+        funding_cex = agg.funding_avg if agg else None
+        predicted_cex = agg.predicted_funding_avg if agg else None
+        cex_stale = bool(agg.stale) if agg else False
+
+        # Prefer HL INFO predicted, then CEX aggregate; funding from WS (8h) then CEX avg
+        predicted_funding = predicted_hl_8h if is_valid_funding(predicted_hl_8h) else predicted_cex
+        funding = funding_hl_ws if is_valid_funding(funding_hl_ws) else funding_cex
+
+        if (cex_stale or hl_stale) and symbol in self._market_data_health:
+            health = self._market_data_health[symbol]
+            if health.status == "red":
+                logger.debug(
+                    "MarketEvent %s: feed health RED (cex_stale=%s hl_stale=%s)",
+                    symbol,
+                    cex_stale,
+                    hl_stale,
+                )
 
         # Orderbook metrics (if available)
         ob = self._latest_orderbook.get(symbol)
@@ -912,6 +1138,20 @@ class TradingEngine:
         # ── Liquidation stats (Task 3.3) ──
         liq_notional, liq_side, liq_count = self._get_liquidation_stats(symbol)
 
+        predicted_by_venue: Optional[Dict[str, float]] = None
+        if hl_pred and hl_pred.venues:
+            predicted_by_venue = {
+                v: vf.funding_rate_8h
+                for v, vf in hl_pred.venues.items()
+                if is_valid_funding(vf.funding_rate_8h)
+            }
+
+        feed = self._market_data_health.get(symbol)
+        feed_status = feed.status if feed else None
+        feed_stale = bool(
+            (cex_stale or hl_stale) and feed_status in ("yellow", "red")
+        )
+
         event = MarketEvent(
             symbol=symbol,
             price=price,
@@ -920,8 +1160,8 @@ class TradingEngine:
             candle_5m=candles.get(300),
             candle_15m=candles.get(900),
             candle_1h=candles.get(3600),
-            funding=safe_float(ctx.funding_rate) if ctx else None,
-            predicted_funding=safe_float(ctx.predicted_funding) if ctx else None,
+            funding=funding,
+            predicted_funding=predicted_funding,
             oi_total=safe_float(ctx.open_interest) if ctx else None,
             oi_delta=getattr(candles.get(900), 'oi_delta', None) if candles.get(900) else None,
             volume_1m=getattr(candles.get(60), 'volume', None) if candles.get(60) else None,
@@ -950,6 +1190,9 @@ class TradingEngine:
             liquidation_feed_ready=self._liquidation_feed_ready,
             oi_long_ratio=self._latest_long_short_ratio.get(symbol),
             oi_short_ratio=self._latest_short_ratio.get(symbol),
+            predicted_funding_by_venue=predicted_by_venue,
+            market_data_health=feed_status,
+            market_data_stale=feed_stale,
         )
 
         logger.debug(

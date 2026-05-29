@@ -360,7 +360,10 @@ class BacktestEngine:
             self._current_day = day
             self._daily_trade_count = {}
 
-        if self._daily_trade_count.get(day, 0) >= self.cfg.max_daily_trades:
+        if (
+            self.cfg.max_daily_trades > 0
+            and self._daily_trade_count.get(day, 0) >= self.cfg.max_daily_trades
+        ):
             return None
 
         strat_key = regime_strategy_name(signal)

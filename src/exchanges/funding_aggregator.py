@@ -9,10 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+import time
+from dataclasses import dataclass, field, replace
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
+
+from src.exchanges.funding_normalize import (
+    EXCHANGE_FUNDING_INTERVAL_HOURS,
+    normalize_funding_to_8h,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +36,17 @@ class FundingOI:
     oi_change_24h_pct: Optional[float] = None
     mark_price: Optional[float] = None
     timestamp_ms: int = 0
+    funding_interval_hours: float = 8.0
+
+
+def _normalize_funding_oi(foi: FundingOI) -> None:
+    """In-place: scale funding fields to 8h equivalent for cross-venue comparison."""
+    hours = EXCHANGE_FUNDING_INTERVAL_HOURS.get(foi.exchange, foi.funding_interval_hours)
+    foi.funding_interval_hours = hours
+    if foi.funding_rate is not None:
+        foi.funding_rate = normalize_funding_to_8h(foi.funding_rate, hours)
+    if foi.predicted_funding is not None:
+        foi.predicted_funding = normalize_funding_to_8h(foi.predicted_funding, hours)
 
 
 @dataclass
@@ -44,6 +61,9 @@ class AggregatedFundingOI:
     exchange_count: int = 0
     by_exchange: Dict[str, FundingOI] = field(default_factory=dict)
     timestamp_ms: int = 0
+    stale: bool = False
+    age_sec: float = 0.0
+    failed_exchanges: List[str] = field(default_factory=list)
 
 
 # ── Exchange clients ──
@@ -174,35 +194,46 @@ class BybitFundingClient:
                 funding = float(latest.get("fundingRate", 0))
                 funding_time = int(latest.get("fundingRateTimestamp", 0))
 
-            # Open interest
-            async with session.get(
-                f"{self.BASE}/recent-open-interest",
-                params={"category": "linear", "symbol": symbol, "limit": 1}
-            ) as resp:
-                oi_data = await resp.json()
-                if oi_data is None:
-                    oi_list = []
-                else:
-                    oi_list = oi_data.get("result", {}).get("list", [])
-                oi = float(oi_list[0].get("openInterest", 0)) if oi_list else None
-
-            # Mark price
+            mark: Optional[float] = None
             async with session.get(
                 f"{self.BASE}/tickers",
-                params={"category": "linear", "symbol": symbol}
+                params={"category": "linear", "symbol": symbol},
             ) as resp:
                 ticker_data = await resp.json()
-                if ticker_data is None:
-                    ticker_list = []
-                else:
+                if ticker_data and ticker_data.get("retCode") == 0:
                     ticker_list = ticker_data.get("result", {}).get("list", [])
-                mark = float(ticker_list[0].get("markPrice", 0)) if ticker_list else None
+                    if ticker_list:
+                        mark = float(ticker_list[0].get("markPrice", 0))
+
+            oi_usd: Optional[float] = None
+            async with session.get(
+                f"{self.BASE}/open-interest",
+                params={
+                    "category": "linear",
+                    "symbol": symbol,
+                    "intervalTime": "5min",
+                    "limit": 1,
+                },
+            ) as resp:
+                oi_data = await resp.json()
+                if oi_data and oi_data.get("retCode") == 0:
+                    oi_list = oi_data.get("result", {}).get("list", [])
+                    if oi_list:
+                        row = oi_list[0]
+                        oi_val = row.get("openInterestValue") or row.get(
+                            "singleOpenInterestValue"
+                        )
+                        if oi_val is not None:
+                            oi_usd = float(oi_val)
+                        else:
+                            oi_coin = float(row.get("openInterest", 0))
+                            oi_usd = oi_coin * mark if (oi_coin and mark) else oi_coin
 
             return FundingOI(
                 symbol=symbol.replace("USDT", ""),
                 exchange="bybit",
                 funding_rate=funding,
-                open_interest=oi * mark if (oi and mark) else oi,
+                open_interest=oi_usd,
                 mark_price=mark,
                 timestamp_ms=funding_time,
             )
@@ -302,7 +333,17 @@ class FundingOIAggregator:
         },
     }
 
-    def __init__(self, coinalyze_key: Optional[str] = None):
+    CEX_EXCHANGES = ("binance", "bybit", "okx")
+
+    def __init__(
+        self,
+        coinalyze_key: Optional[str] = None,
+        *,
+        stale_max_sec: float = 300.0,
+        connect_timeout: float = 10.0,
+        total_timeout: float = 25.0,
+        max_retries: int = 3,
+    ) -> None:
         self.clients: Dict[str, Any] = {}
         if coinalyze_key:
             self.clients["coinalyze"] = CoinalyzeClient(coinalyze_key)
@@ -311,38 +352,43 @@ class FundingOIAggregator:
         self.clients["okx"] = OKXFundingClient()
         self._cache: Dict[str, AggregatedFundingOI] = {}
         self._last_poll_ms: int = 0
+        self._stale_max_sec = float(stale_max_sec)
+        self._connect_timeout = float(connect_timeout)
+        self._total_timeout = float(total_timeout)
+        self._max_retries = int(max_retries)
 
     async def _fetch_with_retry(
         self,
         client: Any,
         session: aiohttp.ClientSession,
         mapped: str,
-        max_retries: int = 3,
+        max_retries: Optional[int] = None,
         base_delay: float = 1.0,
     ) -> Optional[FundingOI]:
         """Fetch with exponential backoff retry for transient errors."""
-        for attempt in range(max_retries):
+        retries = max_retries if max_retries is not None else self._max_retries
+        for attempt in range(retries):
             try:
                 result = await client.fetch(session, mapped)
                 if result is not None:
                     return result
                 # Result is None (soft failure) — retry once quickly
-                if attempt < max_retries - 1:
+                if attempt < retries - 1:
                     await asyncio.sleep(base_delay * (2 ** attempt))
             except (aiohttp.ClientConnectorError, aiohttp.ServerTimeoutError, asyncio.TimeoutError) as exc:
-                if attempt < max_retries - 1:
+                if attempt < retries - 1:
                     delay = base_delay * (2 ** attempt)
                     logger.warning(
                         "%s fetch %s transient error (attempt %d/%d): %s — retrying in %.1fs",
                         getattr(client, "__class__", "").__name__, mapped,
-                        attempt + 1, max_retries, exc, delay,
+                        attempt + 1, retries, exc, delay,
                     )
                     await asyncio.sleep(delay)
                 else:
                     logger.warning(
                         "%s fetch %s failed after %d attempts: %s",
                         getattr(client, "__class__", "").__name__, mapped,
-                        max_retries, exc,
+                        retries, exc,
                     )
             except Exception as exc:
                 logger.warning(
@@ -352,90 +398,181 @@ class FundingOIAggregator:
                 break
         return None
 
+    def _build_aggregate(
+        self,
+        sym: str,
+        by_exchange: Dict[str, FundingOI],
+        failed: List[str],
+        timestamp_ms: int,
+    ) -> AggregatedFundingOI:
+        fundings = [f.funding_rate for f in by_exchange.values() if f.funding_rate is not None]
+        predicted = [
+            f.predicted_funding for f in by_exchange.values() if f.predicted_funding is not None
+        ]
+        ois = [f.open_interest for f in by_exchange.values() if f.open_interest is not None]
+
+        funding_avg = sum(fundings) / len(fundings) if fundings else None
+        predicted_avg = sum(predicted) / len(predicted) if predicted else None
+        oi_total = sum(ois) if ois else None
+
+        funding_weighted = None
+        if fundings and ois:
+            pairs = [
+                (f.funding_rate, f.open_interest)
+                for f in by_exchange.values()
+                if f.funding_rate is not None and f.open_interest is not None
+            ]
+            total_oi = sum(oi for _, oi in pairs)
+            if total_oi > 0:
+                funding_weighted = sum(f * oi for f, oi in pairs) / total_oi
+
+        coinalyze_data = by_exchange.get("coinalyze")
+        if coinalyze_data:
+            funding_avg = coinalyze_data.funding_rate
+            funding_weighted = coinalyze_data.funding_rate
+            predicted_avg = coinalyze_data.predicted_funding
+            if coinalyze_data.open_interest is not None:
+                oi_total = coinalyze_data.open_interest
+
+        return AggregatedFundingOI(
+            symbol=sym,
+            funding_avg=funding_avg,
+            funding_weighted=funding_weighted,
+            predicted_funding_avg=predicted_avg,
+            oi_total=oi_total,
+            exchange_count=len(by_exchange),
+            by_exchange=by_exchange,
+            timestamp_ms=timestamp_ms,
+            stale=False,
+            age_sec=0.0,
+            failed_exchanges=failed,
+        )
+
+    async def _poll_symbol(
+        self,
+        session: aiohttp.ClientSession,
+        sym: str,
+    ) -> Tuple[Optional[AggregatedFundingOI], List[str]]:
+        """Fetch one symbol from Coinalyze (optional) + CEX in parallel."""
+        mappings = self.SYMBOL_MAP.get(sym)
+        if not mappings:
+            return None, []
+
+        by_exchange: Dict[str, FundingOI] = {}
+        failed: List[str] = []
+        fetch_tasks: List[Tuple[str, asyncio.Task]] = []
+
+        if "coinalyze" in mappings and "coinalyze" in self.clients:
+            client = self.clients["coinalyze"]
+            mapped = mappings["coinalyze"]
+            fetch_tasks.append(
+                (
+                    "coinalyze",
+                    asyncio.create_task(self._fetch_with_retry(client, session, mapped)),
+                )
+            )
+
+        for ex in self.CEX_EXCHANGES:
+            if ex not in mappings:
+                continue
+            client = self.clients.get(ex)
+            if client is None:
+                continue
+            mapped = mappings[ex]
+            fetch_tasks.append(
+                (ex, asyncio.create_task(self._fetch_with_retry(client, session, mapped))),
+            )
+
+        if fetch_tasks:
+            names, tasks = zip(*fetch_tasks)
+            responses = await asyncio.gather(*tasks, return_exceptions=True)
+            for ex_name, resp in zip(names, responses):
+                if isinstance(resp, FundingOI):
+                    _normalize_funding_oi(resp)
+                    by_exchange[resp.exchange] = resp
+                else:
+                    failed.append(ex_name)
+
+        if not by_exchange:
+            return None, failed
+
+        now_ms = int(time.time() * 1000)
+        agg = self._build_aggregate(sym, by_exchange, failed, now_ms)
+        return agg, failed
+
     async def poll(self, symbols: List[str]) -> Dict[str, AggregatedFundingOI]:
-        """Fetch and aggregate funding/OI for given symbols."""
+        """Fetch and aggregate funding/OI; serve stale cache on transient failures."""
         results: Dict[str, AggregatedFundingOI] = {}
+        now_ms = int(time.time() * 1000)
 
         connector = aiohttp.TCPConnector(
             ttl_dns_cache=300,
             use_dns_cache=True,
-            limit=20,
+            limit=30,
             enable_cleanup_closed=True,
         )
-        timeout = aiohttp.ClientTimeout(total=15, connect=5)
+        timeout = aiohttp.ClientTimeout(
+            total=self._total_timeout,
+            connect=self._connect_timeout,
+        )
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            for sym in symbols:
-                mappings = self.SYMBOL_MAP.get(sym)
-                if not mappings:
+            sym_list = [s for s in symbols if s in self.SYMBOL_MAP]
+            polled = await asyncio.gather(
+                *[self._poll_symbol(session, sym) for sym in sym_list],
+                return_exceptions=True,
+            )
+
+            for sym, item in zip(sym_list, polled):
+                if isinstance(item, Exception):
+                    logger.warning("Funding poll error for %s: %s", sym, item)
+                    fresh = None
+                    failed = ["poll_exception"]
+                else:
+                    fresh, failed = item
+
+                if fresh is not None:
+                    self._cache[sym] = fresh
+                    results[sym] = fresh
+                    if failed:
+                        logger.info(
+                            "Funding %s: OK (%d exchanges, partial fail: %s)",
+                            sym,
+                            fresh.exchange_count,
+                            ",".join(failed),
+                        )
                     continue
 
-                by_exchange: Dict[str, FundingOI] = {}
-                tasks = []
-
-                # Try Coinalyze first (aggregated 15+ exchanges)
-                if "coinalyze" in mappings and "coinalyze" in self.clients:
-                    client = self.clients["coinalyze"]
-                    mapped = mappings["coinalyze"]
-                    coinalyze_result = await self._fetch_with_retry(client, session, mapped)
-                    if coinalyze_result:
-                        by_exchange["coinalyze"] = coinalyze_result
-                        logger.info("Coinalyze %s: funding=%.6f, predicted=%s, OI=$%.0f",
-                                    sym, coinalyze_result.funding_rate or 0,
-                                    f"{coinalyze_result.predicted_funding:.6f}" if coinalyze_result.predicted_funding else "N/A",
-                                    coinalyze_result.open_interest or 0)
-
-                # Fallback to individual exchanges if Coinalyze failed
-                if not by_exchange:
-                    for ex, mapped in mappings.items():
-                        if ex == "coinalyze":
-                            continue
-                        client = self.clients.get(ex)
-                        if client:
-                            tasks.append(self._fetch_with_retry(client, session, mapped))
-
-                    responses = await asyncio.gather(*tasks, return_exceptions=True)
-                    for resp in responses:
-                        if isinstance(resp, FundingOI):
-                            by_exchange[resp.exchange] = resp
-
-                # Aggregate
-                if not by_exchange:
+                cached = self._cache.get(sym)
+                if cached is None:
+                    logger.warning("Funding %s: no data and no cache", sym)
                     continue
 
-                fundings = [f.funding_rate for f in by_exchange.values() if f.funding_rate is not None]
-                predicted = [f.predicted_funding for f in by_exchange.values() if f.predicted_funding is not None]
-                ois = [f.open_interest for f in by_exchange.values() if f.open_interest is not None]
+                age_sec = (now_ms - cached.timestamp_ms) / 1000.0 if cached.timestamp_ms else 0.0
+                if age_sec > self._stale_max_sec:
+                    logger.warning(
+                        "Funding %s: poll failed and cache expired (age=%.0fs > %.0fs)",
+                        sym,
+                        age_sec,
+                        self._stale_max_sec,
+                    )
+                    continue
 
-                funding_avg = sum(fundings) / len(fundings) if fundings else None
-                predicted_avg = sum(predicted) / len(predicted) if predicted else None
-                oi_total = sum(ois) if ois else None
-
-                # Weighted funding by OI
-                funding_weighted = None
-                if fundings and ois and len(fundings) == len(ois):
-                    total_oi = sum(ois)
-                    if total_oi > 0:
-                        funding_weighted = sum(f * oi for f, oi in zip(fundings, ois)) / total_oi
-
-                # If Coinalyze is present, use its values as primary (already aggregated)
-                coinalyze_data = by_exchange.get("coinalyze")
-                if coinalyze_data:
-                    funding_avg = coinalyze_data.funding_rate
-                    funding_weighted = coinalyze_data.funding_rate
-                    predicted_avg = coinalyze_data.predicted_funding
-                    oi_total = coinalyze_data.open_interest
-
-                results[sym] = AggregatedFundingOI(
-                    symbol=sym,
-                    funding_avg=funding_avg,
-                    funding_weighted=funding_weighted,
-                    predicted_funding_avg=predicted_avg,
-                    oi_total=oi_total,
-                    exchange_count=len(by_exchange),
-                    by_exchange=by_exchange,
+                stale_row = replace(
+                    cached,
+                    stale=True,
+                    age_sec=age_sec,
+                    failed_exchanges=failed,
+                )
+                self._cache[sym] = stale_row
+                results[sym] = stale_row
+                logger.warning(
+                    "Funding %s: using STALE cache (age=%.0fs, last_exchanges=%d)",
+                    sym,
+                    age_sec,
+                    stale_row.exchange_count,
                 )
 
-        self._cache = results
+        self._last_poll_ms = now_ms
         return results
 
     def get(self, symbol: str) -> Optional[AggregatedFundingOI]:

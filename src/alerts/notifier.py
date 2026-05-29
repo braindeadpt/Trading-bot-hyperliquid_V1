@@ -26,6 +26,7 @@ class AlertNotifier:
         self._session: Optional[aiohttp.ClientSession] = None
         self._last_ws_alert = 0.0
         self._last_daily_pnl = 0.0
+        self._last_market_data_alert = 0.0
 
     async def _session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -120,6 +121,25 @@ class AlertNotifier:
             f"Strategy: {strategy}"
         )
         await self.send(msg, "info")
+
+    async def market_data_health_red(
+        self,
+        overall: str,
+        details: str,
+        duration_min: float,
+    ) -> None:
+        """Alert when market data feeds stay unhealthy (rate limited)."""
+        now = asyncio.get_event_loop().time()
+        if now - self._last_market_data_alert < 900:
+            return
+        self._last_market_data_alert = now
+        msg = (
+            f"🚨 <b>MARKET DATA HEALTH {overall.upper()}</b>\n"
+            f"Duration: {duration_min:.1f} min\n"
+            f"{details}\n"
+            f"Strategies may use stale funding/OI — check dashboard."
+        )
+        await self.send(msg, "error")
 
     async def ws_disconnect(self, exchange: str, duration_sec: float) -> None:
         """Alert if WS disconnected for more than 5 minutes."""

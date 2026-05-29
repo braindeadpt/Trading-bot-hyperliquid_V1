@@ -24,7 +24,7 @@ class RiskManager:
     Hard limits:
       - Max 1 position per asset (both strategies share the same pool)
       - Max 5 total open positions
-      - Max 5 trades per day (resets at 00:00 UTC)
+      - Max trades per day (0 = unlimited; resets at 00:00 UTC)
       - Max 3% daily loss → circuit breaker until next day
       - Max 10% drawdown from peak → circuit breaker until next day
       - Per trade: risk 1% of capital (sized by ATR distance)
@@ -128,10 +128,13 @@ it is not used directly in the current implementation.
         # --- 2. Daily reset check (embedded in portfolio) ---
         # PortfolioState auto-resets on date rollover, so we read current values.
 
-        # --- 3. Max trades per day ---
-        daily_trades = portfolio.daily_trades  # type: ignore
-        if daily_trades >= self._max_daily_trades:
-            return False, f"Daily trade limit reached ({daily_trades}/{self._max_daily_trades})"
+        # --- 3. Max trades per day (0 = disabled) ---
+        if self._max_daily_trades > 0:
+            daily_trades = portfolio.daily_trades  # type: ignore
+            if daily_trades >= self._max_daily_trades:
+                return False, (
+                    f"Daily trade limit reached ({daily_trades}/{self._max_daily_trades})"
+                )
 
         # --- 4. Max positions per asset ---
         positions = portfolio.positions  # type: ignore

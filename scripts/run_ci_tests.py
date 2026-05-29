@@ -16,6 +16,8 @@ TESTS = [
     "tests/test_phase4.py",
     "tests/test_phase5_live_auth.py",
     "tests/test_volatility_breakout.py",
+    "tests/test_market_data_funding.py",
+    "tests/test_market_data_phase4.py",
 ]
 
 

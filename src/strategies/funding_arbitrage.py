@@ -27,6 +27,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import collections
 import logging
 
+from src.exchanges.funding_normalize import (
+    funding_data_usable,
+    is_valid_funding,
+    resolve_effective_funding,
+    venue_funding_spread,
+)
 from src.strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
 
 logger = logging.getLogger(__name__)
@@ -92,6 +98,9 @@ class FundingArbitrage(Strategy):
         self._scan_interval_ms: int = 60_000  # scan every 60 seconds
         self._pending_signals: List[Signal] = []  # queue of signals to emit
         self._pending_exit: Optional[ExitSignal] = None
+        self.REQUIRE_FEED_HEALTH = bool(cfg.get("require_feed_health", False))
+        self.MAX_VENUE_SPREAD = float(cfg.get("max_venue_spread", 0.001))
+        self.USE_MULTI_VENUE = bool(cfg.get("use_multi_venue_predicted", True))
 
     @property
     def name(self) -> str:
@@ -188,9 +197,26 @@ class FundingArbitrage(Strategy):
         If a pair is found, queue both leg signals and emit them on subsequent
         on_data calls for the respective symbols.
         """
-        funding = event.predicted_funding or event.funding
-        if funding is None:
+        if not funding_data_usable(
+            event,
+            require_feed_health=self.REQUIRE_FEED_HEALTH,
+            max_venue_spread=self.MAX_VENUE_SPREAD,
+        ):
             return None
+
+        funding = resolve_effective_funding(event, prefer_predicted=True)
+        if not is_valid_funding(funding):
+            return None
+
+        if self.USE_MULTI_VENUE and event.predicted_funding_by_venue:
+            spread_v = venue_funding_spread(event.predicted_funding_by_venue)
+            if spread_v > self.MAX_VENUE_SPREAD:
+                logger.debug(
+                    "FundingArbitrage %s skip — venue spread %.4f%% > max",
+                    event.symbol,
+                    spread_v * 100,
+                )
+                return None
 
         # Update cross-symbol cache (always — powers spread monitoring when dormant)
         self._latest_funding[event.symbol] = funding
@@ -272,8 +298,8 @@ class FundingArbitrage(Strategy):
 
     def on_position(self, position: Position, event: MarketEvent) -> Optional[ExitSignal]:
         """Exit when funding normalizes or max hold reached."""
-        funding = event.predicted_funding or event.funding
-        if funding is None:
+        funding = resolve_effective_funding(event, prefer_predicted=True)
+        if not is_valid_funding(funding):
             return None
 
         # Time-based exit
@@ -416,6 +442,7 @@ class FundingArbitrage(Strategy):
                 "partner": short_sym,
                 "funding": long_funding,
                 "spread": spread,
+                "funding_source": "hl_predicted_cex_8h",
             },
         )
         short_sig = Signal(
@@ -434,6 +461,7 @@ class FundingArbitrage(Strategy):
                 "partner": long_sym,
                 "funding": short_funding,
                 "spread": spread,
+                "funding_source": "hl_predicted_cex_8h",
             },
         )
 

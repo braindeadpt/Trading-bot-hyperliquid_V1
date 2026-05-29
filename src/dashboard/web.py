@@ -84,6 +84,8 @@ class DashboardEmitter:
             self._emit_positions()
             self._emit_trades()
             self._emit_logs()
+            self._emit_market_data_health()
+            self._emit_funding_update()
         except Exception as e:
             logger.warning("emit_all error: %s", e)
 
@@ -143,6 +145,74 @@ class DashboardEmitter:
                 "last_update": evt.get("processed_at", 0),
             })
         self._safe_emit("live_data", rows)
+
+    def _emit_market_data_health(self) -> None:
+        summary = getattr(_engine, "_market_data_health_summary", None)
+        if summary is not None and hasattr(summary, "to_dict"):
+            self._safe_emit("market_data_health", summary.to_dict())
+            return
+        health = getattr(_engine, "_market_data_health", {}) or {}
+        rows = [h.to_dict() for h in health.values()]
+        overall = "red"
+        if rows and all(r.get("status") == "green" for r in rows):
+            overall = "green"
+        elif rows and not any(r.get("status") == "red" for r in rows):
+            overall = "yellow"
+        self._safe_emit("market_data_health", {"overall": overall, "symbols": {r["symbol"]: r for r in rows}})
+
+    def _emit_funding_update(self) -> None:
+        """Merged funding/OI + feed status for dashboard cards."""
+        symbols = getattr(_engine, "_symbols", [])
+        ctxs = getattr(_engine, "_latest_ctx", {})
+        health_map = getattr(_engine, "_market_data_health", {}) or {}
+        agg_map = getattr(_engine, "_latest_agg_funding", {})
+        hl_client = getattr(_engine, "_hl_predicted", None)
+        payload: Dict[str, Any] = {}
+
+        for sym in symbols:
+            ctx = ctxs.get(sym)
+            feed = health_map.get(sym)
+            agg = agg_map.get(sym)
+            hl_snap = hl_client.get(sym) if hl_client else None
+            pred = None
+            if hl_snap and hl_snap.predicted_funding_hl_8h is not None:
+                pred = hl_snap.predicted_funding_hl_8h
+            elif agg and agg.predicted_funding_avg is not None:
+                pred = agg.predicted_funding_avg
+
+            current = None
+            if feed and feed.funding_hl_ws is not None:
+                current = feed.funding_hl_ws
+            elif agg and agg.funding_avg is not None:
+                current = agg.funding_avg
+            elif ctx and getattr(ctx, "funding_rate", None) is not None:
+                current = ctx.funding_rate
+
+            payload[sym] = {
+                "current": current,
+                "predicted": pred,
+                "cex_avg": feed.funding_cex_avg_8h if feed else (agg.funding_avg if agg else None),
+                "hl_predicted_8h": feed.funding_hl_predicted_8h if feed else None,
+                "oi_total": feed.oi_cex_usd if feed else (agg.oi_total if agg else None),
+                "oi_hl": feed.oi_hl if feed else (getattr(ctx, "open_interest", None) if ctx else None),
+                "health": feed.status if feed else "unknown",
+                "cex_stale": feed.cex_stale if feed else True,
+                "hl_stale": feed.hl_predicted_stale if feed else True,
+                "cex_age_sec": feed.cex_age_sec if feed else None,
+                "hl_age_sec": feed.hl_predicted_age_sec if feed else None,
+                "cex_exchanges": feed.cex_exchanges if feed else [],
+                "failure_rate_1h": feed.failure_rate_1h if feed else 0.0,
+            }
+
+        summary = getattr(_engine, "_market_data_health_summary", None)
+        if summary is not None:
+            payload["_overall"] = {
+                "status": summary.overall,
+                "red_since_sec": summary.red_since_sec,
+                "failure_rate_1h": summary.failure_rate_1h,
+                "polls_1h": summary.polls_1h,
+            }
+        self._safe_emit("funding_update", payload)
 
     def _emit_engine_monitor(self) -> None:
         """Engine health - ticks/sec, total ticks, last error."""
@@ -480,6 +550,24 @@ def create_app(config: Dict[str, Any]) -> tuple:
             "running": getattr(_engine, "_running", False),
         })
 
+    @app.route("/api/market_data_health")
+    def api_market_data_health():
+        if _engine is None:
+            return jsonify({"feeds": [], "overall": "red"})
+        summary = getattr(_engine, "_market_data_health_summary", None)
+        if summary is not None and hasattr(summary, "to_dict"):
+            body = summary.to_dict()
+            body["feeds"] = list(body.get("symbols", {}).values())
+            return jsonify(body)
+        health = getattr(_engine, "_market_data_health", {}) or {}
+        rows = [h.to_dict() for h in health.values()]
+        overall = "green"
+        if any(r.get("status") == "red" for r in rows):
+            overall = "red"
+        elif any(r.get("status") == "yellow" for r in rows):
+            overall = "yellow"
+        return jsonify({"feeds": rows, "overall": overall, "symbols": {r["symbol"]: r for r in rows}})
+
     @app.route("/api/live_data")
     def api_live_data():
         if _engine is None:
@@ -489,11 +577,22 @@ def create_app(config: Dict[str, Any]) -> tuple:
             price = getattr(_engine, "_latest_price", {}).get(sym)
             ctx = getattr(_engine, "_latest_ctx", {}).get(sym)
             evt = getattr(_engine, "_last_market_events", {}).get(sym, {})
+            agg = getattr(_engine, "_latest_agg_funding", {}).get(sym)
+            hl = getattr(_engine, "_hl_predicted", None)
+            hl_snap = hl.get(sym) if hl else None
+            feed = getattr(_engine, "_market_data_health", {}).get(sym)
             rows.append({
                 "symbol": sym,
                 "price": getattr(price, "mid", None) if price else None,
                 "funding": getattr(ctx, "funding_rate", None) if ctx else None,
+                "predicted": (
+                    hl_snap.predicted_funding_hl_8h if hl_snap else None
+                ),
+                "funding_cex_avg": agg.funding_avg if agg else None,
                 "oi": getattr(ctx, "open_interest", None) if ctx else None,
+                "oi_cex_usd": agg.oi_total if agg else None,
+                "feed_status": feed.status if feed else "unknown",
+                "feed_stale": bool(agg.stale) if agg else True,
             })
         return jsonify(rows)
 

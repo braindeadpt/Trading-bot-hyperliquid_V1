@@ -10,6 +10,11 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 import collections
 import logging
 
+from src.exchanges.funding_normalize import (
+    funding_data_usable,
+    is_valid_funding,
+    resolve_effective_funding,
+)
 from src.strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
 from src.strategies.indicators import (
     Candle,
@@ -35,6 +40,7 @@ class _MeanRevState:
     last_atr: Optional[float] = None
     last_signal_side: Optional[str] = None
     last_signal_ts: int = 0
+    last_funding_hist_ms: int = 0
 
 
 class MeanReversion(Strategy):
@@ -76,6 +82,8 @@ class MeanReversion(Strategy):
         self.OI_DELTA_THRESHOLD = cfg.get("oi_delta_threshold", 0.0)  # OI must be decreasing
         self.USE_PREDICTED_PRIMARY = cfg.get("use_predicted_primary", True)
         self.REQUIRE_REAL_OI_RATIO = cfg.get("require_real_oi_ratio", False)
+        self.REQUIRE_FEED_HEALTH = bool(cfg.get("require_feed_health", False))
+        self.MAX_VENUE_SPREAD = float(cfg.get("max_venue_spread", 0.001))
 
     @property
     def name(self) -> str:
@@ -111,9 +119,9 @@ class MeanReversion(Strategy):
         idx70 = int(0.70 * (n - 1))
         p70 = sample_abs[idx70]
 
-        # Sanity caps: don't let dynamic thresholds go crazy
-        p90 = min(max(p90, 0.001), 0.02)   # 0.1% to 2.0%
-        p70 = min(max(p70, 0.0005), 0.01)  # 0.05% to 1.0%
+        # Sanity caps for low-funding regimes (8h-normalized rates)
+        p90 = min(max(p90, 0.00002), 0.02)   # 0.002% to 2.0%
+        p70 = min(max(p70, 0.00001), 0.01)  # 0.001% to 1.0%
 
         return p90, p70
 
@@ -195,24 +203,24 @@ class MeanReversion(Strategy):
         else:
             rv = None
 
-        # ── Task 2.3: Predicted funding check with cross-validation ──
-        # Primary: predicted funding. Fallback: current funding.
-        # Both are stored in history for percentile calculation.
+        if not funding_data_usable(
+            event,
+            require_feed_health=self.REQUIRE_FEED_HEALTH,
+            max_venue_spread=self.MAX_VENUE_SPREAD,
+        ):
+            return None
+
+        funding = resolve_effective_funding(event, prefer_predicted=self.USE_PREDICTED_PRIMARY)
+        if not is_valid_funding(funding):
+            return None
+
         pred_funding = event.predicted_funding
-        curr_funding = event.funding
 
-        if self.USE_PREDICTED_PRIMARY and pred_funding is not None:
-            funding = pred_funding
-        elif curr_funding is not None:
-            funding = curr_funding
-        else:
-            return None  # Can't trade without funding data
-
-        # Store in rolling history for dynamic percentile
-        if curr_funding is not None:
-            state.funding_history.append(curr_funding)
-        if pred_funding is not None:
-            state.predicted_funding_history.append(pred_funding)
+        if event.timestamp_ms != state.last_funding_hist_ms:
+            state.last_funding_hist_ms = event.timestamp_ms
+            state.funding_history.append(funding)
+            if is_valid_funding(pred_funding):
+                state.predicted_funding_history.append(pred_funding)
 
         # Compute dynamic thresholds from history
         extreme_threshold, strong_threshold = self._compute_dynamic_thresholds(state)
@@ -454,8 +462,8 @@ class MeanReversion(Strategy):
                 )
 
         # 3. Funding reverted to < ±0.3%
-        funding = event.predicted_funding if event.predicted_funding is not None else event.funding
-        if funding is not None and abs(funding) < self.FUNDING_REVERTED:
+        funding = resolve_effective_funding(event, prefer_predicted=True)
+        if is_valid_funding(funding) and abs(funding) < self.FUNDING_REVERTED:
             return ExitSignal(
                 strategy=self.name,
                 symbol=position.symbol,

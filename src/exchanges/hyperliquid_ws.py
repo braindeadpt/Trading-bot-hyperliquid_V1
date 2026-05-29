@@ -30,6 +30,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import websockets
 from websockets.exceptions import ConnectionClosed
 
+from src.exchanges.funding_normalize import (
+    DEFAULT_HL_FUNDING_INTERVAL_HOURS,
+    parse_optional_rate,
+)
+
 logger = logging.getLogger(__name__)
 
 # Reconnect / heartbeat constants
@@ -76,9 +81,9 @@ class HlAssetCtx:
     index_price: float
     oracle_price: float
     open_interest: float
-    funding_rate: float
-    predicted_funding: float
-    funding_interval_hours: int = 8
+    funding_rate: Optional[float] = None
+    predicted_funding: Optional[float] = None
+    funding_interval_hours: float = 1.0
     leverage: Dict[str, Any] = None  # type: ignore[assignment]
     available_margin: float = 0.0
     position: Optional[Dict[str, Any]] = None  # type: ignore[assignment]
@@ -347,6 +352,7 @@ class HyperliquidWSClient:
         if not symbol:
             return
         ctx_data = data.get("ctx", data)
+        # HL WS activeAssetCtx has ``funding`` only (no predFunding) — see predictedFundings INFO API.
         ctx = HlAssetCtx(
             symbol=symbol,
             timestamp_ms=int(time.time() * 1000),
@@ -354,8 +360,9 @@ class HyperliquidWSClient:
             index_price=float(ctx_data.get("indexPx", 0.0)),
             oracle_price=float(ctx_data.get("oraclePx", 0.0)),
             open_interest=float(ctx_data.get("openInterest", 0.0)),
-            funding_rate=float(ctx_data.get("funding", 0.0)),
-            predicted_funding=float(ctx_data.get("predFunding", 0.0)),
+            funding_rate=parse_optional_rate(ctx_data.get("funding")),
+            predicted_funding=parse_optional_rate(ctx_data.get("predFunding")),
+            funding_interval_hours=DEFAULT_HL_FUNDING_INTERVAL_HOURS,
         )
         self.bus.publish(f"ctx:{symbol}", ctx)
 

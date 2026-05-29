@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import aiohttp
+
+from src.exchanges.hl_predicted_funding import (
+    HlSymbolFundingSnapshot,
+    HyperliquidPredictedFundingClient,
+    parse_predicted_fundings_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +183,18 @@ class HyperliquidRESTClient:
                 logger.debug("Skipping malformed funding rate entry: %s", exc)
                 continue
         return out
+
+    async def predicted_fundings(
+        self,
+        symbols: Optional[List[str]] = None,
+    ) -> Dict[str, HlSymbolFundingSnapshot]:
+        """Cross-venue predicted funding (HL INFO ``predictedFundings``)."""
+        raw = await self._post(self._info_url, {"type": "predictedFundings"})
+        parsed = parse_predicted_fundings_response(raw)
+        if symbols is None:
+            return parsed
+        want = set(symbols)
+        return {k: v for k, v in parsed.items() if k in want}
 
     async def l2_book(self, symbol: str) -> Dict[str, Any]:
         """Return the L2 orderbook for a single asset.

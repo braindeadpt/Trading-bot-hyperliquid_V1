@@ -34,5 +34,8 @@ jobs:
       - name: Component health check
         run: python audit_all.py
 
+      - name: Market data audit (live APIs)
+        run: python scripts/audit_market_data.py
+
       - name: Run test suite
         run: python scripts/run_ci_tests.py

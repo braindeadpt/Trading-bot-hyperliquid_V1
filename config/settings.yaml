@@ -43,7 +43,7 @@ exchange:
 risk:
   initial_capital: 10_000.0
   max_positions: 5
-  max_daily_trades: 5
+  max_daily_trades: 0              # 0 = unlimited (paper study); set e.g. 20 on mainnet
   max_daily_loss_pct: 3.0           # circuit breaker trigger
   circuit_breaker_drawdown_pct: 10.0 # from peak (real equity, not cash-only)
   circuit_breaker_recovery_pct: 50.0  # auto-reset when DD < 50% of trip level
@@ -144,11 +144,11 @@ strategy:
   # Strategy: Mean Reversion (Funding Extreme)
   # ═══════════════════════════════════════════════════════════
   mean_reversion:
-    enabled: true
+    enabled: true                   # uses HL predictedFundings + CEX aggregate (8h-normalized)
     timeframe: "15m"
     context_timeframe: "1h"
-    extreme_threshold: 0.0003       # 0.03% predicted funding (was 0.3% — funding is near zero)
-    strong_threshold: 0.0002        # 0.02% predicted funding (was 0.2%)
+    extreme_threshold: 0.0003       # 0.03% predicted funding
+    strong_threshold: 0.0001        # 0.01% (only used when re-enabled; was 0.02%)
     overcrowded_oi_pct: 65.0        # OI concentration on one side
     max_hold_minutes: 60
     stop_loss_pct: 2.0
@@ -163,6 +163,8 @@ strategy:
     oi_delta_threshold: 0.0         # OI_delta must be < 0 (decreasing)
     use_predicted_primary: true     # use predicted funding as primary signal
     require_real_oi_ratio: false    # use Binance LS ratio when available; heuristic fallback
+    require_feed_health: true       # skip entries when market_data health is red
+    max_venue_spread: 0.001         # reject if HL venues disagree >0.1% (8h)
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: Funding Arbitrage (Task 3.1)
@@ -184,6 +186,9 @@ strategy:
     confidence: 0.75
     require_oi_stable: true          # avoid if OI is still surging
     oi_delta_max: 1000.0             # max OI increase allowed
+    use_multi_venue_predicted: true  # HL predictedFundings (Bin/Hl/Bybit) for ranking
+    require_feed_health: true
+    max_venue_spread: 0.001
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: VWAP Deviation (Task 3.2)
@@ -214,8 +219,8 @@ strategy:
     auto_enable_slippage_pct: 0.0005     # fallback slippage per side when book unknown
     auto_enable_min_edge_buffer_pct: 0.0005
     auto_enable_use_book_spread: true    # use half observed spread when tighter than fallback
-    auto_enable_max_book_spread_pct: 0.0004   # 0.04% — book must be this tight to enable
-    auto_disable_max_book_spread_pct: 0.0008  # 0.08% hysteresis — disable when book widens
+    auto_enable_max_book_spread_pct: 0.0015   # 0.15% — HL book often wider than 0.04%
+    auto_disable_max_book_spread_pct: 0.0025  # 0.25% hysteresis — disable when book widens
     auto_enable_min_symbols_with_book: 1
     viability_check_interval_ms: 60000
     bid_ask_ratio_long: 1.5          # bid_depth / ask_depth > 1.5 → excess bids → long
@@ -290,9 +295,8 @@ strategy:
     #   Threshold 0.18 = 2 strong or 3+ moderate; no changes to min_agreeing.
     threshold: 0.12
     min_agreeing: 2
-    # High-conviction bypass: a single strategy at ≥0.65 confidence can enter alone.
-    # This fires when other strategies are flat but one has a strong edge.
-    high_conviction_threshold: 0.65
+    # High-conviction bypass: single strategy can enter alone above this confidence.
+    high_conviction_threshold: 0.75
 
   # ═══════════════════════════════════════════════════════════
   # Strategy performance governance (Phase 3)
@@ -332,6 +336,18 @@ market_data:
   liquidation_source: auto          # binance | proxy | auto
   long_short_ratio_enabled: true
   long_short_poll_sec: 300
+  hl_predicted_funding_poll_sec: 90 # Hyperliquid INFO predictedFundings
+  funding_poll_sec: 30              # CEX funding/OI aggregator interval
+  funding_stale_max_sec: 300        # use last-good values up to 5 min on API failure
+  funding_connect_timeout_sec: 10
+  funding_total_timeout_sec: 25
+  min_exchanges_for_green: 2        # health: yellow if fewer CEX sources
+  coinalyze_api_key: ""             # or COINALYZE_API_KEY env / vault
+  health_history_window_sec: 3600   # rolling window for poll failure %
+  alert_red_after_sec: 300          # Telegram if overall health red > 5 min
+  alert_red_cooldown_sec: 900       # min interval between market-data alerts
+  block_funding_strategies_on_red: true  # FundingExtreme / FundingArbitrage skip on red feed
+  max_venue_spread: 0.001           # max HL Bin/Bybit/HlPerp 8h spread (0.1%) per symbol
 
 # ═══════════════════════════════════════════════════════════
 # Backtest
