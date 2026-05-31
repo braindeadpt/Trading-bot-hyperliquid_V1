@@ -53,7 +53,7 @@ risk:
   max_slippage_pct: 0.2             # reject signal if L2 slippage > 0.2%
   min_fill_ratio: 0.8              # reject signal if book covers <80% of size
   taker_fee_pct: 0.035              # Hyperliquid taker fee per side (0.035%)
-  paper_slippage_pct: 0.05         # simulated slippage in paper mode (0.05%)
+  paper_slippage_pct: 0.02         # paper slippage per side (0.02%; was 0.05 — less pessimistic)
 
 # ═══════════════════════════════════════════════════════════
 # Strategy: Trend Follow (Smart Money Flow)
@@ -134,7 +134,7 @@ strategy:
       SmartMoneyFlow: 0.7           # penalize trend following
       VolatilityBreakout: 0.6       # penalize — false breaks common in chop
       DonchianBreakout: 0.5         # penalize — chop kills breakout reliability
-      FundingExtreme: 1.3           # boost mean reversion
+      FundingExtreme: 1.0           # neutral in range (was 1.3 — reduced churn in low funding)
       VWAPDeviation: 1.5            # boost — range is ideal for VWAP fade
       LiquidationCatcher: 1.0       # neutral
       FundingArbitrage: 1.0         # neutral
@@ -147,8 +147,14 @@ strategy:
     enabled: true                   # uses HL predictedFundings + CEX aggregate (8h-normalized)
     timeframe: "15m"
     context_timeframe: "1h"
-    extreme_threshold: 0.0003       # 0.03% predicted funding
-    strong_threshold: 0.0001        # 0.01% (only used when re-enabled; was 0.02%)
+    extreme_threshold: 0.0003       # floor when dynamic history is short
+    strong_threshold: 0.0001
+    min_strong_threshold_abs: 0.00006   # 0.006% 8h — skip noise entries in low-funding regime
+    min_extreme_threshold_abs: 0.00009    # 0.009% 8h
+    funding_reverted: 0.00002           # absolute near-zero funding (8h rate)
+    funding_revert_fraction: 0.5        # exit when |funding| < 50% of |entry_funding|
+    min_funding_exit_hold_ms: 900000      # 15 min before funding-based exit (avoid fee churn)
+    min_profit_before_funding_exit_pct: 0.001  # need +0.1% price move vs entry for funding exit
     overcrowded_oi_pct: 65.0        # OI concentration on one side
     max_hold_minutes: 60
     stop_loss_pct: 2.0

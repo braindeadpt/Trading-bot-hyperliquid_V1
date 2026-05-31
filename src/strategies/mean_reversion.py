@@ -15,6 +15,7 @@ from src.exchanges.funding_normalize import (
     is_valid_funding,
     resolve_effective_funding,
 )
+from src.utils.helpers import safe_float
 from src.strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
 from src.strategies.indicators import (
     Candle,
@@ -57,7 +58,14 @@ class MeanReversion(Strategy):
         # Thresholds (overridable via config)
         self.FUNDING_EXTREME = cfg.get("extreme_threshold", 0.0003)
         self.FUNDING_STRONG = cfg.get("strong_threshold", 0.0002)
-        self.FUNDING_REVERTED = cfg.get("funding_reverted", 0.0003)
+        self.FUNDING_REVERTED = cfg.get("funding_reverted", 0.00002)
+        self.FUNDING_REVERT_FRACTION = float(cfg.get("funding_revert_fraction", 0.5))
+        self.MIN_FUNDING_EXIT_HOLD_MS = int(cfg.get("min_funding_exit_hold_ms", 900_000))
+        self.MIN_PROFIT_BEFORE_FUNDING_EXIT_PCT = float(
+            cfg.get("min_profit_before_funding_exit_pct", 0.001)
+        )
+        self.MIN_STRONG_THRESHOLD_ABS = float(cfg.get("min_strong_threshold_abs", 0.00006))
+        self.MIN_EXTREME_THRESHOLD_ABS = float(cfg.get("min_extreme_threshold_abs", 0.00009))
         self.OI_CONCENTRATION = cfg.get("overcrowded_oi_pct", 65) / 100.0
         self.MAX_HOLD_MINUTES = cfg.get("max_hold_minutes", 60)
         # ATR-based stop loss
@@ -120,8 +128,11 @@ class MeanReversion(Strategy):
         p70 = sample_abs[idx70]
 
         # Sanity caps for low-funding regimes (8h-normalized rates)
-        p90 = min(max(p90, 0.00002), 0.02)   # 0.002% to 2.0%
-        p70 = min(max(p70, 0.00001), 0.01)  # 0.001% to 1.0%
+        p90 = min(max(p90, self.MIN_EXTREME_THRESHOLD_ABS), 0.02)
+        p70 = min(max(p70, self.MIN_STRONG_THRESHOLD_ABS), 0.01)
+        if len(hist) < self.FUNDING_PERCENTILE_LOOKBACK // 2:
+            p90 = max(p90, self.FUNDING_EXTREME, self.MIN_EXTREME_THRESHOLD_ABS)
+            p70 = max(p70, self.FUNDING_STRONG, self.MIN_STRONG_THRESHOLD_ABS)
 
         return p90, p70
 
@@ -377,6 +388,7 @@ class MeanReversion(Strategy):
             take_profit_pct=stop_loss_pct * 1.5,  # 1.5R take-profit
             reason=f"funding_extreme_{target_side}_f{funding:.4f}",
             metadata={
+                "entry_funding": funding,
                 "funding": event.funding,
                 "predicted_funding": event.predicted_funding,
                 "funding_avg": event.funding_avg,
@@ -461,17 +473,46 @@ class MeanReversion(Strategy):
                     metadata={"move_pct": move_pct, "atr_stop_pct": stop_pct},
                 )
 
-        # 3. Funding reverted to < ±0.3%
-        funding = resolve_effective_funding(event, prefer_predicted=True)
-        if is_valid_funding(funding) and abs(funding) < self.FUNDING_REVERTED:
-            return ExitSignal(
-                strategy=self.name,
-                symbol=position.symbol,
-                side="close",
-                confidence=0.9,
-                reason="funding_reverted",
-                metadata={"funding": funding, "threshold": self.FUNDING_REVERTED},
-            )
+        # 3. Funding reverted — only after min hold and when price supports exit
+        if hold_ms >= self.MIN_FUNDING_EXIT_HOLD_MS:
+            funding = resolve_effective_funding(event, prefer_predicted=True)
+            entry_funding = safe_float((position.metadata or {}).get("entry_funding"))
+            if is_valid_funding(funding):
+                entry_abs = abs(entry_funding) if entry_funding else self.FUNDING_REVERTED
+                revert_level = max(
+                    self.FUNDING_REVERTED,
+                    entry_abs * self.FUNDING_REVERT_FRACTION,
+                )
+                funding_reverted = abs(funding) < revert_level
+                if funding_reverted:
+                    if position.entry_price > 0:
+                        if position.side == "long":
+                            move_pct = (current_price - position.entry_price) / position.entry_price
+                        else:
+                            move_pct = (position.entry_price - current_price) / position.entry_price
+                    else:
+                        move_pct = 0.0
+                    if move_pct < self.MIN_PROFIT_BEFORE_FUNDING_EXIT_PCT:
+                        logger.debug(
+                            "FundingExtreme %s hold funding exit — move %.4f%% < min %.4f%%",
+                            position.symbol,
+                            move_pct * 100,
+                            self.MIN_PROFIT_BEFORE_FUNDING_EXIT_PCT * 100,
+                        )
+                    else:
+                        return ExitSignal(
+                            strategy=self.name,
+                            symbol=position.symbol,
+                            side="close",
+                            confidence=0.9,
+                            reason="funding_reverted",
+                            metadata={
+                                "funding": funding,
+                                "entry_funding": entry_funding,
+                                "revert_level": revert_level,
+                                "move_pct": move_pct,
+                            },
+                        )
 
         # 4. OI starts normalizing (crowd is leaving)
         oi_ratio = self._estimate_oi_ratio(event)

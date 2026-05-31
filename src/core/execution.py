@@ -364,7 +364,8 @@ class ExecutionEngine:
         if open_trade is None:
             logger.warning("close_position: no open trade found for %s", position.symbol)
             # Build a synthetic result so callers don't crash
-            pnl_usd = self._compute_pnl(position, fill_exit) - exit_fee
+            entry_fee = 0.0
+            pnl_usd = self._compute_pnl(position, fill_exit) - exit_fee - entry_fee
             pnl_pct = safe_divide(pnl_usd, notional, 0.0)
             return TradeResult(
                 trade_id=-1,
@@ -380,7 +381,8 @@ class ExecutionEngine:
                 timestamp_ms=now_ms,
             )
 
-        pnl_usd = self._compute_pnl(position, fill_exit) - exit_fee
+        entry_fee = safe_float(open_trade.entry_fee, 0.0)
+        pnl_usd = self._compute_pnl(position, fill_exit) - exit_fee - entry_fee
         pnl_pct = safe_divide(pnl_usd, notional, 0.0)
 
         # Update DB

@@ -32,7 +32,7 @@ def default_ensemble_weights() -> List[StrategyWeight]:
     return [
         StrategyWeight("SmartMoneyFlow", 0.18, min_confidence=0.40),
         StrategyWeight("VolatilityBreakout", 0.15, min_confidence=0.50),
-        StrategyWeight("FundingExtreme", 0.16, min_confidence=0.40),
+        StrategyWeight("FundingExtreme", 0.12, min_confidence=0.55),
         StrategyWeight("DonchianBreakout", 0.10, min_confidence=0.50),
         StrategyWeight("VWAPDeviation", 0.12, min_confidence=0.40),
         StrategyWeight("FundingArbitrage", 0.08, min_confidence=0.35),
