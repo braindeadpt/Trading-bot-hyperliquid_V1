@@ -5,6 +5,7 @@ and safe type coercion (no eval / exec).
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -193,6 +194,7 @@ def load_config(
 
     merged = _deep_merge(dict(DEFAULT_CONFIG), user_data)
     _apply_env_overrides(merged, prefix=env_prefix)
+    _apply_mode_overrides(merged)
     _validate_required(merged)
     _coerce_types(merged)
 
@@ -202,6 +204,34 @@ def load_config(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _apply_mode_overrides(config: Dict[str, Any]) -> None:
+    """Apply ``mode_overrides.<mode>`` shallow-merge on top of the active mode.
+
+    Enables mainnet/testnet to ship with safer defaults without forcing
+    operators to maintain two parallel YAML files.  If the active mode
+    is missing or not present in ``mode_overrides`` this is a no-op.
+    """
+    overrides = config.get("mode_overrides")
+    if not isinstance(overrides, dict):
+        return
+    mode = config.get("mode")
+    if not isinstance(mode, str) or mode not in overrides:
+        return
+    block = overrides[mode]
+    if not isinstance(block, dict):
+        logger = logging.getLogger(__name__)
+        logger.warning("mode_overrides.%s must be a dict, got %s", mode, type(block).__name__)
+        return
+    for section, values in block.items():
+        if not isinstance(values, dict):
+            continue
+        target = config.get(section)
+        if not isinstance(target, dict):
+            config[section] = {}
+            target = config[section]
+        target.update(values)
+
 
 def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
     """Recursively merge *overlay* into *base*.  Lists are replaced, not merged."""

@@ -54,6 +54,21 @@ risk:
   min_fill_ratio: 0.8              # reject signal if book covers <80% of size
   taker_fee_pct: 0.035              # Hyperliquid taker fee per side (0.035%)
   paper_slippage_pct: 0.02         # paper slippage per side (0.02%; was 0.05 — less pessimistic)
+  # ── C1: Intraday volatility circuit breaker (soft gate, per-symbol) ──
+  # Blocks new entries when ATR(1h) > multiplier * 7d baseline ATR.
+  # Soft = never forces exits; only rejects new entries.
+  volatility_circuit_breaker:
+    enabled: true
+    multiplier: 3.0                 # current ATR > 3x 7d-baseline → block
+    baseline_window_bars: 168       # 7d × 24 hourly bars
+    block_duration_min: 30          # entries blocked for 30 min after breach
+    min_samples: 24                 # need ~1d of history before evaluating
+  # ── C2: Time-of-day filter (block entries around funding resets) ──
+  funding_blackout:
+    enabled: true
+    minutes_before: 5               # block this many minutes before each reset
+    minutes_after: 5                # block this many minutes after each reset
+    resets_utc: ["00:00", "08:00", "16:00"]  # CEX 8h funding cadence
 
 # ═══════════════════════════════════════════════════════════
 # Strategy: Trend Follow (Smart Money Flow)
@@ -419,3 +434,19 @@ logging:
   file: "logs/bot.log"
   max_bytes: 10_485_760            # 10 MB
   backup_count: 30                # keep last 30 rotated logs
+
+# ═══════════════════════════════════════════════════════════
+# Per-mode overrides (C3 mainnet defaults)
+# ═══════════════════════════════════════════════════════════
+# Shallow-merged on top of the active section when ``mode`` matches.
+# Use to ship safer defaults for mainnet without duplicating the YAML.
+mode_overrides:
+  mainnet:
+    risk:
+      leverage_max: 5.0           # down from 10.0 — half the exposure
+      max_daily_loss_pct: 2.0     # down from 3.0
+      max_daily_trades: 20        # explicit cap (was 0 = unlimited)
+      max_position_size_pct: 3.0  # down from 5.0
+  testnet:
+    risk:
+      max_daily_trades: 50        # cap for testnet (was 0)

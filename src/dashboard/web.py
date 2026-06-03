@@ -595,12 +595,18 @@ def create_app(config: Dict[str, Any]) -> tuple:
             bus = getattr(_engine, "_bus", None)
             if bus is not None and hasattr(bus, "last_publish_age_sec"):
                 data_bus_lag = bus.last_publish_age_sec()
+            vol_cb = getattr(_engine, "_vol_circuit", None)
+            fb = getattr(_engine, "_funding_blackout", None)
             body.update({
                 "running": running,
                 "uptime_sec": getattr(_engine, "uptime_sec", 0),
                 "last_tick_age_sec": last_tick,
                 "data_bus_lag_sec": data_bus_lag,
                 "circuit_breaker": bool(cb),
+                "vol_circuit": vol_cb.snapshot() if vol_cb is not None else {},
+                "funding_blackout_active": bool(
+                    fb.is_blocked() if fb is not None else False
+                ),
                 "ws_healthy": bool(
                     getattr(getattr(_engine, "_hl_ws_client", None), "is_healthy", True)
                 ),

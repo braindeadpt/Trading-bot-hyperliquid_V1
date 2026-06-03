@@ -69,6 +69,8 @@ from .regime import apply_regime_weights as apply_regime_weights_fn
 from .regime import regime_strategy_name
 from .order_router import resolve_order_routing
 from .tca import passes_tca_check
+from .volatility_circuit import VolatilityCircuitBreaker
+from .funding_blackout import FundingBlackoutFilter
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +117,14 @@ class TradingEngine:
         for strat in self._strategies:
             if hasattr(strat, "set_governor"):
                 strat.set_governor(self._strategy_governor)
+
+        # ── C1: Intraday volatility circuit breaker (per-symbol) ──
+        vol_cfg = config.get("risk.volatility_circuit_breaker", {}) or {}
+        self._vol_circuit = VolatilityCircuitBreaker.from_config_dict(vol_cfg)
+
+        # ── C2: Funding-reset blackout (global, per-time-of-day) ──
+        fb_cfg = config.get("risk.funding_blackout", {}) or {}
+        self._funding_blackout = FundingBlackoutFilter.from_config_dict(fb_cfg)
 
         trail = config.get("execution.trailing_stop", {}) or {}
         self._trailing_enabled = bool(trail.get("enabled", True))
@@ -495,6 +505,13 @@ class TradingEngine:
         self._shutdown_event = asyncio.Event()
         self._start_time = time.time()
         logger.info("TradingEngine starting …")
+        logger.info(
+            "Effective risk: leverage=%.1fx max_daily_loss=%.1f%% max_daily_trades=%d max_pos=%.1f%%",
+            float(self._config.get("risk.leverage_max", 1.0)),
+            float(self._config.get("risk.max_daily_loss_pct", 0.0)),
+            int(self._config.get("risk.max_daily_trades", 0)),
+            float(self._config.get("risk.max_position_size_pct", 0.0)),
+        )
 
         # 1. Open executor session
         await self._executor.open()
@@ -970,6 +987,19 @@ class TradingEngine:
                 self._db.save_candle(db_candle, tf_name)
             except Exception as exc:
                 logger.warning("Failed to persist candle for %s %s: %s", symbol, tf_name, exc)
+
+            # ── C1: Feed 1h candle into the volatility circuit breaker ──
+            if timeframe == 3600:
+                try:
+                    high = float(getattr(candle, "high", 0))
+                    low = float(getattr(candle, "low", 0))
+                    close = float(getattr(candle, "close", 0))
+                    ts_ms = int(getattr(candle, "timestamp_ms", utc_timestamp_ms()))
+                    if high > 0 and low > 0 and close > 0:
+                        atr_proxy = (high - low) / close
+                        self._vol_circuit.update(symbol, atr_proxy, ts_ms)
+                except Exception:
+                    logger.exception("vol_circuit update failed for %s", symbol)
         return _on_candle
 
     def _make_liquidation_callback(self, symbol: str):
@@ -1944,6 +1974,35 @@ class TradingEngine:
                     })
                     self._decision_history = self._decision_history[:100]
                     return
+
+        # --- C1: Intraday volatility circuit breaker (soft gate) ---
+        if self._vol_circuit.is_blocked(signal.symbol, int(time.time() * 1000)):
+            remaining = self._vol_circuit.block_remaining_sec(
+                signal.symbol, int(time.time() * 1000)
+            )
+            logger.info(
+                "Signal REJECTED %s %s — vol circuit active (%.0fs remaining)",
+                signal.symbol, signal.side, remaining,
+            )
+            sig_record["status"] = "rejected"
+            sig_record["risk_reason"] = f"vol_circuit:{remaining}s"
+            strat_stats = self._strategy_stats.get(signal.strategy)
+            if strat_stats:
+                strat_stats["rejected_signals"] += 1
+            return
+
+        # --- C2: Funding-reset blackout (time-of-day) ---
+        if self._funding_blackout.is_blocked(int(time.time() * 1000)):
+            logger.info(
+                "Signal REJECTED %s %s — funding reset blackout active",
+                signal.symbol, signal.side,
+            )
+            sig_record["status"] = "rejected"
+            sig_record["risk_reason"] = "funding_blackout"
+            strat_stats = self._strategy_stats.get(signal.strategy)
+            if strat_stats:
+                strat_stats["rejected_signals"] += 1
+            return
 
         # --- Risk check ---
         portfolio_proxy = _PortfolioProxy(
