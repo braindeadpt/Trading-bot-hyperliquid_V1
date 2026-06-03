@@ -53,12 +53,16 @@ class StrategyEnsemble:
         threshold: float = 0.65,
         min_strategies_agreeing: int = 2,
         high_conviction_threshold: float = 0.80,
+        high_conviction_enabled: bool = True,
+        high_conviction_exclude: Optional[List[str]] = None,
     ):
         self._strategies = {s.name: s for s in strategies}
         self._weights = {w.name: w for w in weights}
         self._threshold = threshold
         self._min_strategies_agreeing = min_strategies_agreeing
         self._high_conviction_threshold = high_conviction_threshold
+        self._high_conviction_enabled = high_conviction_enabled
+        self._high_conviction_exclude = frozenset(high_conviction_exclude or ())
         self._last_decision_log: List[Dict] = []
         self._governor: Optional[Any] = None
 
@@ -146,10 +150,13 @@ class StrategyEnsemble:
         agreeing_signals = [s for s in signals if s.side == winning_side]
 
         # High-conviction bypass: single strategy with raw confidence >= threshold
+        single_sig = agreeing_signals[0] if len(agreeing_signals) == 1 else None
         high_conviction = (
-            winning_count == 1
-            and len(agreeing_signals) == 1
-            and agreeing_signals[0].confidence >= self._high_conviction_threshold
+            self._high_conviction_enabled
+            and winning_count == 1
+            and single_sig is not None
+            and single_sig.confidence >= self._high_conviction_threshold
+            and single_sig.strategy not in self._high_conviction_exclude
         )
         if high_conviction:
             single_sig = agreeing_signals[0]

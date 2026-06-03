@@ -98,7 +98,12 @@ strategy:
     take_profit_atr_multiplier: 3.0
     max_hold_hours: 6
     min_confidence: 0.60
-    signal_throttle_ms: 1800000    # 30 min between signals, reduce churn     # 15 min between signals per symbol
+    signal_throttle_ms: 1800000    # 30 min between signals per symbol
+    require_trend_alignment: true  # long only in uptrend (EMA20>EMA50), short in downtrend
+    trend_ema_fast: 20
+    trend_ema_slow: 50
+    failed_breakout_min_hold_ms: 2700000   # 45 min before failed-breakout exit
+    failed_breakout_buffer_pct: 0.001      # must cross BB mid by 0.1% (reduce noise exits)
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: Donchian Breakout (momentum breakout)
@@ -144,7 +149,7 @@ strategy:
   # Strategy: Mean Reversion (Funding Extreme)
   # ═══════════════════════════════════════════════════════════
   mean_reversion:
-    enabled: true                   # uses HL predictedFundings + CEX aggregate (8h-normalized)
+    enabled: false                  # OFF: governor Sharpe -37 on 50 trades; re-enable after paper validation
     timeframe: "15m"
     context_timeframe: "1h"
     extreme_threshold: 0.0003       # floor when dynamic history is short
@@ -299,10 +304,15 @@ strategy:
     #     3 moderate strategies (conf 0.40)             = 0.20
     #     4+ strategies (conf 0.35)                     = 0.18+
     #   Threshold 0.18 = 2 strong or 3+ moderate; no changes to min_agreeing.
-    threshold: 0.12
+    threshold: 0.14
     min_agreeing: 2
     # High-conviction bypass: single strategy can enter alone above this confidence.
-    high_conviction_threshold: 0.75
+    high_conviction_threshold: 0.90
+    high_conviction_enabled: true
+    high_conviction_exclude:
+      - VolatilityBreakout
+      - VWAPDeviation
+      - FundingExtreme
 
   # ═══════════════════════════════════════════════════════════
   # Strategy performance governance (Phase 3)

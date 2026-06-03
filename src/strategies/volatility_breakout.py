@@ -21,6 +21,7 @@ from src.strategies.indicators import (
     Candle,
     calculate_atr,
     calculate_bollinger_bands,
+    calculate_ema,
     calculate_volume_ratio,
 )
 from src.utils.helpers import safe_divide
@@ -57,6 +58,15 @@ class VolatilityBreakout(Strategy):
         self.MAX_HOLD_MS = int(self.MAX_HOLD_HOURS * 3_600_000)
         self.MIN_CONFIDENCE = float(cfg.get("min_confidence", 0.55))
         self.SIGNAL_THROTTLE_MS = int(cfg.get("signal_throttle_ms", 900_000))
+        self.REQUIRE_TREND_ALIGNMENT = bool(cfg.get("require_trend_alignment", True))
+        self.TREND_EMA_FAST = int(cfg.get("trend_ema_fast", 20))
+        self.TREND_EMA_SLOW = int(cfg.get("trend_ema_slow", 50))
+        self.FAILED_BREAKOUT_MIN_HOLD_MS = int(
+            cfg.get("failed_breakout_min_hold_ms", 2_700_000)
+        )
+        self.FAILED_BREAKOUT_BUFFER_PCT = float(
+            cfg.get("failed_breakout_buffer_pct", 0.001)
+        )
 
         self._state: Dict[str, _VolBreakoutState] = {}
 
@@ -110,6 +120,37 @@ class VolatilityBreakout(Strategy):
             return None
 
         side = "long" if broke_up else "short"
+
+        if self.REQUIRE_TREND_ALIGNMENT:
+            closes = [c.close for c in candles]
+            ema_fast = calculate_ema(closes, self.TREND_EMA_FAST)
+            ema_slow = calculate_ema(closes, self.TREND_EMA_SLOW)
+            if ema_fast is None or ema_slow is None:
+                return None
+            if side == "long" and not (price > ema_fast and ema_fast > ema_slow):
+                logger.debug(
+                    "VolatilityBreakout SKIP %s long — trend misaligned "
+                    "(price=%.2f ema%d=%.2f ema%d=%.2f)",
+                    event.symbol,
+                    price,
+                    self.TREND_EMA_FAST,
+                    ema_fast,
+                    self.TREND_EMA_SLOW,
+                    ema_slow,
+                )
+                return None
+            if side == "short" and not (price < ema_fast and ema_fast < ema_slow):
+                logger.debug(
+                    "VolatilityBreakout SKIP %s short — trend misaligned "
+                    "(price=%.2f ema%d=%.2f ema%d=%.2f)",
+                    event.symbol,
+                    price,
+                    self.TREND_EMA_FAST,
+                    ema_fast,
+                    self.TREND_EMA_SLOW,
+                    ema_slow,
+                )
+                return None
 
         adx = event.adx_14
         if adx is not None and (adx < self.MIN_ADX or adx > self.MAX_ADX):
@@ -225,7 +266,17 @@ class VolatilityBreakout(Strategy):
             return None
 
         price = event.price
-        if position.side == "long" and price < middle:
+        if hold_ms < self.FAILED_BREAKOUT_MIN_HOLD_MS:
+            return None
+
+        buf = self.FAILED_BREAKOUT_BUFFER_PCT
+        mid_long_exit = middle * (1.0 - buf) if middle else None
+        mid_short_exit = middle * (1.0 + buf) if middle else None
+        if (
+            position.side == "long"
+            and mid_long_exit is not None
+            and price < mid_long_exit
+        ):
             return ExitSignal(
                 strategy=self.name,
                 symbol=position.symbol,
@@ -233,7 +284,11 @@ class VolatilityBreakout(Strategy):
                 confidence=0.75,
                 reason="failed_breakout_below_mid",
             )
-        if position.side == "short" and price > middle:
+        if (
+            position.side == "short"
+            and mid_short_exit is not None
+            and price > mid_short_exit
+        ):
             return ExitSignal(
                 strategy=self.name,
                 symbol=position.symbol,

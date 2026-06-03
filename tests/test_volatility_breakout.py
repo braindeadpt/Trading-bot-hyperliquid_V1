@@ -72,6 +72,7 @@ def test_squeeze_breakout_long() -> None:
         "signal_throttle_ms": 0,
         "min_adx": 0,
         "max_adx": 100,
+        "require_trend_alignment": False,
     })
     ts = int(time.time() * 1000) - 50 * 900_000
     candles = _mixed_candles(ts)

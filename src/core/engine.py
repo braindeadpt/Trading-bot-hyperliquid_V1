@@ -504,7 +504,7 @@ class TradingEngine:
             try:
                 portfolio = self._portfolio
                 positions = await portfolio.positions
-                capital = await portfolio.capital
+                capital = await portfolio.current_capital
                 daily_pnl = await portfolio.daily_pnl
                 max_dd = portfolio.sync_max_drawdown_pct()
                 active_strategies = []
