@@ -60,8 +60,12 @@ def test_factory_respects_enabled_flags() -> None:
     assert "FundingArbitrage" in names  # loaded via auto_enable
     assert "LiquidationCatcher" in names  # loaded via auto_enable
     assert "SmartMoneyFlow" in names
-    assert "FundingExtreme" in names
     assert "VWAPDeviation" in names
+    mean_rev = cfg.get("strategy.mean_reversion", {}) or {}
+    if mean_rev.get("enabled", True):
+        assert "FundingExtreme" in names
+    else:
+        assert "FundingExtreme" not in names
 
     liq = next(s for s in subs if s.name == "LiquidationCatcher")
     assert liq.AUTO_ENABLE is True
