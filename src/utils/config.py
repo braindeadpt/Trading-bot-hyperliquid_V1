@@ -130,6 +130,16 @@ class Config:
                 return default
         return node
 
+    def has_path(self, dot_path: str) -> bool:
+        """Return True iff every key in the dot-path exists in the config."""
+        node: Any = self._data
+        for key in dot_path.split("."):
+            if isinstance(node, dict) and key in node:
+                node = node[key]
+            else:
+                return False
+        return True
+
     def __getitem__(self, key: str) -> Any:
         return self._data[key]
 

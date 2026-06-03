@@ -3,6 +3,7 @@ Hyperliquid Premium - Real-Time Operations Dashboard v2
 Complete rewrite for maximum visibility into bot internals.
 """
 
+import json
 import logging
 import os
 import secrets
@@ -43,19 +44,55 @@ def _get_db():
 # ═════════════════════════════════════════════════════════════════════════════
 
 class DashboardEmitter:
-    """Emits real-time dashboard updates every second via Socket.IO."""
+    """Emits real-time dashboard updates via Socket.IO.
 
-    def __init__(self, socketio: SocketIO, interval: float = 1.0):
+    Two-tier cadence (B9):
+      * fast (default 0.5s) — high-churn: live_data (prices), engine_monitor
+      * slow (default 5.0s) — slow-churn: status, strategies, positions,
+        portfolio, trades, signals, decisions, candles, market_data_health,
+        funding_update, logs
+    Emits are skipped when the serialized payload hash is unchanged
+    (coalesced push — avoids redundant network traffic on quiet markets).
+    """
+
+    _FAST_EVENTS: tuple = ("live_data", "engine_monitor")
+    _SLOW_EVENTS: tuple = (
+        "status",
+        "candles",
+        "strategies",
+        "signals",
+        "decisions",
+        "portfolio",
+        "positions",
+        "trades",
+        "logs",
+        "market_data_health",
+        "funding_update",
+    )
+
+    def __init__(
+        self,
+        socketio: SocketIO,
+        fast_interval: float = 0.5,
+        slow_interval: float = 5.0,
+    ):
         self.socketio = socketio
-        self.interval = interval
+        self.fast_interval = fast_interval
+        self.slow_interval = slow_interval
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._last_slow_emit: float = 0.0
+        self._last_payload_hash: Dict[str, int] = {}
 
     def start(self) -> None:
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        logger.info("Dashboard emitter started (interval=%ss)", self.interval)
+        logger.info(
+            "Dashboard emitter started (fast=%.1fs slow=%.1fs)",
+            self.fast_interval,
+            self.slow_interval,
+        )
 
     def stop(self) -> None:
         self._running = False
@@ -63,31 +100,55 @@ class DashboardEmitter:
     def _loop(self) -> None:
         while self._running:
             try:
-                self._emit_all()
+                self._emit_all_with_cadence()
+                now = time.time()
+                if now - self._last_slow_emit >= self.slow_interval:
+                    self._last_slow_emit = now
             except Exception as e:
                 logger.warning("Dashboard emitter error: %s", e)
-            time.sleep(self.interval)
+            time.sleep(self.fast_interval)
 
-    def _emit_all(self) -> None:
+    def _emit_all_with_cadence(self) -> None:
+        """Emit slow data once per slow_interval, fast every tick.
+
+        Skips emissions whose payload hash matches the previous one.
+        """
         if _engine is None or self.socketio is None:
             return
+        # Fast events every tick
+        for event in self._FAST_EVENTS:
+            self._emit_cached(event)
+        # Slow events gated by cadence
+        if time.time() - self._last_slow_emit < self.slow_interval:
+            return
+        for event in self._SLOW_EVENTS:
+            self._emit_cached(event)
 
+    def _emit_cached(self, event: str) -> None:
+        """Dispatch to the matching ``_emit_<event>`` method, hashing the
+        returned payload to skip no-op broadcasts."""
+        method = getattr(self, f"_emit_{event}", None)
+        if method is None:
+            return
         try:
-            self._emit_status()
-            self._emit_live_data()
-            self._emit_engine_monitor()
-            self._emit_candles()
-            self._emit_strategies()
-            self._emit_signals()
-            self._emit_decisions()
-            self._emit_portfolio()
-            self._emit_positions()
-            self._emit_trades()
-            self._emit_logs()
-            self._emit_market_data_health()
-            self._emit_funding_update()
+            payload = method()
         except Exception as e:
-            logger.warning("emit_all error: %s", e)
+            logger.warning("%s error: %s", event, e)
+            return
+        try:
+            blob = json.dumps(payload, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            blob = repr(payload)
+        h = hash(blob)
+        if self._last_payload_hash.get(event) == h:
+            return
+        self._last_payload_hash[event] = h
+        self._safe_emit(event, payload)
+
+    def _emit_all(self) -> None:
+        # Backwards-compat shim for callers that still invoke _emit_all()
+        # directly (e.g. manual flush). Delegates to the new cadence path.
+        self._emit_all_with_cadence()
 
     def _safe_emit(self, event: str, data: dict) -> None:
         """Emit to all connected Socket.IO clients."""
@@ -505,8 +566,14 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 return False
             return True
 
-    # Start background emitter
-    emitter = DashboardEmitter(socketio)
+    # Start background emitter (B9) — honor configured cadence
+    _dash_cfg = (config or {}).get("dashboard", {}) or {}
+    _push_sec = float(_dash_cfg.get("push_interval_sec", 2.0) or 2.0)
+    emitter = DashboardEmitter(
+        socketio,
+        fast_interval=min(0.5, max(0.1, _push_sec / 4.0)),
+        slow_interval=max(1.0, _push_sec * 2.5),
+    )
     emitter.start()
 
 
@@ -519,7 +586,30 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
     @app.route("/health")
     def health():
-        return jsonify({"status": "ok"})
+        body: Dict[str, Any] = {"status": "ok"}
+        if _engine is not None:
+            last_tick = getattr(_engine, "last_tick_age_sec", None)
+            cb = getattr(getattr(_engine, "_risk", None), "circuit_breaker_tripped", False)
+            running = getattr(_engine, "_running", False)
+            data_bus_lag = None
+            bus = getattr(_engine, "_bus", None)
+            if bus is not None and hasattr(bus, "last_publish_age_sec"):
+                data_bus_lag = bus.last_publish_age_sec()
+            body.update({
+                "running": running,
+                "uptime_sec": getattr(_engine, "uptime_sec", 0),
+                "last_tick_age_sec": last_tick,
+                "data_bus_lag_sec": data_bus_lag,
+                "circuit_breaker": bool(cb),
+                "ws_healthy": bool(
+                    getattr(getattr(_engine, "_hl_ws_client", None), "is_healthy", True)
+                ),
+            })
+            if not running:
+                body["status"] = "starting"
+            elif last_tick is not None and last_tick > 30:
+                body["status"] = "stale"
+        return jsonify(body)
 
     @app.route("/api/auth/check", methods=["GET", "POST"])
     def api_auth_check():
@@ -595,6 +685,35 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 "feed_stale": bool(agg.stale) if agg else True,
             })
         return jsonify(rows)
+
+    @app.route("/api/strategy_pnl")
+    def api_strategy_pnl():
+        """Per-strategy closed-trade PnL aggregate.
+
+        Query params:
+          days: optional int, filter to last N days of exits (default: all time)
+          strategy: optional str, restrict to a single strategy name
+        """
+        if _engine is None:
+            return jsonify([])
+        try:
+            days = int(request.args.get("days", "0"))
+        except ValueError:
+            days = 0
+        strategy = request.args.get("strategy") or None
+        since_ms = None
+        if days and days > 0:
+            since_ms = int((time.time() - days * 86400) * 1000)
+        db = getattr(_engine, "_db", None)
+        if db is None or not hasattr(db, "get_strategy_pnl"):
+            return jsonify([])
+        rows = db.get_strategy_pnl(since_ms=since_ms, strategy=strategy)
+        return jsonify({
+            "since_ms": since_ms,
+            "days": days,
+            "strategy_filter": strategy,
+            "rows": rows,
+        })
 
     @app.route("/api/strategies")
     def api_strategies():

@@ -158,7 +158,6 @@ class TradingEngine:
             "range": {"SmartMoneyFlow": 0.7, "FundingExtreme": 1.3},
         })
         self._latest_adx: Dict[str, float] = {}
-        self._candles_15m_history: Dict[str, Any] = {}  # symbol -> deque
 
         # In-memory cache of latest data per symbol
         self._latest_price: Dict[str, HlPriceTick] = {}
@@ -212,7 +211,7 @@ class TradingEngine:
         self._ws_health_check_task: Optional[asyncio.Task] = None
         self._summary_task: Optional[asyncio.Task] = None
         self._last_ws_healthy_time: float = time.time()
-        self._ws_disconnect_start: float = time.time()
+        self._ws_disconnect_start: Optional[float] = None
         self._ws_health_warned: bool = False
 
         self._latest_funding: Dict[str, float] = {}
@@ -328,6 +327,16 @@ class TradingEngine:
         # CRIT-004: Dashboard callback — private, only set via validated setter
         self._on_dashboard_tick: Optional[Callable[[], Any]] = None
 
+        # ── Notifier fire-and-forget queue (B3) ──
+        self._notify_tasks: "set[asyncio.Task[Any]]" = set()
+        self._notify_max_pending: int = int(
+            getattr(config, "get", lambda *_: None)("alerts.max_pending", 100) or 100
+        )
+        self._notify_concurrency: int = int(
+            getattr(config, "get", lambda *_: None)("alerts.max_concurrent", 4) or 4
+        )
+        self._notify_sema: Optional[asyncio.Semaphore] = None  # bound in start()
+
     # ── Public properties for dashboard / external access ──
     @property
     def portfolio(self) -> PortfolioState:
@@ -382,6 +391,52 @@ class TradingEngine:
     @property
     def daily_trade_count(self) -> int:
         return getattr(self._portfolio, "sync_daily_trades", lambda: 0)()
+
+    @property
+    def last_tick_age_sec(self) -> Optional[float]:
+        """Seconds since the last market tick arrived, or None if no tick yet."""
+        last = self._tick_stats.get("last_tick_time") or 0.0
+        if last <= 0:
+            return None
+        return max(0.0, time.time() - last)
+
+    # ── Notifier fire-and-forget (B3) ──
+
+    def _notify(self, coro_factory: Callable[[], "asyncio.Future[Any]"]) -> None:
+        """Schedule a notifier coroutine fire-and-forget.
+
+        Bounded by ``_notify_max_pending`` (drops oldest when full) and
+        ``_notify_concurrency`` (semaphore limits parallel HTTP calls).
+        Prevents a slow Telegram/Discord response from stalling the engine loop.
+        """
+        if self._notifier is None:
+            return
+
+        if self._notify_sema is None:
+            self._notify_sema = asyncio.Semaphore(self._notify_concurrency)
+
+        # Cap pending tasks to avoid unbounded memory growth on alert storms.
+        pending = [t for t in self._notify_tasks if not t.done()]
+        if len(pending) >= self._notify_max_pending:
+            logger.warning(
+                "Notifier backlog full (%d pending) — dropping new alert",
+                len(pending),
+            )
+            return
+
+        async def _runner() -> None:
+            assert self._notify_sema is not None
+            try:
+                async with self._notify_sema:
+                    await coro_factory()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Notifier task failed")
+
+        task = asyncio.create_task(_runner())
+        self._notify_tasks.add(task)
+        task.add_done_callback(self._notify_tasks.discard)
 
     @property
     def positions(self) -> Dict[str, Any]:
@@ -479,18 +534,27 @@ class TradingEngine:
                         self._ws_disconnect_start = now
                         logger.warning("WS health check FAILED — no data for >90s")
                         self._ws_health_warned = True
-                    duration = now - self._ws_disconnect_start
-                    if self._notifier is not None:
-                        await self._notifier.ws_disconnect(
-                            exchange="Hyperliquid", duration_sec=duration
+                    if self._notifier is not None and self._ws_disconnect_start is not None:
+                        duration = now - self._ws_disconnect_start
+                        self._notify(
+                            lambda d=duration: self._notifier.ws_disconnect(
+                                exchange="Hyperliquid", duration_sec=d
+                            )
                         )
                 else:
                     if self._ws_health_warned:
-                        duration = now - self._ws_disconnect_start
+                        duration = (
+                            now - self._ws_disconnect_start
+                            if self._ws_disconnect_start is not None
+                            else 0.0
+                        )
                         logger.info("WS health RESTORED after %.0fs", duration)
                         self._ws_health_warned = False
+                        self._ws_disconnect_start = None
                         if self._notifier is not None:
-                            await self._notifier.send_alert("WS reconnected")
+                            self._notify(
+                                lambda: self._notifier.send_alert("WS reconnected")
+                            )
                     self._last_ws_healthy_time = now
             except asyncio.CancelledError:
                 break
@@ -543,11 +607,13 @@ class TradingEngine:
 
                 if self._notifier is not None:
                     pnl_emoji = "+" if daily_pnl >= 0 else ""
-                    await self._notifier.send(
+                    summary_msg = (
                         f"Summary: capital={capital:.0f} | daily_pnl={pnl_emoji}{daily_pnl:.2f} | "
                         f"DD={max_dd*100:.1f}% | positions={len(positions)} | "
-                        f"cb={'TRIPPED' if cb_tripped else 'ok'}",
-                        level="info",
+                        f"cb={'TRIPPED' if cb_tripped else 'ok'}"
+                    )
+                    self._notify(
+                        lambda m=summary_msg: self._notifier.send(m, level="info")
                     )
 
             except Exception:
@@ -665,10 +731,12 @@ class TradingEngine:
                     f"{sym}: cex={h.cex_exchange_count} hl_ok={h.hl_predicted_ok}"
                 )
         details = "\n".join(details_lines[:8]) or "all symbols degraded"
-        await self._notifier.market_data_health_red(
-            summary.overall,
-            details,
-            summary.red_since_sec / 60.0,
+        overall = summary.overall
+        red_min = summary.red_since_sec / 60.0
+        self._notify(
+            lambda: self._notifier.market_data_health_red(
+                overall, details, red_min
+            )
         )
 
     async def _poll_funding_loop(self) -> None:
@@ -773,6 +841,19 @@ class TradingEngine:
 
         # 4. Close executor
         await self._executor.close()
+
+        # 5. Drain pending notifier tasks (B3) — cap wait at 5s
+        if self._notify_tasks:
+            pending = [t for t in self._notify_tasks if not t.done()]
+            if pending:
+                logger.info("Draining %d pending notifier tasks …", len(pending))
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*pending, return_exceptions=True),
+                        timeout=5.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Notifier drain timed out — %d tasks may be cancelled", len(pending))
 
         logger.info("TradingEngine stopped")
 
@@ -910,7 +991,11 @@ class TradingEngine:
                 if cb_tripped and not self._circuit_breaker_notified:
                     self._circuit_breaker_notified = True
                     reason = getattr(self._risk, '_circuit_breaker_reason', 'unknown')
-                    await self._notifier.circuit_breaker(reason=reason, action='Trading halted')
+                    self._notify(
+                        lambda: self._notifier.circuit_breaker(
+                            reason=reason, action='Trading halted'
+                        )
+                    )
                 elif not cb_tripped and self._circuit_breaker_notified:
                     self._circuit_breaker_notified = False
 
@@ -2119,12 +2204,17 @@ class TradingEngine:
 
         # --- Notify trade entry ---
         if self._notifier is not None:
-            await self._notifier.trade_entry(
-                symbol=signal.symbol,
-                side=signal.side,
-                size=result.size,
-                price=result.entry_price,
-                strategy=signal.strategy,
+            sym, side, size, price, strat = (
+                signal.symbol,
+                signal.side,
+                result.size,
+                result.entry_price,
+                signal.strategy,
+            )
+            self._notify(
+                lambda: self._notifier.trade_entry(
+                    symbol=sym, side=side, size=size, price=price, strategy=strat,
+                )
             )
 
     async def _process_exit_signal(self, exit_signal: ExitSignal, position: Position) -> None:
@@ -2262,6 +2352,23 @@ class TradingEngine:
         strategy = position.metadata.get("strategy", "unknown")
         self._update_cooldown_on_exit(strategy, position.symbol, result.pnl_pct)
 
+        # --- Record per-strategy PnL row (for dashboard drill-down) ---
+        try:
+            self._db.record_strategy_pnl(
+                strategy=strategy,
+                symbol=position.symbol,
+                side=position.side,
+                pnl_usd=result.pnl_usd,
+                pnl_pct=result.pnl_pct,
+                size=position.size,
+                entry_time=position.entry_time_ms,
+                exit_time=result.exit_time_ms if hasattr(result, "exit_time_ms") else int(time.time() * 1000),
+                exit_reason=reason,
+                trade_id=position.metadata.get("trade_id") if position.metadata else None,
+            )
+        except Exception:
+            logger.exception("Failed to record strategy_pnl row for %s", position.symbol)
+
         self._decision_history.insert(0, {
             "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
             "type": "exit",
@@ -2282,12 +2389,15 @@ class TradingEngine:
 
         # --- Notify trade exit ---
         if self._notifier is not None:
-            await self._notifier.trade_exit(
-                symbol=position.symbol,
-                side=position.side,
-                pnl=result.pnl_usd,
-                exit_price=result.exit_price if hasattr(result, 'exit_price') else result.entry_price,
-                strategy=position.metadata.get("strategy", "unknown"),
+            sym = position.symbol
+            side = position.side
+            pnl = result.pnl_usd
+            exit_px = result.exit_price if hasattr(result, 'exit_price') else result.entry_price
+            strat = position.metadata.get("strategy", "unknown")
+            self._notify(
+                lambda: self._notifier.trade_exit(
+                    symbol=sym, side=side, pnl=pnl, exit_price=exit_px, strategy=strat,
+                )
             )
 
     async def _flatten_all_positions(self, _current_price: float) -> None:

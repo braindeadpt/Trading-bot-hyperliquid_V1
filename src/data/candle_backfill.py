@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import urllib.request
 from typing import Any, List, Optional, Sequence
@@ -21,6 +22,9 @@ BINANCE_INTERVALS = {
 
 DEFAULT_TIMEFRAMES = ("1m", "5m", "15m", "1h")
 
+DEFAULT_BACKFILL_TIMEOUT_SEC = 15.0
+PER_REQUEST_TIMEOUT_SEC = 5.0
+
 
 def _limit_for_days(tf: str, days: int) -> int:
     per_day = {"1m": 24 * 60, "5m": 24 * 12, "15m": 24 * 4, "1h": 24}
@@ -33,7 +37,7 @@ def fetch_binance_klines(symbol: str, interval: str, limit: int = 1000) -> list:
         f"https://api.binance.com/api/v3/klines"
         f"?symbol={symbol}USDT&interval={interval}&limit={limit}"
     )
-    with urllib.request.urlopen(url, timeout=15) as resp:
+    with urllib.request.urlopen(url, timeout=PER_REQUEST_TIMEOUT_SEC) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -71,14 +75,28 @@ def backfill_symbols(
     symbols: Sequence[str],
     days: int = 7,
     timeframes: Sequence[str] = DEFAULT_TIMEFRAMES,
+    timeout_sec: float = DEFAULT_BACKFILL_TIMEOUT_SEC,
 ) -> int:
-    """Download and store candles from Binance. Returns total rows saved."""
+    """Download and store candles from Binance. Returns total rows saved.
+
+    Aborts early when cumulative wall time exceeds ``timeout_sec`` (per-call
+    timeout is :data:`PER_REQUEST_TIMEOUT_SEC`). Set ``BOT_BACKFILL_TIMEOUT_SEC``
+    to override. Returns rows successfully stored before the cap.
+    """
     total = 0
+    deadline = time.monotonic() + max(0.0, float(timeout_sec))
     for symbol in symbols:
         sym = symbol.strip().upper()
         for tf in timeframes:
             if tf not in BINANCE_INTERVALS:
                 continue
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "Backfill timeout reached (%.1fs) — aborting after %d rows",
+                    timeout_sec,
+                    total,
+                )
+                return total
             limit = _limit_for_days(tf, days)
             try:
                 raw = fetch_binance_klines(sym, BINANCE_INTERVALS[tf], limit)
@@ -112,6 +130,9 @@ def ensure_candle_history(
     min_15m = int(config.get("database.backfill_min_candles_15m", 80))
     days = int(config.get("database.backfill_days", 7))
     timeframes = config.get("database.backfill_timeframes", list(DEFAULT_TIMEFRAMES))
+    timeout_sec = float(
+        os.environ.get("BOT_BACKFILL_TIMEOUT_SEC", DEFAULT_BACKFILL_TIMEOUT_SEC)
+    )
 
     need = needs_backfill(db, symbols, min_15m)
     if not need:
@@ -122,8 +143,11 @@ def ensure_candle_history(
         return 0
 
     active_log.info(
-        "Backfilling Binance history (%d days) for %s — faster strategy warm-up",
+        "Backfilling Binance history (%d days, cap=%.1fs) for %s — faster strategy warm-up",
         days,
+        timeout_sec,
         ", ".join(need),
     )
-    return backfill_symbols(db, symbols, days=days, timeframes=timeframes)
+    return backfill_symbols(
+        db, symbols, days=days, timeframes=timeframes, timeout_sec=timeout_sec
+    )

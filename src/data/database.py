@@ -170,6 +170,7 @@ class Database:
             self._create_funding_table()
             self._create_oi_table()
             self._create_portfolio_table()
+            self._create_strategy_pnl_table()
             self._migrate_portfolio_table()
             self._migrate_trades_table()
             self._create_indexes()
@@ -259,6 +260,24 @@ class Database:
             );
         """)
 
+    def _create_strategy_pnl_table(self) -> None:
+        self._conn().execute("""
+            CREATE TABLE IF NOT EXISTS strategy_pnl (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                strategy    TEXT    NOT NULL,
+                symbol      TEXT    NOT NULL,
+                side        TEXT    NOT NULL,
+                pnl_usd     REAL    NOT NULL,
+                pnl_pct     REAL    NOT NULL,
+                size        REAL    NOT NULL,
+                entry_time  INTEGER NOT NULL,
+                exit_time   INTEGER NOT NULL,
+                exit_reason TEXT,
+                trade_id    INTEGER,
+                is_win      INTEGER NOT NULL
+            );
+        """)
+
     def _migrate_portfolio_table(self) -> None:
         """Add peak_capital column to existing portfolio_snapshots table."""
         try:
@@ -287,6 +306,8 @@ class Database:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_funding_symbol_ts ON funding_history(symbol, timestamp);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_oi_symbol_ts ON oi_history(symbol, timestamp);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_ts ON portfolio_snapshots(timestamp);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_strategy_pnl_strategy ON strategy_pnl(strategy);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_strategy_pnl_exit_time ON strategy_pnl(exit_time);")
 
     # ------------------------------------------------------------------
     # Candles
@@ -468,6 +489,88 @@ class Database:
             cur = self._conn().execute(sql, params)
             rows = cur.fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Strategy PnL (per-strategy breakdown)
+    # ------------------------------------------------------------------
+
+    def record_strategy_pnl(
+        self,
+        strategy: str,
+        symbol: str,
+        side: str,
+        pnl_usd: float,
+        pnl_pct: float,
+        size: float,
+        entry_time: int,
+        exit_time: int,
+        exit_reason: str,
+        trade_id: Optional[int],
+    ) -> None:
+        """Insert a closed-trade row into the strategy_pnl table for drill-down."""
+        sql = """
+            INSERT INTO strategy_pnl (
+                strategy, symbol, side, pnl_usd, pnl_pct, size,
+                entry_time, exit_time, exit_reason, trade_id, is_win
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        is_win = 1 if pnl_usd > 0 else 0
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, (
+                strategy, symbol, side, pnl_usd, pnl_pct, size,
+                entry_time, exit_time, exit_reason, trade_id, is_win,
+            ))
+            conn.commit()
+
+    def get_strategy_pnl(
+        self,
+        since_ms: Optional[int] = None,
+        strategy: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return per-strategy aggregate stats.
+
+        When ``since_ms`` is provided only closed trades with
+        ``exit_time >= since_ms`` are considered (default: all time).
+        """
+        where: List[str] = []
+        params: List[Any] = []
+        if since_ms is not None:
+            where.append("exit_time >= ?")
+            params.append(since_ms)
+        if strategy is not None:
+            where.append("strategy = ?")
+            params.append(strategy)
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        sql = f"""
+            SELECT
+                strategy,
+                COUNT(*)              AS trades,
+                SUM(is_win)           AS wins,
+                SUM(pnl_usd)          AS total_pnl_usd,
+                AVG(pnl_pct) * 100    AS avg_pnl_pct,
+                AVG(CASE WHEN pnl_usd > 0 THEN pnl_pct ELSE 0 END) * 100 AS avg_win_pct,
+                AVG(CASE WHEN pnl_usd < 0 THEN pnl_pct ELSE 0 END) * 100 AS avg_loss_pct,
+                MAX(pnl_usd)          AS best_trade_usd,
+                MIN(pnl_usd)          AS worst_trade_usd,
+                MAX(exit_time)        AS last_exit_ms
+            FROM strategy_pnl
+            {where_sql}
+            GROUP BY strategy
+            ORDER BY total_pnl_usd DESC
+        """
+        with self._conn():
+            cur = self._conn().execute(sql, params)
+            rows = cur.fetchall()
+        results: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            trades = d.get("trades") or 0
+            wins = d.get("wins") or 0
+            d["win_rate"] = round((wins / trades) if trades else 0.0, 4)
+            results.append(d)
+        return results
 
     # ------------------------------------------------------------------
     # Signals

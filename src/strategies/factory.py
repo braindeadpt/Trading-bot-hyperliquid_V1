@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, List
 
 from src.strategies.base import Strategy
@@ -14,6 +15,8 @@ from src.strategies.orderbook_scalper import OrderBookScalper
 from src.strategies.trend_follow import TrendFollow
 from src.strategies.volatility_breakout import VolatilityBreakout
 from src.strategies.vwap_deviation import VWAPDeviation
+
+logger = logging.getLogger(__name__)
 
 _STRATEGY_REGISTRY = (
     ("strategy.trend_follow", TrendFollow),
@@ -64,6 +67,12 @@ def build_sub_strategies(cfg: Any) -> List[Strategy]:
     """Instantiate enabled (or auto-enable) sub-strategies from config."""
     strategies: List[Strategy] = []
     for path, cls in _STRATEGY_REGISTRY:
+        if hasattr(cfg, "has_path") and not cfg.has_path(path):
+            logger.warning(
+                "Strategy section '%s' missing from config — using built-in defaults "
+                "(add the section explicitly to silence this warning).",
+                path,
+            )
         section = cfg.get(path, {}) or {}
         if path in ("strategy.mean_reversion", "strategy.funding_arbitrage"):
             section = _enrich_funding_strategy_config(cfg, section)
