@@ -1,24 +1,32 @@
 """Backfill candle history from Binance into the bot's SQLite database.
 
+Thin wrapper around :func:`src.data.candle_backfill.backfill_symbols`.
+On normal bot start, backfill runs automatically when history is missing
+(see ``database.auto_backfill_on_start`` in ``config/settings.yaml``).
+
 Usage:
     python scripts/backfill_candles.py
     python scripts/backfill_candles.py --symbols BTC,ETH,SOL --days 7
     python scripts/backfill_candles.py --db-path data/live/bot.db
 
-On normal bot start, backfill runs automatically when history is missing
-(see database.auto_backfill_on_start in config/settings.yaml).
+Honors ``BOT_BACKFILL_TIMEOUT_SEC`` (default 15s).
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.data.candle_backfill import backfill_symbols, needs_backfill
+from src.data.candle_backfill import (
+    DEFAULT_BACKFILL_TIMEOUT_SEC,
+    backfill_symbols,
+    needs_backfill,
+)
 from src.data.database import Database
 from src.utils.config import load_config
 
@@ -28,6 +36,12 @@ def main() -> None:
     parser.add_argument("--db-path", default="", help="Path to bot SQLite DB")
     parser.add_argument("--symbols", default="", help="Comma-separated symbols")
     parser.add_argument("--days", type=int, default=0, help="Days of history to fetch")
+    parser.add_argument(
+        "--timeout-sec",
+        type=float,
+        default=float(os.environ.get("BOT_BACKFILL_TIMEOUT_SEC", DEFAULT_BACKFILL_TIMEOUT_SEC)),
+        help="Total wall-time cap (default: 15s, override with BOT_BACKFILL_TIMEOUT_SEC)",
+    )
     parser.add_argument("--force", action="store_true", help="Backfill even if DB looks warm")
     args = parser.parse_args()
 
@@ -55,8 +69,16 @@ def main() -> None:
         db.close()
         return
 
-    print(f"Backfilling {', '.join(targets)} ({days} days)...")
-    total = backfill_symbols(db, targets, days=days, timeframes=timeframes)
+    print(
+        f"Backfilling {', '.join(targets)} ({days} days, cap={args.timeout_sec:.1f}s)..."
+    )
+    total = backfill_symbols(
+        db,
+        targets,
+        days=days,
+        timeframes=timeframes,
+        timeout_sec=args.timeout_sec,
+    )
     db.close()
     print(f"\nDone! {total} candles saved to {db_path}")
 

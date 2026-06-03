@@ -192,7 +192,16 @@ class TradingEngine:
         # Internal state
         self._running: bool = False
         self._shutdown_event: Optional[asyncio.Event] = None
-        self._event_lock = asyncio.Lock()
+        # B2: per-symbol locks replace the old global _event_lock so events
+        # for different symbols process in parallel. PortfolioState and the
+        # trade-execution subsystem keep their own internal locks for
+        # cross-symbol writes.
+        self._symbol_locks: Dict[str, asyncio.Lock] = {
+            sym: asyncio.Lock() for sym in self._symbols
+        }
+        # Held only by cross-symbol operations (e.g. circuit-breaker flatten)
+        # that must not interleave with themselves.
+        self._cross_symbol_lock = asyncio.Lock()
         self._start_time: Optional[float] = None
 
         # Track which topics we subscribed to so we can unsubscribe on stop
@@ -402,6 +411,20 @@ class TradingEngine:
 
     # ── Notifier fire-and-forget (B3) ──
 
+    def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
+        """Return the per-symbol asyncio lock, creating on demand.
+
+        B2: a per-symbol lock replaces the previous global ``_event_lock``
+        so events for different symbols (BTC vs ETH vs SOL) process in
+        parallel. Same-symbol events stay serialized, preserving the
+        read-your-writes consistency the strategy code depends on.
+        """
+        lock = self._symbol_locks.get(symbol)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._symbol_locks[symbol] = lock
+        return lock
+
     def _notify(self, coro_factory: Callable[[], "asyncio.Future[Any]"]) -> None:
         """Schedule a notifier coroutine fire-and-forget.
 
@@ -441,6 +464,22 @@ class TradingEngine:
     @property
     def positions(self) -> Dict[str, Any]:
         return self._portfolio.get_positions_sync() if hasattr(self._portfolio, "get_positions_sync") else {}
+
+    @property
+    def portfolio_snapshot_sync(self):
+        """Return an atomic frozen snapshot of portfolio state (B2b).
+
+        Safe to call from sync contexts (e.g. the dashboard emitter
+        thread). Performs a single internal lock acquisition, eliminating
+        the TOCTOU window between separate sync reads.
+        """
+        if not hasattr(self._portfolio, "snapshot_sync"):
+            return None
+        try:
+            return self._portfolio.snapshot_sync()
+        except Exception:
+            logger.exception("portfolio_snapshot_sync failed")
+            return None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -981,7 +1020,7 @@ class TradingEngine:
                 logger.warning("WS appears unhealthy — market data may be stale")
                 self._ws_health_warned = True
 
-        async with self._event_lock:
+        async with self._get_symbol_lock(symbol):
             if not self._running:
                 return
 

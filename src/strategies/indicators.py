@@ -175,41 +175,58 @@ def calculate_bollinger_bands(
     return lower, middle, upper
 
 
-def detect_support_resistance(candles: List[Candle], lookback: int = 50) -> Tuple[Optional[float], Optional[float]]:
-    """Detect support and resistance levels via pivot highs/lows.
-    
-    A pivot high: high > neighbors on both sides (3-bar lookaround).
-    A pivot low:  low  < neighbors on both sides.
-    Support = median of recent pivot lows.
-    Resistance = median of recent pivot highs.
+def detect_support_resistance(
+    candles: List[Candle],
+    lookback: int = 50,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Detect support and resistance via causal Williams Fractals.
+
+    A pivot high at bar ``i-2`` is confirmed when its high is strictly
+    greater than the highs of bars ``i-3`` and ``i-1`` (and bar ``i``
+    must not exceed it). This means the pivot is *known* 2 bars after
+    it occurs, so the indicator is fully causal — safe for live and
+    backtest use.
+
+    Returns ``(support, resistance)`` as the median of the last few
+    confirmed pivot lows / highs, or a min/max fallback over the
+    lookback window when no pivots are present.
     """
-    if len(candles) < lookback + 2:
+    if len(candles) < lookback + 3:
         return None, None
 
     pivot_highs: List[float] = []
     pivot_lows: List[float] = []
 
-    for i in range(2, len(candles) - 2):
-        prev2 = candles[i - 2]
+    # Causal scan: a pivot at index `i - 2` is decided using bars
+    # `i - 3`, `i - 2`, `i - 1`, `i`. Loop runs while those indices
+    # are all inside the array, so the result for bar `i` only
+    # references data that is already available at decision time.
+    for i in range(3, len(candles)):
+        prev3 = candles[i - 3]
+        pivot = candles[i - 2]
         prev1 = candles[i - 1]
         curr = candles[i]
-        next1 = candles[i + 1]
-        next2 = candles[i + 2]
 
-        if curr.high > prev2.high and curr.high > prev1.high and curr.high > next1.high and curr.high > next2.high:
-            pivot_highs.append(curr.high)
-        if curr.low < prev2.low and curr.low < prev1.low and curr.low < next1.low and curr.low < next2.low:
-            pivot_lows.append(curr.low)
+        if (
+            pivot.high > prev3.high
+            and pivot.high > prev1.high
+            and pivot.high >= curr.high
+        ):
+            pivot_highs.append(pivot.high)
+        if (
+            pivot.low < prev3.low
+            and pivot.low < prev1.low
+            and pivot.low <= curr.low
+        ):
+            pivot_lows.append(pivot.low)
 
     if not pivot_highs or not pivot_lows:
-        # Fallback: use min/max of lookback window
+        # Fallback: min/max of the lookback window (causal — only past data)
         window = candles[-lookback:]
         return min(c.low for c in window), max(c.high for c in window)
 
-    # Use median of last few pivots
     recent_highs = pivot_highs[-5:] if len(pivot_highs) >= 5 else pivot_highs
     recent_lows = pivot_lows[-5:] if len(pivot_lows) >= 5 else pivot_lows
-
     recent_highs.sort()
     recent_lows.sort()
 

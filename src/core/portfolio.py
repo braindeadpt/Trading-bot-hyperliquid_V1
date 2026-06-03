@@ -59,6 +59,26 @@ class _PositionSnapshot:
         )
 
 
+@dataclass(frozen=True)
+class PortfolioSnapshotView:
+    """Atomic, read-only snapshot of portfolio state for dashboards.
+
+    Produced by :meth:`PortfolioState.snapshot_sync` under a single
+    internal lock acquisition, then frozen so the dashboard / status
+    endpoint can read every counter without racing the writer.
+    """
+    cash: float
+    peak_capital: float
+    total_equity: float
+    unrealized_pnl: float
+    daily_pnl: float
+    daily_trades: int
+    max_drawdown_pct: float
+    position_count: int
+    positions: Dict[str, Position]
+    last_reset_date: str
+
+
 class PortfolioState:
     """Thread-safe portfolio state tracker.
 
@@ -477,3 +497,42 @@ class PortfolioState:
     def sync_trade_history(self) -> List[Dict[str, Any]]:
         """Return a copy of closed-trade history."""
         return list(self._trade_history)
+
+    # ------------------------------------------------------------------
+    # Atomic snapshot (B2b) — single lock acquisition returns a
+    # frozen view of every value the dashboard / status endpoint needs,
+    # eliminating the TOCTOU window between separate sync reads.
+    # ------------------------------------------------------------------
+
+    def snapshot_sync(self) -> "PortfolioSnapshotView":
+        """Return a consistent frozen view of all dashboard-visible state.
+
+        Performs a single ``_lock`` acquisition (non-async) and packages
+        every counter the dashboard / status endpoint reads into one
+        ``frozen=True`` dataclass. Consumers then read from the snapshot
+        without ever racing the event-loop writer.
+        """
+        positions = {
+            sym: p.to_position() for sym, p in self._positions.items()
+        }
+        total_equity = self._cash + sum(
+            self._position_equity(p) for p in self._positions.values()
+        )
+        unrealized = sum(p.unrealized_pnl for p in self._positions.values())
+        max_dd_pct = 0.0
+        if self._peak_capital > 0.0:
+            max_dd_pct = max(
+                (self._peak_capital - total_equity) / self._peak_capital, 0.0
+            ) * 100.0
+        return PortfolioSnapshotView(
+            cash=self._cash,
+            peak_capital=self._peak_capital,
+            total_equity=total_equity,
+            unrealized_pnl=unrealized,
+            daily_pnl=self._daily_pnl,
+            daily_trades=self._daily_trades,
+            max_drawdown_pct=max_dd_pct,
+            position_count=len(self._positions),
+            positions=positions,
+            last_reset_date=self._last_reset_date,
+        )

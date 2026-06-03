@@ -111,18 +111,56 @@ HlOrderbook = HlL2Book
 # ---------------------------------------------------------------------------
 
 class DataBus:
-    """Simple publish/subscribe message bus (thread-safe)."""
+    """Simple publish/subscribe message bus (thread-safe).
 
-    def __init__(self) -> None:
+    B13: adds a per-topic publish-rate limiter. When a topic exceeds
+    ``rate_limit_hz`` messages within a 1-second window, subsequent
+    publishes are dropped (and counted) to prevent a reconnect storm
+    from queueing thousands of tasks on the event loop. Set
+    ``rate_limit_hz=0`` to disable.
+    """
+
+    DEFAULT_RATE_LIMIT_HZ = 200
+    _RATE_WINDOW_SEC = 1.0
+
+    def __init__(self, rate_limit_hz: int = DEFAULT_RATE_LIMIT_HZ) -> None:
         self._listeners: Dict[str, List[Callable[[Any], Any]]] = {}
         self._lock = asyncio.Lock()
         self._tasks: set = set()  # Keep strong refs to prevent Python 3.14 deallocation crash
+        self._rate_limit_hz = max(0, int(rate_limit_hz))
+        # Per-topic sliding window: list of timestamps for current second
+        self._rate_window: Dict[str, List[float]] = {}
+        self._dropped_total: Dict[str, int] = {}
+        self._last_drop_warn: Dict[str, float] = {}
 
     async def subscribe(self, topic: str, callback: Callable[[Any], Any]) -> None:
         async with self._lock:
             self._listeners.setdefault(topic, []).append(callback)
 
     def publish(self, topic: str, data: Any) -> None:
+        # ── B13 backpressure gate ──
+        if self._rate_limit_hz > 0:
+            now = time.time()
+            window = self._rate_window.setdefault(topic, [])
+            cutoff = now - self._RATE_WINDOW_SEC
+            # Trim window to current second
+            while window and window[0] < cutoff:
+                window.pop(0)
+            if len(window) >= self._rate_limit_hz:
+                self._dropped_total[topic] = self._dropped_total.get(topic, 0) + 1
+                # Warn at most once per minute per topic
+                last_warn = self._last_drop_warn.get(topic, 0.0)
+                if now - last_warn >= 60.0:
+                    self._last_drop_warn[topic] = now
+                    logger.warning(
+                        "DataBus rate limit hit on '%s' (>=%d msg/s) — "
+                        "dropping publishes to prevent event-loop flood",
+                        topic,
+                        self._rate_limit_hz,
+                    )
+                return
+            window.append(now)
+
         listeners = self._listeners.get(topic, [])
         for cb in listeners:
             try:
@@ -135,6 +173,17 @@ class DataBus:
                     cb(data)
             except Exception:
                 logger.exception("DataBus callback error on %s", topic)
+
+    def last_publish_age_sec(self, topic: str) -> Optional[float]:
+        """Return seconds since the last successful publish on *topic*."""
+        window = self._rate_window.get(topic)
+        if not window:
+            return None
+        return max(0.0, time.time() - window[-1])
+
+    def dropped_counts(self) -> Dict[str, int]:
+        """Return a snapshot of dropped-message counters per topic."""
+        return dict(self._dropped_total)
 
     async def unsubscribe(self, topic: str, callback: Callable[[Any], Any]) -> None:
         async with self._lock:
