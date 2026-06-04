@@ -5,6 +5,7 @@ logs/
 data/live/*.db
 data/live/*.db-shm
 data/live/*.db-wal
+data/live/archive/         # rotated DB backups
 data/test_health.db
 data/vault.enc
 
