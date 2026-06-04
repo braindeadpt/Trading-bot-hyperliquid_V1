@@ -1,8 +1,10 @@
 @echo off
 chcp 65001 >nul
-title Hyperliquid Premium Bot - Quick Start
+title Hyperliquid Premium Bot v3.1.10 - Quick Start
 
 :: Quick launcher - Paper Trading with dashboard
+:: Bot v3.1.10 ships with: per-symbol locks, vol circuit breaker,
+:: funding-reset blackout, mainnet defaults override.
 :: For advanced options use start.bat
 :: For background operation with crash recovery use service.bat
 :: For crash recovery with log analysis use run_with_recovery.py

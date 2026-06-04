@@ -23,7 +23,8 @@ if errorlevel 1 (
 :: Show menu
 echo.
 echo ╔══════════════════════════════════════════════════════════╗
-echo ║    HYPERLIQUID PREMIUM BOT v3.1.0                        ║
+echo ║    HYPERLIQUID PREMIUM BOT v3.1.10                       ║
+echo ║    (Phases A+B+C: hardening, concurrency, risk gates)   ║
 echo ╚══════════════════════════════════════════════════════════╝
 echo.
 echo Choose mode:
@@ -32,19 +33,23 @@ echo   [2] Testnet         (Hyperliquid testnet, paper money)
 echo   [3] Mainnet         (REAL MONEY — confirm required)
 echo   [4] Backtest        (historical simulation)
 echo   [5] Security Audit  (scan code for vulnerabilities)
-echo   [6] Update from GitHub  (git pull latest)
-echo   [7] Crash Recovery     (restart with log analysis, Task 5.2)
+echo   [6] Look-ahead Audit  (CIs detect future-data leakage)
+echo   [7] Cascade Stress    (Phase C vol circuit simulation)
+echo   [8] Update from GitHub  (git pull latest)
+echo   [9] Crash Recovery     (restart with log analysis, Task 5.2)
 echo   [0] Exit
 echo.
-set /p choice="Enter option [1-7,0]: "
+set /p choice="Enter option [0-9]: "
 
 if "%choice%"=="1" goto paper
 if "%choice%"=="2" goto testnet
 if "%choice%"=="3" goto mainnet
 if "%choice%"=="4" goto backtest
 if "%choice%"=="5" goto audit
-if "%choice%"=="6" goto update
-if "%choice%"=="7" goto recovery
+if "%choice%"=="6" goto lookahead
+if "%choice%"=="7" goto cascade
+if "%choice%"=="8" goto update
+if "%choice%"=="9" goto recovery
 if "%choice%"=="0" goto end
 
 echo Invalid option.
@@ -131,6 +136,24 @@ echo Installing/updating dependencies...
 python -m pip install -r requirements.txt
 echo.
 echo Done. Press any key to return.
+pause
+goto end
+
+:lookahead
+echo.
+echo [MODE] Look-ahead Audit (static scan for future-data leakage)
+echo.
+python scripts/lookahead_audit.py --ci
+echo.
+pause
+goto end
+
+:cascade
+echo.
+echo [MODE] Cascade Stress Test (vol circuit + funding blackout + DD CB)
+echo.
+python tests/test_cascade_simulation.py
+echo.
 pause
 goto end
 

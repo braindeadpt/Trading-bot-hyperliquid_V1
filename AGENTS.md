@@ -222,6 +222,8 @@ python tests/test_task_3_2.py            # VWAPDeviation Z-score, entry, ADX fil
 python tests/test_task_3_3.py            # LiquidationCatcher entry, filters, 2R exit, max hold
 python tests/test_fase_4.py              # Portfolio governance: drawdown, exposure, Kelly
 python tests/test_basic.py               # unittest smoke tests for core components
+python tests/test_cascade_simulation.py  # Phase C: vol circuit + funding blackout + DD CB
+python scripts/lookahead_audit.py --ci   # Phase B: static scan for future-data leakage
 ```
 
 ### Notes
@@ -229,6 +231,8 @@ python tests/test_basic.py               # unittest smoke tests for core compone
 - There is **no centralized test runner** (no `pytest.ini`, `tox.ini`, or CI pipeline).
 - `pytest` and `pytest-asyncio` are listed as commented-out optional dependencies in `requirements.txt`.
 - **`tests/test_critical_fixes.py`** — tests for the v3.1.1 patch (drawdown circuit, portfolio restore, FundingArbitrage lifecycle, execution exit price fix). Always run this after modifying core engine, portfolio, risk, or execution.
+- **`tests/test_cascade_simulation.py`** (Phase C, v3.1.10) — 7 stress tests covering VolatilityCircuitBreaker trip/extend/per-symbol isolation/snapshot, FundingBlackoutFilter 9 boundary cases, DD CB regression, and cold-start guard.
+- **`scripts/lookahead_audit.py --ci`** (Phase B, v3.1.9) — static scan for future-data access (LOOKAHEAD-001..006). Fails CI on any non-LOW finding.
 
 ### Component Health Check
 ```bash
@@ -325,6 +329,25 @@ def on_position(self, position: Position) -> Optional[ExitSignal]: ...
 ### Determinism
 Backtest and live modes share the **exact same** strategy and risk logic. The only difference is the data source (historical DB candles vs. live WebSocket ticks) and the execution layer (simulated fills vs. REST API orders).
 
+### Risk Gate Order (Phase C, v3.1.10)
+Every entry signal flows through these gates in order — fail any one → reject:
+1. **Per-symbol lock** (`_get_symbol_lock` in `engine.py:983`) — serializes same-symbol processing.
+2. **Volatility circuit breaker** (`VolatilityCircuitBreaker.is_blocked`) — soft gate; blocks entries when ATR(1h) > 3x 7d baseline for 30min. Config: `risk.volatility_circuit_breaker`.
+3. **Funding-reset blackout** (`FundingBlackoutFilter.is_blocked`) — global time-of-day filter; blocks entries 5min before/after 00:00/08:00/16:00 UTC. Config: `risk.funding_blackout`.
+4. **Correlation monitor** — rejects highly-correlated position adds (governed by `strategy.portfolio_governance.max_correlation`).
+5. **`RiskManager.can_enter`** — daily trade count, daily loss, drawdown circuit, exposure caps, position-size cap, ATR-based sizing, leverage cap, max-positions.
+6. **TCA check** (`passes_tca_check`) — slippage + fill ratio from L2 book.
+7. **Order routing** (`resolve_order_routing`) — `post_only` vs `market` vs `limit`.
+
+Soft gates (vol CB, funding blackout, correlation) only block new entries — never force exits. Hard gates (drawdown CB, daily loss) own flatten behavior.
+
+### Per-Mode Overrides (Phase C, v3.1.10)
+`mode_overrides.<mode>` in `settings.yaml` is shallow-merged on top of the active section by `_apply_mode_overrides` in `src/utils/config.py`. Used to ship safer mainnet defaults:
+- `mainnet`: leverage 5x (was 10), max_daily_loss 2% (was 3), max_daily_trades 20 (was unlimited), max_pos 3% (was 5).
+- `testnet`: max_daily_trades 50.
+
+Effective settings are logged once at engine start (`Effective risk: leverage=...`).
+
 ---
 
 ## 10. Important Files for Agents
@@ -336,14 +359,18 @@ Backtest and live modes share the **exact same** strategy and risk logic. The on
 | `src/core/engine.py` | `TradingEngine` — the main event loop. Any change to signal flow or timing goes here. |
 | `src/core/risk_manager.py` | Central risk gate. Changing position limits or adding new risk rules happens here. |
 | `src/core/execution.py` | `ExecutionEngine` — paper simulation and live order submission. |
+| `src/core/volatility_circuit.py` | `VolatilityCircuitBreaker` — soft per-symbol gate (Phase C, v3.1.10). |
+| `src/core/funding_blackout.py` | `FundingBlackoutFilter` — time-of-day entry filter (Phase C, v3.1.10). |
 | `src/strategies/base.py` | `Strategy` ABC, `MarketEvent`, `Signal`, `Position`, `ExitSignal`. |
 | `src/exchanges/hyperliquid_ws.py` | WebSocket client and `DataBus` pub/sub implementation. |
 | `src/strategies/orderbook_scalper.py` | OrderBookScalper — scalps bid_ask_ratio micro-imbalances with tight TP/SL. |
 | `src/strategies/ensemble.py` | StrategyEnsemble — weighted consensus across all 6 sub-strategies. |
 | `src/data/database.py` | SQLite schema and all persistence queries. |
 | `scripts/backfill_candles.py` | Binance historical candle backfill to populate candle tables before bot start. |
+| `scripts/lookahead_audit.py` | `LOOKAHEAD-001..006` static scanner (Phase B, v3.1.9). |
 | `src/security/audit.py` | Static security scanner. If you add new file-I/O or HTTP patterns, update the auditor. |
 | `config/settings.yaml` | All tunable parameters. Add new strategy params here and in `DEFAULT_CONFIG`. |
+| `src/utils/config.py` | Configuration loader: defaults, deep-merge, env overrides, **`_apply_mode_overrides`**. |
 
 ---
 
@@ -351,7 +378,7 @@ Backtest and live modes share the **exact same** strategy and risk logic. The on
 
 Before submitting any code change:
 
-1. **Run the security audit** and ensure zero CRITICAL / HIGH findings:
+1. **Run the security audit** and ensure zero CRITICAL / MED / LOW findings (HIGH is acceptable only for pre-existing `AUDIT-005` in `crash_recovery.py`):
    ```bash
    python main.py --audit
    ```
@@ -362,14 +389,20 @@ Before submitting any code change:
 3. **Run the relevant test files** for the subsystem you changed:
    ```bash
    python tests/test_basic.py
+   python tests/test_critical_fixes.py
+   python tests/test_cascade_simulation.py
    python tests/test_<relevant_task>.py
    ```
-4. **Ensure type hints** are present on new public functions.
-5. **Use safe helpers** (`safe_float`, `safe_json_loads`, `validate_safe_path`) instead of raw conversions.
-6. **Do not add** `eval`, `exec`, `pickle.loads`, `subprocess`, or hardcoded secrets.
-7. **Update `DEFAULT_CONFIG`** in `src/utils/config.py` if you introduce new required config keys.
-8. **Update this `AGENTS.md`** if you change build steps, testing procedures, or security rules.
+4. **Run the look-ahead audit** to catch future-data access regressions:
+   ```bash
+   python scripts/lookahead_audit.py --ci
+   ```
+5. **Ensure type hints** are present on new public functions.
+6. **Use safe helpers** (`safe_float`, `safe_json_loads`, `validate_safe_path`) instead of raw conversions.
+7. **Do not add** `eval`, `exec`, `pickle.loads`, `subprocess`, or hardcoded secrets.
+8. **Update `DEFAULT_CONFIG`** in `src/utils/config.py` if you introduce new required config keys.
+9. **Update this `AGENTS.md`** if you change build steps, testing procedures, or security rules.
 
 ---
 
-*Last updated: 2026-05-11 (v3.1.1 patch applied)*
+*Last updated: 2026-06-03 (v3.1.10 — Phases A + B + C applied)*
