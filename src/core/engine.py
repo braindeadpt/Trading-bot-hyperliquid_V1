@@ -654,7 +654,7 @@ class TradingEngine:
                     "long_exposure=%.2f | short_exposure=%.2f | "
                     "open_pos=%d | daily_trades=%d | cb=%s | "
                     "strategies=%s",
-                    capital, daily_pnl, max_dd * 100,
+                    capital, daily_pnl, max_dd,
                     long_exposure, short_exposure,
                     len(positions), daily_trades,
                     "TRIPPED" if cb_tripped else "ok",
