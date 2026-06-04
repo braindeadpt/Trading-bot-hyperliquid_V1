@@ -69,49 +69,60 @@ class AggregatedFundingOI:
 # ── Exchange clients ──
 
 class CoinalyzeClient:
-    """Coinalyze API — aggregated funding + OI from 15+ exchanges."""
+    """Coinalyze API — aggregated funding + OI from 15+ exchanges.
+
+    Free tier: 40 requests/min.  We issue 3 parallel calls per symbol
+    (funding-rate, predicted-funding-rate, open-interest) and merge.
+    """
     BASE = "https://api.coinalyze.net/v1"
 
     def __init__(self, api_key: str):
         self.api_key = api_key
 
-    async def fetch(self, session: aiohttp.ClientSession, symbol: str) -> Optional[FundingOI]:
-        """symbol: BTCUSDT_PERP"""
+    async def _get(
+        self,
+        session: aiohttp.ClientSession,
+        path: str,
+        symbol: str,
+    ) -> Optional[Dict[str, Any]]:
         try:
             async with session.get(
-                f"{self.BASE}/futures/funding/latest",
+                f"{self.BASE}{path}",
                 params={"symbols": symbol},
                 headers={"api-key": self.api_key},
             ) as resp:
                 if resp.status != 200:
-                    logger.warning("Coinalyze HTTP %s for %s", resp.status, symbol)
+                    logger.warning("Coinalyze HTTP %s for %s %s", resp.status, path, symbol)
                     return None
                 data = await resp.json()
-                if not data or not data.get("success"):
-                    return None
-                result = data.get("result", [])
-                if not result:
-                    return None
-                latest = result[0]
-                funding = float(latest.get("fundingRate", 0))
-                predicted = float(latest.get("predictedFundingRate", 0)) if latest.get("predictedFundingRate") else None
-                oi_value = float(latest.get("oiValue", 0))  # OI in USD
-                oi_coin = float(latest.get("openInterest", 0))  # OI in coins
-                mark = float(latest.get("markPrice", 0))
-                funding_time = int(latest.get("fundingTime", 0)) * 1000  # Convert to ms
-
-                return FundingOI(
-                    symbol=symbol.replace("USDT_PERP", "").replace("-PERP", ""),
-                    exchange="coinalyze",
-                    funding_rate=funding,
-                    predicted_funding=predicted,
-                    open_interest=oi_value,  # Already in USD
-                    mark_price=mark,
-                    timestamp_ms=funding_time,
-                )
-        except Exception as e:
-            logger.warning("Coinalyze fetch failed for %s: %s", symbol, e)
+                if isinstance(data, list) and data:
+                    return data[0]
+                return None
+        except Exception as exc:
+            logger.warning("Coinalyze %s %s error: %s", path, symbol, exc)
             return None
+
+    async def fetch(self, session: aiohttp.ClientSession, symbol: str) -> Optional[FundingOI]:
+        """symbol: BTCUSDT_PERP.A (include exchange code, e.g. .A = Binance)."""
+        funding_row, predicted_row, oi_row = await asyncio.gather(
+            self._get(session, "/funding-rate", symbol),
+            self._get(session, "/predicted-funding-rate", symbol),
+            self._get(session, "/open-interest", symbol),
+        )
+        if funding_row is None and predicted_row is None and oi_row is None:
+            return None
+        funding = float(funding_row["value"]) if funding_row and "value" in funding_row else None
+        predicted = float(predicted_row["value"]) if predicted_row and "value" in predicted_row else None
+        oi_value = float(oi_row["value"]) if oi_row and "value" in oi_row else None
+        ts_ms = int((funding_row or predicted_row or oi_row or {}).get("update", 0))
+        return FundingOI(
+            symbol=symbol.replace("USDT_PERP", "").replace("-PERP", "").split(".")[0],
+            exchange="coinalyze",
+            funding_rate=funding,
+            predicted_funding=predicted,
+            open_interest=oi_value,
+            timestamp_ms=ts_ms,
+        )
 
 
 class BinanceFundingClient:
@@ -314,19 +325,19 @@ class FundingOIAggregator:
 
     SYMBOL_MAP = {
         "BTC": {
-            "coinalyze": "BTCUSDT_PERP",
+            "coinalyze": "BTCUSDT_PERP.A",
             "binance": "BTCUSDT",
             "bybit": "BTCUSDT",
             "okx": "BTC-USDT-SWAP",
         },
         "ETH": {
-            "coinalyze": "ETHUSDT_PERP",
+            "coinalyze": "ETHUSDT_PERP.A",
             "binance": "ETHUSDT",
             "bybit": "ETHUSDT",
             "okx": "ETH-USDT-SWAP",
         },
         "SOL": {
-            "coinalyze": "SOLUSDT_PERP",
+            "coinalyze": "SOLUSDT_PERP.A",
             "binance": "SOLUSDT",
             "bybit": "SOLUSDT",
             "okx": "SOL-USDT-SWAP",

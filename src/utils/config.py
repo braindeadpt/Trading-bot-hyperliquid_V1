@@ -12,6 +12,40 @@ from typing import Any, Dict, List, Optional, Union
 
 import yaml
 
+
+def _load_dotenv(path: Path) -> int:
+    """Tiny .env loader: KEY=value lines into os.environ (no override of existing).
+
+    Returns the number of variables loaded. Skips comments and blank lines.
+    Strips optional surrounding quotes. Logs a warning on malformed lines.
+    """
+    if not path.exists() or not path.is_file():
+        return 0
+    loaded = 0
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    logger = logging.getLogger(__name__)
+                    logger.warning("Malformed .env line in %s: %r", path, line)
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                if (value.startswith('"') and value.endswith('"')) or (
+                    value.startswith("'") and value.endswith("'")
+                ):
+                    value = value[1:-1]
+                if key and key not in os.environ:
+                    os.environ[key] = value
+                    loaded += 1
+    except OSError as exc:
+        logging.getLogger(__name__).warning("Could not read %s: %s", path, exc)
+    return loaded
+
 # ---------------------------------------------------------------------------
 # Defaults used when a key is missing from the user-provided YAML.
 # ---------------------------------------------------------------------------
@@ -185,6 +219,14 @@ def load_config(
     """
     user_data: Dict[str, Any] = {}
     p = Path(path)
+    # Load .env from the project root (if present) so YAML can reference
+    # env-style secrets without forcing operators to export them in every
+    # shell. We only fill in vars that are not already set, so an explicit
+    # process-level export always wins.
+    env_path = p.parent.parent / ".env" if p.parent.name == "config" else Path(".env")
+    if not env_path.exists():
+        env_path = Path(".env")
+    _load_dotenv(env_path)
     if p.exists():
         with open(p, "r", encoding="utf-8") as fh:
             user_data = yaml.safe_load(fh) or {}
