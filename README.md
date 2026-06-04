@@ -1,107 +1,80 @@
-# Hyperliquid Premium Trading Bot v3.1
+# Hyperliquid Premium Trading Bot v3.1.10
 
-Professional automated trading bot for Hyperliquid perp exchange with modular architecture, real-time dashboard, 5 confluence strategies, advanced risk management, auto-recovery, and paper/testnet/live execution.
+Professional automated trading bot for Hyperliquid perpetuals exchange.
+Modular async architecture, real-time WebSocket data, 7 pluggable strategies,
+deterministic risk management, paper / testnet / mainnet execution, and a
+Flask + Socket.IO dashboard.
+
+Current score: **9.5/10** (Phases A, B, C hardening applied).
 
 ---
 
 ## Quick Start
 
 ```bash
-# Install dependencies
+# 1. Install dependencies
 pip install -r requirements.txt
 
-# Run in Paper Trading mode
+# 2. (Optional but recommended) Backfill historical candles
+python scripts/backfill_candles.py --days 7
+
+# 3. Run in Paper Trading mode
 python main.py --mode paper
 
-# Or use the launcher
-./quickstart.bat
+# Or use the Windows launcher
+quickstart.bat
 ```
 
-Dashboard: http://localhost:5000
+Dashboard: <http://localhost:5000>
+
+For a guided menu (paper / testnet / mainnet / audit / cascade test / update):
+```bash
+start.bat
+```
 
 ---
 
 ## Features
 
-| Feature | Status |
-|---------|--------|
-| Paper Trading | ✅ |
-| Real-time Dashboard | ✅ |
-| WebSocket Data (price, funding, OI, orderbook) | ✅ |
-| Cross-exchange Funding Aggregation | ✅ |
-| 5 Trading Strategies | ✅ |
-| Kelly Criterion Sizing | ✅ |
-| Drawdown Circuit Breaker | ✅ |
-| Auto-recovery on Crash | ✅ |
-| Security Audit | ✅ |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Paper Trading (default)             | [OK]  | No real money |
+| Testnet + Mainnet execution         | [OK]  | Mainnet requires explicit confirmation |
+| Real-time WebSocket dashboard       | [OK]  | Flask + Socket.IO |
+| HL WS feeds (mids, OI, trades, L2)  | [OK]  | 4 channels |
+| Binance WS (trades, liquidations)   | [OK]  | forceOrder + aggTrade |
+| Cross-venue funding (4 venues)      | [OK]  | HL predicted + Bin/Bybit/OKX REST + Coinalyze (optional) |
+| 7 trading strategies                | [OK]  | 5 active in current regime, 2 disabled by governor |
+| Strategy governor (auto-disable)    | [OK]  | Negative Sharpe over 30d => off |
+| Drawdown circuit breaker (10%)      | [OK]  | Hard gate, auto-reset at 00:00 UTC |
+| Intraday volatility circuit         | [OK]  | Soft gate, blocks entries when ATR>3x baseline |
+| Funding-reset time blackout         | [OK]  | +/-5min around 00:00/08:00/16:00 UTC |
+| Kelly Criterion sizing              | [OK]  | Per-strategy, bounded |
+| Correlation monitor                 | [OK]  | Rejects correlated adds |
+| Look-ahead / future-data audit      | [OK]  | Static scanner (Phase B) |
+| Static security audit               | [OK]  | 9 rules (eval/subprocess/secret/etc.) |
+| Encrypted credential vault          | [OK]  | Fernet + PBKDF2 480k iterations |
+| Crash-recovery wrapper              | [OK]  | 3 restarts, 30s cooldown |
 
 ---
 
 ## Strategies
 
-### 1. TrendFollow (SmartMoneyFlow)
-- Trend following with 9 confluence conditions
-- Filters: OIR, RSI, orderbook walls, funding
-- Confidence: 6/9 → 0.50, 8/9 → 1.00
+The 7 strategies are governed by `StrategyGovernor` which auto-disables any
+strategy with negative Sharpe over the last 30 days.
 
-### 2. FundingExtreme (MeanReversion)
-- Contrarian on extreme funding rates
-- Dynamic percentile thresholds (p90/p70)
-- Cross-exchange confirmation + OI decreasing
+| Strategy             | Type           | Status (typical) | Notes |
+|----------------------|----------------|------------------|-------|
+| FundingArbitrage     | market-neutral | Active           | Best performer; uses HL predicted + cross-venue CEX |
+| LiquidationCatcher   | event-driven   | Active           | Fades $10M+ Binance liquidations |
+| VWAPDeviation        | mean-reversion | Active (low-vol) | Z-score vs VWAP(1h), ADX filter |
+| VolatilityBreakout   | trend          | Active           | ATR-scaled breakout, regime-weighted |
+| OrderBookScalper     | microstructure | Active           | Fades OIR micro-imbalances, tight TP/SL |
+| SmartMoneyFlow       | trend          | Disabled         | Sharpe negative in current regime |
+| DonchianBreakout     | trend          | Disabled         | Sharpe negative (small sample) |
+| FundingExtreme       | mean-reversion | Disabled         | Sharpe -37, kept off permanently |
 
-### 3. FundingArbitrage
-- Market-neutral funding spread
-- Long negative funding, short positive funding
-- Exit on funding reversion (< 0.2%)
-
-### 4. VWAPDeviation
-- Mean reversion to VWAP(1h)
-- Z-score threshold: 1.8σ
-- Filters: ADX < 35, OIR, funding
-
-### 5. LiquidationCatcher
-- Fade liquidation cascades ($10M+ in 5min)
-- Opposite direction entry
-- Stop: 1% ATR, Take Profit: 2R
-
----
-
-## Configuration
-
-Key parameters in `config/settings.yaml`:
-
-```yaml
-mode: "paper"              # paper | testnet | mainnet
-
-assets:
-  - "BTC"
-  - "ETH"
-  - "SOL"
-
-risk:
-  initial_capital: 10_000
-  max_positions: 5
-  circuit_breaker_drawdown_pct: 10.0
-
-strategy:
-  mean_reversion:
-    extreme_threshold: 0.003   # 0.3% funding
-    strong_threshold: 0.002    # 0.2% funding
-
-  funding_arbitrage:
-    min_funding_spread: 0.004  # 0.4% spread
-
-  vwap_deviation:
-    z_threshold: 1.8           # 1.8 sigma
-    max_adx: 35.0
-
-  liquidation_catcher:
-    min_notional_usd: 10_000_000  # $10M
-
-  ensemble:
-    threshold: 0.40
-    min_agreeing: 1
-```
+Ensemble logic combines signals via weighted consensus (configurable threshold).
 
 ---
 
@@ -109,58 +82,128 @@ strategy:
 
 ```
 trading-bot-hyperliquid/
-├── main.py                    # Entry point
-├── run_with_recovery.py       # Auto-restart wrapper
-├── config/
-│   └── settings.yaml          # Configuration
-├── src/
-│   ├── core/                  # Engine, risk, execution, portfolio
-│   ├── strategies/            # 5 strategy modules
-│   ├── exchanges/             # Hyperliquid WS/REST, Binance, funding aggregator
-│   ├── data/                  # Candle builder, database, orderbook metrics
-│   ├── dashboard/             # Flask + Socket.IO dashboard
-│   └── utils/                 # Config, logger, helpers
-├── tests/                     # Test suite
-└── logs/                     # Runtime logs
+  main.py                      # Entry point + arg parsing
+  run_with_recovery.py         # Crash-recovery wrapper
+  audit_all.py                 # Component health check (imports every module)
+  requirements.txt             # Fully pinned deps
+  config/
+    settings.yaml              # Main configuration
+    .env.example               # Template for API secrets
+  src/
+    core/                      # engine, risk, execution, portfolio, vol circuit, funding blackout
+    strategies/                # 7 strategies + base ABC + indicators + ensemble + factory + governor
+    exchanges/                 # Hyperliquid WS/REST, Binance API, funding aggregator, HL predicted
+    data/                      # SQLite, candle builder, orderbook metrics, backfill
+    dashboard/                 # Flask + Socket.IO server + embedded UI
+    security/                  # Fernet vault + static security audit
+    alerts/                    # Telegram / Discord notifier
+    backtest/                  # Backtest engine + performance metrics
+    utils/                     # config loader, logger, helpers, crash recovery
+  tests/                       # Hybrid suite: unittest + assertion scripts
+  scripts/                     # backfill, lookahead audit, CI runner
+  data/                        # Runtime SQLite DB (auto-created, gitignored)
+  logs/                        # Rotating logs (auto-created, gitignored)
+  docs/
+    SECURITY.md                # Threat model + deployment checklist
+  quickstart.bat / start.bat / stop.bat / service.bat   # Windows launchers
 ```
+
+---
+
+## Risk Gates (per entry, in order)
+
+1. Per-symbol lock (serializes same-symbol processing)
+2. Volatility circuit breaker (soft; blocks entries when ATR>3x baseline)
+3. Funding-reset blackout (soft; blocks +/-5min around funding reset)
+4. Correlation monitor (rejects correlated adds)
+5. `RiskManager.can_enter` (hard; daily trades / loss / DD / exposure / leverage)
+6. TCA check (slippage + fill ratio from L2)
+7. Order routing (post-only vs market vs limit)
+
+Soft gates (1-4) only block new entries. Hard gates (5) own flatten behavior.
 
 ---
 
 ## Commands
 
 ```bash
-# Paper trading
-python main.py --mode paper
-
-# Testnet
+# Modes
+python main.py --mode paper          # default
 python main.py --mode testnet
-
-# Mainnet (requires API keys)
-python main.py --mode mainnet
-
-# Backtest
+python main.py --mode mainnet        # requires API keys + explicit env var
 python main.py --backtest --from-date 2024-01-01 --to-date 2024-03-01
 
-# Security audit
-python main.py --audit
+# Audits
+python main.py --audit               # security audit
+python scripts/lookahead_audit.py --ci   # future-data leakage scanner
+python tests/test_cascade_simulation.py  # vol circuit stress test
+
+# Maintenance
+python scripts/backfill_candles.py --symbols BTC,ETH,SOL --days 7
+python tests/test_basic.py
+python tests/test_critical_fixes.py
+python audit_all.py
 ```
+
+---
+
+## Configuration
+
+YAML in `config/settings.yaml`. Hierarchy (later wins):
+1. Hard-coded `DEFAULT_CONFIG` in `src/utils/config.py`
+2. User YAML
+3. Environment variables prefixed with `BOT_` (e.g. `BOT_RISK_MAX_POSITIONS=7`)
+4. Per-mode overrides in `mode_overrides.<mode>` (Phase C)
+
+Mainnet defaults (auto-applied via `mode_overrides.mainnet`):
+- `leverage_max`: 5x (was 10x)
+- `max_daily_loss_pct`: 2% (was 3%)
+- `max_daily_trades`: 20 (was unlimited)
+- `max_position_size_pct`: 3% (was 5%)
+
+Secrets live in `.env` (gitignored) or in the encrypted vault at
+`data/vault.enc`. Required env vars: `HYPERLIQUID_API_KEY`,
+`HYPERLIQUID_API_SECRET`, optional `COINALYZE_API_KEY`,
+`TELEGRAM_BOT_TOKEN`, `DISCORD_WEBHOOK_URL`.
 
 ---
 
 ## Security
 
-- **Paper mode is default** — no real money at risk
-- Live trading requires API keys in `config/.env`
-- `.env` is gitignored — never committed
-- Run `python main.py --audit` before live trading
+- Paper mode is the default. Mainnet requires both the config flag and
+  `HYPERLIQUID_MAINNET_ENABLED=true`.
+- `.env` and `data/vault.enc` are gitignored.
+- `python main.py --audit` runs the static security scanner (9 rules:
+  eval/exec, hardcoded secrets, HTTP to unknown hosts, file writes outside
+  project, os.system/subprocess, pickle.loads, dynamic __import__,
+  suspicious comments, HTTP inventory).
+- `scripts/lookahead_audit.py --ci` runs the future-data leakage scanner
+  (6 rules) and fails CI on any non-LOW finding.
+- See `docs/SECURITY.md` for the full threat model and deployment checklist.
+
+---
+
+## Testing
+
+The suite is hybrid (unittest + standalone assertion scripts).
+No central pytest runner; each test is invoked directly.
+
+```bash
+python -m unittest tests.test_basic               # 11/11 unittest smoke
+python tests/test_critical_fixes.py               # v3.1.1 regression
+python tests/test_cascade_simulation.py           # Phase C stress (7 tests)
+python scripts/lookahead_audit.py --ci            # Phase B future-data
+python audit_all.py                               # Component health
+python -m src.security.audit                      # Static security
+```
 
 ---
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.11+ (tested on 3.14)
 - Windows or Linux/macOS
-- All dependencies in `requirements.txt`
+- All dependencies in `requirements.txt` (fully pinned)
 
 ---
 
