@@ -293,7 +293,16 @@ async def main() -> None:
     # -----------------------------------------------------------------------
     # 5. Initialize WebSocket / API clients
     # -----------------------------------------------------------------------
-    data_bus = DataBus()
+    # QW4 (v3.1.13): per-topic rate-limit overrides so that high-frequency
+    # trade:* ticks on BTC/ETH/SOL don't get dropped by the B13 backpressure
+    # gate (BTC trade bursts exceed 200 msg/s). Other noisy topics stay
+    # protected by the 200 Hz global cap.
+    data_bus = DataBus(
+        rate_limit_hz=cfg.get("exchange.databus.rate_limit_hz", 200),
+        topic_rate_limits={
+            "trade:": cfg.get("exchange.databus.trade_rate_limit_hz", 2000),
+        },
+    )
 
     hl_ws = HyperliquidWSClient(
         bus=data_bus,

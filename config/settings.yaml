@@ -31,11 +31,18 @@ exchange:
     ws_url: "wss://api.hyperliquid.xyz/ws"
     rest_url: "https://api.hyperliquid.xyz"
     testnet: false
-  
+
   binance:
     rest_url: "https://api.binance.com"
     ws_url: "wss://stream.binance.com:9443/ws"
     ws_enabled: true
+
+  # QW4 (v3.1.13): DataBus per-topic rate limits. Global cap stays at
+  # 200 Hz; trade:* gets a 2000 Hz override so BTC/ETH/SOL trade bursts
+  # don't drop. Set trade_rate_limit_hz=0 to disable for that prefix.
+  databus:
+    rate_limit_hz: 200
+    trade_rate_limit_hz: 2000
 
 # ═══════════════════════════════════════════════════════════
 # Risk management
@@ -84,7 +91,7 @@ strategy:
     max_hold_hours: 4
     stop_loss_atr_multiplier: 2.0
     overcrowded_penalty: 0.2        # reduce confidence by 20%
-    min_confidence: 0.40           # reduced from 0.50
+    min_confidence: 0.30           # QW5: reduced from 0.40 to fire on more setups
     extreme_threshold: 0.0003        # align with near-zero funding regime (0.03%)
     # Microstructure filters (Task 2.2)
     oir_long_threshold: 0.6         # OIR > 0.6 confirms long
@@ -112,7 +119,7 @@ strategy:
     stop_loss_atr_multiplier: 1.5
     take_profit_atr_multiplier: 3.0
     max_hold_hours: 6
-    min_confidence: 0.60
+    min_confidence: 0.45            # QW5: reduced from 0.60
     signal_throttle_ms: 1800000    # 30 min between signals per symbol
     require_trend_alignment: true  # long only in uptrend (EMA20>EMA50), short in downtrend
     trend_ema_fast: 20
@@ -134,7 +141,7 @@ strategy:
     max_size_pct: 0.03
     max_hold_hours: 6
     signal_throttle_ms: 900000
-    min_confidence: 0.55
+    min_confidence: 0.40            # QW5: reduced from 0.55
 
   # Regime filter (ADX-based strategy weighting)
   adx_period: 14
@@ -178,7 +185,7 @@ strategy:
     overcrowded_oi_pct: 65.0        # OI concentration on one side
     max_hold_minutes: 60
     stop_loss_pct: 2.0
-    min_confidence: 0.55            # reduced from 0.65 for more signals
+    min_confidence: 0.40            # QW5: reduced from 0.55
     # ── Task 2.3: Dynamic upgrades ──
     use_dynamic_percentile: true    # use rolling p90 instead of fixed thresholds
     funding_percentile_lookback: 90 # ~90 funding observations (30 days of 8h funding)
@@ -231,8 +238,8 @@ strategy:
     max_size_pct: 0.03             # 3% max size
     stop_loss_atr_multiplier: 2.0   # ATR-based stop
     max_hold_hours: 4               # mean reversion is quick or wrong
-    min_confidence: 0.55            # reduced from 0.65
-    confidence_extreme: 0.75        # reduced from 0.85
+    min_confidence: 0.40            # QW5: reduced from 0.55
+    confidence_extreme: 0.65        # QW5: reduced from 0.75
     signal_throttle_ms: 180000      # 3 min between signals (was 5 min)
 
   # ═══════════════════════════════════════════════════════════
@@ -256,7 +263,7 @@ strategy:
     base_size_pct: 0.005             # 0.5% capital
     max_size_pct: 0.01              # 1% max
     max_hold_seconds: 300            # 5 min max hold
-    min_confidence: 0.55
+    min_confidence: 0.40            # QW5: reduced from 0.55
     signal_throttle_ms: 60000        # 60s between signals per symbol
 
   # ═══════════════════════════════════════════════════════════
@@ -277,7 +284,7 @@ strategy:
     stop_loss_atr_multiplier: 1.0  # tight stop
     max_hold_minutes: 30            # liquidation cascades resolve quickly
     take_profit_r: 1.5              # 1.5R take profit (was 2.0 — tighter target)
-    min_confidence: 0.60            # reduced from 0.70
+    min_confidence: 0.45            # QW5: reduced from 0.60
     signal_throttle_ms: 3600000     # 1h cooldown (was 2h)
 
   # ═══════════════════════════════════════════════════════════
@@ -308,8 +315,8 @@ strategy:
     # Sizing
     base_size_pct: 0.008            # 0.8% base
     max_size_pct: 0.02              # 2% max
-    min_confidence: 0.60
-    confidence_strong: 0.85
+    min_confidence: 0.45            # QW5: reduced from 0.60
+    confidence_strong: 0.75        # QW5: reduced from 0.85
     signal_throttle_ms: 600000      # 10 min between signals per symbol
 
   # ═══════════════════════════════════════════════════════════
@@ -337,24 +344,25 @@ strategy:
   # Cooldown Manager (Task 2.4)
   # ═══════════════════════════════════════════════════════════
   cooldown:
-    base_minutes: 60                # 1h base cooldown after any trade
-    max_minutes: 240                # 4h max cooldown after consecutive losses
-    multiplier: 2.0                 # double after each loss (1h → 2h → 4h)
+    base_minutes: 30                # QW5: 30m base cooldown (was 60m)
+    max_minutes: 120                # QW5: 2h max cooldown (was 4h)
+    multiplier: 2.0                 # double after each loss (30m → 1h → 2h)
 
   # ═══════════════════════════════════════════════════════════
   # Ensemble Configuration
   # ═══════════════════════════════════════════════════════════
   ensemble:
-    # Option A (recommended): pure config — lower threshold to match realistic scores.
-    #   Normalized weights × confidence:
-    #     2 strong strategies (SMF+FundingExtreme, conf 0.50) = 0.185
-    #     3 moderate strategies (conf 0.40)             = 0.20
-    #     4+ strategies (conf 0.35)                     = 0.18+
-    #   Threshold 0.18 = 2 strong or 3+ moderate; no changes to min_agreeing.
-    threshold: 0.14
-    min_agreeing: 2
+    # QW5 (v3.1.13): looser aggregation to trade more often in volatile regimes.
+    #   threshold 0.10 = 1 strong strategy can break through with high weight.
+    #   min_agreeing 1 = a single high-confidence sub-strategy can trigger.
+    #   High-conviction bypass lowered to 0.75 so individual strategies
+    #   (e.g. CVDOrderFlow, OrderBookScalper) can act alone on micro-structure.
+    #   Compensated by: portfolio risk gates, vol circuit, funding blackout,
+    #   and 60% directional exposure cap.
+    threshold: 0.10
+    min_agreeing: 1
     # High-conviction bypass: single strategy can enter alone above this confidence.
-    high_conviction_threshold: 0.90
+    high_conviction_threshold: 0.75
     high_conviction_enabled: true
     high_conviction_exclude:
       - VolatilityBreakout

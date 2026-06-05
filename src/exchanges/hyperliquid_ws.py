@@ -118,35 +118,58 @@ class DataBus:
     publishes are dropped (and counted) to prevent a reconnect storm
     from queueing thousands of tasks on the event loop. Set
     ``rate_limit_hz=0`` to disable.
+
+    QW4 (v3.1.13): per-topic overrides via ``topic_rate_limits`` dict.
+    Maps a topic prefix (e.g. ``"trade:"``) to a higher Hz limit so
+    high-frequency trade ticks on BTC/ETH/SOL don't get dropped while
+    the 200 Hz global cap still protects noisy control topics.
     """
 
     DEFAULT_RATE_LIMIT_HZ = 200
     _RATE_WINDOW_SEC = 1.0
 
-    def __init__(self, rate_limit_hz: int = DEFAULT_RATE_LIMIT_HZ) -> None:
+    def __init__(
+        self,
+        rate_limit_hz: int = DEFAULT_RATE_LIMIT_HZ,
+        topic_rate_limits: Optional[Dict[str, int]] = None,
+    ) -> None:
         self._listeners: Dict[str, List[Callable[[Any], Any]]] = {}
         self._lock = asyncio.Lock()
         self._tasks: set = set()  # Keep strong refs to prevent Python 3.14 deallocation crash
         self._rate_limit_hz = max(0, int(rate_limit_hz))
+        self._topic_rate_limits: Dict[str, int] = dict(topic_rate_limits or {})
         # Per-topic sliding window: list of timestamps for current second
         self._rate_window: Dict[str, List[float]] = {}
         self._dropped_total: Dict[str, int] = {}
         self._last_drop_warn: Dict[str, float] = {}
+
+    def _limit_for(self, topic: str) -> int:
+        """Return the per-topic rate limit (most specific prefix match)."""
+        if not self._topic_rate_limits:
+            return self._rate_limit_hz
+        best = self._rate_limit_hz
+        best_len = -1
+        for prefix, limit in self._topic_rate_limits.items():
+            if topic.startswith(prefix) and len(prefix) > best_len:
+                best = int(limit)
+                best_len = len(prefix)
+        return best
 
     async def subscribe(self, topic: str, callback: Callable[[Any], Any]) -> None:
         async with self._lock:
             self._listeners.setdefault(topic, []).append(callback)
 
     def publish(self, topic: str, data: Any) -> None:
-        # ── B13 backpressure gate ──
-        if self._rate_limit_hz > 0:
+        # ── B13 backpressure gate (with per-topic override) ──
+        effective_limit = self._limit_for(topic)
+        if effective_limit > 0:
             now = time.time()
             window = self._rate_window.setdefault(topic, [])
             cutoff = now - self._RATE_WINDOW_SEC
             # Trim window to current second
             while window and window[0] < cutoff:
                 window.pop(0)
-            if len(window) >= self._rate_limit_hz:
+            if len(window) >= effective_limit:
                 self._dropped_total[topic] = self._dropped_total.get(topic, 0) + 1
                 # Warn at most once per minute per topic
                 last_warn = self._last_drop_warn.get(topic, 0.0)
@@ -156,7 +179,7 @@ class DataBus:
                         "DataBus rate limit hit on '%s' (>=%d msg/s) — "
                         "dropping publishes to prevent event-loop flood",
                         topic,
-                        self._rate_limit_hz,
+                        effective_limit,
                     )
                 return
             window.append(now)

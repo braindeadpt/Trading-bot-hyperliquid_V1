@@ -1,4 +1,4 @@
-# Hyperliquid Premium Trading Bot v3.1.12
+# Hyperliquid Premium Trading Bot v3.1.13
 
 Professional automated trading bot for Hyperliquid perpetuals exchange.
 Modular async architecture, real-time WebSocket data, 8 pluggable strategies,
@@ -196,6 +196,7 @@ python tests/test_cascade_simulation.py           # Phase C stress (7 tests)
 python tests/test_cvd_orderflow.py                # CVDOrderFlow 20/20
 python tests/test_qw_observability.py             # v3.1.12 QW1+QW2 (11 tests)
 python tests/test_log_rotation.py                 # v3.1.12 QW3 (9 tests)
+python tests/test_databus_per_topic.py            # v3.1.13 QW4 (7 tests)
 python scripts/lookahead_audit.py --ci            # Phase B future-data
 python audit_all.py                               # Component health
 python -m src.security.audit                      # Static security

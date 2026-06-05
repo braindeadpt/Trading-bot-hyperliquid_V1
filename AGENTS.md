@@ -226,6 +226,7 @@ python tests/test_cascade_simulation.py  # Phase C: vol circuit + funding blacko
 python tests/test_cvd_orderflow.py       # CVDOrderFlow: divergence, MTF alignment, ADX/OIR/volume filters
 python tests/test_qw_observability.py    # v3.1.12: decision_audit table + trade journal enrichment
 python tests/test_log_rotation.py        # v3.1.12: TimedRotatingFileHandler (daily, 14 backups)
+python tests/test_databus_per_topic.py   # v3.1.13: DataBus per-topic rate limit override
 python scripts/lookahead_audit.py --ci   # Phase B: static scan for future-data leakage
 ```
 
@@ -238,6 +239,7 @@ python scripts/lookahead_audit.py --ci   # Phase B: static scan for future-data 
 - **`tests/test_cvd_orderflow.py`** (v3.1.11) — 20 unit tests for CVDOrderFlow: bullish/bearish divergence, MTF alignment, ADX band, OIR confirmation, volume gate, throttling, exit logic (TP/SL/max-hold/opposite-divergence), and signal metadata completeness.
 - **`tests/test_qw_observability.py`** (v3.1.12, Quick Wins) — 11 unit tests for the new `decision_audit` table (save/get/count/filters, indexes, metadata roundtrip, special chars) and trade journal enrichment (new columns on `trades` table, JSON snapshot, migration of pre-existing bot.db). Best-effort writes — never disrupt live trading.
 - **`tests/test_log_rotation.py`** (v3.1.12) — 9 unit tests for the new `TimedRotatingFileHandler` config: default handler type, custom `when`/`interval`/`backupCount`/`utc`, size cap on 3.13+, idempotent re-setup, manual `doRollover`, file handler disabled when `log_file=None`.
+- **`tests/test_databus_per_topic.py`** (v3.1.13) — 7 unit tests for the per-topic rate limit override: default fallback, override applied, no spillover to other topics, most-specific prefix wins, partial drop at higher cap, full drop at default cap, `rate_limit_hz=0` disables globally.
 - **`scripts/lookahead_audit.py --ci`** (Phase B, v3.1.9) — static scan for future-data access (LOOKAHEAD-001..006). Fails CI on any non-LOW finding.
 
 ### Component Health Check
@@ -414,4 +416,4 @@ Before submitting any code change:
 
 ---
 
-*Last updated: 2026-06-05 (v3.1.12 — QW1 `decision_audit` DB table, QW2 trade journal enrichment, QW3 time-based log rotation)*
+*Last updated: 2026-06-05 (v3.1.13 — QW4 DataBus per-topic rate limits, QW5 looser ensemble + per-strategy thresholds to trade in volatile regimes)*
