@@ -281,6 +281,38 @@ strategy:
     signal_throttle_ms: 3600000     # 1h cooldown (was 2h)
 
   # ═══════════════════════════════════════════════════════════
+  # Strategy: CVD OrderFlow (volume-tape divergence)
+  # ═══════════════════════════════════════════════════════════
+  cvd_orderflow:
+    enabled: true
+    # Rolling windows (in 1m bars) for multi-timeframe divergence confirmation
+    window_short_bars: 5            # 5m CVD
+    window_medium_bars: 15          # 15m CVD
+    window_long_bars: 60            # 1h CVD
+    # Signal thresholds
+    min_divergence_strength: 0.35   # signed divergence must exceed this magnitude
+    min_price_move_pct: 0.002       # 0.2% — avoid signalling on flat tape
+    min_volume_usd: 50000.0         # filter thin books (USD notional)
+    # ADX regime filter (avoid dead markets and strong trends)
+    max_adx: 30.0
+    min_adx: 12.0
+    # OIR (orderbook imbalance) confirmation
+    require_oir_confirm: true
+    oir_threshold: 0.15
+    # Risk management
+    stop_loss_atr_multiplier: 2.0
+    take_profit_r_multiple: 2.0
+    stop_loss_floor_pct: 0.005      # 0.5% min stop
+    stop_loss_ceiling_pct: 0.05     # 5% max stop
+    max_hold_hours: 6
+    # Sizing
+    base_size_pct: 0.008            # 0.8% base
+    max_size_pct: 0.02              # 2% max
+    min_confidence: 0.60
+    confidence_strong: 0.85
+    signal_throttle_ms: 600000      # 10 min between signals per symbol
+
+  # ═══════════════════════════════════════════════════════════
   # Kelly Criterion Sizing (Task 4.4)
   # ═══════════════════════════════════════════════════════════
   kelly:

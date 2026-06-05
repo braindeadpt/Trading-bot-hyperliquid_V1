@@ -7,6 +7,7 @@ from typing import Any, List
 
 from src.strategies.base import Strategy
 from src.strategies.ensemble import StrategyEnsemble, StrategyWeight
+from src.strategies.cvd_orderflow import CVDOrderFlow
 from src.strategies.donchian_breakout import DonchianBreakout
 from src.strategies.funding_arbitrage import FundingArbitrage
 from src.strategies.liquidation_catcher import LiquidationCatcher
@@ -27,6 +28,7 @@ _STRATEGY_REGISTRY = (
     ("strategy.vwap_deviation", VWAPDeviation),
     ("strategy.liquidation_catcher", LiquidationCatcher),
     ("strategy.orderbook_scalper", OrderBookScalper),
+    ("strategy.cvd_orderflow", CVDOrderFlow),
 )
 
 
@@ -41,6 +43,7 @@ def default_ensemble_weights() -> List[StrategyWeight]:
         StrategyWeight("FundingArbitrage", 0.08, min_confidence=0.35),
         StrategyWeight("LiquidationCatcher", 0.13, min_confidence=0.40),
         StrategyWeight("OrderBookScalper", 0.10, min_confidence=0.50),
+        StrategyWeight("CVDOrderFlow", 0.10, min_confidence=0.55),
     ]
 
 

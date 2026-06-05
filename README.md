@@ -60,7 +60,7 @@ start.bat
 
 ## Strategies
 
-The 7 strategies are governed by `StrategyGovernor` which auto-disables any
+The 8 strategies are governed by `StrategyGovernor` which auto-disables any
 strategy with negative Sharpe over the last 30 days.
 
 | Strategy             | Type           | Status (typical) | Notes |
@@ -70,6 +70,7 @@ strategy with negative Sharpe over the last 30 days.
 | VWAPDeviation        | mean-reversion | Active (low-vol) | Z-score vs VWAP(1h), ADX filter |
 | VolatilityBreakout   | trend          | Active           | ATR-scaled breakout, regime-weighted |
 | OrderBookScalper     | microstructure | Active           | Fades OIR micro-imbalances, tight TP/SL |
+| CVDOrderFlow         | order-flow     | Active           | Multi-TF CVD divergence (5m/15m/1h) |
 | SmartMoneyFlow       | trend          | Disabled         | Sharpe negative in current regime |
 | DonchianBreakout     | trend          | Disabled         | Sharpe negative (small sample) |
 | FundingExtreme       | mean-reversion | Disabled         | Sharpe -37, kept off permanently |
@@ -91,7 +92,7 @@ trading-bot-hyperliquid/
     .env.example               # Template for API secrets
   src/
     core/                      # engine, risk, execution, portfolio, vol circuit, funding blackout
-    strategies/                # 7 strategies + base ABC + indicators + ensemble + factory + governor
+    strategies/                # 8 strategies + base ABC + indicators + ensemble + factory + governor
     exchanges/                 # Hyperliquid WS/REST, Binance API, funding aggregator, HL predicted
     data/                      # SQLite, candle builder, orderbook metrics, backfill
     dashboard/                 # Flask + Socket.IO server + embedded UI

@@ -95,6 +95,9 @@ strats = [
     ("VWAPDeviation", "src.strategies.vwap_deviation", "VWAPDeviation"),
     ("VolatilityBreakout", "src.strategies.volatility_breakout", "VolatilityBreakout"),
     ("LiquidationCatcher", "src.strategies.liquidation_catcher", "LiquidationCatcher"),
+    ("DonchianBreakout", "src.strategies.donchian_breakout", "DonchianBreakout"),
+    ("OrderBookScalper", "src.strategies.orderbook_scalper", "OrderBookScalper"),
+    ("CVDOrderFlow", "src.strategies.cvd_orderflow", "CVDOrderFlow"),
 ]
 for name, mod, cls in strats:
     try:

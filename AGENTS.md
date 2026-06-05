@@ -8,7 +8,7 @@
 
 This is **Hyperliquid Premium Trading Bot v3.1** — an async Python trading bot for the Hyperliquid perpetuals exchange. It supports **paper trading** (default), **testnet**, and **mainnet** execution modes.
 
-The bot is built around a **WebSocket-first event architecture**: real-time market data from Hyperliquid (and optional Binance feeds) flows through an async pub/sub `DataBus`, gets aggregated into multi-timeframe candles, and is consumed by six strategy modules (including the OrderBook Imbalance Scalper for tick-level orderbook micro-patterns). A central `TradingEngine` orchestrates signal generation, risk gating, position sizing, and execution. All state is persisted to a local SQLite database, and a Flask + Socket.IO dashboard provides real-time monitoring.
+The bot is built around a **WebSocket-first event architecture**: real-time market data from Hyperliquid (and optional Binance feeds) flows through an async pub/sub `DataBus`, gets aggregated into multi-timeframe candles, and is consumed by eight strategy modules (including the OrderBook Imbalance Scalper for tick-level orderbook micro-patterns and the CVD OrderFlow strategy for volume-tape divergence). A central `TradingEngine` orchestrates signal generation, risk gating, position sizing, and execution. All state is persisted to a local SQLite database, and a Flask + Socket.IO dashboard provides real-time monitoring.
 
 **Key characteristics:**
 - Fully async (`asyncio`) with auto-reconnecting WebSocket clients.
@@ -223,6 +223,7 @@ python tests/test_task_3_3.py            # LiquidationCatcher entry, filters, 2R
 python tests/test_fase_4.py              # Portfolio governance: drawdown, exposure, Kelly
 python tests/test_basic.py               # unittest smoke tests for core components
 python tests/test_cascade_simulation.py  # Phase C: vol circuit + funding blackout + DD CB
+python tests/test_cvd_orderflow.py       # CVDOrderFlow: divergence, MTF alignment, ADX/OIR/volume filters
 python scripts/lookahead_audit.py --ci   # Phase B: static scan for future-data leakage
 ```
 
@@ -232,6 +233,7 @@ python scripts/lookahead_audit.py --ci   # Phase B: static scan for future-data 
 - `pytest` and `pytest-asyncio` are listed as commented-out optional dependencies in `requirements.txt`.
 - **`tests/test_critical_fixes.py`** — tests for the v3.1.1 patch (drawdown circuit, portfolio restore, FundingArbitrage lifecycle, execution exit price fix). Always run this after modifying core engine, portfolio, risk, or execution.
 - **`tests/test_cascade_simulation.py`** (Phase C, v3.1.10) — 7 stress tests covering VolatilityCircuitBreaker trip/extend/per-symbol isolation/snapshot, FundingBlackoutFilter 9 boundary cases, DD CB regression, and cold-start guard.
+- **`tests/test_cvd_orderflow.py`** (v3.1.11) — 20 unit tests for CVDOrderFlow: bullish/bearish divergence, MTF alignment, ADX band, OIR confirmation, volume gate, throttling, exit logic (TP/SL/max-hold/opposite-divergence), and signal metadata completeness.
 - **`scripts/lookahead_audit.py --ci`** (Phase B, v3.1.9) — static scan for future-data access (LOOKAHEAD-001..006). Fails CI on any non-LOW finding.
 
 ### Component Health Check
@@ -364,7 +366,8 @@ Effective settings are logged once at engine start (`Effective risk: leverage=..
 | `src/strategies/base.py` | `Strategy` ABC, `MarketEvent`, `Signal`, `Position`, `ExitSignal`. |
 | `src/exchanges/hyperliquid_ws.py` | WebSocket client and `DataBus` pub/sub implementation. |
 | `src/strategies/orderbook_scalper.py` | OrderBookScalper — scalps bid_ask_ratio micro-imbalances with tight TP/SL. |
-| `src/strategies/ensemble.py` | StrategyEnsemble — weighted consensus across all 6 sub-strategies. |
+| `src/strategies/cvd_orderflow.py` | CVDOrderFlow — multi-timeframe (5m/15m/1h) cumulative volume delta divergence. Uses `buy_volume`/`sell_volume` from candle_builder. |
+| `src/strategies/ensemble.py` | StrategyEnsemble — weighted consensus across all 8 sub-strategies. |
 | `src/data/database.py` | SQLite schema and all persistence queries. |
 | `scripts/backfill_candles.py` | Binance historical candle backfill to populate candle tables before bot start. |
 | `scripts/lookahead_audit.py` | `LOOKAHEAD-001..006` static scanner (Phase B, v3.1.9). |
@@ -405,4 +408,4 @@ Before submitting any code change:
 
 ---
 
-*Last updated: 2026-06-03 (v3.1.10 — Phases A + B + C applied)*
+*Last updated: 2026-06-05 (v3.1.11 — CVDOrderFlow strategy added, 8 sub-strategies total)*
