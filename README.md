@@ -1,11 +1,11 @@
-# Hyperliquid Premium Trading Bot v3.1.10
+# Hyperliquid Premium Trading Bot v3.1.12
 
 Professional automated trading bot for Hyperliquid perpetuals exchange.
-Modular async architecture, real-time WebSocket data, 7 pluggable strategies,
+Modular async architecture, real-time WebSocket data, 8 pluggable strategies,
 deterministic risk management, paper / testnet / mainnet execution, and a
 Flask + Socket.IO dashboard.
 
-Current score: **9.5/10** (Phases A, B, C hardening applied).
+Current score: **9.5/10** (Phases A, B, C hardening + QW observability applied).
 
 ---
 
@@ -94,7 +94,7 @@ trading-bot-hyperliquid/
     core/                      # engine, risk, execution, portfolio, vol circuit, funding blackout
     strategies/                # 8 strategies + base ABC + indicators + ensemble + factory + governor
     exchanges/                 # Hyperliquid WS/REST, Binance API, funding aggregator, HL predicted
-    data/                      # SQLite, candle builder, orderbook metrics, backfill
+    data/                      # SQLite, candle builder, orderbook metrics, backfill, decision audit
     dashboard/                 # Flask + Socket.IO server + embedded UI
     security/                  # Fernet vault + static security audit
     alerts/                    # Telegram / Discord notifier
@@ -193,6 +193,9 @@ No central pytest runner; each test is invoked directly.
 python -m unittest tests.test_basic               # 11/11 unittest smoke
 python tests/test_critical_fixes.py               # v3.1.1 regression
 python tests/test_cascade_simulation.py           # Phase C stress (7 tests)
+python tests/test_cvd_orderflow.py                # CVDOrderFlow 20/20
+python tests/test_qw_observability.py             # v3.1.12 QW1+QW2 (11 tests)
+python tests/test_log_rotation.py                 # v3.1.12 QW3 (9 tests)
 python scripts/lookahead_audit.py --ci            # Phase B future-data
 python audit_all.py                               # Component health
 python -m src.security.audit                      # Static security

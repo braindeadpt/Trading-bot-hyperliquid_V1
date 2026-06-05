@@ -238,6 +238,11 @@ async def main() -> None:
         level=cfg.get("logging.level", "INFO"),
         log_file=str(log_dir / "bot.log"),
         json_format=cfg.get("logging.json", False),
+        max_bytes=int(cfg.get("logging.max_bytes", 10_485_760)),
+        backup_count=int(cfg.get("logging.backup_count", 14)),
+        rotation_when=str(cfg.get("logging.rotation_when", "midnight")),
+        rotation_interval=int(cfg.get("logging.rotation_interval", 1)),
+        utc=bool(cfg.get("logging.rotation_utc", False)),
     )
     # Route all other loggers to the same handlers
     root = logging.getLogger()

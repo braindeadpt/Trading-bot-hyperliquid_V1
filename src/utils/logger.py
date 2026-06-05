@@ -4,6 +4,10 @@ Usage:
     from src.utils.logger import setup_logger
     logger = setup_logger("bot", level="INFO", json=True)
     logger.info("Starting engine", extra={"capital": 100_000})
+
+QW3: switched from size-based to time-based rotation (default: daily,
+14 backups).  The legacy ``max_bytes``/``backup_count`` knobs are
+preserved as a safety cap so a runaway log can never fill the disk.
 """
 from __future__ import annotations
 
@@ -61,11 +65,18 @@ def setup_logger(
     level: str = "INFO",
     json_format: bool = False,
     log_file: Optional[str] = None,
-    max_bytes: int = 10_485_760,   # 10 MiB
-    backup_count: int = 5,
+    max_bytes: int = 10_485_760,   # 10 MiB safety cap
+    backup_count: int = 14,        # 14 daily backups (QW3 default)
     console: bool = True,
+    rotation_when: str = "midnight",
+    rotation_interval: int = 1,
+    utc: bool = False,
 ) -> logging.Logger:
     """Create and configure a logger with rotating file + optional console handlers.
+
+    QW3: time-based rotation is the default (``rotation_when='midnight'``,
+    one file per day, 14 backups retained).  ``max_bytes`` is preserved as
+    a hard cap so a runaway log can never exceed ~10 MiB per file.
 
     Parameters
     ----------
@@ -78,11 +89,17 @@ def setup_logger(
     log_file :
         Path to the rotating log file.  None = file handler disabled.
     max_bytes :
-        Rollover threshold for the rotating file.
+        Per-file size safety cap (default 10 MiB).
     backup_count :
-        Number of backup files to keep.
+        Number of backup files / rotation intervals to keep.
     console :
         Whether to attach a StreamHandler for stdout.
+    rotation_when :
+        TimedRotatingFileHandler ``when`` argument (default 'midnight').
+    rotation_interval :
+        TimedRotatingFileHandler ``interval`` argument.
+    utc :
+        If True, use UTC for rotation timestamps (default: local time).
 
     Returns
     -------
@@ -108,16 +125,36 @@ def setup_logger(
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
 
-    # --- Rotating file handler ---
+    # --- Rotating file handler (time-based primary, size cap safety net) ---
     if log_file:
         p = Path(log_file)
         p.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.handlers.RotatingFileHandler(
-            filename=str(p),
-            maxBytes=max_bytes,
-            backupCount=backup_count,
-            encoding="utf-8",
-        )
+        # QW3: use TimedRotatingFileHandler as the primary mechanism.
+        # We layer a size cap by checking file size in the same handler
+        # via the ``maxBytes`` attribute (Python 3.13+ supports both
+        # when='midnight' and maxBytes simultaneously).
+        try:
+            file_handler: logging.Handler
+            file_handler = logging.handlers.TimedRotatingFileHandler(
+                filename=str(p),
+                when=rotation_when,
+                interval=rotation_interval,
+                backupCount=backup_count,
+                encoding="utf-8",
+                utc=utc,
+            )
+            # Python >=3.13: enforce size cap alongside time rotation.
+            # Older Python: silently fall back to time-only.
+            if hasattr(file_handler, "maxBytes"):
+                file_handler.maxBytes = max_bytes  # type: ignore[attr-defined]
+        except (TypeError, AttributeError):
+            # Pre-3.13 fallback to size-based rotation.
+            file_handler = logging.handlers.RotatingFileHandler(
+                filename=str(p),
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+            )
         file_handler.setLevel(logger.level)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)

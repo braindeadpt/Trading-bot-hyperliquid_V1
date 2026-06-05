@@ -464,8 +464,11 @@ logging:
   level: "INFO"
   json: false
   file: "logs/bot.log"
-  max_bytes: 10_485_760            # 10 MB
-  backup_count: 30                # keep last 30 rotated logs
+  max_bytes: 10_485_760            # 10 MB per-file size cap (safety net)
+  backup_count: 14                 # QW3: keep 14 days of rotated logs (time-based)
+  rotation_when: "midnight"        # QW3: daily rotation
+  rotation_interval: 1
+  rotation_utc: false              # rotate at local midnight; set true for UTC-based rotation
 
 # ═══════════════════════════════════════════════════════════
 # Per-mode overrides (C3 mainnet defaults)

@@ -224,6 +224,8 @@ python tests/test_fase_4.py              # Portfolio governance: drawdown, expos
 python tests/test_basic.py               # unittest smoke tests for core components
 python tests/test_cascade_simulation.py  # Phase C: vol circuit + funding blackout + DD CB
 python tests/test_cvd_orderflow.py       # CVDOrderFlow: divergence, MTF alignment, ADX/OIR/volume filters
+python tests/test_qw_observability.py    # v3.1.12: decision_audit table + trade journal enrichment
+python tests/test_log_rotation.py        # v3.1.12: TimedRotatingFileHandler (daily, 14 backups)
 python scripts/lookahead_audit.py --ci   # Phase B: static scan for future-data leakage
 ```
 
@@ -234,6 +236,8 @@ python scripts/lookahead_audit.py --ci   # Phase B: static scan for future-data 
 - **`tests/test_critical_fixes.py`** — tests for the v3.1.1 patch (drawdown circuit, portfolio restore, FundingArbitrage lifecycle, execution exit price fix). Always run this after modifying core engine, portfolio, risk, or execution.
 - **`tests/test_cascade_simulation.py`** (Phase C, v3.1.10) — 7 stress tests covering VolatilityCircuitBreaker trip/extend/per-symbol isolation/snapshot, FundingBlackoutFilter 9 boundary cases, DD CB regression, and cold-start guard.
 - **`tests/test_cvd_orderflow.py`** (v3.1.11) — 20 unit tests for CVDOrderFlow: bullish/bearish divergence, MTF alignment, ADX band, OIR confirmation, volume gate, throttling, exit logic (TP/SL/max-hold/opposite-divergence), and signal metadata completeness.
+- **`tests/test_qw_observability.py`** (v3.1.12, Quick Wins) — 11 unit tests for the new `decision_audit` table (save/get/count/filters, indexes, metadata roundtrip, special chars) and trade journal enrichment (new columns on `trades` table, JSON snapshot, migration of pre-existing bot.db). Best-effort writes — never disrupt live trading.
+- **`tests/test_log_rotation.py`** (v3.1.12) — 9 unit tests for the new `TimedRotatingFileHandler` config: default handler type, custom `when`/`interval`/`backupCount`/`utc`, size cap on 3.13+, idempotent re-setup, manual `doRollover`, file handler disabled when `log_file=None`.
 - **`scripts/lookahead_audit.py --ci`** (Phase B, v3.1.9) — static scan for future-data access (LOOKAHEAD-001..006). Fails CI on any non-LOW finding.
 
 ### Component Health Check
@@ -394,6 +398,8 @@ Before submitting any code change:
    python tests/test_basic.py
    python tests/test_critical_fixes.py
    python tests/test_cascade_simulation.py
+   python tests/test_qw_observability.py   # if you touched DB schema or trade entry
+   python tests/test_log_rotation.py       # if you touched setup_logger
    python tests/test_<relevant_task>.py
    ```
 4. **Run the look-ahead audit** to catch future-data access regressions:
@@ -408,4 +414,4 @@ Before submitting any code change:
 
 ---
 
-*Last updated: 2026-06-05 (v3.1.11 — CVDOrderFlow strategy added, 8 sub-strategies total)*
+*Last updated: 2026-06-05 (v3.1.12 — QW1 `decision_audit` DB table, QW2 trade journal enrichment, QW3 time-based log rotation)*

@@ -31,7 +31,13 @@ class Candle:
 
 @dataclass(frozen=True)
 class TradeEntry:
-    """Parameters required to open a new trade row."""
+    """Parameters required to open a new trade row.
+
+    QW2 trade-journal enrichment:  the *entry_market_snapshot* and
+    *signal_metadata* fields are JSON-encoded blobs that capture the
+    full regime context at entry time, so post-mortem analysis can
+    correlate trades with market conditions (ADX, OIR, funding, etc.).
+    """
     symbol: str
     side: str
     entry_price: float
@@ -40,6 +46,15 @@ class TradeEntry:
     strategy: str
     status: str = "open"
     sub_strategy: Optional[str] = None
+    # QW2 journal fields
+    entry_adx: Optional[float] = None
+    entry_oir: Optional[float] = None
+    entry_funding: Optional[float] = None
+    entry_predicted_funding: Optional[float] = None
+    entry_bid_ask_imbalance: Optional[float] = None
+    entry_volume_1m: Optional[float] = None
+    entry_market_snapshot: Optional[str] = None
+    signal_metadata: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -171,8 +186,10 @@ class Database:
             self._create_oi_table()
             self._create_portfolio_table()
             self._create_strategy_pnl_table()
+            self._create_decision_audit_table()
             self._migrate_portfolio_table()
             self._migrate_trades_table()
+            self._migrate_decision_audit_table()
             self._create_indexes()
 
     def _create_candle_tables(self) -> None:
@@ -278,6 +295,28 @@ class Database:
             );
         """)
 
+    def _create_decision_audit_table(self) -> None:
+        """Persistent decision audit log (replaces in-memory _decision_history).
+
+        Records every signal gate decision:  correlation, vol_circuit,
+        funding_blackout, can_enter, execution.  Survives restarts, so
+        post-mortem analysis of rejected signals is possible.
+        """
+        self._conn().execute("""
+            CREATE TABLE IF NOT EXISTS decision_audit (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp          INTEGER NOT NULL,
+                decision_type      TEXT    NOT NULL,
+                symbol             TEXT    NOT NULL,
+                side               TEXT,
+                strategy           TEXT,
+                signal_confidence  REAL,
+                result             TEXT    NOT NULL,
+                reason             TEXT,
+                metadata           TEXT
+            );
+        """)
+
     def _migrate_portfolio_table(self) -> None:
         """Add peak_capital column to existing portfolio_snapshots table."""
         try:
@@ -289,12 +328,46 @@ class Database:
             pass
 
     def _migrate_trades_table(self) -> None:
+        """Add trade journal columns and QW2 enrichment fields.
+
+        New columns (all nullable, safe migration):
+          - sub_strategy       (existing; preserved)
+          - entry_adx          ADX(14) at entry time
+          - entry_oir          orderbook imbalance ratio at entry
+          - entry_funding      funding rate at entry
+          - entry_predicted_funding predicted funding at entry
+          - entry_bid_ask_imbalance   15m buy/sell imbalance at entry
+          - entry_volume_1m    1m volume at entry (USD)
+          - entry_market_snapshot     full JSON snapshot of regime
+          - signal_metadata    raw signal.metadata as JSON
+        """
         cols = {
             row[1]
             for row in self._conn().execute("PRAGMA table_info(trades)").fetchall()
         }
-        if "sub_strategy" not in cols:
-            self._conn().execute("ALTER TABLE trades ADD COLUMN sub_strategy TEXT")
+        new_columns = [
+            ("sub_strategy",            "TEXT"),
+            ("entry_adx",               "REAL"),
+            ("entry_oir",               "REAL"),
+            ("entry_funding",           "REAL"),
+            ("entry_predicted_funding", "REAL"),
+            ("entry_bid_ask_imbalance", "REAL"),
+            ("entry_volume_1m",         "REAL"),
+            ("entry_market_snapshot",   "TEXT"),
+            ("signal_metadata",         "TEXT"),
+        ]
+        for col_name, col_type in new_columns:
+            if col_name not in cols:
+                try:
+                    self._conn().execute(
+                        f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # Race or already added — safe to ignore
+
+    def _migrate_decision_audit_table(self) -> None:
+        """No-op for now; placeholder for future decision_audit columns."""
+        return
 
     def _create_indexes(self) -> None:
         cur = self._cursor()
@@ -308,6 +381,10 @@ class Database:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_ts ON portfolio_snapshots(timestamp);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_strategy_pnl_strategy ON strategy_pnl(strategy);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_strategy_pnl_exit_time ON strategy_pnl(exit_time);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_ts ON decision_audit(timestamp);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_strategy ON decision_audit(strategy);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_result ON decision_audit(result);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_type ON decision_audit(decision_type);")
 
     # ------------------------------------------------------------------
     # Candles
@@ -423,18 +500,30 @@ class Database:
     # ------------------------------------------------------------------
 
     def save_trade_entry(self, entry: TradeEntry) -> int:
-        """Insert a new open trade and return its auto-generated id."""
+        """Insert a new open trade and return its auto-generated id.
+
+        QW2: persists QW2 journal fields (entry_adx, entry_oir, etc.
+        + entry_market_snapshot, signal_metadata) when provided.
+        """
         sql = """
             INSERT INTO trades (
-                symbol, side, entry_price, entry_time, size, strategy, sub_strategy, status
+                symbol, side, entry_price, entry_time, size,
+                strategy, sub_strategy, status,
+                entry_adx, entry_oir, entry_funding, entry_predicted_funding,
+                entry_bid_ask_imbalance, entry_volume_1m,
+                entry_market_snapshot, signal_metadata
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         with self._write_lock:
             conn = self._conn()
             cur = conn.execute(sql, (
                 entry.symbol, entry.side, entry.entry_price, entry.entry_time,
                 entry.size, entry.strategy, entry.sub_strategy, entry.status,
+                entry.entry_adx, entry.entry_oir, entry.entry_funding,
+                entry.entry_predicted_funding, entry.entry_bid_ask_imbalance,
+                entry.entry_volume_1m,
+                entry.entry_market_snapshot, entry.signal_metadata,
             ))
             trade_id = cur.lastrowid
             conn.commit()
@@ -527,7 +616,6 @@ class Database:
     def get_strategy_pnl(
         self,
         since_ms: Optional[int] = None,
-        strategy: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Return per-strategy aggregate stats.
 
@@ -571,6 +659,137 @@ class Database:
             d["win_rate"] = round((wins / trades) if trades else 0.0, 4)
             results.append(d)
         return results
+
+    # ------------------------------------------------------------------
+    # Decision audit (QW1)
+    # ------------------------------------------------------------------
+
+    def save_decision(
+        self,
+        timestamp: int,
+        decision_type: str,
+        symbol: str,
+        result: str,
+        reason: str,
+        side: Optional[str] = None,
+        strategy: Optional[str] = None,
+        signal_confidence: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Persist a single decision-audit row.
+
+        Parameters
+        ----------
+        timestamp : int
+            Unix millisecond timestamp of the decision.
+        decision_type : str
+            Gate name:  'risk_check', 'correlation', 'vol_circuit',
+            'funding_blackout', 'execution', 'tca', 'ensemble'.
+        symbol : str
+            Trading symbol the decision relates to.
+        result : str
+            'accepted' | 'rejected' | 'executed'.
+        reason : str
+            Human-readable explanation.
+        side : str, optional
+            'long' | 'short' (when applicable).
+        strategy : str, optional
+            Strategy that produced the signal.
+        signal_confidence : float, optional
+            Confidence score of the underlying signal.
+        metadata : dict, optional
+            Extra structured context (e.g.  ADX, OIR, capital, correlation).
+        """
+        meta_json = json.dumps(metadata) if metadata else None
+        sql = """
+            INSERT INTO decision_audit (
+                timestamp, decision_type, symbol, side, strategy,
+                signal_confidence, result, reason, metadata
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        with self._write_lock:
+            conn = self._conn()
+            cur = conn.execute(sql, (
+                timestamp, decision_type, symbol, side, strategy,
+                signal_confidence, result, reason, meta_json,
+            ))
+            conn.commit()
+        return int(cur.lastrowid or 0)
+
+    def get_decisions(
+        self,
+        limit: int = 200,
+        decision_type: Optional[str] = None,
+        result: Optional[str] = None,
+        strategy: Optional[str] = None,
+        symbol: Optional[str] = None,
+        since_ms: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Query the decision audit log with optional filters.
+
+        All filters are AND-combined.  Results sorted newest first.
+        """
+        conditions: List[str] = []
+        params: List[Any] = []
+        if decision_type:
+            conditions.append("decision_type = ?")
+            params.append(decision_type)
+        if result:
+            conditions.append("result = ?")
+            params.append(result)
+        if strategy:
+            conditions.append("strategy = ?")
+            params.append(strategy)
+        if symbol:
+            conditions.append("symbol = ?")
+            params.append(symbol)
+        if since_ms is not None:
+            conditions.append("timestamp >= ?")
+            params.append(since_ms)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT * FROM decision_audit {where_clause} ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        with self._conn():
+            cur = self._conn().execute(sql, params)
+            rows = cur.fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            # Decode metadata JSON for callers
+            if d.get("metadata"):
+                try:
+                    d["metadata"] = json.loads(d["metadata"])
+                except (TypeError, ValueError):
+                    pass
+            out.append(d)
+        return out
+
+    def count_decisions(
+        self,
+        decision_type: Optional[str] = None,
+        result: Optional[str] = None,
+        since_ms: Optional[int] = None,
+    ) -> int:
+        """Count decision-audit rows (useful for gate analytics)."""
+        conditions: List[str] = []
+        params: List[Any] = []
+        if decision_type:
+            conditions.append("decision_type = ?")
+            params.append(decision_type)
+        if result:
+            conditions.append("result = ?")
+            params.append(result)
+        if since_ms is not None:
+            conditions.append("timestamp >= ?")
+            params.append(since_ms)
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT COUNT(*) AS n FROM decision_audit {where_clause}"
+        with self._conn():
+            row = self._conn().execute(sql, params).fetchone()
+        return int(row["n"] or 0) if row else 0
 
     # ------------------------------------------------------------------
     # Signals

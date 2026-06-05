@@ -1380,6 +1380,128 @@ class TradingEngine:
             return None
         return (buy - sell) / total
 
+    # ------------------------------------------------------------------
+    # QW1: Decision audit (in-memory ring + DB persistence)
+    # ------------------------------------------------------------------
+
+    def _persist_decision(
+        self,
+        decision_type: str,
+        symbol: str,
+        result: str,
+        reason: str,
+        side: Optional[str] = None,
+        strategy: Optional[str] = None,
+        signal_confidence: Optional[float] = None,
+        ts_ms: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record a single gate decision in both the dashboard ring and DB.
+
+        QW1: replaces the bare ``_decision_history.insert(0, ...)`` pattern
+        with a unified call that also persists to the ``decision_audit``
+        table.  DB writes are best-effort — failures are logged but do not
+        disrupt the live trading flow.
+
+        Parameters
+        ----------
+        decision_type : str
+            Gate name:  'cooldown' | 'correlation' | 'risk' | 'vol_circuit'
+            | 'funding_blackout' | 'tca' | 'execution' | 'exit' | 'ensemble'.
+        result : str
+            'accepted' | 'rejected' | 'executed'.
+        reason : str
+            Human-readable explanation.
+        """
+        if ts_ms is None:
+            ts_ms = int(time.time() * 1000)
+        time_str = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime("%H:%M:%S")
+
+        # 1. In-memory ring (preserves existing dashboard behaviour)
+        self._decision_history.insert(0, {
+            "time": time_str,
+            "type": decision_type,
+            "symbol": symbol,
+            "side": side,
+            "result": result,
+            "reason": reason,
+        })
+        self._decision_history = self._decision_history[:100]
+
+        # 2. Persistent audit row (best-effort)
+        try:
+            if getattr(self, "_db", None) is not None:
+                self._db.save_decision(
+                    timestamp=ts_ms,
+                    decision_type=decision_type,
+                    symbol=symbol,
+                    side=side,
+                    strategy=strategy,
+                    signal_confidence=signal_confidence,
+                    result=result,
+                    reason=reason,
+                    metadata=metadata,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("decision_audit persist failed (non-fatal): %s", exc)
+
+    def _extract_market_snapshot(
+        self,
+        event: MarketEvent,
+        signal: Optional[Signal] = None,
+    ) -> Dict[str, Any]:
+        """Build a JSON-serializable regime snapshot for trade journal.
+
+        QW2: captures the full market context at the moment a trade
+        enters so post-mortem analysis can correlate outcomes with
+        regime (ADX, OIR, funding, imbalance, etc.).
+        """
+        c_1m = event.candle_1m
+        buy_vol = float(getattr(c_1m, "buy_volume", 0.0) or 0.0) if c_1m else 0.0
+        sell_vol = float(getattr(c_1m, "sell_volume", 0.0) or 0.0) if c_1m else 0.0
+
+        snapshot: Dict[str, Any] = {
+            "price": event.price,
+            "adx_14": event.adx_14,
+            "atr_14": event.atr_14,
+            "rsi_14": event.rsi_14,
+            "ema_20": event.ema_20,
+            "funding": event.funding,
+            "predicted_funding": event.predicted_funding,
+            "funding_avg": event.funding_avg,
+            "funding_weighted": event.funding_weighted,
+            "predicted_funding_avg": event.predicted_funding_avg,
+            "oi_total": event.oi_total,
+            "oi_total_aggregated": event.oi_total_aggregated,
+            "oi_delta": event.oi_delta,
+            "oi_exchange_count": event.oi_exchange_count,
+            "volume_1m": event.volume_1m,
+            "bid_ask_imbalance": event.bid_ask_imbalance,
+            "vwap_15m": event.vwap_15m,
+            "orderbook_spread_pct": event.orderbook_spread_pct,
+            "orderbook_oir": event.orderbook_oir,
+            "orderbook_depth_quality": event.orderbook_depth_quality,
+            "orderbook_bid_ask_ratio": event.orderbook_bid_ask_ratio,
+            "cvd_1m": buy_vol - sell_vol,
+            "cvd_buy_vol_1m": buy_vol,
+            "cvd_sell_vol_1m": sell_vol,
+            "liquidation_notional_5m": event.liquidation_notional_5m,
+            "liquidation_count_5m": event.liquidation_count_5m,
+            "market_data_health": event.market_data_health,
+            "market_data_stale": event.market_data_stale,
+        }
+        if signal is not None:
+            snapshot["signal"] = {
+                "strategy": signal.strategy,
+                "side": signal.side,
+                "confidence": signal.confidence,
+                "size_pct": signal.size_pct,
+                "reason": signal.reason,
+                "stop_loss_pct": signal.stop_loss_pct,
+                "take_profit_pct": signal.take_profit_pct,
+            }
+        return snapshot
+
     def _accumulate_liquidation_proxy(
         self,
         symbol: str,
@@ -1887,15 +2009,16 @@ class TradingEngine:
             )
             sig_record["status"] = "rejected"
             sig_record["risk_reason"] = cooldown_reason
-            self._decision_history.insert(0, {
-                "time": sig_time,
-                "type": "cooldown",
-                "symbol": signal.symbol,
-                "side": signal.side,
-                "result": "rejected",
-                "reason": cooldown_reason,
-            })
-            self._decision_history = self._decision_history[:100]
+            self._persist_decision(
+                decision_type="cooldown",
+                symbol=signal.symbol,
+                side=signal.side,
+                strategy=signal.strategy,
+                signal_confidence=signal.confidence,
+                ts_ms=event.timestamp_ms,
+                result="rejected",
+                reason=cooldown_reason,
+            )
             return
 
         # --- Kelly Criterion sizing (Task 4.4) ---
@@ -1964,15 +2087,21 @@ class TradingEngine:
                         strat_stats["rejected_signals"] += 1
                         if strat_stats["signal_history"]:
                             strat_stats["signal_history"][0]["status"] = "rejected"
-                    self._decision_history.insert(0, {
-                        "time": sig_time,
-                        "type": "correlation",
-                        "symbol": signal.symbol,
-                        "side": signal.side,
-                        "result": "rejected",
-                        "reason": reason,
-                    })
-                    self._decision_history = self._decision_history[:100]
+                    self._persist_decision(
+                        decision_type="correlation",
+                        symbol=signal.symbol,
+                        side=signal.side,
+                        strategy=signal.strategy,
+                        signal_confidence=signal.confidence,
+                        ts_ms=event.timestamp_ms,
+                        result="rejected",
+                        reason=reason,
+                        metadata={
+                            "conflict_symbol": conflict_sym,
+                            "correlation": float(corr),
+                            "threshold": float(corr_threshold),
+                        },
+                    )
                     return
 
         # --- C1: Intraday volatility circuit breaker (soft gate) ---
@@ -2030,15 +2159,16 @@ class TradingEngine:
                 strat_stats["rejected_signals"] += 1
                 if strat_stats["signal_history"]:
                     strat_stats["signal_history"][0]["status"] = "rejected"
-            self._decision_history.insert(0, {
-                "time": sig_time,
-                "type": "risk",
-                "symbol": signal.symbol,
-                "side": signal.side,
-                "result": "rejected",
-                "reason": reason,
-            })
-            self._decision_history = self._decision_history[:100]
+            self._persist_decision(
+                decision_type="risk",
+                symbol=signal.symbol,
+                side=signal.side,
+                strategy=signal.strategy,
+                signal_confidence=signal.confidence,
+                ts_ms=event.timestamp_ms,
+                result="rejected",
+                reason=reason,
+            )
             return
 
         # --- Position sizing ---
@@ -2101,17 +2231,17 @@ class TradingEngine:
                 sig_record["risk_reason"] = (
                     f"fill_ratio {fill_ratio*100:.1f}% < {self._min_fill_ratio*100:.0f}%"
                 )
-                self._decision_history.insert(0, {
-                    "time": sig_time,
-                    "type": "risk",
-                    "symbol": signal.symbol,
-                    "side": signal.side,
-                    "result": "rejected",
-                    "reason": (
-                        f"fill_ratio {fill_ratio*100:.1f}% < {self._min_fill_ratio*100:.0f}%"
-                    ),
-                })
-                self._decision_history = self._decision_history[:100]
+                self._persist_decision(
+                    decision_type="risk",
+                    symbol=signal.symbol,
+                    side=signal.side,
+                    strategy=signal.strategy,
+                    signal_confidence=signal.confidence,
+                    ts_ms=event.timestamp_ms,
+                    result="rejected",
+                    reason=f"fill_ratio {fill_ratio*100:.1f}% < {self._min_fill_ratio*100:.0f}%",
+                    metadata={"fill_ratio": float(fill_ratio), "min_fill_ratio": float(self._min_fill_ratio)},
+                )
                 return
 
             # 2. Slippage check — is the price impact acceptable?
@@ -2127,15 +2257,17 @@ class TradingEngine:
                 )
                 sig_record["status"] = "rejected"
                 sig_record["risk_reason"] = f"slippage {slippage*100:.3f}% > {self._max_slippage_pct*100:.2f}%"
-                self._decision_history.insert(0, {
-                    "time": sig_time,
-                    "type": "risk",
-                    "symbol": signal.symbol,
-                    "side": signal.side,
-                    "result": "rejected",
-                    "reason": f"slippage {slippage*100:.3f}% > {self._max_slippage_pct*100:.2f}%",
-                })
-                self._decision_history = self._decision_history[:100]
+                self._persist_decision(
+                    decision_type="risk",
+                    symbol=signal.symbol,
+                    side=signal.side,
+                    strategy=signal.strategy,
+                    signal_confidence=signal.confidence,
+                    ts_ms=event.timestamp_ms,
+                    result="rejected",
+                    reason=f"slippage {slippage*100:.3f}% > {self._max_slippage_pct*100:.2f}%",
+                    metadata={"slippage": float(slippage), "max_slippage_pct": float(self._max_slippage_pct)},
+                )
                 return
             logger.info(
                 "Slippage OK %s %s - %.3f%% <= %.2f%% (size=%.6f)",
@@ -2171,15 +2303,16 @@ class TradingEngine:
                 )
                 sig_record["status"] = "rejected"
                 sig_record["risk_reason"] = tca_reason
-                self._decision_history.insert(0, {
-                    "time": sig_time,
-                    "type": "tca",
-                    "symbol": signal.symbol,
-                    "side": signal.side,
-                    "result": "rejected",
-                    "reason": tca_reason,
-                })
-                self._decision_history = self._decision_history[:100]
+                self._persist_decision(
+                    decision_type="tca",
+                    symbol=signal.symbol,
+                    side=signal.side,
+                    strategy=signal.strategy,
+                    signal_confidence=signal.confidence,
+                    ts_ms=event.timestamp_ms,
+                    result="rejected",
+                    reason=tca_reason,
+                )
                 return
             if tca_reason != "tca_skipped_no_edge_estimate":
                 logger.info("TCA %s %s — %s", signal.symbol, signal.side, tca_reason)
@@ -2206,20 +2339,21 @@ class TradingEngine:
 
         # --- Execute ---
         try:
-            result = await self._executor.enter_position(signal, self._portfolio)
+            result = await self._executor.enter_position(signal, self._portfolio, market_event=event)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Execution failed for %s: %s", signal.symbol, exc)
             sig_record["status"] = "failed"
             sig_record["risk_reason"] = str(exc)[:80]
-            self._decision_history.insert(0, {
-                "time": sig_time,
-                "type": "execution",
-                "symbol": signal.symbol,
-                "side": signal.side,
-                "result": "failed",
-                "reason": str(exc)[:80],
-            })
-            self._decision_history = self._decision_history[:100]
+            self._persist_decision(
+                decision_type="execution",
+                symbol=signal.symbol,
+                side=signal.side,
+                strategy=signal.strategy,
+                signal_confidence=signal.confidence,
+                ts_ms=event.timestamp_ms,
+                result="failed",
+                reason=str(exc)[:80],
+            )
             return
 
         # Handle rejection (debounce, duplicate, etc.)
@@ -2230,15 +2364,16 @@ class TradingEngine:
             )
             sig_record["status"] = "rejected"
             sig_record["risk_reason"] = result.reason
-            self._decision_history.insert(0, {
-                "time": sig_time,
-                "type": "execution",
-                "symbol": signal.symbol,
-                "side": signal.side,
-                "result": "rejected",
-                "reason": result.reason,
-            })
-            self._decision_history = self._decision_history[:100]
+            self._persist_decision(
+                decision_type="execution",
+                symbol=signal.symbol,
+                side=signal.side,
+                strategy=signal.strategy,
+                signal_confidence=signal.confidence,
+                ts_ms=event.timestamp_ms,
+                result="rejected",
+                reason=result.reason,
+            )
             return
 
         sig_record["status"] = "executed"
@@ -2250,15 +2385,17 @@ class TradingEngine:
             if strat_stats["signal_history"]:
                 strat_stats["signal_history"][0]["status"] = "executed"
 
-        self._decision_history.insert(0, {
-            "time": sig_time,
-            "type": "execution",
-            "symbol": signal.symbol,
-            "side": signal.side,
-            "result": "executed",
-            "reason": f"size={result.size:.6f} @ {result.entry_price:.2f}",
-        })
-        self._decision_history = self._decision_history[:100]
+        self._persist_decision(
+            decision_type="execution",
+            symbol=signal.symbol,
+            side=signal.side,
+            strategy=signal.strategy,
+            signal_confidence=signal.confidence,
+            ts_ms=event.timestamp_ms,
+            result="executed",
+            reason=f"size={result.size:.6f} @ {result.entry_price:.2f}",
+            metadata={"trade_id": int(result.trade_id), "size": float(result.size), "entry_price": float(result.entry_price)},
+        )
 
         # --- Update portfolio ---
         notional = result.entry_price * result.size
@@ -2392,15 +2529,13 @@ class TradingEngine:
             result = await self._executor.close_position(position, exit_price, reason)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Exit execution failed for %s: %s", position.symbol, exc)
-            self._decision_history.insert(0, {
-                "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
-                "type": "exit",
-                "symbol": position.symbol,
-                "side": position.side,
-                "result": "failed",
-                "reason": str(exc)[:80],
-            })
-            self._decision_history = self._decision_history[:100]
+            self._persist_decision(
+                decision_type="exit",
+                symbol=position.symbol,
+                side=position.side,
+                result="failed",
+                reason=str(exc)[:80],
+            )
             return
 
         # Update portfolio
@@ -2467,15 +2602,15 @@ class TradingEngine:
         except Exception:
             logger.exception("Failed to record strategy_pnl row for %s", position.symbol)
 
-        self._decision_history.insert(0, {
-            "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
-            "type": "exit",
-            "symbol": position.symbol,
-            "side": position.side,
-            "result": "closed",
-            "reason": f"{reason} pnl={result.pnl_usd:.2f} ({result.pnl_pct*100:.2f}%)",
-        })
-        self._decision_history = self._decision_history[:100]
+        self._persist_decision(
+            decision_type="exit",
+            symbol=position.symbol,
+            side=position.side,
+            strategy=str(position.metadata.get("strategy", "") or "") if position.metadata else None,
+            result="closed",
+            reason=f"{reason} pnl={result.pnl_usd:.2f} ({result.pnl_pct*100:.2f}%)",
+            metadata={"pnl_usd": float(result.pnl_usd), "pnl_pct": float(result.pnl_pct), "exit_reason": reason},
+        )
 
         logger.info(
             "Position CLOSED %s pnl=%.2f (%.2f%%) reason=%s",

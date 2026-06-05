@@ -7,13 +7,14 @@ switching between paper and live does not change the bookkeeping contract.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from src.data.database import Database, TradeEntry, TradeExit
-from src.strategies.base import Position, Signal
+from src.strategies.base import MarketEvent, Position, Signal
 from src.utils.config import Config
 from src.utils.helpers import safe_float, safe_divide, utc_now, utc_timestamp_ms
 
@@ -172,12 +173,17 @@ class ExecutionEngine:
         self,
         signal: Signal,
         portfolio: Any,  # PortfolioState
+        market_event: Optional[MarketEvent] = None,
     ) -> TradeResult:
         """Open a new position.
 
         In **paper** mode the fill is simulated instantly at *signal.entry_price*.
         In **testnet** / **mainnet** mode an order is submitted via the REST
         client and the result is tracked.
+
+        QW2: when *market_event* is provided, a JSON snapshot of the regime
+        (ADX, OIR, funding, imbalance, etc.) is stored alongside the trade
+        for post-mortem analysis.
 
         Returns a :class:`TradeResult` in all cases.
         """
@@ -271,6 +277,69 @@ class ExecutionEngine:
         if signal.strategy != "StrategyEnsemble":
             sub_strategy = signal.strategy
 
+        # QW2: build trade journal snapshot (regime context at entry)
+        snapshot_json: Optional[str] = None
+        signal_meta_json: Optional[str] = None
+        entry_adx: Optional[float] = None
+        entry_oir: Optional[float] = None
+        entry_funding: Optional[float] = None
+        entry_predicted_funding: Optional[float] = None
+        entry_bid_ask_imbalance: Optional[float] = None
+        entry_volume_1m: Optional[float] = None
+        if market_event is not None:
+            try:
+                snapshot = {
+                    "adx_14": market_event.adx_14,
+                    "atr_14": market_event.atr_14,
+                    "rsi_14": market_event.rsi_14,
+                    "ema_20": market_event.ema_20,
+                    "funding": market_event.funding,
+                    "predicted_funding": market_event.predicted_funding,
+                    "funding_avg": market_event.funding_avg,
+                    "funding_weighted": market_event.funding_weighted,
+                    "predicted_funding_avg": market_event.predicted_funding_avg,
+                    "oi_total": market_event.oi_total,
+                    "oi_total_aggregated": market_event.oi_total_aggregated,
+                    "oi_delta": market_event.oi_delta,
+                    "oi_exchange_count": market_event.oi_exchange_count,
+                    "volume_1m": market_event.volume_1m,
+                    "bid_ask_imbalance": market_event.bid_ask_imbalance,
+                    "vwap_15m": market_event.vwap_15m,
+                    "orderbook_spread_pct": market_event.orderbook_spread_pct,
+                    "orderbook_oir": market_event.orderbook_oir,
+                    "orderbook_depth_quality": market_event.orderbook_depth_quality,
+                    "orderbook_bid_ask_ratio": market_event.orderbook_bid_ask_ratio,
+                    "liquidation_notional_5m": market_event.liquidation_notional_5m,
+                    "liquidation_count_5m": market_event.liquidation_count_5m,
+                    "market_data_health": market_event.market_data_health,
+                    "market_data_stale": market_event.market_data_stale,
+                    "price": market_event.price,
+                }
+                # Extract candle-derived fields if available
+                c1m = market_event.candle_1m
+                if c1m is not None:
+                    snapshot["candle_1m_buy_volume"] = float(getattr(c1m, "buy_volume", 0.0) or 0.0)
+                    snapshot["candle_1m_sell_volume"] = float(getattr(c1m, "sell_volume", 0.0) or 0.0)
+                    snapshot["candle_1m_cvd"] = snapshot["candle_1m_buy_volume"] - snapshot["candle_1m_sell_volume"]
+                snapshot_json = json.dumps(snapshot, default=str)
+            except (TypeError, ValueError) as exc:
+                logger.debug("QW2 snapshot build failed (non-fatal): %s", exc)
+                snapshot_json = None
+
+            # Map regime fields for SQL-friendly filtering
+            entry_adx = market_event.adx_14
+            entry_oir = market_event.orderbook_oir
+            entry_funding = market_event.funding
+            entry_predicted_funding = market_event.predicted_funding
+            entry_bid_ask_imbalance = market_event.bid_ask_imbalance
+            entry_volume_1m = market_event.volume_1m
+
+        # Encode signal metadata for the journal
+        try:
+            signal_meta_json = json.dumps(signal.metadata, default=str)
+        except (TypeError, ValueError):
+            signal_meta_json = None
+
         entry_record = TradeEntry(
             symbol=signal.symbol,
             side=signal.side,
@@ -280,6 +349,14 @@ class ExecutionEngine:
             strategy=signal.strategy,
             sub_strategy=str(sub_strategy) if sub_strategy else None,
             status="open",
+            entry_adx=entry_adx,
+            entry_oir=entry_oir,
+            entry_funding=entry_funding,
+            entry_predicted_funding=entry_predicted_funding,
+            entry_bid_ask_imbalance=entry_bid_ask_imbalance,
+            entry_volume_1m=entry_volume_1m,
+            entry_market_snapshot=snapshot_json,
+            signal_metadata=signal_meta_json,
         )
         trade_id = self._db.save_trade_entry(entry_record)
 
