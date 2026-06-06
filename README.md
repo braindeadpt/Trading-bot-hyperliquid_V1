@@ -1,11 +1,12 @@
-# Hyperliquid Premium Trading Bot v3.1.13
+# Hyperliquid Premium Trading Bot v3.1.14
 
 Professional automated trading bot for Hyperliquid perpetuals exchange.
 Modular async architecture, real-time WebSocket data, 8 pluggable strategies,
 deterministic risk management, paper / testnet / mainnet execution, and a
 Flask + Socket.IO dashboard.
 
-Current score: **9.5/10** (Phases A, B, C hardening + QW observability applied).
+Current score: **9.5/10** (Phases A, B, C hardening + QW observability + v3.1.14
+CVDOrderFlow volume unit fix).
 
 ---
 
@@ -60,8 +61,11 @@ start.bat
 
 ## Strategies
 
-The 8 strategies are governed by `StrategyGovernor` which auto-disables any
-strategy with negative Sharpe over the last 30 days.
+The 7 active strategies are governed by `StrategyGovernor` which auto-disables
+any strategy with negative Sharpe over the last 30 days. After v3.1.14 cleanup,
+the dead reference to `FundingExtreme` was removed from the factory table
+(`SmartMoneyFlow` is kept because it's the display name returned by the
+`TrendFollow` class — see `src/strategies/trend_follow.py:name`).
 
 | Strategy             | Type           | Status (typical) | Notes |
 |----------------------|----------------|------------------|-------|
@@ -193,7 +197,7 @@ No central pytest runner; each test is invoked directly.
 python -m unittest tests.test_basic               # 11/11 unittest smoke
 python tests/test_critical_fixes.py               # v3.1.1 regression
 python tests/test_cascade_simulation.py           # Phase C stress (7 tests)
-python tests/test_cvd_orderflow.py                # CVDOrderFlow 20/20
+python tests/test_cvd_orderflow.py                # CVDOrderFlow 21/21 (v3.1.14 + volume unit test)
 python tests/test_qw_observability.py             # v3.1.12 QW1+QW2 (11 tests)
 python tests/test_log_rotation.py                 # v3.1.12 QW3 (9 tests)
 python tests/test_databus_per_topic.py            # v3.1.13 QW4 (7 tests)

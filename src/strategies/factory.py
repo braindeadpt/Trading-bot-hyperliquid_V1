@@ -33,11 +33,19 @@ _STRATEGY_REGISTRY = (
 
 
 def default_ensemble_weights() -> List[StrategyWeight]:
-    """Default ensemble weight table."""
+    """Default ensemble weight table.
+
+    v3.1.14: removed dead reference to ``FundingExtreme`` (removed earlier
+    due to Sharpe -37). The ``SmartMoneyFlow`` entry is *intentional* — it
+    is the display name returned by the :class:`TrendFollow` strategy class
+    (see ``src/strategies/trend_follow.py:name`` property). Renaming would
+    require updates across the regime-weights dict, settings.yaml, ~30
+    test assertions, and a docs file. Keeping the legacy alias is the
+    lower-risk choice for now.
+    """
     return [
         StrategyWeight("SmartMoneyFlow", 0.18, min_confidence=0.40),
         StrategyWeight("VolatilityBreakout", 0.15, min_confidence=0.50),
-        StrategyWeight("FundingExtreme", 0.12, min_confidence=0.55),
         StrategyWeight("DonchianBreakout", 0.10, min_confidence=0.50),
         StrategyWeight("VWAPDeviation", 0.12, min_confidence=0.40),
         StrategyWeight("FundingArbitrage", 0.08, min_confidence=0.35),
@@ -85,21 +93,39 @@ def build_sub_strategies(cfg: Any) -> List[Strategy]:
 
 
 def build_ensemble(cfg: Any) -> StrategyEnsemble:
-    """Build StrategyEnsemble with weights renormalized for enabled strategies."""
+    """Build StrategyEnsemble with weights renormalized for enabled strategies.
+
+    v3.1.14: ``min_confidence`` for each strategy is now read from the
+    live strategy instance's ``MIN_CONFIDENCE`` attribute (which itself was
+    populated from ``settings.yaml: strategy.<name>.min_confidence``). This
+    way, QW5 (and any future per-strategy threshold tweaks) flow through to
+    the ensemble's min_confidence filter instead of being shadowed by the
+    hardcoded table defaults.
+    """
     subs = build_sub_strategies(cfg)
     enabled_names = {s.name for s in subs}
     active_weights = [w for w in default_ensemble_weights() if w.name in enabled_names]
     total = sum(w.weight for w in active_weights)
+
+    # Lookup helper: min_confidence from the actual strategy instance if present.
+    sub_by_name = {s.name: s for s in subs}
+
     if total > 0:
-        active_weights = [
-            StrategyWeight(w.name, w.weight / total, w.min_confidence)
-            for w in active_weights
-        ]
+        active_weights = []
+        for w in default_ensemble_weights():
+            if w.name not in enabled_names:
+                continue
+            # Prefer the live strategy's MIN_CONFIDENCE (already set from settings.yaml).
+            inst = sub_by_name.get(w.name)
+            mc = getattr(inst, "MIN_CONFIDENCE", w.min_confidence) if inst else w.min_confidence
+            active_weights.append(
+                StrategyWeight(w.name, w.weight / total, float(mc))
+            )
 
     ens = cfg.get("strategy.ensemble", {}) or {}
     exclude = ens.get("high_conviction_exclude")
     if exclude is None:
-        exclude = ["VolatilityBreakout", "VWAPDeviation", "FundingExtreme"]
+        exclude = ["VolatilityBreakout", "VWAPDeviation"]
     return StrategyEnsemble(
         strategies=subs,
         weights=active_weights,

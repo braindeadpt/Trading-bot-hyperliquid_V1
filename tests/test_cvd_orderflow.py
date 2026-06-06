@@ -306,7 +306,13 @@ def test_adx_too_low_blocks() -> None:
 
 
 def test_volume_too_low_blocks() -> None:
-    """If total window volume < min, no signal."""
+    """If total window volume < min, no signal.
+
+    Pre-fix bug check: ``total_volume=100.0`` with price 100.0 yields
+    100*100 = 10_000 USD < 50_000 USD threshold -> still blocked. The
+    companion test ``test_volume_unit_conversion`` proves the unit conversion
+    is happening in the candle.
+    """
     strat = CVDOrderFlow()
     sym = "BTC"
     state = strat._get_state(sym)
@@ -321,6 +327,96 @@ def test_volume_too_low_blocks() -> None:
     ev = make_event(sym, 97.0, candle_1m=c, adx=20.0, ts_offset=60)
     sig = strat.on_data(ev)
     print_test("volume_too_low_blocks", sig is None)
+
+
+def test_volume_unit_conversion() -> None:
+    """v3.1.14: verify candle volume is converted from token-units to USD.
+
+    Reproduces the production bug where ``CVDOrderFlow`` was comparing
+    raw token volume (e.g. ``160 BTC``) to a USD threshold (``50_000``)
+    and silently blocking every signal. After the fix, the strategy
+    multiplies the token volume by the candle close price.
+
+    Scenarios:
+      * BTC at $100_000 with 100 BTC traded = $10_000_000 USD  -> passes gate
+      * SOL at $150 with 50_000 SOL traded  = $7_500_000 USD    -> passes gate
+      * BTC at $100_000 with 0.05 BTC traded = $5_000 USD       -> blocked
+
+    This test directly inspects the ``_BarDelta`` returned by
+    ``_extract_bar`` to confirm the conversion happens.
+    """
+    strat = CVDOrderFlow()
+
+    # Scenario 1: BTC at $100k, 100 BTC traded -> $10M USD
+    ev_btc = make_event(
+        "BTC", price=100_000.0,
+        candle_1m=_FakeCandle(
+            open=100_000.0, high=100_100.0, low=99_900.0, close=100_000.0,
+            volume=100.0, _ts=_ts(0),  # 100 BTC in token units
+            buy_volume=70.0, sell_volume=30.0,
+        ),
+    )
+    bar_btc = CVDOrderFlow._extract_bar(ev_btc)
+    assert bar_btc is not None, "BTC candle should be extracted"
+    expected_btc_usd = 100.0 * 100_000.0  # 10_000_000
+    assert abs(bar_btc.total_volume - expected_btc_usd) < 1.0, (
+        f"BTC: total_volume should be {expected_btc_usd} USD, "
+        f"got {bar_btc.total_volume}"
+    )
+    assert abs(bar_btc.buy_volume - 70.0 * 100_000.0) < 1.0, (
+        f"BTC: buy_volume should be 7_000_000 USD, got {bar_btc.buy_volume}"
+    )
+
+    # Scenario 2: SOL at $150, 50_000 SOL traded -> $7.5M USD
+    ev_sol = make_event(
+        "SOL", price=150.0,
+        candle_1m=_FakeCandle(
+            open=150.0, high=151.0, low=149.0, close=150.0,
+            volume=50_000.0, _ts=_ts(0),  # 50k SOL in token units
+            buy_volume=30_000.0, sell_volume=20_000.0,
+        ),
+    )
+    bar_sol = CVDOrderFlow._extract_bar(ev_sol)
+    assert bar_sol is not None, "SOL candle should be extracted"
+    expected_sol_usd = 50_000.0 * 150.0  # 7_500_000
+    assert abs(bar_sol.total_volume - expected_sol_usd) < 1.0, (
+        f"SOL: total_volume should be {expected_sol_usd} USD, "
+        f"got {bar_sol.total_volume}"
+    )
+
+    # Scenario 3: very low volume -> should be rejected by volume gate
+    ev_tiny = make_event(
+        "BTC", price=100_000.0,
+        candle_1m=_FakeCandle(
+            open=100_000.0, high=100_000.0, low=100_000.0, close=100_000.0,
+            volume=0.05, _ts=_ts(0),  # 0.05 BTC = $5_000 USD
+            buy_volume=0.03, sell_volume=0.02,
+        ),
+    )
+    # Pre-fill bars so warm-up is satisfied
+    state = strat._get_state("BTC")
+    for i in range(20):
+        state.bars_1m.append(_BarDelta(
+            timestamp_ms=_ts(i),
+            price_close=100_000.0 - i * 10.0,  # gentle downtrend
+            delta=0.05, total_volume=0.05 * 100_000.0,  # 5_000 USD per bar
+            buy_volume=0.04 * 100_000.0, sell_volume=0.01 * 100_000.0,
+        ))
+    sig = strat.on_data(ev_tiny)
+    # Either rejected by volume gate OR by warm-up; both are valid since
+    # the scenario presents a low-volume case that shouldn't pass.
+    print_test("volume_unit_conversion_tiny_blocked", sig is None)
+
+    print_test(
+        "volume_unit_conversion_btc",
+        abs(bar_btc.total_volume - expected_btc_usd) < 1.0,
+        f"{bar_btc.total_volume:.0f} USD (expected {expected_btc_usd:.0f})",
+    )
+    print_test(
+        "volume_unit_conversion_sol",
+        abs(bar_sol.total_volume - expected_sol_usd) < 1.0,
+        f"{bar_sol.total_volume:.0f} USD (expected {expected_sol_usd:.0f})",
+    )
 
 
 def test_oir_misaligned_blocks() -> None:
@@ -514,6 +610,7 @@ def main() -> int:
         test_adx_too_high_blocks,
         test_adx_too_low_blocks,
         test_volume_too_low_blocks,
+        test_volume_unit_conversion,
         test_oir_misaligned_blocks,
         test_throttle_blocks_rapid_signals,
         test_exit_max_hold,

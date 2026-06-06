@@ -163,7 +163,16 @@ class CVDOrderFlow(Strategy):
 
     @staticmethod
     def _extract_bar(event: MarketEvent) -> Optional[_BarDelta]:
-        """Pull (delta, volume, price) from the event's 1m candle."""
+        """Pull (delta, volume, price) from the event's 1m candle.
+
+        v3.1.14 fix: candle.volume from Hyperliquid is in *token units* (BTC,
+        ETH, SOL), not USD. The volume gate (``MIN_VOLUME_USD``) is denominated
+        in USD, so we must convert: ``volume_usd = token_volume * close_price``.
+        For BTC at $100k, 1 token = $100k. For SOL at $150, 1 token = $150.
+        Without this conversion, ``stats_m.volume < 50_000`` was almost always
+        True for BTC (token volumes 100-500) and intermittently True for SOL,
+        silently blocking valid divergence signals.
+        """
         c = event.candle_1m
         if c is None:
             return None
@@ -171,15 +180,22 @@ class CVDOrderFlow(Strategy):
         sell = float(getattr(c, "sell_volume", 0.0) or 0.0)
         if buy == 0.0 and sell == 0.0:
             return None
-        total = float(getattr(c, "volume", buy + sell) or (buy + sell))
+        total_tokens = float(getattr(c, "volume", buy + sell) or (buy + sell))
+        close_price = float(c.close)
+        if close_price <= 0.0:
+            return None
+        # Convert token units -> USD so MIN_VOLUME_USD gate is in apples-to-apples units.
+        total_usd = total_tokens * close_price
+        buy_usd = buy * close_price
+        sell_usd = sell * close_price
         ts = int(getattr(c, "timestamp_ms", event.timestamp_ms))
         return _BarDelta(
             timestamp_ms=ts,
-            price_close=float(c.close),
+            price_close=close_price,
             delta=buy - sell,
-            total_volume=total,
-            buy_volume=buy,
-            sell_volume=sell,
+            total_volume=total_usd,
+            buy_volume=buy_usd,
+            sell_volume=sell_usd,
         )
 
     def _window_stats(self, bars: Deque[_BarDelta], window: int) -> Optional[_WindowStats]:
@@ -477,7 +493,7 @@ class CVDOrderFlow(Strategy):
         state._last_no_signal_log_ms = event.timestamp_ms
         suffix = f" ({reason})" if reason else ""
         logger.info(
-            "CVDOrderFlow %s NO SIGNAL — div=%.2f price_chg=%.2f%% vol=%.0f%s",
+            "CVDOrderFlow %s NO SIGNAL — div=%.2f price_chg=%.2f%% vol_usd=%.0f%s",
             event.symbol,
             stats_m.divergence,
             stats_m.price_change_pct * 100.0,

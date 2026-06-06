@@ -23,7 +23,7 @@ if errorlevel 1 (
 :: Show menu
 echo.
 echo ╔══════════════════════════════════════════════════════════╗
-echo ║    HYPERLIQUID PREMIUM BOT v3.1.10                       ║
+echo ║    HYPERLIQUID PREMIUM BOT v3.1.14                       ║
 echo ║    (Phases A+B+C: hardening, concurrency, risk gates)   ║
 echo ╚══════════════════════════════════════════════════════════╝
 echo.
