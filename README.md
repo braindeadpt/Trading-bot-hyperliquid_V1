@@ -1,4 +1,4 @@
-# Hyperliquid Premium Trading Bot v3.1.14
+# Hyperliquid Premium Trading Bot v3.1.15
 
 Professional automated trading bot for Hyperliquid perpetuals exchange.
 Modular async architecture, real-time WebSocket data, 8 pluggable strategies,
@@ -6,7 +6,8 @@ deterministic risk management, paper / testnet / mainnet execution, and a
 Flask + Socket.IO dashboard.
 
 Current score: **9.5/10** (Phases A, B, C hardening + QW observability + v3.1.14
-CVDOrderFlow volume unit fix).
+CVDOrderFlow volume unit fix + v3.1.15 volume observability panel:
+OBV slope, MFI, rolling VWAP multi-TF).
 
 ---
 
@@ -198,6 +199,7 @@ python -m unittest tests.test_basic               # 11/11 unittest smoke
 python tests/test_critical_fixes.py               # v3.1.1 regression
 python tests/test_cascade_simulation.py           # Phase C stress (7 tests)
 python tests/test_cvd_orderflow.py                # CVDOrderFlow 21/21 (v3.1.14 + volume unit test)
+python tests/test_volume_indicators.py            # v3.1.15 OBV + MFI + VWAP-multi-TF (16 tests)
 python tests/test_qw_observability.py             # v3.1.12 QW1+QW2 (11 tests)
 python tests/test_log_rotation.py                 # v3.1.12 QW3 (9 tests)
 python tests/test_databus_per_topic.py            # v3.1.13 QW4 (7 tests)

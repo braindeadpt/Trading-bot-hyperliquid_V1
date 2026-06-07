@@ -203,6 +203,13 @@ class DashboardEmitter:
                 "ob_bid_wall": evt.get("orderbook_largest_bid_wall"),
                 "ob_ask_wall": evt.get("orderbook_largest_ask_wall"),
                 "rvol": evt.get("last_realized_vol"),
+                # v3.1.15: volume observability (pure read-out, no trading logic)
+                "obv_slope_5m": evt.get("obv_slope_5m"),
+                "mfi_5m": evt.get("mfi_5m"),
+                "vwap_1m_rolling": evt.get("vwap_1m_rolling"),
+                "vwap_5m_rolling": evt.get("vwap_5m_rolling"),
+                "vwap_15m_rolling": evt.get("vwap_15m_rolling"),
+                "vwap_1h_rolling": evt.get("vwap_1h_rolling"),
                 "last_update": evt.get("processed_at", 0),
             })
         self._safe_emit("live_data", rows)

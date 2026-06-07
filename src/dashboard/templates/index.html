@@ -210,6 +210,38 @@ tr:hover td { background: var(--panel-hover); }
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- ROW 1.5: v3.1.15 Volume Indicators — pure observability          -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="grid" style="margin-top:var(--gap);">
+    <div class="g-12">
+        <div class="panel" style="max-height:160px;">
+            <div class="panel-header">Volume Indicators <span class="dim">OBV slope / MFI / VWAP multi-TF (observability only)</span></div>
+            <div class="panel-body" style="padding:0;">
+                <div style="overflow:auto; max-height:136px;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Sym</th>
+                                <th class="num">OBV &Delta;5m</th>
+                                <th class="num">MFI 5m</th>
+                                <th class="num">VWAP 1m</th>
+                                <th class="num">VWAP 5m</th>
+                                <th class="num">VWAP 15m</th>
+                                <th class="num">VWAP 1h</th>
+                                <th class="num">Price vs VWAP5m</th>
+                            </tr>
+                        </thead>
+                        <tbody id="vol-indicators-tbody">
+                            <tr><td colspan="8" class="muted" style="text-align:center;">Waiting for data...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
 <!-- ROW 2: Execution — Positions + Trades                            -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="grid" style="margin-top:var(--gap);">
@@ -585,6 +617,37 @@ function renderCandles(rows) {
     }).join('');
 }
 
+// ── Volume Indicators (v3.1.15) ──
+function renderVolIndicators(rows) {
+    const tbody = document.getElementById("vol-indicators-tbody");
+    if (!tbody) return;
+    if (!rows || !rows.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="muted" style="text-align:center;">Waiting for data...</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(r => {
+        const obvClass = r.obv_slope_5m > 0 ? "up" : r.obv_slope_5m < 0 ? "down" : "";
+        const mfiClass = r.mfi_5m > 70 ? "up" : r.mfi_5m < 30 ? "down" : "";
+        let pvsClass = "";
+        let pvsText = "--";
+        if (r.price != null && r.vwap_5m_rolling != null && r.vwap_5m_rolling > 0) {
+            const pct = (r.price / r.vwap_5m_rolling - 1) * 100;
+            pvsClass = pct > 0.05 ? "up" : pct < -0.05 ? "down" : "";
+            pvsText = (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%";
+        }
+        return `<tr>
+            <td><span class="highlight">${r.symbol}</span></td>
+            <td class="num ${obvClass}">${r.obv_slope_5m != null ? fmtNum(r.obv_slope_5m) : "--"}</td>
+            <td class="num ${mfiClass}">${r.mfi_5m != null ? r.mfi_5m.toFixed(0) : "--"}</td>
+            <td class="num">${r.vwap_1m_rolling != null ? "$" + fmtNum(r.vwap_1m_rolling) : "--"}</td>
+            <td class="num">${r.vwap_5m_rolling != null ? "$" + fmtNum(r.vwap_5m_rolling) : "--"}</td>
+            <td class="num">${r.vwap_15m_rolling != null ? "$" + fmtNum(r.vwap_15m_rolling) : "--"}</td>
+            <td class="num">${r.vwap_1h_rolling != null ? "$" + fmtNum(r.vwap_1h_rolling) : "--"}</td>
+            <td class="num ${pvsClass}">${pvsText}</td>
+        </tr>`;
+    }).join('');
+}
+
 // ── Engine ──
 function renderEngine(data) {
     if (!data) return;
@@ -777,7 +840,7 @@ let _lastPortfolio = null;
 let _lastEngine = null;
 socket.on("portfolio", (data) => { _lastPortfolio = data; updateKPIs(data, _lastEngine); });
 socket.on("engine_monitor", (data) => { _lastEngine = data; renderEngine(data); updateKPIs(_lastPortfolio, data); });
-socket.on("live_data", (data) => renderLiveData(data));
+socket.on("live_data", (data) => { renderLiveData(data); renderVolIndicators(data); });
 socket.on("candles", (data) => renderCandles(data));
 socket.on("signals", (data) => renderSignals(data));
 socket.on("decisions", (data) => renderDecisions(data));

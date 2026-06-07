@@ -5,7 +5,7 @@ Every indicator is implemented from first principles (no pandas)."""
 
 from dataclasses import dataclass
 import math
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -481,6 +481,120 @@ def calculate_volume_ratio(
 
     ratio = current_volume / avg_volume
     return current_volume, ratio
+
+
+def calculate_obv(candles: List[Candle]) -> Optional[float]:
+    """On-Balance Volume (OBV).
+
+    Cumulative volume signed by candle direction:
+        - close > prev_close:  OBV += volume
+        - close < prev_close:  OBV -= volume
+        - close == prev_close: OBV unchanged
+
+    Returns the running OBV value, or None if fewer than 2 candles.
+
+    Note: OBV is unbounded (can be huge), so it is best used for
+    divergence (price rising + OBV falling = bearish divergence)
+    rather than absolute level. Use the helper `calculate_obv_slope`
+    to normalize it to a rate.
+    """
+    if not candles or len(candles) < 2:
+        return None
+
+    obv = 0.0
+    for i in range(1, len(candles)):
+        c = candles[i]
+        p = candles[i - 1]
+        if c.close > p.close:
+            obv += c.volume
+        elif c.close < p.close:
+            obv -= c.volume
+    return obv
+
+
+def calculate_obv_slope(candles: List[Candle], lookback: int = 14) -> Optional[float]:
+    """OBV normalized to a slope (OBV delta over `lookback` bars).
+
+    Returns the change in OBV over the last `lookback` candles, or
+    None if insufficient data.
+
+    Useful for divergence detection without exposing the raw unbounded
+    OBV value to the UI.
+    """
+    if not candles or len(candles) < lookback + 1:
+        return None
+
+    obv_now = calculate_obv(candles[-lookback:])
+    obv_prev = calculate_obv(candles[-(lookback + 1):-1])
+    if obv_now is None or obv_prev is None:
+        return None
+    return obv_now - obv_prev
+
+
+def calculate_mfi(candles: List[Candle], period: int = 14) -> Optional[float]:
+    """Money Flow Index (MFI), 0..100.
+
+    Typical Price (TP) = (high + low + close) / 3
+    Raw Money Flow    = TP * volume
+    Money Flow Ratio  = sum(PMF, last `period`) / sum(NMF, last `period`)
+    MFI               = 100 - 100 / (1 + MFR)
+
+    Returns the MFI value, or None if fewer than `period + 1` candles.
+    """
+    if not candles or len(candles) < period + 1:
+        return None
+
+    pos_flow = 0.0
+    neg_flow = 0.0
+    for i in range(1, period + 1):
+        c = candles[-i]
+        p = candles[-(i + 1)]
+        tp = (c.high + c.low + c.close) / 3.0
+        prev_tp = (p.high + p.low + p.close) / 3.0
+        rmf = tp * c.volume
+        if tp > prev_tp:
+            pos_flow += rmf
+        elif tp < prev_tp:
+            neg_flow += rmf
+
+    if neg_flow == 0.0:
+        return 100.0 if pos_flow > 0.0 else 50.0
+    mfr = pos_flow / neg_flow
+    return 100.0 - (100.0 / (1.0 + mfr))
+
+
+def calculate_vwap_multi_tf(
+    candles_by_tf: Dict[str, List[Candle]],
+) -> Dict[str, Optional[float]]:
+    """VWAP computed for multiple timeframes in a single call.
+
+    Args:
+        candles_by_tf: dict mapping timeframe name (e.g. "1m", "5m",
+            "15m", "1h") to a list of Candle objects. The list is
+            typically the last N bars of that timeframe.
+
+    Returns:
+        dict with the same keys; each value is VWAP (typical price
+        weighted by volume) for that timeframe, or None if the list
+        is empty / all volumes are zero.
+
+    Note: this is a "rolling session VWAP" per timeframe, not a
+    true daily anchored VWAP. Sufficient for divergence detection
+    and dashboard observability.
+    """
+    out: Dict[str, Optional[float]] = {}
+    for tf, candles in candles_by_tf.items():
+        if not candles:
+            out[tf] = None
+            continue
+        pv_sum = 0.0
+        vol_sum = 0.0
+        for c in candles:
+            tp = (c.high + c.low + c.close) / 3.0
+            pv_sum += tp * c.volume
+            vol_sum += c.volume
+        out[tf] = (pv_sum / vol_sum) if vol_sum > 0.0 else None
+    return out
 
 
 def volatility_target_size(

@@ -55,7 +55,13 @@ from src.strategies.base import (
     Signal,
     Strategy,
 )
-from src.strategies.indicators import Candle, calculate_adx
+from src.strategies.indicators import (
+    Candle,
+    calculate_adx,
+    calculate_mfi,
+    calculate_obv_slope,
+    calculate_vwap_multi_tf,
+)
 from src.utils.config import Config
 from src.utils.helpers import safe_float, safe_divide, utc_timestamp_ms
 
@@ -181,6 +187,12 @@ class TradingEngine:
         import collections
         self._candles_15m_history: Dict[str, Any] = {
             sym: collections.deque(maxlen=50)
+            for sym in self._symbols
+        }
+
+        # 5m candle history for OBV / MFI (v3.1.15 observability)
+        self._candles_5m_history: Dict[str, Any] = {
+            sym: collections.deque(maxlen=200)
             for sym in self._symbols
         }
 
@@ -963,6 +975,9 @@ class TradingEngine:
             # Append 15m candles to history for ADX (regime filter)
             if timeframe == 900:
                 self._candles_15m_history[symbol].append(candle)
+            # Append 5m candles to history for OBV / MFI (v3.1.15)
+            if timeframe == 300:
+                self._candles_5m_history[symbol].append(candle)
             # Feed return to correlation monitor (any timeframe, 15m preferred)
             if timeframe == 900 and hasattr(candle, 'close'):
                 prev = self._last_candle_close.get(symbol)
@@ -1075,6 +1090,24 @@ class TradingEngine:
 
             self._strategy_governor.evaluate(event.timestamp_ms)
 
+            # --- v3.1.15: Volume indicators (OBV slope, MFI, VWAP multi-TF) ---
+            # Pure observability. Stored in _last_market_events and pushed
+            # to the dashboard. NOT consumed by strategies (zero impact on
+            # signal generation).
+            obv_slope_5m: Optional[float] = None
+            mfi_5m: Optional[float] = None
+            hist_5m = list(self._candles_5m_history.get(symbol, []))
+            hist_15m_local = list(self._candles_15m_history.get(symbol, []))
+            if hist_5m:
+                obv_slope_5m = calculate_obv_slope(hist_5m, lookback=14)
+                mfi_5m = calculate_mfi(hist_5m, period=14)
+            vwap_by_tf: Dict[str, Optional[float]] = calculate_vwap_multi_tf({
+                "1m":  [event.candle_1m]   if event.candle_1m  else [],
+                "5m":  hist_5m[-20:]       if hist_5m          else [],
+                "15m": hist_15m_local[-20:] if hist_15m_local   else [],
+                "1h":  [event.candle_1h]   if event.candle_1h  else [],
+            })
+
             # --- Dashboard tracking ---
             now = time.time()
             self._tick_stats["total"] += 1
@@ -1106,6 +1139,13 @@ class TradingEngine:
                 "orderbook_bid_ask_ratio": event.orderbook_bid_ask_ratio,
                 "orderbook_largest_bid_wall": event.orderbook_largest_bid_wall,
                 "orderbook_largest_ask_wall": event.orderbook_largest_ask_wall,
+                # v3.1.15: volume-derived observability (NOT used in strategies)
+                "obv_slope_5m": obv_slope_5m,
+                "mfi_5m": mfi_5m,
+                "vwap_1m_rolling": vwap_by_tf.get("1m"),
+                "vwap_5m_rolling": vwap_by_tf.get("5m"),
+                "vwap_15m_rolling": vwap_by_tf.get("15m"),
+                "vwap_1h_rolling": vwap_by_tf.get("1h"),
                 "candles": {
                     "1m": event.candle_1m is not None,
                     "5m": event.candle_5m is not None,

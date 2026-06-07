@@ -1,4 +1,4 @@
-# AGENTS.md — Hyperliquid Premium Trading Bot v3.1.14
+# AGENTS.md — Hyperliquid Premium Trading Bot v3.1.15
 
 > This file is intended for AI coding agents. It assumes zero prior knowledge of the project.
 
@@ -6,7 +6,7 @@
 
 ## 1. Project Overview
 
-This is **Hyperliquid Premium Trading Bot v3.1.14** — an async Python trading bot for the Hyperliquid perpetuals exchange. It supports **paper trading** (default), **testnet**, and **mainnet** execution modes.
+This is **Hyperliquid Premium Trading Bot v3.1.15** — an async Python trading bot for the Hyperliquid perpetuals exchange. It supports **paper trading** (default), **testnet**, and **mainnet** execution modes.
 
 The bot is built around a **WebSocket-first event architecture**: real-time market data from Hyperliquid (and optional Binance feeds) flows through an async pub/sub `DataBus`, gets aggregated into multi-timeframe candles, and is consumed by eight strategy modules (including the OrderBook Imbalance Scalper for tick-level orderbook micro-patterns and the CVD OrderFlow strategy for volume-tape divergence). A central `TradingEngine` orchestrates signal generation, risk gating, position sizing, and execution. All state is persisted to a local SQLite database, and a Flask + Socket.IO dashboard provides real-time monitoring.
 
@@ -227,6 +227,7 @@ python tests/test_cvd_orderflow.py       # CVDOrderFlow: divergence, MTF alignme
 python tests/test_qw_observability.py    # v3.1.12: decision_audit table + trade journal enrichment
 python tests/test_log_rotation.py        # v3.1.12: TimedRotatingFileHandler (daily, 14 backups)
 python tests/test_databus_per_topic.py   # v3.1.13: DataBus per-topic rate limit override
+python tests/test_volume_indicators.py    # v3.1.15: OBV + OBV-slope + MFI + VWAP multi-TF (16 tests)
 python scripts/lookahead_audit.py --ci   # Phase B: static scan for future-data leakage
 ```
 
@@ -240,6 +241,7 @@ python scripts/lookahead_audit.py --ci   # Phase B: static scan for future-data 
 - **`tests/test_qw_observability.py`** (v3.1.12, Quick Wins) — 11 unit tests for the new `decision_audit` table (save/get/count/filters, indexes, metadata roundtrip, special chars) and trade journal enrichment (new columns on `trades` table, JSON snapshot, migration of pre-existing bot.db). Best-effort writes — never disrupt live trading.
 - **`tests/test_log_rotation.py`** (v3.1.12) — 9 unit tests for the new `TimedRotatingFileHandler` config: default handler type, custom `when`/`interval`/`backupCount`/`utc`, size cap on 3.13+, idempotent re-setup, manual `doRollover`, file handler disabled when `log_file=None`.
 - **`tests/test_databus_per_topic.py`** (v3.1.13) — 7 unit tests for the per-topic rate limit override: default fallback, override applied, no spillover to other topics, most-specific prefix wins, partial drop at higher cap, full drop at default cap, `rate_limit_hz=0` disables globally.
+- **`tests/test_volume_indicators.py`** (v3.1.15) — 16 unit tests for the new pure-observability volume indicators: `calculate_obv` (classic trend, mixed direction, flat-candle skip, insufficient data), `calculate_obv_slope` (positive/bearish-divergence/insufficient), `calculate_mfi` (all-rising/all-falling/mid-range/insufficient), `calculate_vwap_multi_tf` (empty/single/multi/zero-volume/missing-tf). All 16 tests pass.
 - **`scripts/lookahead_audit.py --ci`** (Phase B, v3.1.9) — static scan for future-data access (LOOKAHEAD-001..006). Fails CI on any non-LOW finding.
 - **`tests/test_cvd_orderflow.py`** (v3.1.14) — added `test_volume_unit_conversion` (3 sub-assertions) covering the bug where `CVDOrderFlow._extract_bar` returned raw token units (e.g. 160 BTC) while the volume gate was denominated in USD ($50_000). Fix multiplies by `c.close` to normalize. All 21 tests now pass.
 
@@ -417,4 +419,4 @@ Before submitting any code change:
 
 ---
 
-*Last updated: 2026-06-06 (v3.1.14 — CVDOrderFlow volume unit fix (token→USD via `c.close`); factory table dead refs cleaned; per-strategy min_confidence now flows from settings.yaml to ensemble)*
+*Last updated: 2026-06-07 (v3.1.15 — volume observability panel: `calculate_obv`, `calculate_obv_slope`, `calculate_mfi`, `calculate_vwap_multi_tf` in `src/strategies/indicators.py`; engine tracks 5m candle history and pushes `obv_slope_5m`, `mfi_5m`, `vwap_1m_rolling`, `vwap_5m_rolling`, `vwap_15m_rolling`, `vwap_1h_rolling` to dashboard; new "Volume Indicators" panel in `index.html`. Pure observability — zero impact on strategy logic.)*
