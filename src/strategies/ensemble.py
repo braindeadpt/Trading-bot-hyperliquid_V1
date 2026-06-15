@@ -161,9 +161,14 @@ class StrategyEnsemble:
         if high_conviction:
             single_sig = agreeing_signals[0]
             logger.info(
-                "Ensemble HIGH-CONVICTION %s %s | %s conf=%.2f score=%.3f (single strategy bypass)",
-                event.symbol, winning_side, single_sig.strategy,
-                single_sig.confidence, winning_score
+                "Ensemble DECISION %s %s | path=high_conviction | agreeing=1 | "
+                "score=%.3f | hc_threshold=%.2f | strategy=%s conf=%.2f",
+                event.symbol,
+                winning_side,
+                winning_score,
+                self._high_conviction_threshold,
+                single_sig.strategy,
+                single_sig.confidence,
             )
             signal = Signal(
                 strategy=self.name,
@@ -178,7 +183,7 @@ class StrategyEnsemble:
                 metadata={**single_sig.metadata, "ensemble_score": winning_score, "high_conviction_bypass": True, "original_strategy": single_sig.strategy},
             )
             logger.info(
-                "Ensemble SIGNAL %s %s | score=%.3f | conf=%.2f | size=%.2f%% | strategy=%s",
+                "Ensemble SIGNAL %s %s | path=high_conviction | score=%.3f | conf=%.2f | size=%.2f%% | strategy=%s",
                 event.symbol, winning_side, winning_score, signal.confidence,
                 signal.size_pct * 100, single_sig.strategy,
             )
@@ -187,16 +192,26 @@ class StrategyEnsemble:
         # Normal threshold check
         if winning_score < self._threshold:
             logger.info(
-                "Ensemble NO SIGNAL %s: best_score=%.3f < threshold=%.2f",
-                event.symbol, winning_score, self._threshold
+                "Ensemble NO SIGNAL %s | path=rejected | reason=below_threshold | "
+                "agreeing=%d | score=%.3f | threshold=%.2f | min_agreeing=%d",
+                event.symbol,
+                winning_count,
+                winning_score,
+                self._threshold,
+                self._min_strategies_agreeing,
             )
             return None
 
         # Require minimum number of strategies agreeing
         if winning_count < self._min_strategies_agreeing:
             logger.info(
-                "Ensemble NO SIGNAL %s: only %d strategy(s) agree, need %d",
-                event.symbol, winning_count, self._min_strategies_agreeing
+                "Ensemble NO SIGNAL %s | path=rejected | reason=insufficient_agreement | "
+                "agreeing=%d | need=%d | score=%.3f | threshold=%.2f",
+                event.symbol,
+                winning_count,
+                self._min_strategies_agreeing,
+                winning_score,
+                self._threshold,
             )
             return None
 
@@ -219,6 +234,19 @@ class StrategyEnsemble:
         combined_meta["ensemble_score"] = winning_score
         combined_meta["strategies_agreeing"] = [s.strategy for s in agreeing_signals]
 
+        logger.info(
+            "Ensemble DECISION %s %s | path=confluence | agreeing=%d | need=%d | "
+            "score=%.3f | threshold=%.2f | conf=%.2f | strategies=%s",
+            event.symbol,
+            winning_side,
+            winning_count,
+            self._min_strategies_agreeing,
+            winning_score,
+            self._threshold,
+            avg_confidence,
+            [s.strategy for s in agreeing_signals],
+        )
+
         signal = Signal(
             strategy=self.name,
             symbol=event.symbol,
@@ -233,7 +261,7 @@ class StrategyEnsemble:
         )
 
         logger.info(
-            "Ensemble SIGNAL %s %s | score=%.3f | conf=%.2f | size=%.2f%% | strategies=%s",
+            "Ensemble SIGNAL %s %s | path=confluence | score=%.3f | conf=%.2f | size=%.2f%% | strategies=%s",
             event.symbol, winning_side, winning_score, avg_confidence,
             min_size_pct * 100,
             [s.strategy for s in agreeing_signals],
@@ -261,7 +289,7 @@ class StrategyEnsemble:
         falling back to the ensemble flip check.
         """
         meta = position.metadata or {}
-        original = meta.get("original_strategy")
+        original = meta.get("original_strategy") or meta.get("sub_strategy")
         agreeing = meta.get("strategies_agreeing", [])
 
         # Try original sub-strategy first

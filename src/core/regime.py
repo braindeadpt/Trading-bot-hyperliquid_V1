@@ -8,8 +8,11 @@ from src.strategies.base import Signal
 
 
 def regime_strategy_name(sig: Signal) -> str:
-    """Resolve sub-strategy name for ADX regime weighting."""
+    """Resolve sub-strategy name for ADX regime weighting and trade attribution."""
     meta = sig.metadata or {}
+    preset = meta.get("sub_strategy")
+    if preset:
+        return str(preset)
     if sig.strategy == "StrategyEnsemble":
         original = meta.get("original_strategy")
         if original:

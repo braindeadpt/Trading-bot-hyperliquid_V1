@@ -74,6 +74,10 @@ class MarketEvent:
     market_data_health: Optional[str] = None  # green | yellow | red
     market_data_stale: bool = False
 
+    # Binance spot lead price (engine injects from binance_price:{symbol} DataBus topic)
+    binance_mid: Optional[float] = None
+    binance_timestamp_ms: Optional[int] = None
+
 
 @dataclass(frozen=True)
 class Signal:

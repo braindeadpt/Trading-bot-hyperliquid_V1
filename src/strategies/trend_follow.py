@@ -77,6 +77,7 @@ class TrendFollow(Strategy):
         self.VOL_MIN_MULT = cfg.get("vol_min_mult", 0.25)            # min 0.25x base size
         self.VOL_MAX_MULT = cfg.get("vol_max_mult", 3.0)             # max 3.0x base size
         self.BASE_SIZE_PCT = cfg.get("base_size_pct", 0.01)          # 1% base
+        self.TAKE_PROFIT_R_MULT = float(cfg.get("take_profit_r_multiple", 2.0))
 
     @property
     def name(self) -> str:
@@ -509,7 +510,7 @@ class TrendFollow(Strategy):
             size_pct=risk_pct,
             entry_price=event.price,
             stop_loss_pct=stop_loss_pct,
-            take_profit_pct=stop_loss_pct * 1.5,  # 1.5R take-profit
+            take_profit_pct=stop_loss_pct * self.TAKE_PROFIT_R_MULT,
             reason=f"trend_{side}_" + "_".join(met_reasons),
             metadata={
                 "met_conditions": met_reasons,
@@ -523,6 +524,7 @@ class TrendFollow(Strategy):
                 "imbalance": event.bid_ask_imbalance,
                 "realized_vol_annual": rv,
                 "size_pct": risk_pct,
+                "take_profit_r": self.TAKE_PROFIT_R_MULT,
                 "rsi": event.rsi_14,
                 "oir": event.orderbook_oir,
                 "ask_wall": event.orderbook_largest_ask_wall,

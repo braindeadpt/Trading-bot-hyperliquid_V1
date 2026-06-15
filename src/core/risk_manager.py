@@ -323,12 +323,16 @@ it is not used directly in the current implementation.
         """Return the base-asset position size (notional / price).
 
         Formula:
-          risk_amount   = capital × per_trade_risk_pct
-          stop_distance = max(2 × atr_pct, min_stop_distance_pct)
-          notional      = risk_amount / stop_distance
-          size          = notional / entry_price
+          risk_amount        = capital × per_trade_risk_pct
+          stop_distance      = max(2 × atr_pct, min_stop_distance_pct)
+          notional_risk      = risk_amount / stop_distance  (ATR risk ceiling)
+          notional_conviction = capital × signal.size_pct  (strategy / Kelly sizing)
+          max_notional       = capital × max_position_size_pct
+          notional_final     = min(notional_risk, notional_conviction, max_notional)
+          size               = notional_final / entry_price
 
-        The result is clamped to max_position_size_pct of capital.
+        ``size_pct`` (and Kelly adjustments applied upstream) may reduce size below
+        the risk ceiling but never increase above it.
 
         Args:
             signal:  The entry signal (entry_price may be None → use current price)
@@ -351,28 +355,43 @@ it is not used directly in the current implementation.
         if atr_pct_f <= 0.0:
             atr_pct_f = self.MIN_STOP_DISTANCE_PCT / 2.0
 
+        size_pct = safe_float(signal.size_pct)
+        if size_pct <= 0.0:
+            logger.warning(
+                "calculate_position_size: non-positive size_pct %.4f — using risk ceiling only",
+                size_pct,
+            )
+
         # Risk amount in USD
         risk_amount = capital_f * self._per_trade_risk_pct
 
         # Stop distance = 2×ATR, floored at 0.5%
         stop_distance = max(2.0 * atr_pct_f, self.MIN_STOP_DISTANCE_PCT)
 
-        # Notional position size in USD
-        notional = safe_divide(risk_amount, stop_distance, 0.0)
+        # ATR-based risk ceiling (notional)
+        notional_risk = safe_divide(risk_amount, stop_distance, 0.0)
 
-        # Max notional = 20% of capital
+        # Strategy conviction target (Kelly multiplier applied upstream in engine)
+        notional_conviction = capital_f * size_pct if size_pct > 0.0 else notional_risk
+
+        # Hard cap on position notional
         max_notional = capital_f * self.MAX_POSITION_SIZE_PCT
-        notional = min(notional, max_notional)
+
+        notional_final = min(notional_risk, notional_conviction, max_notional)
 
         # Convert to base-asset size
-        size = safe_divide(notional, price, 0.0)
+        size = safe_divide(notional_final, price, 0.0)
 
         logger.debug(
-            "Sizing: capital=%.2f risk=%.2f stop=%.4f notional=%.2f size=%.6f",
+            "Sizing: capital=%.2f risk_notional=%.2f conviction_notional=%.2f "
+            "final_notional=%.2f max_notional=%.2f stop=%.4f size_pct=%.4f size=%.6f",
             capital_f,
-            risk_amount,
+            notional_risk,
+            notional_conviction,
+            notional_final,
+            max_notional,
             stop_distance,
-            notional,
+            size_pct,
             size,
         )
         return size

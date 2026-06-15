@@ -10,6 +10,7 @@ from src.strategies.ensemble import StrategyEnsemble, StrategyWeight
 from src.strategies.cvd_orderflow import CVDOrderFlow
 from src.strategies.donchian_breakout import DonchianBreakout
 from src.strategies.funding_arbitrage import FundingArbitrage
+from src.strategies.lead_lag import LeadLag
 from src.strategies.liquidation_catcher import LiquidationCatcher
 from src.strategies.mean_reversion import MeanReversion
 from src.strategies.orderbook_scalper import OrderBookScalper
@@ -29,6 +30,7 @@ _STRATEGY_REGISTRY = (
     ("strategy.liquidation_catcher", LiquidationCatcher),
     ("strategy.orderbook_scalper", OrderBookScalper),
     ("strategy.cvd_orderflow", CVDOrderFlow),
+    ("strategy.lead_lag", LeadLag),
 )
 
 
@@ -52,6 +54,7 @@ def default_ensemble_weights() -> List[StrategyWeight]:
         StrategyWeight("LiquidationCatcher", 0.13, min_confidence=0.40),
         StrategyWeight("OrderBookScalper", 0.10, min_confidence=0.50),
         StrategyWeight("CVDOrderFlow", 0.10, min_confidence=0.55),
+        StrategyWeight("LeadLag", 0.10, min_confidence=0.45),
     ]
 
 

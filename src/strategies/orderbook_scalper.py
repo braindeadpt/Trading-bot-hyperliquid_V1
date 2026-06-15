@@ -1,15 +1,19 @@
 """Strategy 6: OrderBook Imbalance Scalper
 
-Scalps micro-inefficiencies in the orderbook:
-  - bid_ask_ratio > 1.5 → excess bids → go LONG
-  - bid_ask_ratio < 0.67 → excess asks → go SHORT
+Scalps micro-inefficiencies from L2 bid/ask depth imbalance.
 
-Designed for near-zero funding regimes where directional bias
-is absent and market-making bots create micro-patterns.
+Modes (config ``mode``):
+  * **momentum** (default): follow the heavier side of the book
+      - bid_ask_ratio >= long threshold → LONG (bid-heavy book)
+      - bid_ask_ratio <= short threshold → SHORT (ask-heavy book)
+  * **fade**: mean-revert the imbalance (opposite sides)
+
+Anti-spoof: entries are rejected when the wall driving the signal sits
+within ``spoof_wall_proximity_pct`` of mid and depth is heavily skewed
+(see ``spoof_depth_skew_min``).
 
 Timeframe: tick-level (orderbook updates).
-Max hold: 5 minutes (quick scalp or wrong).
-Risk: 0.3% stop, 0.15% take-profit, 0.5% capital.
+Max hold: 5 minutes.
 """
 
 import logging
@@ -30,16 +34,27 @@ class _ScalperState:
 
 
 class OrderBookScalper(Strategy):
-    """OrderBook Imbalance Scalper — fades orderbook micro-imbalances.
+    """OrderBook Imbalance Scalper — momentum or fade on bid/ask depth ratio.
 
-    Enters when bid/ask ratio deviates from 1.0 significantly,
-    betting on mean reversion of the book.
+    Default ``mode=momentum`` follows the heavier book side; ``mode=fade``
+    bets on mean reversion. Suspicious walls near price are filtered out.
     """
+
+    VALID_MODES = frozenset({"momentum", "fade"})
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         cfg = config or {}
+        mode = str(cfg.get("mode", "momentum")).lower()
+        if mode not in self.VALID_MODES:
+            logger.warning(
+                "OrderBookScalper: unknown mode '%s' — using momentum", mode
+            )
+            mode = "momentum"
+        self.MODE = mode
         self.BID_ASK_LONG = cfg.get("bid_ask_ratio_long", 1.5)
         self.BID_ASK_SHORT = cfg.get("bid_ask_ratio_short", 0.67)
+        self.SPOOF_WALL_PROXIMITY_PCT = float(cfg.get("spoof_wall_proximity_pct", 0.001))
+        self.SPOOF_DEPTH_SKEW_MIN = float(cfg.get("spoof_depth_skew_min", 0.65))
         self.TAKE_PROFIT_PCT = cfg.get("take_profit_pct", 0.0015)
         self.STOP_LOSS_PCT = cfg.get("stop_loss_pct", 0.003)
         self.BASE_SIZE_PCT = cfg.get("base_size_pct", 0.005)
@@ -173,6 +188,55 @@ class OrderBookScalper(Strategy):
             self._state[symbol] = _ScalperState()
         return self._state[symbol]
 
+    def _resolve_entry(
+        self, ratio: float
+    ) -> Optional[Tuple[str, str, float]]:
+        """Return (target_side, imbalance_side, deviation) or None.
+
+        ``imbalance_side`` is ``bid`` or ``ask`` — which side of the book
+        triggered the signal (used for anti-spoof wall checks).
+        """
+        if ratio >= self.BID_ASK_LONG:
+            imbalance_side = "bid"
+            deviation = ratio - 1.0
+            if self.MODE == "fade":
+                target_side = "short"
+            else:
+                target_side = "long"
+            return target_side, imbalance_side, deviation
+        if ratio <= self.BID_ASK_SHORT:
+            imbalance_side = "ask"
+            deviation = 1.0 - ratio
+            if self.MODE == "fade":
+                target_side = "long"
+            else:
+                target_side = "short"
+            return target_side, imbalance_side, deviation
+        return None
+
+    def _is_spoof_wall(self, event: MarketEvent, imbalance_side: str) -> bool:
+        """True when a near-price wall + skewed depth looks like spoof."""
+        price = event.price
+        if price <= 0.0:
+            return False
+
+        depth_q = event.orderbook_depth_quality
+        if depth_q is None:
+            return False
+
+        if imbalance_side == "bid":
+            wall = event.orderbook_largest_bid_wall
+            depth_skewed = depth_q >= self.SPOOF_DEPTH_SKEW_MIN
+        else:
+            wall = event.orderbook_largest_ask_wall
+            depth_skewed = depth_q <= (1.0 - self.SPOOF_DEPTH_SKEW_MIN)
+
+        if wall is None or not depth_skewed:
+            return False
+
+        dist_pct = abs(price - wall) / price
+        return dist_pct <= self.SPOOF_WALL_PROXIMITY_PCT
+
     # ------------------------------------------------------------------
     # Entry logic
     # ------------------------------------------------------------------
@@ -200,16 +264,27 @@ class OrderBookScalper(Strategy):
             return None
 
         # Check for imbalance
-        if ratio >= self.BID_ASK_LONG:
-            target_side = "long"
-            deviation = ratio - 1.0
-        elif ratio <= self.BID_ASK_SHORT:
-            target_side = "short"
-            deviation = 1.0 - ratio
-        else:
+        resolved = self._resolve_entry(ratio)
+        if resolved is None:
             logger.debug(
                 "OrderBookScalper %s NO SIGNAL — ratio=%.3f (need > %.1f or < %.2f)",
                 event.symbol, ratio, self.BID_ASK_LONG, self.BID_ASK_SHORT,
+            )
+            return None
+
+        target_side, imbalance_side, deviation = resolved
+
+        if self._is_spoof_wall(event, imbalance_side):
+            logger.info(
+                "OrderBookScalper SKIP %s — spoof wall (%s side, mode=%s, "
+                "depth_q=%s, wall_dist<=%.3f%%)",
+                event.symbol,
+                imbalance_side,
+                self.MODE,
+                f"{event.orderbook_depth_quality:.2f}"
+                if event.orderbook_depth_quality is not None
+                else "N/A",
+                self.SPOOF_WALL_PROXIMITY_PCT * 100.0,
             )
             return None
 
@@ -228,9 +303,9 @@ class OrderBookScalper(Strategy):
         size_pct = min(self.BASE_SIZE_PCT * (1.0 + deviation), self.MAX_SIZE_PCT)
 
         logger.info(
-            "OrderBookScalper %s signal for %s — ratio=%.3f, deviation=%.3f, "
+            "OrderBookScalper %s signal for %s — mode=%s ratio=%.3f, deviation=%.3f, "
             "confidence=%.2f, size=%.2f%%",
-            target_side, event.symbol, ratio, deviation, confidence, size_pct * 100,
+            target_side, event.symbol, self.MODE, ratio, deviation, confidence, size_pct * 100,
         )
 
         return Signal(
@@ -242,9 +317,11 @@ class OrderBookScalper(Strategy):
             entry_price=event.price,
             stop_loss_pct=self.STOP_LOSS_PCT,
             take_profit_pct=self.TAKE_PROFIT_PCT,
-            reason=f"ob_scalp_{target_side}_ratio{ratio:.2f}",
+            reason=f"ob_scalp_{self.MODE}_{target_side}_ratio{ratio:.2f}",
             metadata={
+                "mode": self.MODE,
                 "bid_ask_ratio": ratio,
+                "imbalance_side": imbalance_side,
                 "deviation": deviation,
                 "stop_loss_pct": self.STOP_LOSS_PCT,
                 "take_profit_pct": self.TAKE_PROFIT_PCT,

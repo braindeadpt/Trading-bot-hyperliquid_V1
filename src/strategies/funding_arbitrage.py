@@ -66,6 +66,7 @@ class FundingArbitrage(Strategy):
         # Position sizing
         self.PAIR_SIZE_PCT = cfg.get("pair_size_pct", 0.02)  # 2% of capital per pair side
         self.STOP_LOSS_PCT = cfg.get("stop_loss_pct", 0.03)  # 3% stop on each leg
+        self.TAKE_PROFIT_R = float(cfg.get("take_profit_r", 2.0))
         self.CONFIDENCE = cfg.get("confidence", 0.75)
         # OI filter: avoid if OI is surging (crowd still entering)
         self.REQUIRE_OI_STABLE = cfg.get("require_oi_stable", True)
@@ -434,7 +435,7 @@ class FundingArbitrage(Strategy):
             size_pct=self.PAIR_SIZE_PCT,
             entry_price=None,
             stop_loss_pct=self.STOP_LOSS_PCT,
-            take_profit_pct=self.STOP_LOSS_PCT * 1.5,  # 1.5R take-profit
+            take_profit_pct=self.STOP_LOSS_PCT * self.TAKE_PROFIT_R,
             reason=f"funding_arb_long_{long_funding:.4f}",
             metadata={
                 "pair": "funding_arb",
@@ -443,6 +444,7 @@ class FundingArbitrage(Strategy):
                 "funding": long_funding,
                 "spread": spread,
                 "funding_source": "hl_predicted_cex_8h",
+                "take_profit_r": self.TAKE_PROFIT_R,
             },
         )
         short_sig = Signal(
@@ -453,7 +455,7 @@ class FundingArbitrage(Strategy):
             size_pct=self.PAIR_SIZE_PCT,
             entry_price=None,
             stop_loss_pct=self.STOP_LOSS_PCT,
-            take_profit_pct=self.STOP_LOSS_PCT * 1.5,  # 1.5R take-profit
+            take_profit_pct=self.STOP_LOSS_PCT * self.TAKE_PROFIT_R,
             reason=f"funding_arb_short_{short_funding:.4f}",
             metadata={
                 "pair": "funding_arb",
@@ -462,6 +464,7 @@ class FundingArbitrage(Strategy):
                 "funding": short_funding,
                 "spread": spread,
                 "funding_source": "hl_predicted_cex_8h",
+                "take_profit_r": self.TAKE_PROFIT_R,
             },
         )
 

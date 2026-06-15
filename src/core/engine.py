@@ -42,6 +42,7 @@ from src.exchanges.funding_normalize import (
     normalize_funding_to_8h,
 )
 from src.exchanges.hl_predicted_funding import HyperliquidPredictedFundingClient
+from src.exchanges.binance_price_bridge import BinanceMidTick
 from src.exchanges.hyperliquid_ws import (
     DataBus,
     HlAssetCtx,
@@ -177,6 +178,7 @@ class TradingEngine:
 
         # In-memory cache of latest data per symbol
         self._latest_price: Dict[str, HlPriceTick] = {}
+        self._latest_binance_mid: Dict[str, BinanceMidTick] = {}
         self._latest_ctx: Dict[str, HlAssetCtx] = {}
         self._latest_candles: Dict[str, Dict[int, Optional[Candle]]] = {
             sym: {60: None, 300: None, 900: None, 3600: None}
@@ -574,6 +576,10 @@ class TradingEngine:
             await self._bus.subscribe(f"ls_ratio:{symbol}", cb_ls)
             self._subscribed_callbacks[f"ls_ratio:{symbol}"] = cb_ls
 
+            cb_bn = self._make_binance_price_callback(symbol)
+            await self._bus.subscribe(f"binance_price:{symbol}", cb_bn)
+            self._subscribed_callbacks[f"binance_price:{symbol}"] = cb_bn
+
         logger.info(
             "TradingEngine running - symbols=%s strategies=%s",
             self._symbols,
@@ -936,6 +942,12 @@ class TradingEngine:
             await self._on_market_event(symbol)
         return _on_price
 
+    def _make_binance_price_callback(self, symbol: str):
+        """Factory: returns an async callback for binance_price:* topics."""
+        async def _on_binance_price(tick: BinanceMidTick) -> None:
+            self._latest_binance_mid[symbol] = tick
+        return _on_binance_price
+
     def _make_ctx_callback(self, symbol: str):
         """Factory: returns an async callback for ctx:* topics."""
         async def _on_ctx(ctx: HlAssetCtx) -> None:
@@ -1206,9 +1218,10 @@ class TradingEngine:
             await self._maybe_scan_funding_arbitrage(event)
 
             # --- 1. Strategy entry signals ---
+            # Top-level list is typically [StrategyEnsemble]; see _strategy_is_operational.
             signals: List[Signal] = []
             for strategy in self._strategies:
-                if not getattr(strategy, "enabled", True):
+                if not self._strategy_is_operational(strategy):
                     continue
                 try:
                     sig = strategy.on_data(event)
@@ -1241,7 +1254,7 @@ class TradingEngine:
                     )
                 else:
                     for strategy in self._strategies:
-                        if not getattr(strategy, "enabled", True):
+                        if not self._strategy_is_operational(strategy):
                             continue
                         # Skip if another strategy opened this position
                         # If position_strategy is None, NO strategy can exit (safety)
@@ -1346,6 +1359,8 @@ class TradingEngine:
             (cex_stale or hl_stale) and feed_status in ("yellow", "red")
         )
 
+        bn_tick = self._latest_binance_mid.get(symbol)
+
         event = MarketEvent(
             symbol=symbol,
             price=price,
@@ -1387,6 +1402,8 @@ class TradingEngine:
             predicted_funding_by_venue=predicted_by_venue,
             market_data_health=feed_status,
             market_data_stale=feed_stale,
+            binance_mid=bn_tick.price if bn_tick is not None else None,
+            binance_timestamp_ms=bn_tick.timestamp_ms if bn_tick is not None else None,
         )
 
         logger.debug(
@@ -1727,6 +1744,19 @@ class TradingEngine:
                 )
             )
         return result
+
+    @staticmethod
+    def _strategy_is_operational(strategy: Any) -> bool:
+        """True when a top-level strategy should run on_data / on_position.
+
+        Live config registers ``[StrategyEnsemble]`` only; sub-strategy gating
+        (governor, ``is_active()`` on auto-enable strategies) happens inside
+        the ensemble. This hook exists for direct top-level strategies that
+        implement ``is_active()`` (e.g. dormant auto-enable modules).
+        """
+        if hasattr(strategy, "is_active"):
+            return bool(strategy.is_active())
+        return True
 
     @staticmethod
     def _regime_strategy_name(sig: Signal) -> str:
@@ -2225,7 +2255,8 @@ class TradingEngine:
             logger.warning("Position size zero for %s - skipping", signal.symbol)
             return
 
-        # Enrich signal metadata with computed size
+        # Enrich signal metadata with computed size and sub-strategy attribution
+        sub_strategy = regime_strategy_name(signal)
         signal = Signal(
             strategy=signal.strategy,
             symbol=signal.symbol,
@@ -2236,7 +2267,12 @@ class TradingEngine:
             stop_loss_pct=signal.stop_loss_pct,
             take_profit_pct=signal.take_profit_pct,
             reason=signal.reason,
-            metadata={**signal.metadata, "calculated_size": size, "atr_pct": atr_pct},
+            metadata={
+                **signal.metadata,
+                "calculated_size": size,
+                "atr_pct": atr_pct,
+                "sub_strategy": sub_strategy,
+            },
         )
 
         ob_raw = self._latest_orderbook_raw.get(signal.symbol)
@@ -2451,6 +2487,7 @@ class TradingEngine:
             unrealized_pnl=0.0,
             metadata={
                 "strategy": signal.strategy,
+                "sub_strategy": sub_strategy,
                 "trade_id": result.trade_id,
                 "stop_loss_pct": stop_distance_pct,
                 "entry_price": result.entry_price,
@@ -2627,8 +2664,21 @@ class TradingEngine:
 
         # --- Record per-strategy PnL row (for dashboard drill-down) ---
         try:
+            attr_strategy = (
+                position.metadata.get("sub_strategy")
+                or regime_strategy_name(
+                    Signal(
+                        strategy=str(position.metadata.get("strategy", "unknown")),
+                        symbol=position.symbol,
+                        side=position.side,
+                        confidence=1.0,
+                        size_pct=0.0,
+                        metadata=position.metadata,
+                    )
+                )
+            )
             self._db.record_strategy_pnl(
-                strategy=strategy,
+                strategy=attr_strategy,
                 symbol=position.symbol,
                 side=position.side,
                 pnl_usd=result.pnl_usd,

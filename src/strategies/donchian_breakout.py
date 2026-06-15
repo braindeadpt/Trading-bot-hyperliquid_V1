@@ -8,7 +8,7 @@ Entry logic:
   - Anti-chop: avg range (high-low) of the last N candles must be >= min_range_pct
 
 Stop loss: ATR(14) on 15m candles * stop_atr_mult
-Take profit: optional 1.5R, but preference is to defer to engine trailing stop
+Take profit: optional 2R, but preference is to defer to engine trailing stop
 Exit (on_position): max_hold_hours and/or price re-entering the channel
 Size: base_size_pct scaled by breakout strength (distance beyond channel / channel width), capped at max_size_pct
 """
@@ -45,7 +45,7 @@ class DonchianBreakout(Strategy):
         self.MIN_ADX = float(cfg.get("min_adx", 22.0))
         self.MIN_RANGE_PCT = float(cfg.get("min_range_pct", 0.001))
         self.STOP_ATR_MULT = float(cfg.get("stop_atr_mult", 2.0))
-        self.TP_R_MULT = float(cfg.get("tp_r_mult", 1.5))
+        self.TP_R_MULT = float(cfg.get("tp_r_mult", 2.0))
         self.BASE_SIZE_PCT = float(cfg.get("base_size_pct", 0.01))
         self.MAX_SIZE_PCT = float(cfg.get("max_size_pct", 0.03))
         self.SIGNAL_THROTTLE_MS = int(cfg.get("signal_throttle_ms", 1_800_000))

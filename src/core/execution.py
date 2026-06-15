@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from src.data.database import Database, TradeEntry, TradeExit
+from src.core.regime import regime_strategy_name
 from src.strategies.base import MarketEvent, Position, Signal
 from src.utils.config import Config
 from src.utils.helpers import safe_float, safe_divide, utc_now, utc_timestamp_ms
@@ -272,10 +273,8 @@ class ExecutionEngine:
         notional = fill_price * size
         entry_fee = notional * entry_fee_pct
 
-        # Persist entry to DB
-        sub_strategy = meta.get("original_strategy")
-        if signal.strategy != "StrategyEnsemble":
-            sub_strategy = signal.strategy
+        # Persist entry to DB — attribute to originating sub-strategy when ensemble
+        sub_strategy = regime_strategy_name(signal)
 
         # QW2: build trade journal snapshot (regime context at entry)
         snapshot_json: Optional[str] = None

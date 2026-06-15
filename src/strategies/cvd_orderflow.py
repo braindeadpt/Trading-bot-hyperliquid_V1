@@ -51,7 +51,7 @@ from src.strategies.base import (
     Signal,
     Strategy,
 )
-from src.strategies.indicators import calculate_atr
+from src.strategies.indicators import Candle, calculate_atr
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,7 @@ class _BarDelta:
 class _CVDState:
     """Per-symbol state for CVD strategy."""
     bars_1m: Deque[_BarDelta] = field(default_factory=lambda: deque(maxlen=240))  # 4h
+    candles_1h: Deque[Candle] = field(default_factory=lambda: deque(maxlen=50))
     last_signal_ms: int = 0
     _last_skip_log_ms: int = 0
     _last_no_signal_log_ms: int = 0
@@ -124,6 +125,7 @@ class CVDOrderFlow(Strategy):
         self.OIR_THRESHOLD = float(cfg.get("oir_threshold", 0.15))
 
         # ── Risk management ──────────────────────────────────────────
+        self.ATR_PERIOD = int(cfg.get("atr_period", 14))
         self.STOP_ATR_MULT = float(cfg.get("stop_loss_atr_multiplier", 2.0))
         self.TP_R_MULT = float(cfg.get("take_profit_r_multiple", 2.0))
         self.MAX_HOLD_HOURS = float(cfg.get("max_hold_hours", 6.0))
@@ -160,6 +162,30 @@ class CVDOrderFlow(Strategy):
         if symbol not in self._state:
             self._state[symbol] = _CVDState()
         return self._state[symbol]
+
+    def _update_candle_1h(self, state: _CVDState, event: MarketEvent) -> None:
+        """Append completed 1h candle to history (deduplicated by timestamp)."""
+        c = event.candle_1h
+        if c is None:
+            return
+        ts = int(getattr(c, "timestamp_ms", event.timestamp_ms))
+        if state.candles_1h and state.candles_1h[-1].timestamp_ms == ts:
+            return
+        state.candles_1h.append(c)
+
+    def _compute_stop_loss_pct(self, state: _CVDState, price: float) -> float:
+        """ATR(1h, 14) stop as fraction of price, clamped to floor/ceiling."""
+        atr: Optional[float] = None
+        candles = list(state.candles_1h)
+        if len(candles) >= self.ATR_PERIOD + 1:
+            atr = calculate_atr(candles[-(self.ATR_PERIOD + 1):], period=self.ATR_PERIOD)
+
+        if atr is not None and atr > 0.0 and price > 0.0:
+            stop_loss_pct = (atr * self.STOP_ATR_MULT) / price
+        else:
+            stop_loss_pct = 0.015  # 1.5% fallback until 15+ 1h bars
+
+        return max(self.STOP_LOSS_FLOOR, min(stop_loss_pct, self.STOP_LOSS_CEIL))
 
     @staticmethod
     def _extract_bar(event: MarketEvent) -> Optional[_BarDelta]:
@@ -265,6 +291,7 @@ class CVDOrderFlow(Strategy):
             return None
 
         state = self._get_state(event.symbol)
+        self._update_candle_1h(state, event)
 
         # Deduplicate by timestamp (candle_complete fires once per bar).
         if state.bars_1m and state.bars_1m[-1].timestamp_ms == bar.timestamp_ms:
@@ -359,21 +386,8 @@ class CVDOrderFlow(Strategy):
         )
         size_pct = min(size_pct, self.MAX_SIZE_PCT)
 
-        # ── ATR-based stop loss ────────────────────────────────────
-        c_1h = event.candle_1h
-        atr: Optional[float] = None
-        if c_1h is not None:
-            try:
-                # Use a small history of 1h candles if available.
-                # Single-candle ATR is the high-low range of that bar.
-                atr = calculate_atr([c_1h], period=1)
-            except (ValueError, ZeroDivisionError):
-                atr = None
-        if atr is not None and atr > 0.0 and event.price > 0.0:
-            stop_loss_pct = (atr * self.STOP_ATR_MULT) / event.price
-        else:
-            stop_loss_pct = 0.015  # 1.5% fallback
-        stop_loss_pct = max(self.STOP_LOSS_FLOOR, min(stop_loss_pct, self.STOP_LOSS_CEIL))
+        # ── ATR-based stop loss (14 × 1h bars) ─────────────────────
+        stop_loss_pct = self._compute_stop_loss_pct(state, event.price)
         take_profit_pct = stop_loss_pct * self.TP_R_MULT
 
         state.last_signal_ms = event.timestamp_ms
@@ -459,6 +473,7 @@ class CVDOrderFlow(Strategy):
 
         # Opposite divergence:  close early
         state = self._get_state(position.symbol)
+        self._update_candle_1h(state, event)
         bar = self._extract_bar(event)
         if bar is not None:
             if state.bars_1m and state.bars_1m[-1].timestamp_ms != bar.timestamp_ms:

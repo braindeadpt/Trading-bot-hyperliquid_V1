@@ -42,6 +42,7 @@ class _MeanRevState:
     last_signal_side: Optional[str] = None
     last_signal_ts: int = 0
     last_funding_hist_ms: int = 0
+    last_exit_ms: int = 0
 
 
 class MeanReversion(Strategy):
@@ -77,6 +78,7 @@ class MeanReversion(Strategy):
         self.VOL_MIN_MULT = cfg.get("vol_min_mult", 0.25)
         self.VOL_MAX_MULT = cfg.get("vol_max_mult", 3.0)
         self.BASE_SIZE_PCT = cfg.get("base_size_pct", 0.01)  # 1% base
+        self.TAKE_PROFIT_R_MULT = float(cfg.get("take_profit_r_multiple", 2.0))
         self.SR_LOOKBACK = cfg.get("sr_lookback", 30)
         self.MIN_CONFIDENCE_EXTREME = cfg.get("min_confidence_extreme", 0.85)
         self.MIN_CONFIDENCE_STRONG = cfg.get("min_confidence_strong", 0.65)
@@ -92,6 +94,7 @@ class MeanReversion(Strategy):
         self.REQUIRE_REAL_OI_RATIO = cfg.get("require_real_oi_ratio", False)
         self.REQUIRE_FEED_HEALTH = bool(cfg.get("require_feed_health", False))
         self.MAX_VENUE_SPREAD = float(cfg.get("max_venue_spread", 0.001))
+        self.REENTRY_COOLDOWN_MS = int(cfg.get("reentry_cooldown_ms", 600_000))
 
     @property
     def name(self) -> str:
@@ -184,6 +187,12 @@ class MeanReversion(Strategy):
         """Evaluate contrarian entry on extreme funding + overcrowded OI."""
         state = self._get_state(event.symbol)
 
+        if (
+            state.last_exit_ms > 0
+            and event.timestamp_ms - state.last_exit_ms < self.REENTRY_COOLDOWN_MS
+        ):
+            return None
+
         # Update candle histories (deduplicate by timestamp)
         if event.candle_1h and (not state.candles_1h or state.candles_1h[-1].timestamp_ms != event.candle_1h.timestamp_ms):
             state.candles_1h.append(event.candle_1h)
@@ -268,7 +277,7 @@ class MeanReversion(Strategy):
             target_side = "short"
 
         # --- OI concentration check ---
-        oi_ratio = self._estimate_oi_ratio(event)
+        oi_ratio, oi_ratio_is_real = self._estimate_oi_ratio(event)
         if oi_ratio is None:
             return None  # Can't assess overcrowding without OI
 
@@ -385,7 +394,7 @@ class MeanReversion(Strategy):
             size_pct=risk_pct,
             entry_price=current_price,
             stop_loss_pct=stop_loss_pct,
-            take_profit_pct=stop_loss_pct * 1.5,  # 1.5R take-profit
+            take_profit_pct=stop_loss_pct * self.TAKE_PROFIT_R_MULT,
             reason=f"funding_extreme_{target_side}_f{funding:.4f}",
             metadata={
                 "entry_funding": funding,
@@ -394,6 +403,7 @@ class MeanReversion(Strategy):
                 "funding_avg": event.funding_avg,
                 "funding_weighted": event.funding_weighted,
                 "oi_ratio": oi_ratio,
+                "oi_ratio_is_real": oi_ratio_is_real,
                 "oi_delta": event.oi_delta,
                 "overcrowded_score": overcrowded_score,
                 "support": support,
@@ -404,10 +414,15 @@ class MeanReversion(Strategy):
                 "strong_threshold": strong_threshold,
                 "atr": atr,
                 "stop_loss_pct": stop_loss_pct,
+                "take_profit_r": self.TAKE_PROFIT_R_MULT,
                 "realized_vol_annual": rv,
                 "size_pct": risk_pct,
             },
         )
+
+    def _mark_exit(self, state: _MeanRevState, now_ms: int) -> None:
+        """Record exit time for per-symbol re-entry cooldown."""
+        state.last_exit_ms = now_ms
 
     def on_position(self, position: Position, event: MarketEvent) -> Optional[ExitSignal]:
         """Evaluate exit conditions for a contrarian position."""
@@ -418,6 +433,7 @@ class MeanReversion(Strategy):
         # 1. Time limit: max 60 minutes (before next funding payment)
         hold_ms = now - position.entry_time_ms
         if hold_ms >= self.MAX_HOLD_MINUTES * 60 * 1000:
+            self._mark_exit(state, now)
             return ExitSignal(
                 strategy=self.name,
                 symbol=position.symbol,
@@ -433,6 +449,7 @@ class MeanReversion(Strategy):
         if position.stop_loss_price is not None:
             # Entry-calculated ATR stop
             if position.side == "long" and current_price <= position.stop_loss_price:
+                self._mark_exit(state, now)
                 return ExitSignal(
                     strategy=self.name,
                     symbol=position.symbol,
@@ -442,6 +459,7 @@ class MeanReversion(Strategy):
                     metadata={"stop_price": position.stop_loss_price},
                 )
             if position.side == "short" and current_price >= position.stop_loss_price:
+                self._mark_exit(state, now)
                 return ExitSignal(
                     strategy=self.name,
                     symbol=position.symbol,
@@ -455,6 +473,7 @@ class MeanReversion(Strategy):
             stop_pct = (self.STOP_ATR_MULT * atr) / position.entry_price
             move_pct = (current_price - position.entry_price) / position.entry_price
             if position.side == "long" and move_pct <= -stop_pct:
+                self._mark_exit(state, now)
                 return ExitSignal(
                     strategy=self.name,
                     symbol=position.symbol,
@@ -464,6 +483,7 @@ class MeanReversion(Strategy):
                     metadata={"move_pct": move_pct, "atr_stop_pct": stop_pct},
                 )
             if position.side == "short" and move_pct >= stop_pct:
+                self._mark_exit(state, now)
                 return ExitSignal(
                     strategy=self.name,
                     symbol=position.symbol,
@@ -473,12 +493,14 @@ class MeanReversion(Strategy):
                     metadata={"move_pct": move_pct, "atr_stop_pct": stop_pct},
                 )
 
-        # 3. Funding reverted — only after min hold and when price supports exit
+        # 3. Funding reverted — only after min hold, strong entry, and min profit
         if hold_ms >= self.MIN_FUNDING_EXIT_HOLD_MS:
             funding = resolve_effective_funding(event, prefer_predicted=True)
             entry_funding = safe_float((position.metadata or {}).get("entry_funding"))
-            if is_valid_funding(funding):
-                entry_abs = abs(entry_funding) if entry_funding else self.FUNDING_REVERTED
+            entry_abs = abs(entry_funding) if entry_funding else 0.0
+            entry_was_strong = entry_abs >= self.MIN_STRONG_THRESHOLD_ABS
+
+            if entry_was_strong and is_valid_funding(funding):
                 revert_level = max(
                     self.FUNDING_REVERTED,
                     entry_abs * self.FUNDING_REVERT_FRACTION,
@@ -492,14 +514,8 @@ class MeanReversion(Strategy):
                             move_pct = (position.entry_price - current_price) / position.entry_price
                     else:
                         move_pct = 0.0
-                    if move_pct < self.MIN_PROFIT_BEFORE_FUNDING_EXIT_PCT:
-                        logger.debug(
-                            "FundingExtreme %s hold funding exit — move %.4f%% < min %.4f%%",
-                            position.symbol,
-                            move_pct * 100,
-                            self.MIN_PROFIT_BEFORE_FUNDING_EXIT_PCT * 100,
-                        )
-                    else:
+                    if move_pct >= self.MIN_PROFIT_BEFORE_FUNDING_EXIT_PCT:
+                        self._mark_exit(state, now)
                         return ExitSignal(
                             strategy=self.name,
                             symbol=position.symbol,
@@ -513,85 +529,87 @@ class MeanReversion(Strategy):
                                 "move_pct": move_pct,
                             },
                         )
+                    logger.debug(
+                        "FundingExtreme %s hold funding exit — move %.4f%% < min %.4f%%",
+                        position.symbol,
+                        move_pct * 100,
+                        self.MIN_PROFIT_BEFORE_FUNDING_EXIT_PCT * 100,
+                    )
+            elif not entry_was_strong:
+                logger.debug(
+                    "FundingExtreme %s skip funding exit — |entry_funding|=%.6f < min_strong %.6f",
+                    position.symbol,
+                    entry_abs,
+                    self.MIN_STRONG_THRESHOLD_ABS,
+                )
 
-        # 4. OI starts normalizing (crowd is leaving)
-        oi_ratio = self._estimate_oi_ratio(event)
-        if oi_ratio is not None:
-            # Was it very concentrated? Check if it's now back toward 0.5
-            # For long position: we entered when shorts were crowded (oi_ratio low).
-            # Exit when OI ratio returns above ~0.4 (normalizing).
-            # For short position: we entered when longs were crowded (oi_ratio high).
-            # Exit when OI ratio returns below ~0.6.
+        # 4. OI starts normalizing (crowd is leaving) — real LS ratio only
+        oi_ratio, oi_ratio_is_real = self._estimate_oi_ratio(event)
+        if oi_ratio is not None and oi_ratio_is_real:
             if position.side == "long" and oi_ratio > 0.4:
+                self._mark_exit(state, now)
                 return ExitSignal(
                     strategy=self.name,
                     symbol=position.symbol,
                     side="close",
                     confidence=0.7,
                     reason="oi_normalizing_after_shorts",
-                    metadata={"oi_ratio": oi_ratio},
+                    metadata={"oi_ratio": oi_ratio, "oi_ratio_is_real": True},
                 )
             if position.side == "short" and oi_ratio < 0.6:
+                self._mark_exit(state, now)
                 return ExitSignal(
                     strategy=self.name,
                     symbol=position.symbol,
                     side="close",
                     confidence=0.7,
                     reason="oi_normalizing_after_longs",
-                    metadata={"oi_ratio": oi_ratio},
+                    metadata={"oi_ratio": oi_ratio, "oi_ratio_is_real": True},
                 )
 
         return None
 
-    def _estimate_oi_ratio(self, event: MarketEvent) -> Optional[float]:
+    def _estimate_oi_ratio(self, event: MarketEvent) -> Tuple[Optional[float], bool]:
         """Estimate long/(long+short) positioning ratio.
+
+        Returns ``(ratio, is_real)`` where ``is_real`` is True only when the
+        value comes from ``event.oi_long_ratio`` (Binance global LS ratio).
 
         Priority:
         1. Binance global long/short account ratio (real data)
-        2. Heuristic from OI delta + price direction (fallback)
+        2. Heuristic from OI delta + price direction (fallback, is_real=False)
         """
         if event.oi_long_ratio is not None:
-            return float(event.oi_long_ratio)
+            return float(event.oi_long_ratio), True
 
         if self.REQUIRE_REAL_OI_RATIO:
-            return None
+            return None, False
 
         if event.oi_total is None:
-            return None
+            return None, False
 
-        # If we have oi_delta, we can estimate direction from price + OI change
-        # Price up + OI up = longs entering → long ratio higher
-        # Price down + OI up = shorts entering → short ratio higher
+        # Heuristic fallback — must not drive oi_normalizing exits
         if event.oi_delta is not None:
-            # This is a rough heuristic. In a real system, the exchange API
-            # might provide direct long/short OI split.
-            oi_total = event.oi_total
             oi_delta = event.oi_delta
 
             if oi_delta > 0:
-                # OI increasing: new positions being opened
-                # Assume the direction of new positions matches recent price move
                 if event.candle_15m:
                     price_change = event.candle_15m.close - event.candle_15m.open
                     if price_change > 0:
-                        return 0.65  # Longs dominant
+                        return 0.65, False
                     elif price_change < 0:
-                        return 0.35  # Shorts dominant
-                # No candle data — neutral with mild long bias (crypto tends long)
-                return 0.55
+                        return 0.35, False
+                return 0.55, False
             elif oi_delta < 0:
-                # OI decreasing: positions being closed
-                # If price is up and OI down = shorts covering (shorts were dominant)
                 if event.candle_15m:
                     price_change = event.candle_15m.close - event.candle_15m.open
                     if price_change > 0:
-                        return 0.35  # Shorts were dominant, now covering
+                        return 0.35, False
                     elif price_change < 0:
-                        return 0.65  # Longs were dominant, now selling
-                return 0.5
+                        return 0.65, False
+                return 0.5, False
 
-        # No delta — return neutral
-        return 0.5
+        return 0.5, False
 
     def _check_not_blowoff(
         self,

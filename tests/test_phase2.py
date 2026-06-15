@@ -95,8 +95,9 @@ def test_mean_reversion_prefers_binance_oi_ratio() -> None:
         funding=0.0005,
         predicted_funding=0.0005,
     )
-    ratio = strat._estimate_oi_ratio(event)
+    ratio, is_real = strat._estimate_oi_ratio(event)
     assert ratio == 0.72
+    assert is_real is True
 
 
 def test_orderbook_scalper_auto_enables_on_tight_book() -> None:

@@ -24,7 +24,7 @@ def estimate_expected_edge_pct(signal: Signal) -> Optional[float]:
     meta = signal.metadata or {}
     r_mult = safe_float(meta.get("take_profit_r"), 0.0)
     if r_mult <= 0:
-        r_mult = 1.5
+        r_mult = 2.0
     return sl * r_mult
 
 

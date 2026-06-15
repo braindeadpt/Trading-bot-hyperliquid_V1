@@ -78,6 +78,7 @@ class VWAPDeviation(Strategy):
         self.CONFIDENCE_EXTREME = cfg.get("confidence_extreme", 0.85)
         # Throttle
         self.SIGNAL_THROTTLE_MS = cfg.get("signal_throttle_ms", 300_000)  # 5 min
+        self.TAKE_PROFIT_R_MULT = float(cfg.get("take_profit_r_multiple", 2.0))
 
         self._state: Dict[str, _VWAPDevState] = {}
 
@@ -243,7 +244,7 @@ class VWAPDeviation(Strategy):
             size_pct=size_pct,
             entry_price=event.price,
             stop_loss_pct=stop_loss_pct,
-            take_profit_pct=stop_loss_pct * 1.5,  # 1.5R take-profit
+            take_profit_pct=stop_loss_pct * self.TAKE_PROFIT_R_MULT,
             reason=f"vwap_dev_{target_side}_z{zscore:.1f}_v{vol_ratio:.1f}",
             metadata={
                 "vwap": vwap,
@@ -255,6 +256,7 @@ class VWAPDeviation(Strategy):
                 "funding": funding,
                 "atr": atr,
                 "stop_loss_pct": stop_loss_pct,
+                "take_profit_r": self.TAKE_PROFIT_R_MULT,
             },
         )
 

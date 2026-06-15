@@ -90,6 +90,7 @@ strategy:
     atr_period: 14
     max_hold_hours: 4
     stop_loss_atr_multiplier: 2.0
+    take_profit_r_multiple: 2.0     # 2R TP — covers taker RT fees + slippage on small moves
     overcrowded_penalty: 0.2        # reduce confidence by 20%
     min_confidence: 0.30           # QW5: reduced from 0.40 to fire on more setups
     extreme_threshold: 0.0003        # align with near-zero funding regime (0.03%)
@@ -137,6 +138,7 @@ strategy:
     min_range_pct: 0.001           # 0.1% avg range minimum (anti-chop)
     atr_period: 14
     stop_atr_mult: 2.0
+    tp_r_mult: 2.0                  # 2R take-profit (was implicit 1.5R default)
     base_size_pct: 0.01
     max_size_pct: 0.03
     max_hold_hours: 6
@@ -157,6 +159,7 @@ strategy:
       LiquidationCatcher: 1.0       # neutral — liquidation can cascade in trends
       FundingArbitrage: 1.0         # neutral
       OrderBookScalper: 0.7         # penalize — trends override micro-imbalances
+      LeadLag: 1.0                   # neutral — lag arb works in trends and ranges
     range:
       SmartMoneyFlow: 0.7           # penalize trend following
       VolatilityBreakout: 0.6       # penalize — false breaks common in chop
@@ -166,6 +169,35 @@ strategy:
       LiquidationCatcher: 1.0       # neutral
       FundingArbitrage: 1.0         # neutral
       OrderBookScalper: 1.3         # boost — micro-patterns shine in range
+
+      OrderBookScalper: 1.3         # boost — micro-patterns shine in range
+      LeadLag: 1.1                  # slight boost — range chop still has BN lead pulses
+
+  # ═══════════════════════════════════════════════════════════
+  # Strategy: LeadLag (Binance → Hyperliquid short-term lag)
+  # ═══════════════════════════════════════════════════════════
+  lead_lag:
+    enabled: true
+    impulse_window_ms: 10000        # 10s Binance return window (5–15s typical)
+    impulse_min_pct: 0.0005         # 0.05% min Binance impulse to trigger
+    gap_min_pct: 0.0003             # 0.03% min HL lag beyond fees
+    min_edge_buffer_pct: 0.0002     # extra buffer above HL spread + RT fees
+    taker_fee_pct: 0.00035          # per-side fee estimate for gap math
+    max_hl_spread_pct: 0.0008       # 0.08% — only enter on tight HL book
+    require_oir_confirm: true
+    oir_threshold: 0.10             # OIR must align with entry side
+    convergence_pct: 0.0001         # gap closed → take profit (~0.01%)
+    stop_loss_pct: 0.003            # 0.30% hard stop
+    max_hold_seconds: 90            # time-stop if gap does not close
+    impulse_reversal_pct: 0.0003    # exit if Binance impulse flips
+    base_size_pct: 0.005            # 0.5% capital
+    max_size_pct: 0.008             # 0.8% max
+    min_confidence: 0.45
+    max_confidence: 0.85
+    signal_throttle_ms: 30000       # 30s between signals per symbol
+    buffer_ms: 30000                # rolling mid history window
+    max_binance_stale_ms: 2000      # skip if Binance tick older than 2s
+    warmup_samples: 5
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: Mean Reversion (Funding Extreme)
@@ -182,9 +214,11 @@ strategy:
     funding_revert_fraction: 0.5        # exit when |funding| < 50% of |entry_funding|
     min_funding_exit_hold_ms: 900000      # 15 min before funding-based exit (avoid fee churn)
     min_profit_before_funding_exit_pct: 0.001  # need +0.1% price move vs entry for funding exit
+    reentry_cooldown_ms: 600000           # 10 min anti-churn after any exit before re-entry
     overcrowded_oi_pct: 65.0        # OI concentration on one side
     max_hold_minutes: 60
     stop_loss_pct: 2.0
+    take_profit_r_multiple: 2.0     # 2R TP (was hardcoded 1.5R)
     min_confidence: 0.40            # QW5: reduced from 0.55
     # ── Task 2.3: Dynamic upgrades ──
     use_dynamic_percentile: true    # use rolling p90 instead of fixed thresholds
@@ -216,6 +250,7 @@ strategy:
     max_hold_hours: 8                # max hold until next funding payment
     pair_size_pct: 0.02              # 2% of capital per leg
     stop_loss_pct: 0.03              # 3% stop on each leg
+    take_profit_r: 2.0               # 2R TP per leg (was hardcoded 1.5R)
     confidence: 0.75
     require_oi_stable: true          # avoid if OI is still surging
     oi_delta_max: 1000.0             # max OI increase allowed
@@ -237,6 +272,7 @@ strategy:
     base_size_pct: 0.01             # 1% base size
     max_size_pct: 0.03             # 3% max size
     stop_loss_atr_multiplier: 2.0   # ATR-based stop
+    take_profit_r_multiple: 2.0     # 2R TP (was hardcoded 1.5R)
     max_hold_hours: 4               # mean reversion is quick or wrong
     min_confidence: 0.40            # QW5: reduced from 0.55
     confidence_extreme: 0.65        # QW5: reduced from 0.75
@@ -248,6 +284,9 @@ strategy:
   orderbook_scalper:
     enabled: false                  # manual force-on; leave false to use auto_enable
     auto_enable: true               # activates when book spread + TP edge beat RT fees
+    mode: momentum                  # momentum = follow heavy book side; fade = mean-revert imbalance
+    spoof_wall_proximity_pct: 0.001 # reject if supporting wall within 0.1% of mid
+    spoof_depth_skew_min: 0.65      # bid wall spoof when depth_quality >= this; ask when <= 1-this
     auto_enable_taker_fee_pct: 0.0001   # maker fee when execution.maker_orders enabled
     auto_enable_slippage_pct: 0.0005     # fallback slippage per side when book unknown
     auto_enable_min_edge_buffer_pct: 0.0005
@@ -256,8 +295,8 @@ strategy:
     auto_disable_max_book_spread_pct: 0.0025  # 0.25% hysteresis — disable when book widens
     auto_enable_min_symbols_with_book: 1
     viability_check_interval_ms: 60000
-    bid_ask_ratio_long: 1.5          # bid_depth / ask_depth > 1.5 → excess bids → long
-    bid_ask_ratio_short: 0.67        # bid_depth / ask_depth < 0.67 → excess asks → short
+    bid_ask_ratio_long: 1.5          # bid_depth / ask_depth > 1.5 → bid-heavy book
+    bid_ask_ratio_short: 0.67        # bid_depth / ask_depth < 0.67 → ask-heavy book
     take_profit_pct: 0.0025          # 0.25% take-profit
     stop_loss_pct: 0.002             # 0.20% stop-loss (R:R 1.25:1)
     base_size_pct: 0.005             # 0.5% capital
@@ -283,7 +322,7 @@ strategy:
     max_size_pct: 0.01              # 1% max
     stop_loss_atr_multiplier: 1.0  # tight stop
     max_hold_minutes: 30            # liquidation cascades resolve quickly
-    take_profit_r: 1.5              # 1.5R take profit (was 2.0 — tighter target)
+    take_profit_r: 2.0              # 2R take profit (was 1.5R — insufficient after RT fees)
     min_confidence: 0.45            # QW5: reduced from 0.60
     signal_throttle_ms: 3600000     # 1h cooldown (was 2h)
 
@@ -352,22 +391,20 @@ strategy:
   # Ensemble Configuration
   # ═══════════════════════════════════════════════════════════
   ensemble:
-    # QW5 (v3.1.13): looser aggregation to trade more often in volatile regimes.
-    #   threshold 0.10 = 1 strong strategy can break through with high weight.
-    #   min_agreeing 1 = a single high-confidence sub-strategy can trigger.
-    #   High-conviction bypass lowered to 0.75 so individual strategies
-    #   (e.g. CVDOrderFlow, OrderBookScalper) can act alone on micro-structure.
-    #   Compensated by: portfolio risk gates, vol circuit, funding blackout,
-    #   and 60% directional exposure cap.
-    threshold: 0.10
-    min_agreeing: 1
+    # Confluence gate: require >=2 agreeing strategies OR single high-conviction bypass.
+    # threshold 0.25 = combined weighted score must clear bar for multi-strategy entries.
+    # min_agreeing 2 = one sub-strategy alone cannot enter unless high-conviction bypass.
+    # High-conviction bypass at 0.80 — excluded strategies never bypass alone.
+    threshold: 0.25
+    min_agreeing: 2
     # High-conviction bypass: single strategy can enter alone above this confidence.
-    high_conviction_threshold: 0.75
+    high_conviction_threshold: 0.80
     high_conviction_enabled: true
     high_conviction_exclude:
       - VolatilityBreakout
       - VWAPDeviation
       - FundingExtreme
+      - LeadLag
 
   # ═══════════════════════════════════════════════════════════
   # Strategy performance governance (Phase 3)
@@ -399,6 +436,9 @@ execution:
     strategies:
       - OrderBookScalper
       - VWAPDeviation
+      - DonchianBreakout
+      - VolatilityBreakout
+      - CVDOrderFlow
 
 # ═══════════════════════════════════════════════════════════
 # External market data feeds (Phase 2)

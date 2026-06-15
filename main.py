@@ -390,6 +390,17 @@ async def main() -> None:
     if binance_ws is not None:
         binance_ws_task = asyncio.create_task(binance_ws.start())
         logger.info("Binance WebSocket task started")
+        from exchanges.binance_price_bridge import forward_binance_prices
+
+        asyncio.create_task(
+            forward_binance_prices(
+                binance_ws,
+                data_bus,
+                list(cfg.get("assets", ["BTC", "ETH", "SOL"])),
+            ),
+            name="binance_price_bridge",
+        )
+        logger.info("Binance price bridge task started (aggTrade -> DataBus)")
 
     await candle_builder.start()
     logger.info("CandleBuilder started")

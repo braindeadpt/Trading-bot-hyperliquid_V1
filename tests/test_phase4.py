@@ -35,10 +35,31 @@ def _cfg() -> Config:
             "maker_orders": {
                 "enabled": True,
                 "maker_fee_pct": 0.01,
-                "strategies": ["OrderBookScalper", "VWAPDeviation"],
+                "exit_as_maker": False,
+                "strategies": [
+                    "OrderBookScalper",
+                    "VWAPDeviation",
+                    "DonchianBreakout",
+                    "VolatilityBreakout",
+                    "CVDOrderFlow",
+                ],
             },
         },
     })
+
+
+def _maker_signal(original_strategy: str) -> Signal:
+    return Signal(
+        strategy="StrategyEnsemble",
+        symbol="BTC",
+        side="long",
+        confidence=0.7,
+        size_pct=0.01,
+        entry_price=100_000.0,
+        stop_loss_pct=0.01,
+        take_profit_pct=0.02,
+        metadata={"original_strategy": original_strategy, "calculated_size": 0.01},
+    )
 
 
 def test_maker_routing_for_scalper() -> None:
@@ -97,8 +118,36 @@ def test_tca_passes_with_maker_entry_taker_exit() -> None:
     assert ok, reason
 
 
+def test_maker_routing_for_non_urgent_entries() -> None:
+    book = _Book(bids=[_Level(99_950.0, 1.0)], asks=[_Level(100_050.0, 1.0)])
+    for strat in ("DonchianBreakout", "VolatilityBreakout", "CVDOrderFlow"):
+        _, spec = resolve_order_routing(_maker_signal(strat), _cfg(), book)
+        assert spec.order_type == "limit_maker", strat
+        assert spec.entry_fee_pct == 0.0001, strat
+        assert abs(spec.exit_fee_pct - 0.00035) < 1e-10, strat
+        assert spec.entry_slippage_pct == 0.0, strat
+
+
+def test_tca_uses_maker_entry_fee_for_routed_strategies() -> None:
+    book = _Book(bids=[_Level(99_950.0, 1.0)], asks=[_Level(100_050.0, 1.0)])
+    enriched, spec = resolve_order_routing(_maker_signal("DonchianBreakout"), _cfg(), book)
+    ok, reason = passes_tca_check(
+        enriched,
+        0.00035,
+        0.0005,
+        0.0005,
+        entry_fee_pct=spec.entry_fee_pct,
+        exit_fee_pct=spec.exit_fee_pct,
+        entry_slippage_pct=spec.entry_slippage_pct,
+        exit_slippage_pct=spec.exit_slippage_pct,
+    )
+    assert ok, reason
+
+
 if __name__ == "__main__":
     test_maker_routing_for_scalper()
     test_market_routing_for_trend()
+    test_maker_routing_for_non_urgent_entries()
+    test_tca_uses_maker_entry_fee_for_routed_strategies()
     test_tca_passes_with_maker_entry_taker_exit()
     print("ALL PHASE 4 TESTS PASSED [OK]")

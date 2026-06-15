@@ -58,6 +58,24 @@ class _FakeCandle:
         return self._ts
 
 
+def make_1h_candle(
+    i: int,
+    price: float,
+    range_pct: float = 0.02,
+    base_ms: int = 1_700_000_000_000,
+) -> _FakeCandle:
+    """Build a 1h candle with symmetric high/low around close."""
+    half = range_pct / 2.0
+    return _FakeCandle(
+        open=price,
+        high=price * (1.0 + half),
+        low=price * (1.0 - half),
+        close=price,
+        volume=1000.0,
+        _ts=base_ms + i * 3_600_000,
+    )
+
+
 def _ts(i: int, base: int = 1_700_000_000_000) -> int:
     return base + i * 60_000  # 1m intervals
 
@@ -573,6 +591,66 @@ def test_signal_metadata_complete() -> None:
     )
 
 
+def test_atr_uses_14_period_1h_history() -> None:
+    """Stop uses 14-bar 1h ATR; insufficient history keeps 1.5% fallback."""
+    strat = CVDOrderFlow()
+    price = 50_000.0
+
+    stop_fallback = strat._compute_stop_loss_pct(_CVDState(), price)
+    assert abs(stop_fallback - 0.015) < 1e-9
+
+    state = strat._get_state("BTC")
+    for i in range(14):
+        state.candles_1h.append(make_1h_candle(i, price, range_pct=0.02))
+    assert abs(strat._compute_stop_loss_pct(state, price) - 0.015) < 1e-9
+
+    state.candles_1h.append(make_1h_candle(14, price, range_pct=0.02))
+    stop_warmed = strat._compute_stop_loss_pct(state, price)
+    assert abs(stop_warmed - 0.04) < 1e-4  # 2% range × 2× ATR
+
+    state.candles_1h.append(make_1h_candle(15, price, range_pct=0.30))
+    stop_after_spike = strat._compute_stop_loss_pct(state, price)
+    assert stop_after_spike <= strat.STOP_LOSS_CEIL
+    assert stop_after_spike >= stop_warmed
+
+    print_test(
+        "atr_uses_14_period_1h_history",
+        True,
+        f"fallback=0.015 warmed={stop_warmed:.4f} after_spike={stop_after_spike:.4f}",
+    )
+
+
+def test_stop_stable_across_ticks_same_history() -> None:
+    """Consecutive calls with unchanged 1h deque produce identical stop_loss_pct."""
+    strat = CVDOrderFlow()
+    state = strat._get_state("BTC")
+    for i in range(15):
+        state.candles_1h.append(make_1h_candle(i, 50_000.0))
+
+    stop_first = strat._compute_stop_loss_pct(state, 50_000.0)
+    stop_second = strat._compute_stop_loss_pct(state, 50_000.0)
+    assert stop_first == stop_second
+
+    # Simulate two ticks sharing the same latest 1h candle (no new append)
+    event = make_event("BTC", 50_000.0, ts_offset=0)
+    event = MarketEvent(
+        symbol=event.symbol,
+        price=event.price,
+        timestamp_ms=event.timestamp_ms,
+        candle_1h=make_1h_candle(14, 50_000.0),
+    )
+    strat._update_candle_1h(state, event)
+    stop_after_tick = strat._compute_stop_loss_pct(state, 50_000.0)
+    strat._update_candle_1h(state, event)
+    stop_after_dup = strat._compute_stop_loss_pct(state, 50_000.0)
+    assert stop_after_tick == stop_after_dup == stop_first
+    print_test(
+        "stop_stable_across_ticks_same_history",
+        stop_first == stop_second == stop_after_dup,
+        f"stop={stop_first:.6f}",
+    )
+
+
 def test_disabled_returns_none() -> None:
     """When enabled=False, strategy never fires."""
     strat = CVDOrderFlow({"enabled": False})
@@ -619,6 +697,8 @@ def main() -> int:
         test_window_stats_pure_function,
         test_window_stats_no_divergence_when_aligned,
         test_signal_metadata_complete,
+        test_atr_uses_14_period_1h_history,
+        test_stop_stable_across_ticks_same_history,
         test_disabled_returns_none,
     ]
     for t in tests:
