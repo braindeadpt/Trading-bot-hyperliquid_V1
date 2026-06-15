@@ -13,6 +13,7 @@ sys.path.insert(0, r"C:\Users\Braindead\Documents\trading-bot-hyperliquid")
 from src.core.risk_manager import RiskManager
 from src.core.kelly_sizer import KellySizer
 from src.strategies.base import Signal, Position
+from src.utils.config import Config
 
 
 # Mock portfolio for testing
@@ -102,8 +103,17 @@ def test_sector_exposure_cap():
     print("TEST 4.2: Sector exposure cap (max 30%)")
     print("=" * 60)
 
-    risk = RiskManager({"max_positions": 5}, None)
-    risk.MAX_SECTOR_EXPOSURE_PCT = 0.30  # 30%
+    risk = RiskManager(
+        Config({
+            "risk": {"max_positions": 5},
+            "strategy": {
+                "portfolio_governance": {
+                    "max_sector_exposure_pct": 30,
+                },
+            },
+        }),
+        None,
+    )
 
     class Pos:
         def __init__(self, side, entry_price, size):

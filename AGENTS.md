@@ -48,7 +48,7 @@ trading-bot-hyperliquid/
 │   └── .env.example           # Template for API secrets
 ├── src/                       # All application code
 │   ├── core/                  # Engine, portfolio, risk, execution, Kelly sizer, correlation monitor
-│   ├── strategies/            # 6 strategies + base ABC + indicators + ensemble
+│   ├── strategies/            # 10 sub-strategies + base ABC + indicators + ensemble
 │   ├── exchanges/             # Hyperliquid WS/REST, Binance API, funding aggregator
 │   ├── data/                  # SQLite DB, candle builder, orderbook metrics, historical fetcher
 │   ├── dashboard/             # Flask + Socket.IO server + embedded HTML UI
@@ -376,7 +376,10 @@ Effective settings are logged once at engine start (`Effective risk: leverage=..
 | `src/exchanges/hyperliquid_ws.py` | WebSocket client and `DataBus` pub/sub implementation. |
 | `src/strategies/orderbook_scalper.py` | OrderBookScalper — scalps bid_ask_ratio micro-imbalances with tight TP/SL. |
 | `src/strategies/cvd_orderflow.py` | CVDOrderFlow — multi-timeframe (5m/15m/1h) cumulative volume delta divergence. Uses `buy_volume`/`sell_volume` from candle_builder. |
-| `src/strategies/ensemble.py` | StrategyEnsemble — weighted consensus across all 8 sub-strategies. |
+| `src/strategies/ensemble.py` | StrategyEnsemble — weighted consensus across all enabled sub-strategies. |
+| `src/strategies/lead_lag.py` | LeadLag — Binance USD-M perp mark vs HL mid lag arb (short hold). |
+| `src/exchanges/binance_price_bridge.py` | Spot `@aggTrade` → DataBus `binance_price:{symbol}`. |
+| `src/exchanges/binance_perp_price_bridge.py` | USD-M `@markPrice@1s` → DataBus `binance_perp_price:{symbol}` (LeadLag). |
 | `src/data/database.py` | SQLite schema and all persistence queries. |
 | `scripts/backfill_candles.py` | Binance historical candle backfill to populate candle tables before bot start. |
 | `scripts/lookahead_audit.py` | `LOOKAHEAD-001..006` static scanner (Phase B, v3.1.9). |

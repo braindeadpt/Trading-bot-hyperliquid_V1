@@ -78,6 +78,10 @@ class MarketEvent:
     binance_mid: Optional[float] = None
     binance_timestamp_ms: Optional[int] = None
 
+    # Binance USD-M perp mark price (basis-corrected reference for LeadLag)
+    binance_perp_mid: Optional[float] = None
+    binance_perp_timestamp_ms: Optional[int] = None
+
 
 @dataclass(frozen=True)
 class Signal:

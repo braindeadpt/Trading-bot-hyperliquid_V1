@@ -418,6 +418,20 @@ async def main() -> None:
         await _binance_futures_feed.start()
         logger.info("BinanceFuturesFeed started (liquidation_source=%s)", liq_source)
 
+    # Binance USD-M perp mark prices for LeadLag (basis-corrected vs HL perp)
+    lead_lag_cfg = cfg.get("strategy.lead_lag", {}) or {}
+    if bool(lead_lag_cfg.get("enabled", False)) or bool(lead_lag_cfg.get("auto_enable", False)):
+        from exchanges.binance_perp_price_bridge import forward_binance_perp_prices
+
+        asyncio.create_task(
+            forward_binance_perp_prices(
+                data_bus,
+                list(cfg.get("assets", ["BTC", "ETH", "SOL"])),
+            ),
+            name="binance_perp_price_bridge",
+        )
+        logger.info("Binance perp mark-price bridge started (markPrice@1s -> DataBus)")
+
     # -----------------------------------------------------------------------
     # 9. Start TradingEngine (this creates & loads the portfolio snapshot)
     # -----------------------------------------------------------------------

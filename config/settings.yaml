@@ -169,8 +169,6 @@ strategy:
       LiquidationCatcher: 1.0       # neutral
       FundingArbitrage: 1.0         # neutral
       OrderBookScalper: 1.3         # boost — micro-patterns shine in range
-
-      OrderBookScalper: 1.3         # boost — micro-patterns shine in range
       LeadLag: 1.1                  # slight boost — range chop still has BN lead pulses
 
   # ═══════════════════════════════════════════════════════════
@@ -187,8 +185,11 @@ strategy:
     require_oir_confirm: true
     oir_threshold: 0.10             # OIR must align with entry side
     convergence_pct: 0.0001         # gap closed → take profit (~0.01%)
-    stop_loss_pct: 0.003            # 0.30% hard stop
-    max_hold_seconds: 90            # time-stop if gap does not close
+    stop_gap_mult: 1.5               # stop = clamp(|gap| * mult, floor, ceiling)
+    stop_floor_pct: 0.0008           # 0.08% minimum stop
+    stop_ceiling_pct: 0.004          # 0.40% maximum stop
+    min_tp_r: 1.0                    # reject if take_profit < stop * min_tp_r
+    max_hold_seconds: 90             # time-stop if gap does not close
     impulse_reversal_pct: 0.0003    # exit if Binance impulse flips
     base_size_pct: 0.005            # 0.5% capital
     max_size_pct: 0.008             # 0.8% max

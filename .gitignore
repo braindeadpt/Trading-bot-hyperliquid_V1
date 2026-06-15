@@ -49,6 +49,8 @@ dist/
 htmlcov/
 .coverage
 test_output.log
+test.log
+test_results.txt
 backtest_results.json
 
 # Backtest data

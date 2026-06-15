@@ -1,4 +1,4 @@
-"""Tests for LeadLag strategy (Binance lead / HL lag arb)."""
+"""Tests for LeadLag strategy (Binance perp lead / HL lag arb)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,10 @@ def _cfg() -> dict:
         "require_oir_confirm": True,
         "oir_threshold": 0.05,
         "convergence_pct": 0.0001,
-        "stop_loss_pct": 0.003,
+        "stop_gap_mult": 1.5,
+        "stop_floor_pct": 0.0008,
+        "stop_ceiling_pct": 0.004,
+        "min_tp_r": 1.0,
         "max_hold_seconds": 120,
         "base_size_pct": 0.005,
         "max_size_pct": 0.008,
@@ -38,9 +41,10 @@ def _cfg() -> dict:
 def _event(
     symbol: str,
     hl_mid: float,
-    bn_mid: float,
+    bn_perp_mid: float,
     ts_ms: int,
     *,
+    bn_spot_mid: float | None = None,
     spread: float = 0.0002,
     oir: float = 0.2,
 ) -> MarketEvent:
@@ -48,7 +52,9 @@ def _event(
         symbol=symbol,
         price=hl_mid,
         timestamp_ms=ts_ms,
-        binance_mid=bn_mid,
+        binance_perp_mid=bn_perp_mid,
+        binance_perp_timestamp_ms=ts_ms,
+        binance_mid=bn_spot_mid if bn_spot_mid is not None else bn_perp_mid,
         binance_timestamp_ms=ts_ms,
         orderbook_spread_pct=spread,
         orderbook_oir=oir,
@@ -56,7 +62,6 @@ def _event(
 
 
 def _warm_up(strategy: LeadLag, symbol: str = "BTC") -> None:
-    """Seed HL/BN buffers with flat prices before impulse."""
     base_ts = 1_000_000
     for i in range(3):
         strategy.on_data(_event(symbol, 100_000.0, 100_000.0, base_ts + i * 1_000))
@@ -68,30 +73,88 @@ def test_warmup_blocks_signal_until_enough_samples() -> None:
     assert sig is None
 
 
-def test_long_signal_on_binance_impulse_and_negative_gap() -> None:
+def test_long_signal_uses_perp_gap_with_proportional_stop() -> None:
     strategy = LeadLag(_cfg())
     _warm_up(strategy)
 
-    # Binance +0.10% impulse; HL still ~0.10% below BN
-    sig = strategy.on_data(_event("BTC", 99_900.0, 100_100.0, 12_000))
+    # ~0.50% perp gap + impulse — large enough for R:R >= 1:1
+    sig = strategy.on_data(_event("BTC", 99_500.0, 100_500.0, 12_000))
     assert sig is not None
     assert sig.side == "long"
-    assert sig.strategy == "LeadLag"
-    assert sig.stop_loss_pct == 0.003
-    assert sig.take_profit_pct is not None and sig.take_profit_pct > 0
+    assert sig.take_profit_pct is not None
+    assert sig.stop_loss_pct is not None
+    assert sig.take_profit_pct >= sig.stop_loss_pct
+    assert sig.stop_loss_pct == 0.004  # clamp(|gap|*1.5, floor, ceiling)
     assert sig.metadata["entry_gap_pct"] < 0
+    assert sig.metadata["take_profit_r"] >= 1.0
 
 
-def test_short_signal_on_binance_dump_and_positive_gap() -> None:
+def test_rejects_signal_when_rr_below_minimum() -> None:
+    strategy = LeadLag(_cfg())
+    _warm_up(strategy)
+    strategy.on_data(_event("BTC", 100_000.0, 100_100.0, 11_500))
+
+    # ~0.20% perp gap with impulse — fails min_tp_r vs proportional stop
+    sig = strategy.on_data(_event("BTC", 99_800.0, 100_000.0, 12_000))
+    assert sig is None
+
+
+def test_spot_basis_alone_does_not_trigger_without_perp_gap() -> None:
+    """Spot shows lag but perp is aligned with HL — no signal."""
+    strategy = LeadLag(_cfg())
+    _warm_up(strategy)
+
+    # Perp flat at 100k; spot pumped to 100.15k would fake lag if used
+    strategy.on_data(
+        _event(
+            "BTC",
+            100_000.0,
+            100_000.0,
+            11_000,
+            bn_spot_mid=100_150.0,
+        )
+    )
+    sig = strategy.on_data(
+        _event(
+            "BTC",
+            100_000.0,
+            100_000.0,
+            12_000,
+            bn_spot_mid=100_150.0,
+        )
+    )
+    assert sig is None
+
+
+def test_requires_binance_perp_mid_not_spot_only() -> None:
+    strategy = LeadLag(_cfg())
+    _warm_up(strategy)
+
+    sig = strategy.on_data(
+        MarketEvent(
+            symbol="BTC",
+            price=99_500.0,
+            timestamp_ms=12_000,
+            binance_mid=100_000.0,
+            binance_timestamp_ms=12_000,
+            orderbook_spread_pct=0.0002,
+            orderbook_oir=0.2,
+        )
+    )
+    assert sig is None
+
+
+def test_short_signal_on_perp_dump_and_positive_gap() -> None:
     strategy = LeadLag(_cfg())
     for i in range(3):
         strategy.on_data(_event("BTC", 100_500.0, 100_500.0, 1_000 + i * 1_000, oir=-0.2))
 
     sig = strategy.on_data(
-        _event("BTC", 100_200.0, 100_000.0, 12_000, oir=-0.2)
+        _event("BTC", 100_500.0, 100_000.0, 12_000, oir=-0.2)
     )
     assert sig is not None
     assert sig.side == "short"
+    assert sig.take_profit_pct >= sig.stop_loss_pct
     assert sig.metadata["entry_gap_pct"] > 0
 
 
@@ -106,7 +169,7 @@ def test_gap_convergence_take_profit_exit() -> None:
         metadata={
             "original_strategy": "LeadLag",
             "entry_gap_pct": -0.0008,
-            "entry_bn_mid": 100_100.0,
+            "entry_bn_perp_mid": 100_100.0,
         },
     )
     exit_sig = strategy.on_position(
@@ -119,7 +182,10 @@ def test_gap_convergence_take_profit_exit() -> None:
 
 if __name__ == "__main__":
     test_warmup_blocks_signal_until_enough_samples()
-    test_long_signal_on_binance_impulse_and_negative_gap()
-    test_short_signal_on_binance_dump_and_positive_gap()
+    test_long_signal_uses_perp_gap_with_proportional_stop()
+    test_rejects_signal_when_rr_below_minimum()
+    test_spot_basis_alone_does_not_trigger_without_perp_gap()
+    test_requires_binance_perp_mid_not_spot_only()
+    test_short_signal_on_perp_dump_and_positive_gap()
     test_gap_convergence_take_profit_exit()
     print("ALL LEADLAG TESTS PASSED [OK]")

@@ -1,17 +1,21 @@
 """Strategy: LeadLag — short-term directional arb when Binance leads Hyperliquid.
 
-Binance price source
---------------------
-Live/paper: ``MarketEvent.binance_mid`` and ``MarketEvent.binance_timestamp_ms``,
-injected by the trading engine from ``BinanceMidTick`` on DataBus topic
-``binance_price:{symbol}``. The tick originates from Binance spot ``@aggTrade``
-(via :mod:`src.exchanges.binance_price_bridge`).
+Binance price source (basis-corrected)
+--------------------------------------
+Uses **Binance USD-M perpetual mark price**, not spot:
 
-Assumed latency: Binance WS ~50–200 ms; HL ``allMids`` similar. The edge window
-is HL catching up over roughly 1–5 seconds after a Binance impulse — not funding
-dependent.
+- ``MarketEvent.binance_perp_mid`` / ``binance_perp_timestamp_ms`` injected by
+  the engine from ``BinancePerpMidTick`` on DataBus topic
+  ``binance_perp_price:{symbol}`` (``@markPrice@1s`` via
+  :mod:`src.exchanges.binance_perp_price_bridge`).
 
-Backtest: no Binance feed — strategy skips when ``binance_mid`` is absent.
+Spot ``binance_mid`` (``@aggTrade`` spot) is ignored for entries/exits because
+HL trades perps — comparing to spot embeds structural spot–perp basis.
+
+Assumed latency: Binance futures WS ~50–200 ms; HL ``allMids`` similar.
+Edge window: HL catches up over ~1–5 s after a Binance perp impulse.
+
+Backtest: skips when ``binance_perp_mid`` is absent.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from __future__ import annotations
 import collections
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, Optional, Tuple
 
 from src.strategies.base import ExitSignal, MarketEvent, Position, Signal, Strategy
 from src.utils.helpers import safe_divide, safe_float
@@ -44,11 +48,11 @@ class _LeadLagState:
 
 
 class LeadLag(Strategy):
-    """Exploit Binance → Hyperliquid price lag on short impulses.
+    """Exploit Binance perp → Hyperliquid perp lag on short impulses.
 
-    Entry: Binance impulse exceeds threshold while HL mid has not caught up
-    (gap beyond fees + spread). Exit: gap convergence, time-stop, impulse
-    reversal, or engine hard stop/take-profit.
+    Entry: Binance perp impulse exceeds threshold while HL has not caught up
+  (perp gap beyond fees + spread). Stop scales with |gap|; take-profit targets
+    gap closure with minimum R:R ``min_tp_r``.
     """
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
@@ -62,7 +66,10 @@ class LeadLag(Strategy):
         self.REQUIRE_OIR_CONFIRM = bool(cfg.get("require_oir_confirm", True))
         self.OIR_THRESHOLD = float(cfg.get("oir_threshold", 0.10))
         self.CONVERGENCE_PCT = float(cfg.get("convergence_pct", 0.0001))
-        self.STOP_LOSS_PCT = float(cfg.get("stop_loss_pct", 0.003))
+        self.STOP_GAP_MULT = float(cfg.get("stop_gap_mult", 1.5))
+        self.STOP_FLOOR_PCT = float(cfg.get("stop_floor_pct", 0.0008))
+        self.STOP_CEILING_PCT = float(cfg.get("stop_ceiling_pct", 0.004))
+        self.MIN_TP_R = float(cfg.get("min_tp_r", 1.0))
         self.MAX_HOLD_MS = int(cfg.get("max_hold_seconds", 90)) * 1000
         self.BASE_SIZE_PCT = float(cfg.get("base_size_pct", 0.005))
         self.MAX_SIZE_PCT = float(cfg.get("max_size_pct", 0.008))
@@ -84,6 +91,15 @@ class LeadLag(Strategy):
         if symbol not in self._state:
             self._state[symbol] = _LeadLagState()
         return self._state[symbol]
+
+    @staticmethod
+    def _resolve_bn_perp(event: MarketEvent) -> Tuple[Optional[float], Optional[int]]:
+        """Return Binance USD-M perp mark price — never fall back to spot."""
+        mid = event.binance_perp_mid
+        ts = event.binance_perp_timestamp_ms
+        if mid is None or ts is None or mid <= 0:
+            return None, None
+        return mid, ts
 
     def _prune(self, samples: Deque[_PriceSample], now_ms: int) -> None:
         cutoff = now_ms - self.BUFFER_MS
@@ -131,6 +147,24 @@ class LeadLag(Strategy):
         rt_fee = 2.0 * self.TAKER_FEE_PCT
         return self.GAP_MIN_PCT + spread + rt_fee + self.MIN_EDGE_BUFFER_PCT
 
+    @staticmethod
+    def _clamp_stop(gap_abs: float, mult: float, floor: float, ceiling: float) -> float:
+        raw = gap_abs * mult
+        return max(floor, min(raw, ceiling))
+
+    def _risk_reward(
+        self,
+        gap_abs: float,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Return (stop_loss_pct, take_profit_pct) or (None, None) if R:R too poor."""
+        stop = self._clamp_stop(
+            gap_abs, self.STOP_GAP_MULT, self.STOP_FLOOR_PCT, self.STOP_CEILING_PCT,
+        )
+        take_profit = max(gap_abs - self.CONVERGENCE_PCT, self.CONVERGENCE_PCT)
+        if take_profit < stop * self.MIN_TP_R:
+            return None, None
+        return stop, take_profit
+
     def _size_pct(self, confidence: float) -> float:
         span = max(self.MAX_SIZE_PCT - self.BASE_SIZE_PCT, 0.0)
         return min(self.BASE_SIZE_PCT + span * confidence, self.MAX_SIZE_PCT)
@@ -167,15 +201,14 @@ class LeadLag(Strategy):
         return state
 
     def on_data(self, event: MarketEvent) -> Optional[Signal]:
-        bn_mid = event.binance_mid
-        bn_ts = event.binance_timestamp_ms
-        if bn_mid is None or bn_ts is None or bn_mid <= 0:
+        bn_mid, bn_ts = self._resolve_bn_perp(event)
+        if bn_mid is None or bn_ts is None:
             return None
 
         now_ms = event.timestamp_ms
         if now_ms - bn_ts > self.MAX_BINANCE_STALE_MS:
             logger.debug(
-                "LeadLag SKIP %s — stale Binance tick (%dms old)",
+                "LeadLag SKIP %s — stale Binance perp tick (%dms old)",
                 event.symbol,
                 now_ms - bn_ts,
             )
@@ -189,7 +222,7 @@ class LeadLag(Strategy):
         ):
             if not state.warmup_logged:
                 logger.info(
-                    "LeadLag %s WARM-UP: hl=%d/%d bn=%d/%d samples",
+                    "LeadLag %s WARM-UP: hl=%d/%d bn_perp=%d/%d samples",
                     event.symbol,
                     len(state.hl_samples),
                     self.WARMUP_SAMPLES,
@@ -237,22 +270,40 @@ class LeadLag(Strategy):
             )
             return None
 
+        gap_abs = abs(gap)
+        stop_loss_pct, take_profit_pct = self._risk_reward(gap_abs)
+        if stop_loss_pct is None or take_profit_pct is None:
+            logger.debug(
+                "LeadLag SKIP %s %s — R:R < %.1f (gap=%.4f%% stop=%.4f%% tp=%.4f%%)",
+                event.symbol,
+                side,
+                self.MIN_TP_R,
+                gap * 100.0,
+                self._clamp_stop(
+                    gap_abs, self.STOP_GAP_MULT, self.STOP_FLOOR_PCT, self.STOP_CEILING_PCT,
+                ) * 100.0,
+                max(gap_abs - self.CONVERGENCE_PCT, self.CONVERGENCE_PCT) * 100.0,
+            )
+            return None
+
         confidence = self._confidence(impulse, gap, min_gap)
         if confidence < self.MIN_CONFIDENCE:
             return None
 
         size_pct = self._size_pct(confidence)
-        take_profit_pct = max(abs(gap) - self.CONVERGENCE_PCT, self.CONVERGENCE_PCT)
+        tp_r = safe_divide(take_profit_pct, stop_loss_pct, 0.0)
 
         state.last_signal_ms = now_ms
         logger.info(
             "LeadLag %s SIGNAL %s — impulse=%.4f%% gap=%.4f%% "
-            "min_gap=%.4f%% conf=%.2f size=%.3f%%",
+            "stop=%.4f%% tp=%.4f%% R=%.2f conf=%.2f size=%.3f%%",
             event.symbol,
             side,
             impulse * 100.0,
             gap * 100.0,
-            min_gap * 100.0,
+            stop_loss_pct * 100.0,
+            take_profit_pct * 100.0,
+            tp_r,
             confidence,
             size_pct * 100.0,
         )
@@ -264,17 +315,18 @@ class LeadLag(Strategy):
             confidence=confidence,
             size_pct=size_pct,
             entry_price=event.price,
-            stop_loss_pct=self.STOP_LOSS_PCT,
+            stop_loss_pct=stop_loss_pct,
             take_profit_pct=take_profit_pct,
             reason=f"lead_lag_{side}_imp{impulse * 100:.3f}_gap{gap * 100:.3f}",
             metadata={
                 "entry_gap_pct": gap,
                 "entry_impulse_pct": impulse,
-                "entry_bn_mid": bn_mid,
+                "entry_bn_perp_mid": bn_mid,
                 "entry_hl_mid": event.price,
                 "min_net_gap_pct": min_gap,
                 "convergence_pct": self.CONVERGENCE_PCT,
-                "take_profit_r": safe_divide(take_profit_pct, self.STOP_LOSS_PCT, 0.0),
+                "stop_gap_mult": self.STOP_GAP_MULT,
+                "take_profit_r": tp_r,
             },
         )
 
@@ -284,8 +336,8 @@ class LeadLag(Strategy):
             if meta.get("sub_strategy") != self.name:
                 return None
 
-        bn_mid = event.binance_mid
-        if bn_mid is None or bn_mid <= 0:
+        bn_mid, bn_ts = self._resolve_bn_perp(event)
+        if bn_mid is None:
             return None
 
         now_ms = event.timestamp_ms
@@ -314,7 +366,7 @@ class LeadLag(Strategy):
             )
 
         state = self._get_state(position.symbol)
-        self._update_buffers(event, bn_mid, event.binance_timestamp_ms or now_ms)
+        self._update_buffers(event, bn_mid, bn_ts or now_ms)
         impulse = self._impulse_pct(state.bn_samples, now_ms)
         if impulse is not None:
             if position.side == "long" and impulse <= -self.IMPULSE_REVERSAL_PCT:
@@ -336,7 +388,6 @@ class LeadLag(Strategy):
                     metadata={"impulse_pct": impulse, "gap_pct": gap},
                 )
 
-        # Early exit if gap moved past convergence toward overshoot vs entry
         if position.side == "long" and gap >= 0 and entry_gap < 0:
             return ExitSignal(
                 strategy=self.name,

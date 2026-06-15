@@ -43,6 +43,7 @@ from src.exchanges.funding_normalize import (
 )
 from src.exchanges.hl_predicted_funding import HyperliquidPredictedFundingClient
 from src.exchanges.binance_price_bridge import BinanceMidTick
+from src.exchanges.binance_perp_price_bridge import BinancePerpMidTick
 from src.exchanges.hyperliquid_ws import (
     DataBus,
     HlAssetCtx,
@@ -179,6 +180,7 @@ class TradingEngine:
         # In-memory cache of latest data per symbol
         self._latest_price: Dict[str, HlPriceTick] = {}
         self._latest_binance_mid: Dict[str, BinanceMidTick] = {}
+        self._latest_binance_perp_mid: Dict[str, BinancePerpMidTick] = {}
         self._latest_ctx: Dict[str, HlAssetCtx] = {}
         self._latest_candles: Dict[str, Dict[int, Optional[Candle]]] = {
             sym: {60: None, 300: None, 900: None, 3600: None}
@@ -580,6 +582,10 @@ class TradingEngine:
             await self._bus.subscribe(f"binance_price:{symbol}", cb_bn)
             self._subscribed_callbacks[f"binance_price:{symbol}"] = cb_bn
 
+            cb_bn_perp = self._make_binance_perp_price_callback(symbol)
+            await self._bus.subscribe(f"binance_perp_price:{symbol}", cb_bn_perp)
+            self._subscribed_callbacks[f"binance_perp_price:{symbol}"] = cb_bn_perp
+
         logger.info(
             "TradingEngine running - symbols=%s strategies=%s",
             self._symbols,
@@ -947,6 +953,12 @@ class TradingEngine:
         async def _on_binance_price(tick: BinanceMidTick) -> None:
             self._latest_binance_mid[symbol] = tick
         return _on_binance_price
+
+    def _make_binance_perp_price_callback(self, symbol: str):
+        """Factory: returns an async callback for binance_perp_price:* topics."""
+        async def _on_binance_perp_price(tick: BinancePerpMidTick) -> None:
+            self._latest_binance_perp_mid[symbol] = tick
+        return _on_binance_perp_price
 
     def _make_ctx_callback(self, symbol: str):
         """Factory: returns an async callback for ctx:* topics."""
@@ -1360,6 +1372,7 @@ class TradingEngine:
         )
 
         bn_tick = self._latest_binance_mid.get(symbol)
+        bn_perp_tick = self._latest_binance_perp_mid.get(symbol)
 
         event = MarketEvent(
             symbol=symbol,
@@ -1404,6 +1417,10 @@ class TradingEngine:
             market_data_stale=feed_stale,
             binance_mid=bn_tick.price if bn_tick is not None else None,
             binance_timestamp_ms=bn_tick.timestamp_ms if bn_tick is not None else None,
+            binance_perp_mid=bn_perp_tick.price if bn_perp_tick is not None else None,
+            binance_perp_timestamp_ms=(
+                bn_perp_tick.timestamp_ms if bn_perp_tick is not None else None
+            ),
         )
 
         logger.debug(
