@@ -283,9 +283,9 @@ class TrendFollow(Strategy):
         short_met = sum(1 for _, v in short_conditions if v)
         total_conditions = len(long_conditions)  # up to 9 (may be 7 if OIR/imbalance missing)
 
-        # v3.1.18: min_confluence is now relative to actual conditions
-        # evaluated, so missing data doesn't silently bump the score.
-        # Still require a strong majority of the conditions that fired.
+        # v3.1.18: min_confluence is relative to actual conditions
+        # checked, so missing data does not inflate the score.
+        # Still demand a strong majority of the conditions that fired.
         MIN_CONFLUENCE = 6
         if total_conditions < MIN_CONFLUENCE:
             # Not enough observable conditions to make a call.
