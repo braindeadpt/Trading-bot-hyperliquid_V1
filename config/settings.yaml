@@ -238,8 +238,8 @@ strategy:
   # Strategy: Funding Arbitrage (Task 3.1)
   # ═══════════════════════════════════════════════════════════
   funding_arbitrage:
-    enabled: false                  # manual force-on; leave false to use auto_enable
-    auto_enable: true               # activates when cross-asset funding spread covers costs
+    enabled: false                  # v3.1.18: KILLED — not a true arb (cross-asset carry with basis risk)
+    auto_enable: false               # v3.1.18: KILLED — don't auto-activate
     auto_enable_min_net_spread: 0.0008   # 0.08% spread to turn on (RT fees ~0.07%)
     auto_disable_net_spread: 0.0005      # 0.05% hysteresis — avoid flicker when spread fades
     auto_enable_min_symbols: 2
@@ -284,8 +284,9 @@ strategy:
   # Strategy: OrderBook Imbalance Scalper
   # ═══════════════════════════════════════════════════════════
   orderbook_scalper:
-    enabled: false                  # manual force-on; leave false to use auto_enable
-    auto_enable: true               # activates when book spread + TP edge beat RT fees
+    enabled: false                  # v3.1.18: KILLED — R:R 1.25:1 needs 67% win-rate (impossible)
+    auto_enable: false               # v3.1.18: KILLED — don't auto-activate
+    mode: momentum                  # momentum = follow heavy book side; fade = mean-revert imbalance
     mode: momentum                  # momentum = follow heavy book side; fade = mean-revert imbalance
     spoof_wall_proximity_pct: 0.001 # reject if supporting wall within 0.1% of mid
     spoof_depth_skew_min: 0.65      # bid wall spoof when depth_quality >= this; ask when <= 1-this
@@ -315,18 +316,18 @@ strategy:
     auto_enable: true               # activates automatically when Binance feed is validated
     feed_warmup_events: 1           # Binance liquidation events before auto-enable
     require_real_liquidation_data: true
-    min_notional_usd: 5000000      # $5M in 5min to trigger (was $10M)
-    min_liquidation_count: 3       # avoid single large liquidation (was 5)
-    require_oi_decreasing: false   # OI check optional (was required — not always reliable)
+    min_notional_usd: 50000000     # v3.1.18: $50M in 5min (was $5M — restore original, only real cascades)
+    min_liquidation_count: 5       # v3.1.18: avoid single large liquidation (was 3)
+    require_oi_decreasing: true    # v3.1.18: confirm positions wiped (was false)
     oi_delta_max: 0.0              # OI must be decreasing
-    max_adx: 45.0                  # avoid in strong trends (was 40)
+    max_adx: 40.0                  # v3.1.18: don't fade strong trends (was 45)
     base_size_pct: 0.005            # 0.5% — small size, catching a knife
     max_size_pct: 0.01              # 1% max
     stop_loss_atr_multiplier: 1.0  # tight stop
     max_hold_minutes: 30            # liquidation cascades resolve quickly
-    take_profit_r: 2.0              # 2R take profit (was 1.5R — insufficient after RT fees)
-    min_confidence: 0.45            # QW5: reduced from 0.60
-    signal_throttle_ms: 3600000     # 1h cooldown (was 2h)
+    take_profit_r: 2.0              # 2R take profit
+    min_confidence: 0.60            # v3.1.18: was 0.45 — restore original
+    signal_throttle_ms: 3600000     # 1h cooldown
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: CVD OrderFlow (volume-tape divergence)
