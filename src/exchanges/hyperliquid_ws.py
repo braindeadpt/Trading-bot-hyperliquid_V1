@@ -21,11 +21,12 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, Union
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -138,8 +139,11 @@ class DataBus:
         self._tasks: set = set()  # Keep strong refs to prevent Python 3.14 deallocation crash
         self._rate_limit_hz = max(0, int(rate_limit_hz))
         self._topic_rate_limits: Dict[str, int] = dict(topic_rate_limits or {})
-        # Per-topic sliding window: list of timestamps for current second
-        self._rate_window: Dict[str, List[float]] = {}
+        # v3.1.21: per-topic sliding window uses collections.deque so
+        # trimming the front (popleft) is O(1) instead of O(n).
+        # At 2000 Hz trade rate the old list.pop(0) was ~4M ops/sec
+        # and starved the event loop.
+        self._rate_window: Dict[str, Deque[float]] = {}
         self._dropped_total: Dict[str, int] = {}
         self._last_drop_warn: Dict[str, float] = {}
 
@@ -164,11 +168,11 @@ class DataBus:
         effective_limit = self._limit_for(topic)
         if effective_limit > 0:
             now = time.time()
-            window = self._rate_window.setdefault(topic, [])
+            window = self._rate_window.setdefault(topic, collections.deque())
             cutoff = now - self._RATE_WINDOW_SEC
-            # Trim window to current second
+            # Trim window to current second — O(1) per popleft on deque
             while window and window[0] < cutoff:
-                window.pop(0)
+                window.popleft()
             if len(window) >= effective_limit:
                 self._dropped_total[topic] = self._dropped_total.get(topic, 0) + 1
                 # Warn at most once per minute per topic
@@ -184,7 +188,10 @@ class DataBus:
                 return
             window.append(now)
 
-        listeners = self._listeners.get(topic, [])
+        # v3.1.21: copy the listeners list before iterating so a
+        # callback that subscribes / unsubscribes from inside the call
+        # doesn't mutate the list we're walking.
+        listeners = list(self._listeners.get(topic, []))
         for cb in listeners:
             try:
                 if asyncio.iscoroutinefunction(cb):

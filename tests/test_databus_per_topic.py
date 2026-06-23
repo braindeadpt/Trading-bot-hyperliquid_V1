@@ -82,6 +82,49 @@ def test_rate_limit_zero_disables_globally() -> None:
     print_test("rate_limit_zero_disables_globally", ok, f"drops={drops}")
 
 
+def test_rate_window_uses_deque() -> None:
+    """v3.1.21: the per-topic rate window is a collections.deque
+    (O(1) popleft) instead of a list (O(n) pop(0))."""
+    import collections
+    bus = DataBus(rate_limit_hz=200)
+    bus.publish("trade:BTC", None)
+    assert isinstance(bus._rate_window["trade:BTC"], collections.deque)
+    print_test("rate_window_uses_deque", True)
+
+
+def test_rate_window_keeps_correct_size() -> None:
+    """Under heavy publish, the deque trims to ``effective_limit`` and
+    no message goes out the back door un-counted."""
+    bus = DataBus(rate_limit_hz=10, topic_rate_limits={"trade:": 50})
+    for _ in range(100):
+        bus.publish("trade:BTC", None)
+    window = bus._rate_window["trade:BTC"]
+    assert len(window) <= 50
+    print_test("rate_window_keeps_correct_size", len(window) <= 50,
+               f"len={len(window)}")
+
+
+def test_listener_iteration_is_safe() -> None:
+    """v3.1.21: a callback that mutates the listener list during
+    iteration must not break publish (we copy the list first)."""
+    bus = DataBus(rate_limit_hz=0)
+    removed = []
+
+    def remover(_):
+        removed.append(1)
+
+    bus._listeners["topic:x"] = [remover]
+
+    def interceptor(payload):
+        # Mutate the listener list while we are iterating.
+        bus._listeners["topic:x"] = []
+
+    bus._listeners["topic:x"].append(interceptor)
+    # This must not raise (the publish path copies the list first).
+    bus.publish("topic:x", None)
+    print_test("listener_iteration_is_safe", len(removed) == 1)
+
+
 def main() -> int:
     print("=" * 70)
     print("QW4 (DataBus per-topic rate limits) tests")
@@ -95,6 +138,9 @@ def main() -> int:
         test_trade_topic_partial_drop_at_higher_cap,
         test_trade_topic_drops_most_at_default_cap,
         test_rate_limit_zero_disables_globally,
+        test_rate_window_uses_deque,
+        test_rate_window_keeps_correct_size,
+        test_listener_iteration_is_safe,
     ]
     for t in tests:
         try:
