@@ -412,6 +412,8 @@ class PortfolioState:
                         "entry_time_ms": p.entry_time_ms,
                         "unrealized_pnl": p.unrealized_pnl,
                         "current_price": p.current_price,
+                        "stop_loss_price": p.stop_loss_price,
+                        "take_profit_price": p.take_profit_price,
                         "metadata": p.metadata,
                     }
                     for sym, p in self._positions.items()
@@ -443,6 +445,8 @@ class PortfolioState:
                     size=safe_float(p_data["size"]),
                     entry_time_ms=int(p_data.get("entry_time_ms", 0)),
                     unrealized_pnl=safe_float(p_data.get("unrealized_pnl", 0.0)),
+                    stop_loss_price=safe_float(p_data.get("stop_loss_price"), default=0.0) or None,
+                    take_profit_price=safe_float(p_data.get("take_profit_price"), default=0.0) or None,
                     metadata=dict(p_data.get("metadata", {})),
                 )
                 snap.current_price = safe_float(p_data.get("current_price", snap.entry_price))
