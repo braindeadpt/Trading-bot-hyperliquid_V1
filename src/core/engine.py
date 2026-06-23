@@ -259,6 +259,8 @@ class TradingEngine:
         self._hl_ws_client: Optional[Any] = None
         self._ws_health_check_task: Optional[asyncio.Task] = None
         self._summary_task: Optional[asyncio.Task] = None
+        # v3.1.17 C9: reconciliation loop (testnet/mainnet only)
+        self._reconcile_task: Optional[asyncio.Task] = None
         self._last_ws_healthy_time: float = time.time()
         self._ws_disconnect_start: Optional[float] = None
         self._ws_health_warned: bool = False
@@ -614,6 +616,76 @@ class TradingEngine:
         self._summary_task = asyncio.create_task(self._periodic_summary_loop())
         logger.info("Periodic summary loop started (interval=900s)")
 
+        # 7. Start reconciliation loop (testnet/mainnet only) — v3.1.17 C9
+        if self._mode in ("testnet", "mainnet"):
+            self._reconcile_task = asyncio.create_task(self._reconcile_loop())
+            logger.info("Reconciliation loop started (interval=60s)")
+
+    async def _reconcile_loop(self) -> None:
+        """Reconcile in-memory positions with the exchange (testnet/mainnet only).
+
+        v3.1.17 C9: every 60s, fetch the exchange's open positions via
+        the REST client and diff against our in-memory book. Positions
+        that exist on the exchange but not in our book (e.g. an order
+        that filled after our own order was rolled back) are logged as
+        warnings. Positions we track but the exchange doesn't are
+        cancelled locally so we don't keep managing a phantom.
+
+        Failures are logged and never crash the loop.
+        """
+        # Local import to keep the module import-time cost low.
+        try:
+            from src.exchanges.hyperliquid_rest import HyperliquidREST  # noqa: F401
+        except Exception:  # noqa: BLE001
+            HyperliquidREST = None  # type: ignore
+
+        while self._running:
+            try:
+                await asyncio.sleep(60)
+                if not self._running:
+                    return
+                live_client = getattr(self._executor, "_live_client", None)
+                if live_client is None or not getattr(self._executor, "_live_signing_ready", False):
+                    continue
+                if not hasattr(live_client, "get_positions"):
+                    continue
+                try:
+                    exchange_positions = await live_client.get_positions()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Reconciliation get_positions failed: %s", exc)
+                    continue
+                if not isinstance(exchange_positions, list):
+                    continue
+
+                ex_by_symbol: Dict[str, Dict[str, Any]] = {}
+                for p in exchange_positions:
+                    if isinstance(p, dict):
+                        sym = str(p.get("symbol", "")).upper()
+                        if sym:
+                            ex_by_symbol[sym] = p
+
+                mem = await self._portfolio.positions
+                for sym, pos in mem.items():
+                    if sym not in ex_by_symbol:
+                        logger.warning(
+                            "RECONCILE: local position %s missing on exchange — cancelling",
+                            sym,
+                        )
+                        try:
+                            await self._portfolio.cancel_position(sym)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Reconcile cancel failed for %s: %s", sym, exc)
+                for sym, ex_p in ex_by_symbol.items():
+                    if sym not in mem:
+                        logger.warning(
+                            "RECONCILE: exchange has %s (size=%s) but we do not — review",
+                            sym, ex_p.get("size"),
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Reconcile loop iteration failed: %s", exc)
+
     async def _ws_health_loop(self) -> None:
         """Background task: check WS health every 30s."""
         while self._running:
@@ -904,7 +976,10 @@ class TradingEngine:
             self._shutdown_event.set()
 
         # Cancel background tasks
-        for task_name in ("_funding_poll_task", "_ws_health_check_task", "_summary_task"):
+        for task_name in (
+            "_funding_poll_task", "_ws_health_check_task", "_summary_task",
+            "_reconcile_task",
+        ):
             task = getattr(self, task_name, None)
             if task and not task.done():
                 task.cancel()

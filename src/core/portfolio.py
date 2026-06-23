@@ -387,6 +387,30 @@ class PortfolioState:
             })
             self._update_peak_and_drawdown()
 
+    async def cancel_position(self, symbol: str) -> None:
+        """Rollback a freshly-opened position (e.g. after a failed live order).
+
+        v3.1.17 C9: removes the position from the book and credits the
+        cost back to cash, so the engine is not left holding a phantom
+        position. The corresponding DB trade row is updated to status
+        ``'cancelled'`` by the caller.
+        """
+        async with self._lock:
+            pos = self._positions.pop(symbol, None)
+            if pos is None:
+                return
+            # Refund the cost we debited on add_position.
+            cost = pos.entry_price * pos.size
+            self._cash += safe_float(cost)
+            # Roll back the daily_trades counter so a cancelled entry
+            # doesn't poison the daily limit.
+            if self._daily_trades > 0:
+                self._daily_trades -= 1
+            logger.info(
+                "Portfolio cancel_position %s: refunded cost=%.2f cash=%.2f",
+                symbol, cost, self._cash,
+            )
+
     # ------------------------------------------------------------------
     # Metrics
     # ------------------------------------------------------------------

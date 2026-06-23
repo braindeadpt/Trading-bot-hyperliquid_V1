@@ -369,7 +369,33 @@ class ExecutionEngine:
         trade_id = self._db.save_trade_entry(entry_record)
 
         if self._mode in ("testnet", "mainnet"):
-            await self._submit_live_order(signal, size, fill_price)
+            # v3.1.17 C9: on live order failure, roll back the phantom
+            # position we just wrote to the DB and portfolio so we are
+            # not left holding inventory that the exchange never saw.
+            try:
+                await self._submit_live_order(signal, size, fill_price)
+            except Exception as exc:
+                logger.error(
+                    "Live order failed for %s — rolling back trade_id=%d: %s",
+                    signal.symbol, trade_id, exc,
+                    exc_info=True,
+                )
+                try:
+                    await self._portfolio.cancel_position(signal.symbol)
+                except Exception as inner_exc:  # noqa: BLE001
+                    logger.exception("cancel_position rollback failed: %s", inner_exc)
+                async with self._lock:
+                    self._open_trades.pop(signal.symbol, None)
+                    self._last_entry_ms.pop(signal.symbol, None)
+                try:
+                    self._db.update_trade_status(
+                        trade_id,
+                        status="cancelled",
+                        reason=f"live_order_failed: {str(exc)[:100]}",
+                    )
+                except Exception as inner_exc:  # noqa: BLE001
+                    logger.exception("update_trade_status rollback failed: %s", inner_exc)
+                raise
 
         result = TradeResult(
             trade_id=trade_id,
@@ -491,7 +517,29 @@ class ExecutionEngine:
         self._db.update_trade_exit(exit_record)
 
         if self._mode in ("testnet", "mainnet"):
-            await self._submit_live_close(position, fill_exit)
+            # v3.1.17 C9: if the live close fails, revert the DB status
+            # back to 'open' so reconciliation can re-attempt. Also
+            # re-insert the open_trades entry we popped above.
+            try:
+                await self._submit_live_close(position, fill_exit)
+            except Exception as exc:
+                logger.error(
+                    "Live close failed for %s — rolling back trade_id=%d: %s",
+                    position.symbol, open_trade.trade_id, exc,
+                    exc_info=True,
+                )
+                try:
+                    self._db.update_trade_status(
+                        open_trade.trade_id,
+                        status="open",
+                        reason=f"live_close_failed: {str(exc)[:100]}",
+                    )
+                except Exception as inner_exc:  # noqa: BLE001
+                    logger.exception("update_trade_status rollback failed: %s", inner_exc)
+                # Re-insert the open trade so the in-memory index matches DB.
+                async with self._lock:
+                    self._open_trades[position.symbol] = open_trade
+                raise
 
         result = TradeResult(
             trade_id=open_trade.trade_id,

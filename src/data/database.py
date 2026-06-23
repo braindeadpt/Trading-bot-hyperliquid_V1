@@ -560,6 +560,28 @@ class Database:
             ))
             conn.commit()
 
+    def update_trade_status(
+        self,
+        trade_id: int,
+        status: str,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Update a trade's status (e.g. to ``'cancelled'`` after a failed live order).
+
+        v3.1.17 C9: lets the execution engine mark a DB row as cancelled
+        so reconciliation loops don't re-open a phantom position.
+        """
+        if reason is not None:
+            sql = "UPDATE trades SET status = ?, exit_reason = ? WHERE id = ?"
+            params: tuple = (status, reason, trade_id)
+        else:
+            sql = "UPDATE trades SET status = ? WHERE id = ?"
+            params = (status, trade_id)
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, params)
+            conn.commit()
+
     def get_open_trades(self, strategy: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return all currently open trades as dicts."""
         if strategy:
