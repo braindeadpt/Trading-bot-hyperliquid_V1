@@ -1,14 +1,16 @@
-# Hyperliquid Premium Trading Bot v3.1.20
+# Hyperliquid Premium Trading Bot v3.1.23
 
 Professional automated trading bot for Hyperliquid perpetuals exchange.
 Modular async architecture, real-time WebSocket data, 12 pluggable
 strategies, deterministic risk management, paper / testnet / mainnet
-execution, and a Flask + Socket.IO dashboard.
+execution, and a Flask + Socket.IO dashboard with 12 real-time panels.
 
 Current score: **9.5/10** (Phases A, B, C hardening + QW observability
 + v3.1.14 CVDOrderFlow volume unit fix + v3.1.15 volume observability
-panel + v3.1.20 four new strategies: SpotPerpCarry, RangeGrid,
-TrendPyramid, FundingMomentum; LeadLag BasisTrade mode).
+panel + v3.1.16-v3.1.22 critical bug fixes, 4 new strategies, HMM regime
+detection, Monte Carlo bootstrap, walk-forward optimization, OMS order
+tracking, leverage-aware sizing, L2 slippage, position reconciliation,
+funding payment accounting + v3.1.23 dashboard parity redesign).
 
 ---
 
@@ -64,17 +66,14 @@ start.bat
 ## Strategies
 
 The 12 strategies are governed by `StrategyGovernor` which auto-disables
-any strategy with negative Sharpe over the last 30 days. After v3.1.14
-cleanup, the dead reference to `FundingExtreme` was removed from the
-factory table (`SmartMoneyFlow` is kept because it's the display name
-returned by the `TrendFollow` class — see
-`src/strategies/trend_follow.py:name`). v3.1.20 added 4 new strategies
-and a `mode='basis'` option to LeadLag.
+any strategy with negative Sharpe over the last 30 days. The ensemble
+requires cross-class agreement (trend/revert/carry/micro) to avoid
+false confluence from correlated signal generators.
 
 | Strategy             | Type           | Status (typical) | Notes |
 |----------------------|----------------|------------------|-------|
 | TrendPyramid         | trend          | Active (v3.1.20) | EMA20 pullback entries, Chandelier exit, 4R TP |
-| SmartMoneyFlow       | trend          | Active           | Legacy trend follower (v3.1.18 EMA50 exit) |
+| SmartMoneyFlow       | trend          | Active (legacy)  | Trend follower (v3.1.18 EMA50 exit) |
 | DonchianBreakout     | trend          | Active (v3.1.18) | 15m breakout + vol filter (v3.1.18 dim fix) |
 | VolatilityBreakout   | trend          | Active           | Bollinger-squeeze breakout, regime-weighted |
 | SpotPerpCarry        | carry (v3.1.20)| Active           | Short perp + synthetic long spot, true delta-neutral |
@@ -82,12 +81,14 @@ and a `mode='basis'` option to LeadLag.
 | RangeGrid            | revert (v3.1.20)| Active          | Ping-pong maker limit orders in ADX<18 ranges |
 | LiquidationCatcher   | event-driven   | Active           | $50M+ Binance liquidations + OI confirm |
 | VWAPDeviation        | mean-reversion | Active (low-vol) | Z-score vs VWAP(1h); v3.1.18 thresholds restored |
-| CVDOrderFlow         | order-flow     | Active           | Multi-TF CVD divergence (5m/15m/1h) |
+| CVDOrderFlow         | order-flow     | Active           | Multi-TF CVD divergence (5m/15m/1h); v3.1.16 USD fix |
 | LeadLag              | microstructure | Active          | Perp-vs-perp lag (default) OR BasisTrade mode |
 | FundingArbitrage     | market-neutral | Disabled (v3.1.18)| Killed — cross-asset basis risk |
 | FundingExtreme       | mean-reversion | Disabled         | Sharpe -37, kept off permanently |
 
-Ensemble logic combines signals via weighted consensus (configurable threshold).
+Ensemble logic combines signals via weighted consensus with cross-class
+de-correlation (v3.1.18). High-conviction bypass requires confidence
+>= 0.70 and excludes VWAPDeviation, FundingExtreme, LeadLag.
 
 ---
 
@@ -126,14 +127,17 @@ trading-bot-hyperliquid/
 ## Risk Gates (per entry, in order)
 
 1. Per-symbol lock (serializes same-symbol processing)
-2. Volatility circuit breaker (soft; blocks entries when ATR>3x baseline)
-3. Funding-reset blackout (soft; blocks +/-5min around funding reset)
+2. Cooldown (per-strategy, doubling on consecutive losses)
+3. Kelly sizing (confidence-weighted, half-Kelly, capped 2x)
 4. Correlation monitor (rejects correlated adds)
-5. `RiskManager.can_enter` (hard; daily trades / loss / DD / exposure / leverage)
-6. TCA check (slippage + fill ratio from L2)
-7. Order routing (post-only vs market vs limit)
+5. Volatility circuit breaker (soft; blocks entries when ATR>3x baseline)
+6. Funding-reset blackout (soft; blocks +/-5min around funding reset)
+7. `RiskManager.can_enter` (hard; daily trades / loss / DD / exposure / leverage / max position size)
+8. TCA check (slippage + fill ratio from L2 book)
+9. Order routing (post-only vs market vs limit, maker-first when viable)
 
-Soft gates (1-4) only block new entries. Hard gates (5) own flatten behavior.
+Soft gates (1-6) only block new entries. Hard gates (7) own flatten behavior.
+The same `RiskManager` is shared between backtest and live (v3.1.19).
 
 ---
 
@@ -199,20 +203,45 @@ Secrets live in `.env` (gitignored) or in the encrypted vault at
 ## Testing
 
 The suite is hybrid (unittest + standalone assertion scripts).
-No central pytest runner; each test is invoked directly.
+271+ tests across 22 files. No central pytest runner; each test is invoked directly.
 
 ```bash
-python -m unittest tests.test_basic               # 11/11 unittest smoke
-python tests/test_critical_fixes.py               # v3.1.1 regression
+# Core smoke + regression
+python -m unittest tests.test_basic               # 11 unittest smoke
+python tests/test_critical_fixes.py               # v3.1.1 regression (5 tests)
 python tests/test_cascade_simulation.py           # Phase C stress (7 tests)
-python tests/test_cvd_orderflow.py                # CVDOrderFlow 21/21 (v3.1.14 + volume unit test)
-python tests/test_volume_indicators.py            # v3.1.15 OBV + MFI + VWAP-multi-TF (16 tests)
-python tests/test_qw_observability.py             # v3.1.12 QW1+QW2 (11 tests)
-python tests/test_log_rotation.py                 # v3.1.12 QW3 (9 tests)
-python tests/test_databus_per_topic.py            # v3.1.13 QW4 (7 tests)
-python scripts/lookahead_audit.py --ci            # Phase B future-data
-python audit_all.py                               # Component health
-python -m src.security.audit                      # Static security
+
+# Strategy tests
+python tests/test_cvd_orderflow.py                # CVDOrderFlow (23 tests, v3.1.16 USD fix)
+python tests/test_volume_indicators.py            # OBV + MFI + VWAP-multi-TF (16 tests, v3.1.15)
+python tests/test_spot_perp_carry.py              # SpotPerpCarry (10 tests, v3.1.20)
+python tests/test_range_grid.py                   # RangeGrid (10 tests, v3.1.20)
+python tests/test_trend_pyramid.py                # TrendPyramid (10 tests, v3.1.20)
+python tests/test_funding_momentum.py             # FundingMomentum (11 tests, v3.1.20)
+
+# Risk + execution
+python tests/test_leverage_sizing.py              # Leverage-aware sizing (16 tests, v3.1.22)
+python tests/test_execution_oms.py                # OMS order tracking (19 tests, v3.1.22)
+python tests/test_reconcile.py                    # Position reconciliation (3 tests, v3.1.17)
+python tests/test_dashboard_v3123.py              # Dashboard v3.1.23 features (13 tests)
+
+# Quant models + data
+python tests/test_hmm_regime.py                   # HMM regime detection (17 tests, v3.1.21)
+python tests/test_monte_carlo.py                  # Monte Carlo bootstrap (20 tests, v3.1.21)
+python tests/test_walk_forward.py                 # Walk-forward optimization (19 tests, v3.1.21)
+python tests/test_funding_normalize.py            # Per-symbol funding intervals (23 tests, v3.1.21)
+python tests/test_funding_stale_detection.py      # Stale funding detection (11 tests, v3.1.21)
+
+# Observability + infra
+python tests/test_qw_observability.py             # decision_audit + trade journal (11 tests, v3.1.12)
+python tests/test_log_rotation.py                 # TimedRotatingFileHandler (9 tests, v3.1.12)
+python tests/test_databus_per_topic.py            # DataBus per-topic rate limit (10 tests, v3.1.13)
+python tests/test_mainnet_readiness_5_6.py        # Mainnet safe shutdown + WS health (7 tests, v3.1.22)
+
+# Audits
+python scripts/lookahead_audit.py --ci            # Future-data leakage scanner (CI mode)
+python audit_all.py                               # Component health (14 strategies + ensemble)
+python -m src.security.audit                      # Static security (9 AUDIT rules)
 ```
 
 ---

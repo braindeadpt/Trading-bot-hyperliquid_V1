@@ -5,7 +5,7 @@ logs/
 data/live/*.db
 data/live/*.db-shm
 data/live/*.db-wal
-data/live/archive/         # rotated DB backups
+data/live/archive/
 data/test_health.db
 data/vault.enc
 
@@ -58,3 +58,9 @@ tests/data/
 
 # Ad-hoc local debug scripts (keep scripts/backfill_candles.py etc. tracked)
 scripts/check_candles.py
+scripts/audit_*.py
+scripts/diagnose_*.py
+scripts/market_vs_*.py
+scripts/weekend_*.py
+scripts/query_recent_*.py
+scripts/vb_pnl_*.py

@@ -1,4 +1,4 @@
-# AGENTS.md — Hyperliquid Premium Trading Bot v3.1.15
+# AGENTS.md — Hyperliquid Premium Trading Bot v3.1.23
 
 > This file is intended for AI coding agents. It assumes zero prior knowledge of the project.
 
@@ -6,7 +6,7 @@
 
 ## 1. Project Overview
 
-This is **Hyperliquid Premium Trading Bot v3.1.15** — an async Python trading bot for the Hyperliquid perpetuals exchange. It supports **paper trading** (default), **testnet**, and **mainnet** execution modes.
+This is **Hyperliquid Premium Trading Bot v3.1.23** — an async Python trading bot for the Hyperliquid perpetuals exchange. It supports **paper trading** (default), **testnet**, and **mainnet** execution modes.
 
 The bot is built around a **WebSocket-first event architecture**: real-time market data from Hyperliquid (and optional Binance feeds) flows through an async pub/sub `DataBus`, gets aggregated into multi-timeframe candles, and is consumed by twelve strategy modules (including the OrderBook Imbalance Scalper for tick-level orderbook micro-patterns, the CVD OrderFlow strategy for volume-tape divergence, the SpotPerpCarry delta-neutral funding arb, the RangeGrid maker grid, the TrendPyramid EMA pullback trend follower, and the FundingMomentum funding-flip strategy). A central `TradingEngine` orchestrates signal generation, risk gating, position sizing, and execution. All state is persisted to a local SQLite database, and a Flask + Socket.IO dashboard provides real-time monitoring.
 
@@ -422,4 +422,4 @@ Before submitting any code change:
 
 ---
 
-*Last updated: 2026-06-23 (v3.1.20 — 4 new strategies: `SpotPerpCarry` (true delta-neutral funding carry, short perp + synthetically long spot), `RangeGrid` (Bollinger + S/R confirmed range trader with maker limit orders), `TrendPyramid` (EMA20 pullback entries with Chandelier exit, replaces SmartMoneyFlow as primary trend strategy), `FundingMomentum` (follow funding rate flips with OI divergence). LeadLag also gained a `mode='basis'` option (BasisTrade) for spot-vs-perp basis arb. Total of 12 strategies in the ensemble.)*
+*Last updated: 2026-06-23 (v3.1.23 - dashboard parity redesign: 5 sectioned panels with colored labels, funding accounting in trades UI, governor status panel, regime panel with ADX per symbol, risk gates panel with vol circuit / funding blackout / reconciliation / WS health, strategy class labels + Sharpe 30d in strategies panel. Backend: TradeExit.funding_paid, Database.update_trade_funding, StrategyGovernor.last_metrics, adx_14 in _last_market_events, vol_circuit in engine_monitor. 271+ tests across 22 files. v3.1.16-v3.1.22: 6 critical bug fixes, 5 risk/execution fixes, 7 strategy cleanups, 5 backtest realism fixes, 4 new strategies, 7 quant model/infra add-ons, 6 mainnet readiness fixes.)*
