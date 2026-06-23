@@ -1,21 +1,18 @@
-"""Strategy: LeadLag — short-term directional arb when Binance leads Hyperliquid.
+"""Strategy: LeadLag — short-term directional arb.
 
-Binance price source (basis-corrected)
---------------------------------------
-Uses **Binance USD-M perpetual mark price**, not spot:
+Two operating modes (config ``lead_lag.mode``):
 
-- ``MarketEvent.binance_perp_mid`` / ``binance_perp_timestamp_ms`` injected by
-  the engine from ``BinancePerpMidTick`` on DataBus topic
-  ``binance_perp_price:{symbol}`` (``@markPrice@1s`` via
-  :mod:`src.exchanges.binance_perp_price_bridge`).
+* ``"perp_lead"`` (default) — perp-vs-perp. Binance USD-M perp mark
+  leads Hyperliquid perp. Edge window: HL catches up over ~1–5 s.
+  Uses ``MarketEvent.binance_perp_mid``.
 
-Spot ``binance_mid`` (``@aggTrade`` spot) is ignored for entries/exits because
-HL trades perps — comparing to spot embeds structural spot–perp basis.
+* ``"basis"`` — spot-vs-perp basis. Binance spot price diverges from
+  HL perp beyond the funding-implied fair basis. Uses
+  ``MarketEvent.binance_mid`` (spot). Edge window: basis closes over
+  ~1–5 min as arbitrageurs step in. ``min_excess_basis`` is the
+  required excess over the predicted fair basis.
 
-Assumed latency: Binance futures WS ~50–200 ms; HL ``allMids`` similar.
-Edge window: HL catches up over ~1–5 s after a Binance perp impulse.
-
-Backtest: skips when ``binance_perp_mid`` is absent.
+Both modes use the Binance impulse as the trigger.
 """
 
 from __future__ import annotations
@@ -48,15 +45,21 @@ class _LeadLagState:
 
 
 class LeadLag(Strategy):
-    """Exploit Binance perp → Hyperliquid perp lag on short impulses.
+    """Exploit Binance → Hyperliquid lag.
 
-    Entry: Binance perp impulse exceeds threshold while HL has not caught up
-  (perp gap beyond fees + spread). Stop scales with |gap|; take-profit targets
-    gap closure with minimum R:R ``min_tp_r``.
+    perp_lead mode: Binance perp impulse + HL perp gap.
+    basis mode:    Binance spot vs HL perp basis minus funding-implied
+                   fair basis. Excess basis > min_excess_basis → trade.
     """
+
+    MODE_PERP_LEAD: str = "perp_lead"
+    MODE_BASIS: str = "basis"
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         cfg = config or {}
+        # Operating mode
+        self.MODE = str(cfg.get("mode", self.MODE_PERP_LEAD))
+        # Perp-lead mode thresholds
         self.IMPULSE_WINDOW_MS = int(cfg.get("impulse_window_ms", 10_000))
         self.IMPULSE_MIN_PCT = float(cfg.get("impulse_min_pct", 0.0005))
         self.GAP_MIN_PCT = float(cfg.get("gap_min_pct", 0.0003))
@@ -80,6 +83,14 @@ class LeadLag(Strategy):
         self.MAX_BINANCE_STALE_MS = int(cfg.get("max_binance_stale_ms", 2_000))
         self.IMPULSE_REVERSAL_PCT = float(cfg.get("impulse_reversal_pct", 0.0003))
         self.WARMUP_SAMPLES = int(cfg.get("warmup_samples", 5))
+        # Basis-mode thresholds (BasisTrade fix, v3.1.20)
+        # TP = |excess| * tp_mult  (target basis closure)
+        # SL = |excess| * sl_mult  (basis blows past our entry)
+        # R:R = tp_mult / sl_mult; defaults target 1.5:1.
+        self.MIN_EXCESS_BASIS = float(cfg.get("min_excess_basis", 0.0015))
+        self.BASIS_TP_MULT = float(cfg.get("basis_tp_mult", 0.9))
+        self.BASIS_SL_MULT = float(cfg.get("basis_sl_mult", 0.6))
+        self.SPOT_STALE_MAX_MS = int(cfg.get("spot_stale_max_ms", 2_000))
 
         self._state: Dict[str, _LeadLagState] = {}
 
@@ -97,6 +108,15 @@ class LeadLag(Strategy):
         """Return Binance USD-M perp mark price — never fall back to spot."""
         mid = event.binance_perp_mid
         ts = event.binance_perp_timestamp_ms
+        if mid is None or ts is None or mid <= 0:
+            return None, None
+        return mid, ts
+
+    @staticmethod
+    def _resolve_bn_spot(event: MarketEvent) -> Tuple[Optional[float], Optional[int]]:
+        """Return Binance spot mid (used in basis mode)."""
+        mid = event.binance_mid
+        ts = event.binance_timestamp_ms
         if mid is None or ts is None or mid <= 0:
             return None, None
         return mid, ts
@@ -200,7 +220,116 @@ class LeadLag(Strategy):
         self._prune(state.bn_samples, now_ms)
         return state
 
+    def _basis_signal(
+        self,
+        event: MarketEvent,
+    ) -> Optional[Signal]:
+        """BasisTrade logic: spot-vs-perp basis minus funding-implied fair.
+
+        Entry: |excess_basis| > min_excess_basis. If perp > spot + fair,
+        short the perp (basis will collapse). If perp < spot - fair, long.
+        """
+        bn_spot, bn_spot_ts = self._resolve_bn_spot(event)
+        if bn_spot is None or bn_spot_ts is None:
+            return None
+        now_ms = event.timestamp_ms
+        if now_ms - bn_spot_ts > self.SPOT_STALE_MAX_MS:
+            logger.debug(
+                "LeadLag/basis SKIP %s — stale Binance spot tick (%dms old)",
+                event.symbol, now_ms - bn_spot_ts,
+            )
+            return None
+
+        # Fair basis ≈ predicted funding rate; we treat it as an
+        # absolute fraction of notional. Falls back to current funding.
+        fair_basis = event.predicted_funding
+        if fair_basis is None:
+            fair_basis = event.funding
+        if fair_basis is None:
+            fair_basis = event.predicted_funding_avg
+        if fair_basis is None:
+            fair_basis = event.funding_avg
+        if fair_basis is None:
+            fair_basis = 0.0
+        basis = self._gap_pct(event.price, bn_spot)
+        excess = basis - fair_basis
+
+        if now_ms - self._get_state(event.symbol).last_signal_ms < self.SIGNAL_THROTTLE_MS:
+            return None
+        spread = event.orderbook_spread_pct
+        if spread is None or spread > self.MAX_HL_SPREAD_PCT:
+            return None
+
+        state = self._update_buffers(event, bn_spot, bn_spot_ts)
+        if (
+            len(state.hl_samples) < self.WARMUP_SAMPLES
+            or len(state.bn_samples) < self.WARMUP_SAMPLES
+        ):
+            return None
+
+        # Direction: excess > 0 → perp rich → short; excess < 0 → perp cheap → long
+        if excess > self.MIN_EXCESS_BASIS:
+            side = "short"
+        elif excess < -self.MIN_EXCESS_BASIS:
+            side = "long"
+        else:
+            return None
+
+        if not self._oir_confirms(side, event.orderbook_oir):
+            return None
+
+        abs_excess = abs(excess)
+        if abs_excess < 1e-6:
+            return None
+        take_profit_pct = abs_excess * self.BASIS_TP_MULT
+        stop_loss_pct = abs_excess * self.BASIS_SL_MULT
+        if take_profit_pct / max(stop_loss_pct, 1e-9) < 1.5:
+            return None
+
+        # Confidence: scales with how far the excess is above threshold
+        excess_score = min(
+            (abs_excess - self.MIN_EXCESS_BASIS) / self.MIN_EXCESS_BASIS,
+            1.0,
+        )
+        confidence = self.MIN_CONFIDENCE + 0.20 * excess_score
+        confidence = min(confidence, self.MAX_CONFIDENCE)
+        if confidence < self.MIN_CONFIDENCE:
+            return None
+
+        size_pct = self._size_pct(confidence)
+        state.last_signal_ms = now_ms
+
+        return Signal(
+            strategy=self.name,
+            symbol=event.symbol,
+            side=side,
+            confidence=confidence,
+            size_pct=size_pct,
+            entry_price=event.price,
+            stop_loss_pct=stop_loss_pct,
+            take_profit_pct=take_profit_pct,
+            reason=(
+                f"lead_lag_basis_{side}_excess{excess * 100:.2f}bps"
+            ),
+            metadata={
+                "mode": "basis",
+                "basis_pct": basis,
+                "fair_basis_pct": fair_basis,
+                "excess_basis_pct": excess,
+                "min_excess_basis": self.MIN_EXCESS_BASIS,
+                "entry_bn_spot_mid": bn_spot,
+                "entry_hl_mid": event.price,
+                "stop_basis_mult": self.BASIS_SL_MULT,
+                "tp_basis_mult": self.BASIS_TP_MULT,
+            },
+        )
+
     def on_data(self, event: MarketEvent) -> Optional[Signal]:
+        # Basis mode: spot-vs-perp basis arb.
+        if self.MODE == self.MODE_BASIS:
+            return self._basis_signal(event)
+
+        # Perp-lead mode: original implementation.
         bn_mid, bn_ts = self._resolve_bn_perp(event)
         if bn_mid is None or bn_ts is None:
             return None
@@ -336,12 +465,49 @@ class LeadLag(Strategy):
             if meta.get("sub_strategy") != self.name:
                 return None
 
+        now_ms = event.timestamp_ms
+        hold_ms = now_ms - position.entry_time_ms
+        # Basis mode exits when the basis closes toward 0.
+        if meta.get("mode") == "basis" or self.MODE == self.MODE_BASIS:
+            bn_spot, bn_spot_ts = self._resolve_bn_spot(event)
+            if bn_spot is None:
+                return None
+            fair_basis = event.predicted_funding
+            if fair_basis is None:
+                fair_basis = event.funding
+            if fair_basis is None:
+                fair_basis = event.predicted_funding_avg
+            if fair_basis is None:
+                fair_basis = event.funding_avg
+            if fair_basis is None:
+                fair_basis = 0.0
+            basis = self._gap_pct(event.price, bn_spot)
+            excess = basis - fair_basis
+            if abs(excess) <= 0.0001:
+                return ExitSignal(
+                    strategy=self.name,
+                    symbol=position.symbol,
+                    side="close",
+                    confidence=0.9,
+                    reason=f"basis_closed_excess{excess * 100:.3f}",
+                    metadata={"excess_basis_pct": excess, "hold_ms": hold_ms},
+                )
+            if hold_ms >= 5 * 60_000:  # 5 min cap for basis trades
+                return ExitSignal(
+                    strategy=self.name,
+                    symbol=position.symbol,
+                    side="close",
+                    confidence=0.75,
+                    reason=f"basis_time_stop_{hold_ms // 1000}s",
+                    metadata={"excess_basis_pct": excess, "hold_ms": hold_ms},
+                )
+            return None
+
+        # Perp-lead mode (original behaviour).
         bn_mid, bn_ts = self._resolve_bn_perp(event)
         if bn_mid is None:
             return None
 
-        now_ms = event.timestamp_ms
-        hold_ms = now_ms - position.entry_time_ms
         gap = self._gap_pct(event.price, bn_mid)
         entry_gap = safe_float(meta.get("entry_gap_pct"), gap)
 
