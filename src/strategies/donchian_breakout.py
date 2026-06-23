@@ -21,7 +21,12 @@ from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from src.strategies.base import ExitSignal, MarketEvent, Position, Signal, Strategy
-from src.strategies.indicators import Candle, calculate_adx, calculate_atr
+from src.strategies.indicators import (
+    Candle,
+    calculate_adx,
+    calculate_atr,
+    calculate_volume_ratio,
+)
 from src.utils.helpers import safe_divide
 
 logger = logging.getLogger(__name__)
@@ -44,6 +49,10 @@ class DonchianBreakout(Strategy):
         self.LOOKBACK = int(cfg.get("lookback", 20))
         self.MIN_ADX = float(cfg.get("min_adx", 22.0))
         self.MIN_RANGE_PCT = float(cfg.get("min_range_pct", 0.001))
+        # v3.1.18: require real volume on the breakout (no false breakouts
+        # on thin books). calculate_volume_ratio returns (current, ratio)
+        # so we keep both for diagnostic metadata.
+        self.MIN_VOLUME_RATIO = float(cfg.get("min_volume_ratio", 1.5))
         self.STOP_ATR_MULT = float(cfg.get("stop_atr_mult", 2.0))
         self.TP_R_MULT = float(cfg.get("tp_r_mult", 2.0))
         self.BASE_SIZE_PCT = float(cfg.get("base_size_pct", 0.01))
@@ -122,6 +131,18 @@ class DonchianBreakout(Strategy):
             )
             return None
 
+        # v3.1.18: volume confirmation. A breakout on a thin book is a
+        # false breakout; require current volume >= MIN_VOLUME_RATIO * avg.
+        _, vol_ratio = calculate_volume_ratio(prior, lookback=self.LOOKBACK)
+        if vol_ratio is None or vol_ratio < self.MIN_VOLUME_RATIO:
+            logger.debug(
+                "DonchianBreakout SKIP %s — vol_ratio=%s (need >= %.1f)",
+                event.symbol,
+                f"{vol_ratio:.2f}" if vol_ratio is not None else "N/A",
+                self.MIN_VOLUME_RATIO,
+            )
+            return None
+
         side = "long" if long_break else "short"
 
         # --- ATR stop ---
@@ -133,13 +154,20 @@ class DonchianBreakout(Strategy):
         take_profit_pct = stop_loss_pct * self.TP_R_MULT
 
         # --- Confidence & size ---
-        channel_width = (channel_high - channel_low) / (channel_high + channel_low) * 2
+        # v3.1.18: dimensional bug fix. Previously we normalised the
+        # break distance by the *relative* channel width (channel_width =
+        # (high - low) / (high + low) * 2), which gave a unitless ratio
+        # that was always tiny (e.g. 0.01 for a 1% channel) — multiplied
+        # by 10 it always saturated to break_strength=1.0, so the
+        # break_strength < 0.6 hard gate never bound.
+        # Now measure the break as a *price* distance relative to the
+        # channel boundary itself: 0.1% above channel = strength 1.0.
         if long_break:
-            break_dist = (price - channel_high) / channel_width if channel_width > 0 else 0.03
+            break_dist_pct = (price - channel_high) / channel_high
         else:
-            break_dist = (channel_low - price) / channel_width if channel_width > 0 else 0.03
-
-        break_strength = min(1.0, max(0.0, abs(break_dist) * 10))
+            break_dist_pct = (channel_low - price) / channel_low
+        break_dist_pct = abs(break_dist_pct) * 100.0  # convert to %
+        break_strength = min(1.0, max(0.0, break_dist_pct * 10.0))
 
         # --- Hard gate: skip weak breakouts that will never pass ensemble ---
         if break_strength < 0.6:
@@ -161,14 +189,16 @@ class DonchianBreakout(Strategy):
         state.last_signal_ms = event.timestamp_ms
         logger.info(
             "DonchianBreakout %s %s ch=%.2f/cl=%.2f atr=%.4f adx=%.1f "
-            "break=%.3f conf=%.2f",
+            "vol_ratio=%.2f break_pct=%.3f strength=%.2f conf=%.2f",
             event.symbol,
             side,
             channel_high,
             channel_low,
             atr,
             adx,
-            break_dist,
+            vol_ratio,
+            break_dist_pct,
+            break_strength,
             confidence,
         )
 
@@ -187,7 +217,8 @@ class DonchianBreakout(Strategy):
                 "channel_low": channel_low,
                 "atr": atr,
                 "adx": adx,
-                "break_dist_pct": break_dist * 100,
+                "vol_ratio": vol_ratio,
+                "break_dist_pct": break_dist_pct,
                 "break_strength": break_strength,
                 "lookback": self.LOOKBACK,
             },
