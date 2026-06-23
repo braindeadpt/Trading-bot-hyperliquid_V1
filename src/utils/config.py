@@ -6,6 +6,7 @@ and safe type coercion (no eval / exec).
 from __future__ import annotations
 
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -235,8 +236,10 @@ def load_config(
         user_data = {}
 
     merged = _deep_merge(dict(DEFAULT_CONFIG), user_data)
-    _apply_env_overrides(merged, prefix=env_prefix)
+    # v3.1.17 C13: mode_overrides runs first, env_overrides second so
+    # explicit env vars win over the safer mode defaults.
     _apply_mode_overrides(merged)
+    _apply_env_overrides(merged, prefix=env_prefix)
     _validate_required(merged)
     _coerce_types(merged)
 
@@ -287,45 +290,87 @@ def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]
 
 
 def _apply_env_overrides(config: Dict[str, Any], prefix: str = "BOT_") -> None:
-    """Map env vars like BOT_RISK_MAX_POSITIONS=7 into the nested dict."""
+    """Map env vars like ``BOT_RISK_MAX_POSITIONS=7`` into the nested dict.
+
+    v3.1.17 C13: previous implementation split the env-var name on ``_``
+    and walked the config one segment at a time. That broke for keys
+    like ``max_positions`` (one YAML key, two underscore-separated
+    segments). The fix uses a *longest-prefix-match* walk: starting
+    from the longest possible top-level key, try to find a matching
+    dict node in the config; if found, set the remaining path inside
+    it. Otherwise fall back to a direct top-level key.
+    """
     for key, raw in os.environ.items():
         if not key.startswith(prefix):
             continue
-        # Strip prefix, lower, split on underscores to form path
         path_key = key[len(prefix):].lower()
         parts = path_key.split("_")
-
-        # Walk the nested dict; if the path doesn't exist we silently skip
-        # (prevents crashes from unrelated env vars).
-        node = config
-        for part in parts[:-1]:
-            if part not in node or not isinstance(node[part], dict):
+        matched = False
+        # Try the longest top-level match first, then progressively
+        # shorter. This handles e.g. "risk_max_positions" → ["risk",
+        # "max_positions"] where "max_positions" is a single YAML key.
+        for i in range(len(parts), 0, -1):
+            candidate = "_".join(parts[:i])
+            node = config.get(candidate)
+            if isinstance(node, dict):
+                remainder = parts[i:]
+                if not remainder:
+                    config[candidate] = _coerce_scalar(raw)
+                    matched = True
+                    break
+                sub = node
+                # Walk any further dict levels (e.g. "max_positions_sub").
+                walked = True
+                for j in range(len(remainder) - 1):
+                    nxt = "_".join(remainder[: j + 1])
+                    if nxt in sub and isinstance(sub[nxt], dict):
+                        sub = sub[nxt]
+                        remainder = remainder[j + 1 :]
+                        break
+                else:
+                    # No further sub-dict to descend — set the remaining
+                    # path as a single leaf key joined by underscores.
+                    pass
+                leaf = "_".join(remainder) if remainder else "_".join(parts[i:])
+                sub[leaf] = _coerce_scalar(raw)
+                matched = True
                 break
-            node = node[part]
-        else:
-            # Coerce scalar values to int/float/bool/str
-            val = _coerce_scalar(raw)
-            leaf = parts[-1]
-            node[leaf] = val
+        if not matched:
+            # Fallback: try the entire path as a single top-level key.
+            if path_key in config:
+                config[path_key] = _coerce_scalar(raw)
 
 
 def _coerce_scalar(raw: str) -> Union[str, int, float, bool, None]:
-    """Safely coerce a string to the most appropriate primitive type."""
+    """Safely coerce a string to the most appropriate primitive type.
+
+    v3.1.17 C13: previously every ``"0"`` or ``"1"`` was mapped to a
+    bool, which is wrong for numeric keys (``max_positions=0`` should
+    stay an ``int``). The function now defaults to int/float when
+    possible, and only falls back to bool when no numeric conversion
+    succeeds AND the string is a recognized boolean literal.
+    """
     lower = raw.strip().lower()
-    if lower in ("true", "yes", "1", "on"):
+    # Pure digits / signed digits → int (preserves "0", "1", "-3").
+    if lower.lstrip("-+").isdigit():
+        try:
+            return int(lower)
+        except ValueError:
+            pass
+    # Floats (try before bool to avoid "1.5" → True).
+    try:
+        f = float(raw)
+        if math.isfinite(f):
+            return f
+    except (ValueError, TypeError):
+        pass
+    # Recognized boolean literals.
+    if lower in ("true", "yes", "on"):
         return True
-    if lower in ("false", "no", "0", "off"):
+    if lower in ("false", "no", "off"):
         return False
     if lower in ("null", "none", "~"):
         return None
-    try:
-        return int(raw)
-    except ValueError:
-        pass
-    try:
-        return float(raw)
-    except ValueError:
-        pass
     return raw
 
 
