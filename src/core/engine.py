@@ -665,16 +665,23 @@ class TradingEngine:
                             ex_by_symbol[sym] = p
 
                 mem = await self._portfolio.positions
+                # v3.1.21: local ghost (we track, exchange doesn't) is the
+                # dangerous case — log at ERROR and auto-cancel so we
+                # don't keep managing a phantom position.
                 for sym, pos in mem.items():
                     if sym not in ex_by_symbol:
-                        logger.warning(
-                            "RECONCILE: local position %s missing on exchange — cancelling",
+                        logger.error(
+                            "RECONCILE: local position %s missing on exchange — "
+                            "auto-cancelling phantom",
                             sym,
                         )
                         try:
                             await self._portfolio.cancel_position(sym)
                         except Exception as exc:  # noqa: BLE001
                             logger.warning("Reconcile cancel failed for %s: %s", sym, exc)
+                # v3.1.21: untracked exchange position is a warning —
+                # the order may have filled after a rollback. Operator
+                # must reconcile manually via the exchange UI.
                 for sym, ex_p in ex_by_symbol.items():
                     if sym not in mem:
                         logger.warning(
