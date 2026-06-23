@@ -289,34 +289,18 @@ class VWAPDeviation(Strategy):
         if vwap is None or zscore is None:
             return None
 
-        # Exit when price crosses VWAP (Z changes sign from entry)
-        # If we entered SHORT (Z > 2.5), exit when Z < 0 (price below VWAP)
-        # If we entered LONG (Z < -2.5), exit when Z > 0 (price above VWAP)
-        if position.side == "short" and zscore < 0:
-            return ExitSignal(
-                strategy=self.name,
-                symbol=position.symbol,
-                side=position.side,
-                confidence=0.75,
-                reason=f"vwap_cross_below_z{zscore:.1f}",
-            )
-        if position.side == "long" and zscore > 0:
-            return ExitSignal(
-                strategy=self.name,
-                symbol=position.symbol,
-                side=position.side,
-                confidence=0.75,
-                reason=f"vwap_cross_above_z{zscore:.1f}",
-            )
-
-        # Exit when deviation normalizes (|Z| < 1.0)
-        if abs(zscore) < 1.0:
+        # v3.1.18: exit when deviation normalizes close to VWAP.
+        # Previously exited at |Z| < 1.0 which fired before reaching the 2R
+        # TP when the entry was at Z=1.2 (only 0.2σ to traverse). Now wait
+        # for |Z| < 0.3 (close to full VWAP reversion) so the 2R TP has
+        # room to play out.
+        if abs(zscore) < 0.3:
             return ExitSignal(
                 strategy=self.name,
                 symbol=position.symbol,
                 side=position.side,
                 confidence=0.7,
-                reason=f"deviation_normalized_z{zscore:.1f}",
+                reason=f"vwap_reverted_z{zscore:.1f}",
             )
 
         return None

@@ -117,8 +117,8 @@ strategy:
     require_oi_confirm: false      # optional OI delta direction filter
     base_size_pct: 0.01
     max_size_pct: 0.025
-    stop_loss_atr_multiplier: 1.5
-    take_profit_atr_multiplier: 3.0
+    stop_loss_atr_multiplier: 2.0      # wider stop — fewer whipsaw exits post-squeeze (was 1.5)
+    take_profit_atr_multiplier: 4.0    # 2R vs stop (was 3.0 / 1.5R)
     max_hold_hours: 6
     min_confidence: 0.45            # QW5: reduced from 0.60
     signal_throttle_ms: 1800000    # 30 min between signals per symbol
@@ -126,7 +126,7 @@ strategy:
     trend_ema_fast: 20
     trend_ema_slow: 50
     failed_breakout_min_hold_ms: 2700000   # 45 min before failed-breakout exit
-    failed_breakout_buffer_pct: 0.001      # must cross BB mid by 0.1% (reduce noise exits)
+    failed_breakout_buffer_pct: 0.0015     # 0.15% beyond BB mid (was 0.1% — less noise)
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: Donchian Breakout (momentum breakout)
@@ -264,20 +264,21 @@ strategy:
   # ═══════════════════════════════════════════════════════════
   vwap_deviation:
     enabled: true
-    z_threshold: 1.2                # |Z-score| > 1.2σ from VWAP (was 1.8 — more sensitive)
-    volume_surge: 1.2               # volume > 120% of 24h average (was 150%)
-    max_adx: 40.0                   # only trade when ADX < 40 (was 35)
-    require_oir_confirm: false      # OIR confirmation optional (was required)
-    oir_threshold: 0.3              # |OIR| > 0.3 (was 0.4)
+    z_threshold: 2.5                # |Z-score| > 2.5σ from VWAP (v3.1.18: was 1.2 — restore original)
+    min_adx: 15.0                  # v3.1.18: don't trade in dead tape
+    volume_surge: 1.5               # volume > 150% of 24h average (v3.1.18: was 1.2 — restore original)
+    max_adx: 25.0                   # only trade when ADX < 25 (v3.1.18: was 40 — restore original)
+    require_oir_confirm: true       # OIR confirmation required (v3.1.18: was false)
+    oir_threshold: 0.4              # |OIR| > 0.4
     max_funding_opposite: 0.005     # avoid if funding extreme in signal direction
     base_size_pct: 0.01             # 1% base size
     max_size_pct: 0.03             # 3% max size
     stop_loss_atr_multiplier: 2.0   # ATR-based stop
-    take_profit_r_multiple: 2.0     # 2R TP (was hardcoded 1.5R)
+    take_profit_r_multiple: 2.0     # 2R TP
     max_hold_hours: 4               # mean reversion is quick or wrong
-    min_confidence: 0.40            # QW5: reduced from 0.55
-    confidence_extreme: 0.65        # QW5: reduced from 0.75
-    signal_throttle_ms: 180000      # 3 min between signals (was 5 min)
+    min_confidence: 0.65            # v3.1.18: was 0.40 — restore original
+    confidence_extreme: 0.85        # v3.1.18: was 0.65 — restore original
+    signal_throttle_ms: 300000      # 5 min between signals (v3.1.18: was 3 min)
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: OrderBook Imbalance Scalper
@@ -395,14 +396,16 @@ strategy:
     # Confluence gate: require >=2 agreeing strategies OR single high-conviction bypass.
     # threshold 0.25 = combined weighted score must clear bar for multi-strategy entries.
     # min_agreeing 2 = one sub-strategy alone cannot enter unless high-conviction bypass.
-    # High-conviction bypass at 0.80 — excluded strategies never bypass alone.
+    # High-conviction bypass at 0.70 — a single strong strategy (e.g. CVDOrderFlow
+    # up to 0.75) can enter alone; excluded strategies below never bypass.
     threshold: 0.25
     min_agreeing: 2
     # High-conviction bypass: single strategy can enter alone above this confidence.
-    high_conviction_threshold: 0.80
+    high_conviction_threshold: 0.70
     high_conviction_enabled: true
     high_conviction_exclude:
-      - VolatilityBreakout
+      # VolatilityBreakout removed: its squeeze breakouts reach 0.9+ conviction
+      # with volume confirmation — allowed to enter alone via the 0.70 bypass.
       - VWAPDeviation
       - FundingExtreme
       - LeadLag
@@ -426,8 +429,12 @@ execution:
   entry_debounce_ms: 5000
   trailing_stop:
     enabled: true
-    activation_pct: 0.005           # start trailing after +0.5% unrealised
-    trail_pct: 0.003                # stop trails 0.3% behind peak/trough
+    activation_pct: 0.01            # trail only after +1% unrealised (was 0.5%)
+    trail_pct: 0.005                # 0.5% behind peak/trough (was 0.3%)
+    # Strategies with explicit TP/exit logic — skip engine trailing (avoids early winner cuts)
+    exclude_strategies:
+      - VolatilityBreakout
+      - DonchianBreakout
   maker_orders:
     enabled: true
     maker_fee_pct: 0.01             # 0.01% per side (Hyperliquid maker tier)
