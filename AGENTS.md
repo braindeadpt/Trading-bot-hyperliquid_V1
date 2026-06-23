@@ -8,7 +8,7 @@
 
 This is **Hyperliquid Premium Trading Bot v3.1.15** — an async Python trading bot for the Hyperliquid perpetuals exchange. It supports **paper trading** (default), **testnet**, and **mainnet** execution modes.
 
-The bot is built around a **WebSocket-first event architecture**: real-time market data from Hyperliquid (and optional Binance feeds) flows through an async pub/sub `DataBus`, gets aggregated into multi-timeframe candles, and is consumed by eight strategy modules (including the OrderBook Imbalance Scalper for tick-level orderbook micro-patterns and the CVD OrderFlow strategy for volume-tape divergence). A central `TradingEngine` orchestrates signal generation, risk gating, position sizing, and execution. All state is persisted to a local SQLite database, and a Flask + Socket.IO dashboard provides real-time monitoring.
+The bot is built around a **WebSocket-first event architecture**: real-time market data from Hyperliquid (and optional Binance feeds) flows through an async pub/sub `DataBus`, gets aggregated into multi-timeframe candles, and is consumed by twelve strategy modules (including the OrderBook Imbalance Scalper for tick-level orderbook micro-patterns, the CVD OrderFlow strategy for volume-tape divergence, the SpotPerpCarry delta-neutral funding arb, the RangeGrid maker grid, the TrendPyramid EMA pullback trend follower, and the FundingMomentum funding-flip strategy). A central `TradingEngine` orchestrates signal generation, risk gating, position sizing, and execution. All state is persisted to a local SQLite database, and a Flask + Socket.IO dashboard provides real-time monitoring.
 
 **Key characteristics:**
 - Fully async (`asyncio`) with auto-reconnecting WebSocket clients.
@@ -142,7 +142,7 @@ python run_with_recovery.py --mode paper --max-restarts 3 --cooldown 30
 - `timeframes`: `["1m", "5m", "15m", "1h"]`
 - `exchange`: Hyperliquid and Binance WS/REST URLs
 - `risk`: capital limits, position sizing, leverage, slippage, fees, drawdown circuit breaker
-- `strategy`: parameters for all 5 strategies + Kelly Criterion + cooldown governance
+- `strategy`: parameters for all 12 strategies + Kelly Criterion + cooldown governance
 - `backtest`: initial capital, commission, slippage
 - `database`: SQLite path and prune retention
 - `dashboard`: Flask host, port, push interval
@@ -422,4 +422,4 @@ Before submitting any code change:
 
 ---
 
-*Last updated: 2026-06-07 (v3.1.15 — volume observability panel: `calculate_obv`, `calculate_obv_slope`, `calculate_mfi`, `calculate_vwap_multi_tf` in `src/strategies/indicators.py`; engine tracks 5m candle history and pushes `obv_slope_5m`, `mfi_5m`, `vwap_1m_rolling`, `vwap_5m_rolling`, `vwap_15m_rolling`, `vwap_1h_rolling` to dashboard; new "Volume Indicators" panel in `index.html`. Pure observability — zero impact on strategy logic.)*
+*Last updated: 2026-06-23 (v3.1.20 — 4 new strategies: `SpotPerpCarry` (true delta-neutral funding carry, short perp + synthetically long spot), `RangeGrid` (Bollinger + S/R confirmed range trader with maker limit orders), `TrendPyramid` (EMA20 pullback entries with Chandelier exit, replaces SmartMoneyFlow as primary trend strategy), `FundingMomentum` (follow funding rate flips with OI divergence). LeadLag also gained a `mode='basis'` option (BasisTrade) for spot-vs-perp basis arb. Total of 12 strategies in the ensemble.)*

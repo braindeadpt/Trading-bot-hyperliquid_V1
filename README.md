@@ -1,13 +1,14 @@
-# Hyperliquid Premium Trading Bot v3.1.15
+# Hyperliquid Premium Trading Bot v3.1.20
 
 Professional automated trading bot for Hyperliquid perpetuals exchange.
-Modular async architecture, real-time WebSocket data, 8 pluggable strategies,
-deterministic risk management, paper / testnet / mainnet execution, and a
-Flask + Socket.IO dashboard.
+Modular async architecture, real-time WebSocket data, 12 pluggable
+strategies, deterministic risk management, paper / testnet / mainnet
+execution, and a Flask + Socket.IO dashboard.
 
-Current score: **9.5/10** (Phases A, B, C hardening + QW observability + v3.1.14
-CVDOrderFlow volume unit fix + v3.1.15 volume observability panel:
-OBV slope, MFI, rolling VWAP multi-TF).
+Current score: **9.5/10** (Phases A, B, C hardening + QW observability
++ v3.1.14 CVDOrderFlow volume unit fix + v3.1.15 volume observability
+panel + v3.1.20 four new strategies: SpotPerpCarry, RangeGrid,
+TrendPyramid, FundingMomentum; LeadLag BasisTrade mode).
 
 ---
 
@@ -46,7 +47,7 @@ start.bat
 | HL WS feeds (mids, OI, trades, L2)  | [OK]  | 4 channels |
 | Binance WS (trades, liquidations)   | [OK]  | forceOrder + aggTrade |
 | Cross-venue funding (4 venues)      | [OK]  | HL predicted + Bin/Bybit/OKX REST + Coinalyze (optional) |
-| 7 trading strategies                | [OK]  | 5 active in current regime, 2 disabled by governor |
+| 12 trading strategies               | [OK]  | 10 active in current regime, 2 disabled by governor |
 | Strategy governor (auto-disable)    | [OK]  | Negative Sharpe over 30d => off |
 | Drawdown circuit breaker (10%)      | [OK]  | Hard gate, auto-reset at 00:00 UTC |
 | Intraday volatility circuit         | [OK]  | Soft gate, blocks entries when ATR>3x baseline |
@@ -62,22 +63,28 @@ start.bat
 
 ## Strategies
 
-The 7 active strategies are governed by `StrategyGovernor` which auto-disables
-any strategy with negative Sharpe over the last 30 days. After v3.1.14 cleanup,
-the dead reference to `FundingExtreme` was removed from the factory table
-(`SmartMoneyFlow` is kept because it's the display name returned by the
-`TrendFollow` class — see `src/strategies/trend_follow.py:name`).
+The 12 strategies are governed by `StrategyGovernor` which auto-disables
+any strategy with negative Sharpe over the last 30 days. After v3.1.14
+cleanup, the dead reference to `FundingExtreme` was removed from the
+factory table (`SmartMoneyFlow` is kept because it's the display name
+returned by the `TrendFollow` class — see
+`src/strategies/trend_follow.py:name`). v3.1.20 added 4 new strategies
+and a `mode='basis'` option to LeadLag.
 
 | Strategy             | Type           | Status (typical) | Notes |
 |----------------------|----------------|------------------|-------|
-| FundingArbitrage     | market-neutral | Active           | Best performer; uses HL predicted + cross-venue CEX |
-| LiquidationCatcher   | event-driven   | Active           | Fades $10M+ Binance liquidations |
-| VWAPDeviation        | mean-reversion | Active (low-vol) | Z-score vs VWAP(1h), ADX filter |
-| VolatilityBreakout   | trend          | Active           | ATR-scaled breakout, regime-weighted |
-| OrderBookScalper     | microstructure | Active           | Fades OIR micro-imbalances, tight TP/SL |
+| TrendPyramid         | trend          | Active (v3.1.20) | EMA20 pullback entries, Chandelier exit, 4R TP |
+| SmartMoneyFlow       | trend          | Active           | Legacy trend follower (v3.1.18 EMA50 exit) |
+| DonchianBreakout     | trend          | Active (v3.1.18) | 15m breakout + vol filter (v3.1.18 dim fix) |
+| VolatilityBreakout   | trend          | Active           | Bollinger-squeeze breakout, regime-weighted |
+| SpotPerpCarry        | carry (v3.1.20)| Active           | Short perp + synthetic long spot, true delta-neutral |
+| FundingMomentum      | carry (v3.1.20)| Active           | Follow funding flips with OI divergence |
+| RangeGrid            | revert (v3.1.20)| Active          | Ping-pong maker limit orders in ADX<18 ranges |
+| LiquidationCatcher   | event-driven   | Active           | $50M+ Binance liquidations + OI confirm |
+| VWAPDeviation        | mean-reversion | Active (low-vol) | Z-score vs VWAP(1h); v3.1.18 thresholds restored |
 | CVDOrderFlow         | order-flow     | Active           | Multi-TF CVD divergence (5m/15m/1h) |
-| SmartMoneyFlow       | trend          | Disabled         | Sharpe negative in current regime |
-| DonchianBreakout     | trend          | Disabled         | Sharpe negative (small sample) |
+| LeadLag              | microstructure | Active          | Perp-vs-perp lag (default) OR BasisTrade mode |
+| FundingArbitrage     | market-neutral | Disabled (v3.1.18)| Killed — cross-asset basis risk |
 | FundingExtreme       | mean-reversion | Disabled         | Sharpe -37, kept off permanently |
 
 Ensemble logic combines signals via weighted consensus (configurable threshold).

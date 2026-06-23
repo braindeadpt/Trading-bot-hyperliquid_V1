@@ -98,6 +98,12 @@ strats = [
     ("DonchianBreakout", "src.strategies.donchian_breakout", "DonchianBreakout"),
     ("OrderBookScalper", "src.strategies.orderbook_scalper", "OrderBookScalper"),
     ("CVDOrderFlow", "src.strategies.cvd_orderflow", "CVDOrderFlow"),
+    ("LeadLag", "src.strategies.lead_lag", "LeadLag"),
+    # v3.1.20
+    ("SpotPerpCarry", "src.strategies.spot_perp_carry", "SpotPerpCarry"),
+    ("RangeGrid", "src.strategies.range_grid", "RangeGrid"),
+    ("TrendPyramid", "src.strategies.trend_pyramid", "TrendPyramid"),
+    ("FundingMomentum", "src.strategies.funding_momentum", "FundingMomentum"),
 ]
 for name, mod, cls in strats:
     try:

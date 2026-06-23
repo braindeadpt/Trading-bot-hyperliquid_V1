@@ -10,11 +10,15 @@ from src.strategies.ensemble import StrategyEnsemble, StrategyWeight
 from src.strategies.cvd_orderflow import CVDOrderFlow
 from src.strategies.donchian_breakout import DonchianBreakout
 from src.strategies.funding_arbitrage import FundingArbitrage
+from src.strategies.funding_momentum import FundingMomentum
 from src.strategies.lead_lag import LeadLag
 from src.strategies.liquidation_catcher import LiquidationCatcher
 from src.strategies.mean_reversion import MeanReversion
 from src.strategies.orderbook_scalper import OrderBookScalper
+from src.strategies.range_grid import RangeGrid
+from src.strategies.spot_perp_carry import SpotPerpCarry
 from src.strategies.trend_follow import TrendFollow
+from src.strategies.trend_pyramid import TrendPyramid
 from src.strategies.volatility_breakout import VolatilityBreakout
 from src.strategies.vwap_deviation import VWAPDeviation
 
@@ -31,6 +35,11 @@ _STRATEGY_REGISTRY = (
     ("strategy.orderbook_scalper", OrderBookScalper),
     ("strategy.cvd_orderflow", CVDOrderFlow),
     ("strategy.lead_lag", LeadLag),
+    # v3.1.20: 4 new strategies
+    ("strategy.spot_perp_carry", SpotPerpCarry),
+    ("strategy.range_grid", RangeGrid),
+    ("strategy.trend_pyramid", TrendPyramid),
+    ("strategy.funding_momentum", FundingMomentum),
 )
 
 
@@ -44,17 +53,24 @@ def default_ensemble_weights() -> List[StrategyWeight]:
     require updates across the regime-weights dict, settings.yaml, ~30
     test assertions, and a docs file. Keeping the legacy alias is the
     lower-risk choice for now.
+
+    v3.1.20: added 4 new strategies with explicit weights — TrendPyramid
+    replaces SmartMoneyFlow as the primary trend strategy; SpotPerpCarry
+    and RangeGrid are the new low-edge / mean-reversion entries.
     """
     return [
-        StrategyWeight("SmartMoneyFlow", 0.18, min_confidence=0.40),
-        StrategyWeight("VolatilityBreakout", 0.15, min_confidence=0.50),
-        StrategyWeight("DonchianBreakout", 0.10, min_confidence=0.50),
-        StrategyWeight("VWAPDeviation", 0.12, min_confidence=0.40),
-        StrategyWeight("FundingArbitrage", 0.08, min_confidence=0.35),
-        StrategyWeight("LiquidationCatcher", 0.13, min_confidence=0.40),
-        StrategyWeight("OrderBookScalper", 0.10, min_confidence=0.50),
-        StrategyWeight("CVDOrderFlow", 0.10, min_confidence=0.55),
-        StrategyWeight("LeadLag", 0.10, min_confidence=0.45),
+        StrategyWeight("SmartMoneyFlow", 0.12, min_confidence=0.40),
+        StrategyWeight("TrendPyramid", 0.20, min_confidence=0.50),
+        StrategyWeight("VolatilityBreakout", 0.12, min_confidence=0.50),
+        StrategyWeight("DonchianBreakout", 0.08, min_confidence=0.50),
+        StrategyWeight("VWAPDeviation", 0.08, min_confidence=0.65),
+        StrategyWeight("RangeGrid", 0.10, min_confidence=0.50),
+        StrategyWeight("FundingArbitrage", 0.05, min_confidence=0.35),
+        StrategyWeight("SpotPerpCarry", 0.12, min_confidence=0.60),
+        StrategyWeight("FundingMomentum", 0.10, min_confidence=0.50),
+        StrategyWeight("LiquidationCatcher", 0.08, min_confidence=0.60),
+        StrategyWeight("CVDOrderFlow", 0.08, min_confidence=0.55),
+        StrategyWeight("LeadLag", 0.07, min_confidence=0.45),
     ]
 
 

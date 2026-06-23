@@ -35,13 +35,17 @@ class StrategyWeight:
 # VolatilityBreakout all fire on a single breakout candle).
 STRATEGY_CLASS: Dict[str, str] = {
     "SmartMoneyFlow":     "trend",
+    "TrendPyramid":       "trend",
     "VolatilityBreakout": "trend",
     "DonchianBreakout":   "trend",
     "VWAPDeviation":      "revert",
+    "RangeGrid":          "revert",
     "CVDOrderFlow":       "revert",
     "LiquidationCatcher": "revert",
     "FundingArbitrage":   "carry",
-    "LeadLag":            "carry",
+    "SpotPerpCarry":      "carry",
+    "FundingMomentum":    "carry",
+    "LeadLag":            "micro",
     "OrderBookScalper":   "micro",
 }
 
