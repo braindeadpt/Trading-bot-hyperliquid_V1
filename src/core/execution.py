@@ -356,6 +356,7 @@ class ExecutionEngine:
             entry_volume_1m=entry_volume_1m,
             entry_market_snapshot=snapshot_json,
             signal_metadata=signal_meta_json,
+            entry_fee=entry_fee,
         )
         trade_id = self._db.save_trade_entry(entry_record)
 

@@ -55,6 +55,8 @@ class TradeEntry:
     entry_volume_1m: Optional[float] = None
     entry_market_snapshot: Optional[str] = None
     signal_metadata: Optional[str] = None
+    # v3.1.16 C4: persisted so PnL is correctly deducted on close-after-restart
+    entry_fee: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -226,7 +228,8 @@ class Database:
                 pnl_pct     REAL,
                 strategy    TEXT    NOT NULL,
                 exit_reason TEXT,
-                status      TEXT    NOT NULL DEFAULT 'open'
+                status      TEXT    NOT NULL DEFAULT 'open',
+                entry_fee   REAL    DEFAULT 0.0
             );
         """)
 
@@ -355,6 +358,7 @@ class Database:
             ("entry_volume_1m",         "REAL"),
             ("entry_market_snapshot",   "TEXT"),
             ("signal_metadata",         "TEXT"),
+            ("entry_fee",               "REAL DEFAULT 0.0"),
         ]
         for col_name, col_type in new_columns:
             if col_name not in cols:
@@ -504,6 +508,8 @@ class Database:
 
         QW2: persists QW2 journal fields (entry_adx, entry_oir, etc.
         + entry_market_snapshot, signal_metadata) when provided.
+        v3.1.16 C4: also persists entry_fee so close-after-restart can
+        correctly deduct the entry commission from realized PnL.
         """
         sql = """
             INSERT INTO trades (
@@ -511,9 +517,9 @@ class Database:
                 strategy, sub_strategy, status,
                 entry_adx, entry_oir, entry_funding, entry_predicted_funding,
                 entry_bid_ask_imbalance, entry_volume_1m,
-                entry_market_snapshot, signal_metadata
+                entry_market_snapshot, signal_metadata, entry_fee
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         with self._write_lock:
             conn = self._conn()
@@ -524,6 +530,7 @@ class Database:
                 entry.entry_predicted_funding, entry.entry_bid_ask_imbalance,
                 entry.entry_volume_1m,
                 entry.entry_market_snapshot, entry.signal_metadata,
+                entry.entry_fee,
             ))
             trade_id = cur.lastrowid
             conn.commit()
