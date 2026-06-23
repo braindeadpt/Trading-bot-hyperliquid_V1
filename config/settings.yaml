@@ -515,6 +515,15 @@ execution:
   tca_enabled: true
   min_edge_buffer_pct: 0.05         # 0.05% buffer above round-trip costs
   entry_debounce_ms: 5000
+  # v3.1.22: flatten all positions on graceful stop? True is safe
+  # for paper/testnet (no real money). On mainnet a sudden close
+  # can be triggered by a bot restart while live positions are
+  # still valid; flattening at stale prices can crystallise a
+  # loss that the strategy was going to recover. Override to
+  # ``false`` for mainnet (see mode_overrides.mainnet) so live
+  # positions are preserved across restarts and reconciled on
+  # next start.
+  flatten_on_stop: true
   trailing_stop:
     enabled: true
     activation_pct: 0.01            # trail only after +1% unrealised (was 0.5%)
@@ -622,11 +631,37 @@ logging:
 # Use to ship safer defaults for mainnet without duplicating the YAML.
 mode_overrides:
   mainnet:
+    strategy:
+      # v3.1.22: disable high-frequency / latency-sensitive strategies
+      # on mainnet. Their edge depends on colocation-grade latency
+      # and zero maker rebates, which a home/VM deployment cannot
+      # sustain against HFT competition.
+      orderbook_scalper:
+        enabled: false          # too risky for mainnet (fee bleed)
+      lead_lag:
+        enabled: false          # latency arb needs colocation
+      range_grid:
+        enabled: true           # safe, range trading
+      spot_perp_carry:
+        enabled: true           # true arbitrage, safe
     risk:
       leverage_max: 5.0           # down from 10.0 — half the exposure
       max_daily_loss_pct: 2.0     # down from 3.0
       max_daily_trades: 20        # explicit cap (was 0 = unlimited)
       max_position_size_pct: 3.0  # down from 5.0
+    execution:
+      # v3.1.22: prefer maker orders on mainnet to capture the
+      # rebate. Taker fees (0.035%/side) compound quickly on
+      # short-duration strategies.
+      maker_orders:
+        enabled: true
+      # v3.1.22: a crash/restart should NOT close live mainnet
+      # positions at potentially stale prices. The on-stop flatten
+      # only fires in paper/testnet. Mainnet positions are
+      # preserved and reconciled on next start.
+      flatten_on_stop: false
   testnet:
     risk:
       max_daily_trades: 50        # cap for testnet (was 0)
+    execution:
+      flatten_on_stop: true       # safe in testnet (no real money)
