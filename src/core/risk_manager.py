@@ -72,6 +72,14 @@ it is not used directly in the current implementation.
         self._circuit_breaker_drawdown_pct = safe_float(
             config.get("risk.circuit_breaker_drawdown_pct", self.CIRCUIT_BREAKER_DRAWDOWN_PCT * 100.0)
         ) / 100.0
+        # v3.1.16 C6: honour risk.max_position_size_pct from config (5% default,
+        # 3% mainnet override) instead of the hard-coded 20% ceiling. Cap at
+        # the class-level constant so a misconfigured YAML can never allow
+        # positions larger than 20% of capital.
+        config_max_pos_pct = safe_float(
+            config.get("risk.max_position_size_pct", 5.0)
+        ) / 100.0
+        self._max_position_size_pct = min(config_max_pos_pct, self.MAX_POSITION_SIZE_PCT)
 
         self._max_daily_trades = int(
             config.get("risk.max_daily_trades", self.MAX_DAILY_TRADES)
@@ -374,8 +382,8 @@ it is not used directly in the current implementation.
         # Strategy conviction target (Kelly multiplier applied upstream in engine)
         notional_conviction = capital_f * size_pct if size_pct > 0.0 else notional_risk
 
-        # Hard cap on position notional
-        max_notional = capital_f * self.MAX_POSITION_SIZE_PCT
+        # Hard cap on position notional (v3.1.16 C6: read from config)
+        max_notional = capital_f * self._max_position_size_pct
 
         notional_final = min(notional_risk, notional_conviction, max_notional)
 
