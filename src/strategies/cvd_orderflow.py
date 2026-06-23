@@ -214,11 +214,17 @@ class CVDOrderFlow(Strategy):
         total_usd = total_tokens * close_price
         buy_usd = buy * close_price
         sell_usd = sell * close_price
+        # v3.1.16 fix: delta must be in the same unit basis as volume (USD) so
+        # cvd_magnitude = |cvd| / avg_volume_USD is a dimensionless ratio that
+        # can plausibly exceed min_divergence_strength. Previously delta was in
+        # token units (e.g. 40 BTC) while volume was in USD (~$4M for the same
+        # bar), making the ratio always ~15000x too small to ever fire.
+        delta_usd = (buy - sell) * close_price
         ts = int(getattr(c, "timestamp_ms", event.timestamp_ms))
         return _BarDelta(
             timestamp_ms=ts,
             price_close=close_price,
-            delta=buy - sell,
+            delta=delta_usd,
             total_volume=total_usd,
             buy_volume=buy_usd,
             sell_volume=sell_usd,

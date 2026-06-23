@@ -384,6 +384,12 @@ def test_volume_unit_conversion() -> None:
     assert abs(bar_btc.buy_volume - 70.0 * 100_000.0) < 1.0, (
         f"BTC: buy_volume should be 7_000_000 USD, got {bar_btc.buy_volume}"
     )
+    # v3.1.16 fix: delta must be in USD (same unit basis as volume)
+    expected_btc_delta_usd = (70.0 - 30.0) * 100_000.0  # 40 BTC * $100k = $4_000_000
+    assert abs(bar_btc.delta - expected_btc_delta_usd) < 1.0, (
+        f"BTC: delta should be {expected_btc_delta_usd} USD, "
+        f"got {bar_btc.delta}"
+    )
 
     # Scenario 2: SOL at $150, 50_000 SOL traded -> $7.5M USD
     ev_sol = make_event(
@@ -400,6 +406,11 @@ def test_volume_unit_conversion() -> None:
     assert abs(bar_sol.total_volume - expected_sol_usd) < 1.0, (
         f"SOL: total_volume should be {expected_sol_usd} USD, "
         f"got {bar_sol.total_volume}"
+    )
+    expected_sol_delta_usd = (30_000.0 - 20_000.0) * 150.0  # 10k SOL * $150 = $1_500_000
+    assert abs(bar_sol.delta - expected_sol_delta_usd) < 1.0, (
+        f"SOL: delta should be {expected_sol_delta_usd} USD, "
+        f"got {bar_sol.delta}"
     )
 
     # Scenario 3: very low volume -> should be rejected by volume gate
