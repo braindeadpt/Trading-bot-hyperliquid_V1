@@ -36,6 +36,12 @@ class FundingOI:
     oi_change_24h_pct: Optional[float] = None
     mark_price: Optional[float] = None
     timestamp_ms: int = 0
+    # v3.1.21: the exchange-side timestamp of the data (e.g. Binance's
+    # ``fundingTime`` field) is *not* the same as our local wall-time
+    # at which we cached the row. We now track both so the staleness
+    # check can flag a row whose underlying exchange data is hours
+    # old, even if the local cache was just refreshed.
+    exchange_timestamp_ms: int = 0
     funding_interval_hours: float = 8.0
 
 
@@ -61,8 +67,15 @@ class AggregatedFundingOI:
     exchange_count: int = 0
     by_exchange: Dict[str, FundingOI] = field(default_factory=dict)
     timestamp_ms: int = 0
+    # v3.1.21: separate the wall-time at which we cached this row
+    # (``cache_insertion_ms``) from the *exchange-side* timestamp
+    # (``exchange_timestamp_ms``). The staleness check considers
+    # both ages.
+    cache_insertion_ms: int = 0
+    exchange_timestamp_ms: int = 0
     stale: bool = False
     age_sec: float = 0.0
+    exchange_age_sec: float = 0.0
     failed_exchanges: List[str] = field(default_factory=list)
 
 
@@ -175,6 +188,7 @@ class BinanceFundingClient:
                 open_interest=oi * mark if (oi and mark) else oi,
                 mark_price=mark,
                 timestamp_ms=funding_time,
+                exchange_timestamp_ms=funding_time,
             )
         except Exception as e:
             logger.warning("Binance funding fetch failed for %s: %s", symbol, e)
@@ -247,6 +261,7 @@ class BybitFundingClient:
                 open_interest=oi_usd,
                 mark_price=mark,
                 timestamp_ms=funding_time,
+                exchange_timestamp_ms=funding_time,
             )
         except Exception as e:
             logger.warning("Bybit funding fetch failed for %s: %s", symbol, e)
@@ -307,6 +322,7 @@ class OKXFundingClient:
                 open_interest=oi_usd,
                 mark_price=mark,
                 timestamp_ms=funding_time,
+                exchange_timestamp_ms=funding_time,
             )
         except Exception as e:
             logger.warning("OKX funding fetch failed for %s: %s", symbol, e)
@@ -415,6 +431,7 @@ class FundingOIAggregator:
         by_exchange: Dict[str, FundingOI],
         failed: List[str],
         timestamp_ms: int,
+        cache_insertion_ms: int = 0,
     ) -> AggregatedFundingOI:
         fundings = [f.funding_rate for f in by_exchange.values() if f.funding_rate is not None]
         predicted = [
@@ -445,6 +462,15 @@ class FundingOIAggregator:
             if coinalyze_data.open_interest is not None:
                 oi_total = coinalyze_data.open_interest
 
+        # v3.1.21: pick the most recent exchange-side timestamp so the
+        # caller can age-check the underlying data (independent of
+        # the local cache hit).
+        ex_ts_ms = max(
+            (f.exchange_timestamp_ms for f in by_exchange.values()
+             if f.exchange_timestamp_ms > 0),
+            default=0,
+        )
+
         return AggregatedFundingOI(
             symbol=sym,
             funding_avg=funding_avg,
@@ -454,8 +480,11 @@ class FundingOIAggregator:
             exchange_count=len(by_exchange),
             by_exchange=by_exchange,
             timestamp_ms=timestamp_ms,
+            cache_insertion_ms=cache_insertion_ms or timestamp_ms,
+            exchange_timestamp_ms=ex_ts_ms,
             stale=False,
             age_sec=0.0,
+            exchange_age_sec=0.0,
             failed_exchanges=failed,
         )
 
@@ -508,7 +537,13 @@ class FundingOIAggregator:
             return None, failed
 
         now_ms = int(time.time() * 1000)
-        agg = self._build_aggregate(sym, by_exchange, failed, now_ms)
+        agg = self._build_aggregate(
+            sym,
+            by_exchange,
+            failed,
+            now_ms,
+            cache_insertion_ms=now_ms,
+        )
         return agg, failed
 
     async def poll(self, symbols: List[str]) -> Dict[str, AggregatedFundingOI]:
@@ -542,6 +577,31 @@ class FundingOIAggregator:
                     fresh, failed = item
 
                 if fresh is not None:
+                    # v3.1.21: even on a "fresh" poll, the underlying
+                    # exchange data may already be hours old (e.g. we
+                    # just polled but the venue hasn't published a new
+                    # funding tick since the last settlement). Flag
+                    # that case here so downstream consumers know.
+                    exchange_age_sec = 0.0
+                    if fresh.exchange_timestamp_ms > 0:
+                        exchange_age_sec = max(
+                            0.0,
+                            (now_ms - fresh.exchange_timestamp_ms) / 1000.0,
+                        )
+                    if exchange_age_sec > self._stale_max_sec:
+                        logger.warning(
+                            "Funding %s: exchange data is stale "
+                            "(exchange_age=%.0fs > %.0fs, venues=%d)",
+                            sym,
+                            exchange_age_sec,
+                            self._stale_max_sec,
+                            fresh.exchange_count,
+                        )
+                        fresh = replace(
+                            fresh,
+                            stale=True,
+                            exchange_age_sec=exchange_age_sec,
+                        )
                     self._cache[sym] = fresh
                     results[sym] = fresh
                     if failed:
@@ -558,12 +618,30 @@ class FundingOIAggregator:
                     logger.warning("Funding %s: no data and no cache", sym)
                     continue
 
-                age_sec = (now_ms - cached.timestamp_ms) / 1000.0 if cached.timestamp_ms else 0.0
-                if age_sec > self._stale_max_sec:
+                # v3.1.21: staleness = max(cache age, exchange age).
+                # The previous code only looked at cache age, so a
+                # row we cached 30s ago whose underlying exchange
+                # tick is 4h old would have been reported as fresh.
+                cache_age_sec = (
+                    (now_ms - (cached.cache_insertion_ms or cached.timestamp_ms)) / 1000.0
+                    if (cached.cache_insertion_ms or cached.timestamp_ms)
+                    else 0.0
+                )
+                exchange_age_sec = 0.0
+                if cached.exchange_timestamp_ms > 0:
+                    exchange_age_sec = max(
+                        0.0,
+                        (now_ms - cached.exchange_timestamp_ms) / 1000.0,
+                    )
+                worst_age_sec = max(cache_age_sec, exchange_age_sec)
+
+                if worst_age_sec > self._stale_max_sec:
                     logger.warning(
-                        "Funding %s: poll failed and cache expired (age=%.0fs > %.0fs)",
+                        "Funding %s: poll failed and cache expired "
+                        "(cache_age=%.0fs, exchange_age=%.0fs > %.0fs)",
                         sym,
-                        age_sec,
+                        cache_age_sec,
+                        exchange_age_sec,
                         self._stale_max_sec,
                     )
                     continue
@@ -571,15 +649,18 @@ class FundingOIAggregator:
                 stale_row = replace(
                     cached,
                     stale=True,
-                    age_sec=age_sec,
+                    age_sec=cache_age_sec,
+                    exchange_age_sec=exchange_age_sec,
                     failed_exchanges=failed,
                 )
                 self._cache[sym] = stale_row
                 results[sym] = stale_row
                 logger.warning(
-                    "Funding %s: using STALE cache (age=%.0fs, last_exchanges=%d)",
+                    "Funding %s: using STALE cache "
+                    "(cache_age=%.0fs, exchange_age=%.0fs, last_exchanges=%d)",
                     sym,
-                    age_sec,
+                    cache_age_sec,
+                    exchange_age_sec,
                     stale_row.exchange_count,
                 )
 
