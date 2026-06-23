@@ -110,6 +110,7 @@ class TradingEngine:
         self._risk = risk_manager
         self._executor = executor
         self._notifier = notifier
+        self._mode = str(config.get("mode", "paper"))
 
         # ── Kelly Criterion sizer (Task 4.4) ──
         kelly_cfg = config.get("kelly", {})
