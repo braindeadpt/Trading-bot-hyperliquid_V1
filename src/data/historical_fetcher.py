@@ -172,16 +172,24 @@ class HistoricalFetcher:
         3  low
         4  close
         5  volume
-        6  close_time   (ignored)
+        6  close_time   (used to derive timestamp_ms — see below)
         7  quote_volume (ignored)
         8  trades       (ignored)
         9  taker_buy_volume (ignored)
         10 taker_buy_quote_volume (ignored)
         11 ignore       (ignored)
         """
+        # v3.1.16 C11: Use close_time to match live candle_builder convention.
+        # Live candles store timestamp_ms = close_time, so the DB primary
+        # key (symbol, timestamp_ms) is consistent between backfill and
+        # live updates. Previously backfilled rows used open_time, causing
+        # duplicate rows for the same bar (different PK values) and
+        # look-ahead bias in backtests.
+        open_time_ms = int(row[0])
+        close_time_ms = int(row[6])
         return Candle(
             symbol=symbol,
-            timestamp_ms=int(row[0]),
+            timestamp_ms=close_time_ms,
             open=float(row[1]),
             high=float(row[2]),
             low=float(row[3]),

@@ -62,10 +62,17 @@ def _limit_for_days(tf: str, days: int) -> int:
 
 
 def kline_to_candle(k: list, symbol: str) -> Candle:
-    """Convert a Binance kline row to a :class:`Candle`."""
+    """Convert a Binance kline row to a :class:`Candle`.
+
+    v3.1.16 C11: Use close_time (k[6]) for ``timestamp_ms`` to match live
+    candle_builder convention. Previously we used open_time (k[0]), so
+    backfilled rows had a different PK value than the live rows that
+    eventually replaced them, producing duplicates and look-ahead bias
+    in backtests.
+    """
     return Candle(
         symbol=symbol,
-        timestamp_ms=int(k[0]),
+        timestamp_ms=int(k[6]),
         open=float(k[1]),
         high=float(k[2]),
         low=float(k[3]),
