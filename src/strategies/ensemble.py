@@ -221,8 +221,16 @@ class StrategyEnsemble:
         # Use the most conservative (smallest) size_pct
         min_size_pct = min(s.size_pct for s in agreeing_signals)
 
-        # Use the tightest stop loss (largest stop_loss_pct)
-        max_stop = max((s.stop_loss_pct for s in agreeing_signals), default=0.02)
+        # Use highest-confidence contributor's stop/TP to preserve R:R.
+        # v3.1.16 C2 fix: previously the ensemble took max(stop_loss) (widest
+        # stop) and min(take_profit) (tightest TP) — the WORST R:R combination
+        # of any contributor. If each strategy offered 2R, the ensemble would
+        # deliver ~1R, guaranteeing negative expectancy after fees. Use the
+        # highest-confidence contributor's full stop/TP pair instead.
+        agreeing_sorted = sorted(agreeing_signals, key=lambda s: s.confidence, reverse=True)
+        primary = agreeing_sorted[0]
+        primary_stop = primary.stop_loss_pct if primary.stop_loss_pct is not None else 0.02
+        primary_tp = primary.take_profit_pct
 
         # Combine reasons
         reasons = " | ".join(f"{s.strategy}: {s.reason}" for s in agreeing_signals)
@@ -254,8 +262,8 @@ class StrategyEnsemble:
             confidence=avg_confidence,
             size_pct=min_size_pct,
             entry_price=event.price,
-            stop_loss_pct=max_stop,
-            take_profit_pct=min((s.take_profit_pct for s in agreeing_signals if s.take_profit_pct is not None), default=None),  # most conservative TP
+            stop_loss_pct=primary_stop,
+            take_profit_pct=primary_tp,
             reason=f"Ensemble [{winning_score:.2f}]: {reasons}",
             metadata=combined_meta,
         )
