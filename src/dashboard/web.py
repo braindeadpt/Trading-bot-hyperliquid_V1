@@ -798,21 +798,41 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
     @app.route("/api/strategies")
     def api_strategies():
+        """List all strategies with v3.1.23 fields: class, governor, sharpe."""
+        from src.strategies.ensemble import STRATEGY_CLASS
         if _engine is None:
             return jsonify([])
+        governor = getattr(_engine, "_strategy_governor", None)
+        gov_metrics = governor.last_metrics if governor else {}
+        gov_disabled = governor.disabled_strategies if governor else set()
+        sig_hist = getattr(_engine, "_signal_history", [])
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        def _info(s):
+            name = getattr(s, "name", "unknown")
+            today_count = sum(
+                1 for sig in sig_hist
+                if sig.get("strategy") == name
+                and sig.get("time", "").startswith(today_str)
+            )
+            metrics = gov_metrics.get(name, {})
+            return {
+                "name": name,
+                "enabled": getattr(s, "enabled", True) and name not in gov_disabled,
+                "governor_disabled": name in gov_disabled,
+                "strategy_class": STRATEGY_CLASS.get(name, "other"),
+                "signals_today": today_count,
+                "trades_30d": int(safe_float(metrics.get("trades"), 0.0)),
+                "sharpe_30d": safe_float(metrics.get("sharpe"), 0.0),
+            }
+
         result = []
         for s in getattr(_engine, "_strategies", []):
-            result.append({
-                "name": getattr(s, "name", "unknown"),
-                "enabled": getattr(s, "enabled", True),
-            })
+            result.append(_info(s))
             sub = getattr(s, "_strategies", None)
             if isinstance(sub, dict):
                 for sub_s in sub.values():
-                    result.append({
-                        "name": getattr(sub_s, "name", "unknown"),
-                        "enabled": getattr(sub_s, "enabled", True),
-                    })
+                    result.append(_info(sub_s))
         return jsonify(result)
 
     @app.route("/api/strategy/<name>")
