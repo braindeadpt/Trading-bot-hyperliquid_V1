@@ -2624,8 +2624,23 @@ class TradingEngine:
             )
 
         # --- Execute ---
+        # v3.1.22: forward the L2-derived slippage estimate to
+        # enter_position so paper fills match the simulated slippage
+        # (instead of the flat ``risk.paper_slippage_pct`` fallback).
+        # ``slippage_for_tca`` was computed earlier as either the L2
+        # estimate (when an orderbook is available) or 0.0.
+        slip_bps = (
+            float(slippage_for_tca) * 10_000.0
+            if slippage_for_tca and slippage_for_tca > 0
+            else None
+        )
         try:
-            result = await self._executor.enter_position(signal, self._portfolio, market_event=event)
+            result = await self._executor.enter_position(
+                signal,
+                self._portfolio,
+                market_event=event,
+                estimated_slippage_bps=slip_bps,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Execution failed for %s: %s", signal.symbol, exc)
             sig_record["status"] = "failed"

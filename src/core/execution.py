@@ -10,7 +10,8 @@ import asyncio
 import json
 import logging
 import os
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from src.data.database import Database, TradeEntry, TradeExit
@@ -20,6 +21,23 @@ from src.utils.config import Config
 from src.utils.helpers import safe_float, safe_divide, utc_now, utc_timestamp_ms
 
 logger = logging.getLogger(__name__)
+
+
+# v3.1.22: order status constants used by the OMS background poller.
+ORDER_STATUS_FILLED: str = "filled"
+ORDER_STATUS_PARTIAL: str = "partial"
+ORDER_STATUS_OPEN: str = "open"
+ORDER_STATUS_CANCELLED: str = "cancelled"
+ORDER_STATUS_REJECTED: str = "rejected"
+ORDER_STATUS_TIMEOUT: str = "timeout"
+
+# v3.1.22: how long to wait for a live order to fill before treating
+# it as a timeout. The 60s default matches Hyperliquid's REST
+# acknowledgement window for limit orders.
+DEFAULT_LIVE_ORDER_TIMEOUT_S: float = 60.0
+
+# v3.1.22: how often the background task polls open orders.
+DEFAULT_OMS_POLL_INTERVAL_S: float = 5.0
 
 
 @dataclass
@@ -46,6 +64,7 @@ class TradeResult:
     entry_fee: float = 0.0  # fee paid on entry (for portfolio cash tracking)
     funding_total: float = 0.0  # accumulated funding cashflow over the hold
     pnl_pct_capital: float = 0.0  # pnl_pct as fraction of total capital (for Kelly)
+    exchange_order_id: Optional[str] = None  # v3.1.22: HL order id for OMS tracking
 
 
 class ExecutionEngine:
@@ -129,6 +148,20 @@ class ExecutionEngine:
             config.get("execution.entry_debounce_ms", 5_000)
         )  # 5s default
 
+        # v3.1.22: OMS order tracking (live mode only). Maps HL
+        # order id → {symbol, side, size, price, status, timestamp,
+        # filled_size, trade_id}. The background poller walks this
+        # dict and updates each row.
+        self._live_orders: Dict[str, Dict[str, Any]] = {}
+        self._order_status_callbacks: List[Any] = []
+        self._oms_poll_interval_s: float = float(
+            config.get("execution.oms_poll_interval_s", DEFAULT_OMS_POLL_INTERVAL_S)
+        )
+        self._live_order_timeout_s: float = float(
+            config.get("execution.live_order_timeout_s", DEFAULT_LIVE_ORDER_TIMEOUT_S)
+        )
+        self._oms_task: Optional[asyncio.Task[Any]] = None
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -183,12 +216,26 @@ class ExecutionEngine:
         signal: Signal,
         portfolio: Any,  # PortfolioState
         market_event: Optional[MarketEvent] = None,
+        candles_1m: Optional[List[Any]] = None,
+        orderbook: Optional[Any] = None,
+        estimated_slippage_bps: Optional[float] = None,
     ) -> TradeResult:
         """Open a new position.
 
         In **paper** mode the fill is simulated instantly at *signal.entry_price*.
         In **testnet** / **mainnet** mode an order is submitted via the REST
         client and the result is tracked.
+
+        v3.1.22:
+          * ``estimated_slippage_bps`` — when provided (typically
+            from the engine's L2 ``estimate_slippage``), used in
+            place of the flat ``risk.paper_slippage_pct`` for paper
+            fills so simulation matches L2 reality.
+          * ``candles_1m`` / ``orderbook`` — accepted for symmetry
+            with future analytics; not consumed in this method.
+          * The returned ``TradeResult.exchange_order_id`` is set
+            whenever a live order is placed, so the OMS poller can
+            later look it up.
 
         QW2: when *market_event* is provided, a JSON snapshot of the regime
         (ADX, OIR, funding, imbalance, etc.) is stored alongside the trade
@@ -250,7 +297,13 @@ class ExecutionEngine:
             if fill_price <= 0.0:
                 fill_price = raw_price
         elif self._mode == "paper":
-            slippage = self._paper_slippage_pct
+            # v3.1.22: prefer the L2-derived estimate when the engine
+            # supplies one. ``estimated_slippage_bps`` is in basis
+            # points (e.g. 5 bps = 0.05%) so divide by 10_000.
+            if estimated_slippage_bps is not None and estimated_slippage_bps > 0:
+                slippage = float(estimated_slippage_bps) / 10_000.0
+            else:
+                slippage = self._paper_slippage_pct
             if signal.side == "long":
                 fill_price = raw_price * (1.0 + slippage)
             else:
@@ -368,12 +421,38 @@ class ExecutionEngine:
         )
         trade_id = self._db.save_trade_entry(entry_record)
 
+        # v3.1.22: HL order id (only set in live mode after _submit_live_order)
+        exchange_order_id: Optional[str] = None
+
         if self._mode in ("testnet", "mainnet"):
             # v3.1.17 C9: on live order failure, roll back the phantom
             # position we just wrote to the DB and portfolio so we are
             # not left holding inventory that the exchange never saw.
             try:
-                await self._submit_live_order(signal, size, fill_price)
+                hl_response = await self._submit_live_order(
+                    signal, size, fill_price
+                )
+                # v3.1.22: capture the HL order id for OMS tracking.
+                # HL responses come back as either
+                # {"status": "ok", "response": {"data": {"statuses": [...]}}}
+                # or {"raw": ...}. Try the common locations.
+                exchange_order_id = self._extract_order_id(hl_response)
+                if exchange_order_id:
+                    self._live_orders[exchange_order_id] = {
+                        "symbol": signal.symbol,
+                        "side": signal.side,
+                        "size": float(size),
+                        "price": float(fill_price),
+                        "filled_size": 0.0,
+                        "status": ORDER_STATUS_OPEN,
+                        "timestamp": time.time(),
+                        "trade_id": int(trade_id),
+                        "order_type": order_type,
+                    }
+                    logger.info(
+                        "OMS: tracking order %s (symbol=%s trade_id=%d)",
+                        exchange_order_id, signal.symbol, trade_id,
+                    )
             except Exception as exc:
                 logger.error(
                     "Live order failed for %s — rolling back trade_id=%d: %s",
@@ -410,6 +489,7 @@ class ExecutionEngine:
             reason=signal.reason,
             timestamp_ms=now_ms,
             entry_fee=entry_fee,
+            exchange_order_id=exchange_order_id,
         )
 
         async with self._lock:
@@ -617,11 +697,17 @@ class ExecutionEngine:
         signal: Signal,
         size: float,
         price: float,
-    ) -> None:
-        """Submit a signed order to Hyperliquid (testnet or mainnet)."""
+    ) -> Dict[str, Any]:
+        """Submit a signed order to Hyperliquid (testnet or mainnet).
+
+        v3.1.22: returns the raw HL response dict so the caller can
+        extract the order id for OMS tracking. When signing is not
+        configured we return an empty dict (callers treat missing id
+        as "best-effort, no tracking").
+        """
         if self._rest_client is None:
             logger.error("REST client not available in live mode")
-            return
+            return {}
 
         meta = signal.metadata or {}
         order_type = str(meta.get("order_type", "market"))
@@ -651,10 +737,10 @@ class ExecutionEngine:
                 "Skipping live order submission for %s — signing not configured",
                 signal.symbol,
             )
-            return
+            return {}
 
         try:
-            await self._live_client.place_entry(
+            return await self._live_client.place_entry(
                 signal.symbol,
                 signal.side,
                 size,
@@ -670,6 +756,41 @@ class ExecutionEngine:
                 exc,
                 exc_info=True,
             )
+            raise
+
+    @staticmethod
+    def _extract_order_id(hl_response: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Pull the HL order id out of a (potentially nested) response.
+
+        Hyperliquid responses come back as:
+          {"status": "ok", "response": {"data": {"statuses": [
+              {"filled": {"oid": 123, ...}},
+              {"resting": {"oid": 456, ...}}
+          ]}}}
+        or the exchange may return the order id under "oid" directly.
+        """
+        if not isinstance(hl_response, dict):
+            return None
+        # Direct key
+        for key in ("oid", "orderId", "order_id", "id"):
+            if key in hl_response and hl_response[key] is not None:
+                return str(hl_response[key])
+        # Nested under response.data.statuses[*]
+        try:
+            statuses = (
+                hl_response.get("response", {})
+                .get("data", {})
+                .get("statuses", [])
+            )
+            if statuses:
+                first = statuses[0]
+                if isinstance(first, dict):
+                    for sub in first.values():
+                        if isinstance(sub, dict) and "oid" in sub:
+                            return str(sub["oid"])
+        except (AttributeError, TypeError):
+            pass
+        return None
 
     async def _submit_live_close(
         self,
@@ -750,3 +871,223 @@ class ExecutionEngine:
                 loaded.append(result)
         logger.info("Loaded %d open trades from DB", len(loaded))
         return loaded
+
+    # ------------------------------------------------------------------
+    # v3.1.22: OMS — live order tracking + background poller
+    # ------------------------------------------------------------------
+
+    def register_order_callback(self, cb: Any) -> None:
+        """Register a callback fired on every order status change.
+
+        Signature: ``cb(order_id: str, status: str, record: dict)``.
+        Used by the engine to update its internal state and notify
+        notifiers.
+        """
+        if callable(cb):
+            self._order_status_callbacks.append(cb)
+
+    def get_tracked_order(self, order_id: str) -> Optional[Dict[str, Any]]:
+        """Return the in-memory record for *order_id* or None."""
+        return self._live_orders.get(order_id)
+
+    def get_open_orders(self) -> Dict[str, Dict[str, Any]]:
+        """Return all orders still in 'open' or 'partial' state."""
+        return {
+            oid: rec
+            for oid, rec in self._live_orders.items()
+            if rec.get("status") in (ORDER_STATUS_OPEN, ORDER_STATUS_PARTIAL)
+        }
+
+    async def check_order_status(self, order_id: str) -> str:
+        """Query Hyperliquid REST for the current status of *order_id*.
+
+        Returns one of the ``ORDER_STATUS_*`` constants. Returns
+        ``ORDER_STATUS_OPEN`` if the order id is unknown to HL (e.g.
+        the bot was restarted and lost the in-memory record); the
+        OMS poller treats that as a soft signal to keep watching.
+        """
+        if self._rest_client is None:
+            return ORDER_STATUS_OPEN
+        try:
+            resp = await self._rest_client.get_order_status(order_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "check_order_status: REST error for %s: %s",
+                order_id, exc,
+            )
+            return self._live_orders.get(order_id, {}).get(
+                "status", ORDER_STATUS_OPEN
+            )
+
+        if not isinstance(resp, dict):
+            return ORDER_STATUS_OPEN
+
+        # HL returns either:
+        #   {"order": {"status": "filled", ...}}
+        #   {"statuses": ["open"]}
+        order = resp.get("order")
+        if isinstance(order, dict):
+            raw = str(order.get("status", "open")).lower()
+            return self._normalise_hl_status(raw)
+        raw = str(resp.get("status", "open")).lower()
+        return self._normalise_hl_status(raw)
+
+    @staticmethod
+    def _normalise_hl_status(raw: str) -> str:
+        """Map a free-form HL status string to our constants."""
+        raw = (raw or "").lower()
+        if "filled" in raw or raw == "closed":
+            return ORDER_STATUS_FILLED
+        if "partial" in raw:
+            return ORDER_STATUS_PARTIAL
+        if "cancel" in raw:
+            return ORDER_STATUS_CANCELLED
+        if "reject" in raw or "error" in raw:
+            return ORDER_STATUS_REJECTED
+        return ORDER_STATUS_OPEN
+
+    async def start_oms_loop(self) -> None:
+        """Start the background poller for live orders.
+
+        Idempotent: a second call is a no-op. Stop with
+        :meth:`stop_oms_loop`.
+        """
+        if self._oms_task is not None and not self._oms_task.done():
+            return
+        if self._mode not in ("testnet", "mainnet"):
+            return
+        self._oms_task = asyncio.create_task(self._oms_loop())
+        logger.info("OMS poller started (interval=%.1fs)", self._oms_poll_interval_s)
+
+    async def stop_oms_loop(self) -> None:
+        """Stop the background poller. Idempotent."""
+        task = self._oms_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        self._oms_task = None
+        logger.info("OMS poller stopped")
+
+    async def _oms_loop(self) -> None:
+        """Background task: poll every open order, take action on fill/timeout/reject."""
+        try:
+            while True:
+                await asyncio.sleep(self._oms_poll_interval_s)
+                if not self._live_orders:
+                    continue
+                open_orders = self.get_open_orders()
+                if not open_orders:
+                    continue
+                for order_id, record in list(open_orders.items()):
+                    await self._poll_one_order(order_id, record)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("OMS loop crashed: %s", exc)
+
+    async def _poll_one_order(self, order_id: str, record: Dict[str, Any]) -> None:
+        """Check one order; update its status; take action if terminal."""
+        status = await self.check_order_status(order_id)
+        now_ts = time.time()
+        age_s = now_ts - safe_float(record.get("timestamp", now_ts), now_ts)
+
+        previous = record.get("status", ORDER_STATUS_OPEN)
+        if status == previous and status not in (ORDER_STATUS_OPEN, ORDER_STATUS_PARTIAL):
+            return
+
+        if status in (ORDER_STATUS_FILLED, ORDER_STATUS_PARTIAL, ORDER_STATUS_CANCELLED, ORDER_STATUS_REJECTED):
+            record["status"] = status
+            self._fire_order_callbacks(order_id, status, record)
+            if status == ORDER_STATUS_REJECTED:
+                logger.error(
+                    "OMS: order %s REJECTED — rolling back trade_id=%s",
+                    order_id, record.get("trade_id"),
+                )
+                await self._rollback_order(order_id, record, reason="rejected")
+            elif status == ORDER_STATUS_CANCELLED:
+                logger.warning(
+                    "OMS: order %s CANCELLED — rolling back trade_id=%s",
+                    order_id, record.get("trade_id"),
+                )
+                await self._rollback_order(order_id, record, reason="cancelled")
+            elif status == ORDER_STATUS_FILLED:
+                logger.info(
+                    "OMS: order %s FILLED (symbol=%s trade_id=%s age=%.1fs)",
+                    order_id, record.get("symbol"), record.get("trade_id"), age_s,
+                )
+            return
+
+        # Status still open/partial: check timeout
+        if age_s > self._live_order_timeout_s:
+            logger.error(
+                "OMS: order %s TIMEOUT after %.1fs — cancelling and rolling back",
+                order_id, age_s,
+            )
+            record["status"] = ORDER_STATUS_TIMEOUT
+            self._fire_order_callbacks(order_id, ORDER_STATUS_TIMEOUT, record)
+            await self._cancel_timed_out_order(order_id)
+            await self._rollback_order(
+                order_id, record, reason=f"timeout_{age_s:.0f}s"
+            )
+
+    async def _cancel_timed_out_order(self, order_id: str) -> None:
+        """Best-effort cancel of a timed-out live order."""
+        record = self._live_orders.get(order_id)
+        if not record or self._rest_client is None:
+            return
+        try:
+            symbol = record.get("symbol", "")
+            await self._rest_client.cancel_order(symbol, order_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "OMS: cancel failed for %s: %s (will rely on auto-cancel)",
+                order_id, exc,
+            )
+
+    async def _rollback_order(
+        self,
+        order_id: str,
+        record: Dict[str, Any],
+        reason: str,
+    ) -> None:
+        """Apply the C9 rollback (cancel + DB status update)."""
+        symbol = record.get("symbol", "")
+        trade_id = record.get("trade_id", 0)
+        try:
+            portfolio = getattr(self, "_portfolio", None)
+            if portfolio is not None:
+                await portfolio.cancel_position(symbol)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("OMS rollback: cancel_position failed: %s", exc)
+        try:
+            async with self._lock:
+                self._open_trades.pop(symbol, None)
+                self._last_entry_ms.pop(symbol, None)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._db.update_trade_status(
+                int(trade_id),
+                status="cancelled",
+                reason=f"oms_rollback:{reason}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("OMS rollback: update_trade_status failed: %s", exc)
+        # Drop the tracking record so we don't keep polling a dead order
+        self._live_orders.pop(order_id, None)
+
+    def _fire_order_callbacks(
+        self,
+        order_id: str,
+        status: str,
+        record: Dict[str, Any],
+    ) -> None:
+        for cb in self._order_status_callbacks:
+            try:
+                cb(order_id, status, record)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("OMS callback raised: %s", exc)
