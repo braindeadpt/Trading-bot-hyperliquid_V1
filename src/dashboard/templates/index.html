@@ -104,6 +104,17 @@ tr:hover td { background: var(--panel-hover); }
 .stat-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--border); }
 .stat-label { color: var(--dim); font-size: 10px; }
 .stat-value { font-weight: 600; font-size: 10px; }
+/* v3.1.23: Section labels for visual grouping */
+.section-label { display: flex; align-items: center; gap: 8px; margin: 14px 0 6px 0; padding: 0 2px; }
+.section-label:first-of-type { margin-top: 4px; }
+.section-label .bar { width: 3px; height: 14px; border-radius: 2px; }
+.section-label .text { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+.section-label .line { flex: 1; height: 1px; background: var(--border); }
+.section-market .bar { background: var(--accent); }
+.section-execution .bar { background: var(--up); }
+.section-system .bar { background: var(--yellow); }
+.section-intel .bar { background: var(--accent2); }
+.section-logs .bar { background: var(--dim); }
 </style>
 </head>
 <body>
@@ -157,8 +168,11 @@ tr:hover td { background: var(--panel-hover); }
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- ROW 1: Market Data — Live (wide) + Candles (narrow)              -->
+<!-- SECTION: MARKET                                                  -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="section-label section-market">
+    <span class="bar"></span><span class="text">Market Data</span><span class="line"></span>
+</div>
 <div class="grid">
     <div class="g-8">
         <div class="panel" style="max-height:210px;">
@@ -208,16 +222,12 @@ tr:hover td { background: var(--panel-hover); }
         </div>
     </div>
 </div>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- ROW 1.5: v3.1.15 Volume Indicators — pure observability          -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="grid" style="margin-top:var(--gap);">
     <div class="g-12">
-        <div class="panel" style="max-height:160px;">
+        <div class="panel" style="max-height:140px;">
             <div class="panel-header">Volume Indicators <span class="dim">OBV slope / MFI / VWAP multi-TF (observability only)</span></div>
             <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:136px;">
+                <div style="overflow:auto; max-height:116px;">
                     <table>
                         <thead>
                             <tr>
@@ -242,9 +252,12 @@ tr:hover td { background: var(--panel-hover); }
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- ROW 2: Execution — Positions + Trades                            -->
+<!-- SECTION: EXECUTION                                               -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="grid" style="margin-top:var(--gap);">
+<div class="section-label section-execution">
+    <span class="bar"></span><span class="text">Execution</span><span class="line"></span>
+</div>
+<div class="grid">
     <div class="g-6">
         <div class="panel" style="max-height:180px;">
             <div class="panel-header">Open Positions <span class="dim">Active</span></div>
@@ -290,11 +303,14 @@ tr:hover td { background: var(--panel-hover); }
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- ROW 3: Intelligence — Engine + Strategies + Signals/Decisions  -->
+<!-- SECTION: SYSTEM HEALTH — 4 compact panels in one row            -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="grid" style="margin-top:var(--gap);">
+<div class="section-label section-system">
+    <span class="bar"></span><span class="text">System Health</span><span class="line"></span>
+</div>
+<div class="grid">
     <div class="g-3">
-        <div class="panel" style="max-height:240px;">
+        <div class="panel" style="max-height:200px;">
             <div class="panel-header">Engine <span class="dim">Health</span></div>
             <div class="panel-body" style="padding:6px 8px;">
                 <div class="mini-stats">
@@ -318,7 +334,44 @@ tr:hover td { background: var(--panel-hover); }
             </div>
         </div>
     </div>
-    <div class="g-5">
+    <div class="g-3">
+        <div class="panel" style="max-height:200px;">
+            <div class="panel-header">Risk Gates <span class="dim">Soft + hard</span></div>
+            <div class="panel-body" style="padding:6px 8px;">
+                <div class="mini-stats" id="risk-gates-panel">
+                    <div class="muted" style="text-align:center;padding:20px 0;">Waiting...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="g-3">
+        <div class="panel" style="max-height:200px;">
+            <div class="panel-header">Regime <span class="dim">ADX per symbol</span></div>
+            <div class="panel-body" style="padding:6px 8px;">
+                <div class="mini-stats" id="regime-panel">
+                    <div class="muted" style="text-align:center;padding:20px 0;">Waiting...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="g-3">
+        <div class="panel" style="max-height:200px;">
+            <div class="panel-header">Governor <span class="dim">Auto-disable</span></div>
+            <div class="panel-body" id="governor-panel" style="padding:6px 8px; max-height:176px; overflow-y:auto;">
+                <span class="muted">Waiting...</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SECTION: INTELLIGENCE — Strategies + Signals/Decisions          -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="section-label section-intel">
+    <span class="bar"></span><span class="text">Intelligence</span><span class="line"></span>
+</div>
+<div class="grid">
+    <div class="g-8">
         <div class="panel" style="max-height:240px;">
             <div class="panel-header">Strategies <span class="dim">Click for detail</span></div>
             <div class="panel-body" id="strategies-panel" style="padding:6px 8px; max-height:216px; overflow-y:auto;">
@@ -345,43 +398,12 @@ tr:hover td { background: var(--panel-hover); }
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- ROW 3.5: v3.1.23 Regime + Risk Gates + Governor                  -->
+<!-- SECTION: LOGS                                                    -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="grid" style="margin-top:var(--gap);">
-    <div class="g-3">
-        <div class="panel" style="max-height:240px;">
-            <div class="panel-header">Regime <span class="dim">ADX per symbol</span></div>
-            <div class="panel-body" style="padding:6px 8px;">
-                <div class="mini-stats" id="regime-panel">
-                    <div class="muted" style="text-align:center;padding:20px 0;">Waiting...</div>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div class="g-5">
-        <div class="panel" style="max-height:240px;">
-            <div class="panel-header">Risk Gates <span class="dim">Soft + hard (vol CB / funding blackout / recon / WS)</span></div>
-            <div class="panel-body" style="padding:6px 8px;">
-                <div class="mini-stats" id="risk-gates-panel">
-                    <div class="muted" style="text-align:center;padding:20px 0;">Waiting...</div>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div class="g-4">
-        <div class="panel" style="max-height:240px;">
-            <div class="panel-header">Governor <span class="dim">Auto-disable negative Sharpe (30d)</span></div>
-            <div class="panel-body" id="governor-panel" style="padding:6px 8px; max-height:216px; overflow-y:auto;">
-                <span class="muted">Waiting...</span>
-            </div>
-        </div>
-    </div>
+<div class="section-label section-logs">
+    <span class="bar"></span><span class="text">Logs</span><span class="line"></span>
 </div>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- ROW 4: Logs — compact, full width                                  -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="grid" style="margin-top:var(--gap);">
+<div class="grid">
     <div class="g-12">
         <div class="panel" style="max-height:120px;">
             <div class="panel-header">Live Logs <span class="dim">Last 50</span></div>
