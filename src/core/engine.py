@@ -621,6 +621,17 @@ class TradingEngine:
             self._reconcile_task = asyncio.create_task(self._reconcile_loop())
             logger.info("Reconciliation loop started (interval=60s)")
 
+        # 8. v3.1.22: start WS health monitoring loop. The
+        # _ws_health_loop() coroutine has existed since v3.1.18 but
+        # was never wired into a task. Without it, a silent WS
+        # disconnect would not be flagged until the next failed
+        # trade.
+        if self._hl_ws_client is not None:
+            self._ws_health_check_task = asyncio.create_task(
+                self._ws_health_loop()
+            )
+            logger.info("WS health monitoring loop started")
+
     async def _reconcile_loop(self) -> None:
         """Reconcile in-memory positions with the exchange (testnet/mainnet only).
 
@@ -1004,8 +1015,33 @@ class TradingEngine:
         self._subscribed_callbacks.clear()
 
         # 2. Close all open positions (market order at last known price)
-        positions = await self._portfolio.positions
-        for symbol, position in positions.items():
+        # v3.1.22: gated by execution.flatten_on_stop. Paper/testnet
+        # default true (safe, no real money). Mainnet defaults to
+        # false via mode_overrides — closing a live mainnet
+        # position at a stale shutdown price can crystallise a
+        # loss that the strategy was about to recover. The
+        # position will be picked up on the next start and
+        # reconciled against the exchange book.
+        flatten_on_stop = bool(
+            self._config.get("execution.flatten_on_stop", True)
+        )
+        positions_snapshot = await self._portfolio.positions
+        if not flatten_on_stop and positions_snapshot:
+            logger.info(
+                "Preserving %d open position(s) across restart "
+                "(flatten_on_stop=false); will reconcile on next start.",
+                len(positions_snapshot),
+            )
+        for symbol, position in positions_snapshot.items():
+            if not flatten_on_stop:
+                # Skip the close, but still log + persist.
+                last_price = self._latest_price.get(symbol)
+                mark = getattr(last_price, "mid", None) if last_price is not None else None
+                logger.info(
+                    "Position preserved (flatten_on_stop=false): %s side=%s size=%.6f mark=%s",
+                    symbol, position.side, position.size, mark,
+                )
+                continue
             last_price = self._latest_price.get(symbol)
             if last_price is not None:
                 await self._execute_exit(position, last_price.mid, reason="engine_shutdown")
