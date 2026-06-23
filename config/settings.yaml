@@ -405,8 +405,10 @@ strategy:
     high_conviction_threshold: 0.70
     high_conviction_enabled: true
     high_conviction_exclude:
-      # VolatilityBreakout removed: its squeeze breakouts reach 0.9+ conviction
-      # with volume confirmation — allowed to enter alone via the 0.70 bypass.
+      # v3.1.18: VolatilityBreakout is back on the exclude list — it is
+      # correlated with DonchianBreakout (both fire on the same breakout
+      # candle) and must not be allowed to enter alone via the bypass.
+      - VolatilityBreakout
       - VWAPDeviation
       - FundingExtreme
       - LeadLag

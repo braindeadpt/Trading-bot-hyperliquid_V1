@@ -29,6 +29,23 @@ class StrategyWeight:
     min_confidence: float = 0.0  # minimum confidence from this strategy to count
 
 
+# v3.1.18: classify every sub-strategy by the type of edge it trades
+# so the ensemble can detect when all "agreeing" signals are really
+# the same market event counted 3x (e.g. SmartMoneyFlow + Donchian +
+# VolatilityBreakout all fire on a single breakout candle).
+STRATEGY_CLASS: Dict[str, str] = {
+    "SmartMoneyFlow":     "trend",
+    "VolatilityBreakout": "trend",
+    "DonchianBreakout":   "trend",
+    "VWAPDeviation":      "revert",
+    "CVDOrderFlow":       "revert",
+    "LiquidationCatcher": "revert",
+    "FundingArbitrage":   "carry",
+    "LeadLag":            "carry",
+    "OrderBookScalper":   "micro",
+}
+
+
 class StrategyEnsemble:
     """Combines signals from multiple strategies into a single ensemble decision.
 
@@ -148,6 +165,33 @@ class StrategyEnsemble:
             return None
 
         agreeing_signals = [s for s in signals if s.side == winning_side]
+
+        # v3.1.18: cross-class agreement gate. A single breakout candle
+        # can fire SmartMoneyFlow + DonchianBreakout + VolatilityBreakout
+        # simultaneously — they are 1 market event counted 3x, not 3
+        # independent votes. Require the agreeing set to span at least
+        # two different strategy classes (e.g. trend + revert) OR a
+        # single strategy to clear the high-conviction bypass.
+        agreeing_classes = {
+            STRATEGY_CLASS.get(s.strategy, "other")
+            for s in agreeing_signals
+        }
+        if len(agreeing_classes) < 2 and winning_count >= 2:
+            # Same-class multi-strategy agreement is correlated noise,
+            # not independent confirmation. Reject unless bypassed below.
+            logger.info(
+                "Ensemble NO SIGNAL %s | path=rejected | reason=single_class_agreement | "
+                "agreeing=%d | classes=%s | strategies=%s",
+                event.symbol,
+                winning_count,
+                sorted(agreeing_classes),
+                [s.strategy for s in agreeing_signals],
+            )
+            # High-conviction bypass can still rescue a single high-
+            # confidence signal. The winning_count >= 2 branch here
+            # means the bypass is not applicable (we have multiple
+            # strategies but all in one class) — return None.
+            return None
 
         # High-conviction bypass: single strategy with raw confidence >= threshold
         single_sig = agreeing_signals[0] if len(agreeing_signals) == 1 else None
