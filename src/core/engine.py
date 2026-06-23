@@ -1349,6 +1349,9 @@ class TradingEngine:
                 "orderbook_bid_ask_ratio": event.orderbook_bid_ask_ratio,
                 "orderbook_largest_bid_wall": event.orderbook_largest_bid_wall,
                 "orderbook_largest_ask_wall": event.orderbook_largest_ask_wall,
+                # v3.1.23: surface ADX to the dashboard so the regime panel
+                # shows real numbers (not "unknown").
+                "adx_14": event.adx_14,
                 # v3.1.15: volume-derived observability (NOT used in strategies)
                 "obv_slope_5m": obv_slope_5m,
                 "mfi_5m": mfi_5m,
