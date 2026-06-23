@@ -2849,7 +2849,10 @@ class TradingEngine:
         self._risk.on_trade_closed(result)
 
         # --- Update Kelly sizer with trade result (Task 4.4) ---
-        self._kelly_sizer.record_trade(result.pnl_pct)
+        # v3.1.17 C10: Kelly expects PnL / capital, not PnL / notional.
+        # Use pnl_pct_capital (computed in execution.close_position) so a
+        # 20%-of-capital position is not over-stated as a 100% return.
+        self._kelly_sizer.record_trade(result.pnl_pct_capital)
 
         # --- Update strategy stats on exit (Task 5.3) ---
         strategy = position.metadata.get("strategy", "unknown")

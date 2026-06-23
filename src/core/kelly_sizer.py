@@ -13,6 +13,13 @@ Where:
   avg_win = average profit of winning trades (as % of capital)
   avg_loss = average loss of losing trades (as % of capital)
 
+v3.1.17 C10: ``record_trade`` now expects ``pnl_pct`` as a fraction of
+**total capital** (e.g. 0.02 = +2% of capital), not a fraction of
+position notional. The engine feeds ``result.pnl_pct_capital`` from
+``ExecutionEngine.close_position``. Using the old PnL/notional value
+for a 20%-of-capital trade would over-state the return by 5x and
+mis-calibrate the Kelly multiplier.
+
 If insufficient history, falls back to base size.
 """
 
