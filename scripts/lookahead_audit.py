@@ -34,7 +34,16 @@ from typing import Iterable, List, Pattern
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PATHS = ("src/strategies", "src/backtest")
+# v3.1.19: scan the full src tree — the timestamp-convention bug fixed
+# in v3.1.16 (close_time vs open_time) lived in src/data/, which was
+# previously outside the audit scope.
+DEFAULT_PATHS = (
+    "src/strategies",
+    "src/backtest",
+    "src/data",
+    "src/core",
+    "src/exchanges",
+)
 
 # ────────────────────────────────────────────────────────────────────
 # Pattern catalogue
@@ -57,17 +66,41 @@ RULES: List[Rule] = [
     ),
     Rule(
         "LOOKAHEAD-002", "HIGH",
-        "future index access (data[i + N] with N>=1)",
-        # Matches `[expr + N]` or `[expr - N]` where N>=1 AND
-        # preceded by a `+` (NOT `-`, which is a previous-element access).
-        # Also matches `candles[i+1]` style tightly.
+        "future index access (data[i + N] with N>=1, or [i + offset])",
+        # Matches `[expr + N]` where N>=1 (positive offset = future bar).
         re.compile(r"\[\s*[A-Za-z_][\w\.]*\s*\+\s*[123456789]\d*\s*\]"),
+    ),
+    Rule(
+        "LOOKAHEAD-002b", "HIGH",
+        "future index access with variable offset ([i + offset])",
+        # v3.1.19: catch variable offsets too — ``candles[i + offset]`` is
+        # still a look-ahead if offset > 0.
+        re.compile(r"\[\s*\w+\s*\+\s*\w+\s*\]"),
     ),
     Rule(
         "LOOKAHEAD-003", "HIGH",
         "future-indexed variable (next_*, future_*, forward_*)",
         re.compile(r"\b(next_[a-z_][\w]*|future_[a-z_][\w]*|forward_[a-z_][\w]*)"),
-        allow_substrings=("next_candle_complete",),  # the DataBus topic name is fine
+        # v3.1.19: the following identifiers are legitimate uses of
+        # ``next_*`` that do not represent look-ahead bias:
+        #   * next_candle_complete — DataBus topic name
+        #   * next_funding_ts, next_funding_time_ms, next_ms — fields
+        #     holding the *next* scheduled funding settlement time
+        #     (a forward timestamp we are walking toward, not peeking at)
+        #   * nextFundingTime — Binance/JSON field name
+        #   * forward_binance_prices, forward_binance_perp_prices — these
+        #     are *publisher* functions that push Binance prices onto
+        #     the DataBus; they don't peek at future data.
+        allow_substrings=(
+            "next_candle_complete",
+            "next_funding_ts",
+            "next_funding_time_ms",
+            "next_ms",
+            "nextFundingTime",
+            "next_reset_remaining_sec",
+            "forward_binance_prices",
+            "forward_binance_perp_prices",
+        ),
     ),
     Rule(
         "LOOKAHEAD-004", "MEDIUM",
@@ -77,12 +110,24 @@ RULES: List[Rule] = [
     Rule(
         "LOOKAHEAD-005", "MEDIUM",
         ".iloc[-N] on a variable (verify N is last-bar, not future)",
-        re.compile(r"\.iloc\(\s*-\s*\d+"),
+        # v3.1.19: .iloc uses square brackets, not parens. .iloc[-1] on
+        # an equity curve is the *last* bar, not a future peek — that
+        # pattern is the common case and should not fail CI. The regex
+        # excludes N=1.
+        re.compile(r"\.iloc\[\s*-((?:[2-9]|[1-9]\d+))"),
     ),
     Rule(
         "LOOKAHEAD-006", "LOW",
         "comment with 'forward' / 'future' (informational)",
         re.compile(r"#.*\b(forward[-_ ]fill|future[-_ ]data|look[-_ ]ahead)\b", re.IGNORECASE),
+    ),
+    Rule(
+        "LOOKAHEAD-007", "MEDIUM",
+        "candle timestamp stored as Binance kline open_time (timestamp_ms = int(k[0]))",
+        # v3.1.19: catches the v3.1.16 bug. Live candles use close_time
+        # (candle_builder convention), so any historical fetcher writing
+        # k[0] to timestamp_ms creates a duplicate row + look-ahead bias.
+        re.compile(r"timestamp_ms\s*=\s*int\(\s*k\s*\[\s*0\s*\]\s*\)"),
     ),
 ]
 
