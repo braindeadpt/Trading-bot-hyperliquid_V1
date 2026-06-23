@@ -211,10 +211,11 @@ tr:hover td { background: var(--panel-hover); }
                                 <th>Sym</th><th>TF</th><th class="num">Open</th><th class="num">High</th>
                                 <th class="num">Low</th><th class="num">Close</th><th class="num">Vol</th>
                                 <th class="num">Buy%</th><th class="num">VWAP</th>
+                                <th class="num">Age</th>
                             </tr>
                         </thead>
                         <tbody id="candles-tbody">
-                            <tr><td colspan="9" class="muted" style="text-align:center;">No candles yet</td></tr>
+                            <tr><td colspan="10" class="muted" style="text-align:center;">No candles yet</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -659,6 +660,20 @@ function renderCandles(rows) {
         const chg = r.close != null && r.open != null ? r.close - r.open : 0;
         const chgClass = chg > 0 ? "up" : chg < 0 ? "down" : "";
         const buyPct = r.buy_volume != null && r.volume > 0 ? (r.buy_volume / r.volume * 100) : null;
+        // v3.1.23: surface candle age so the user can see staleness
+        // (15m/1h candles only update when they complete, so they may be
+        // hours/days old after a restart). Highlight if > 2x the timeframe.
+        const tfSeconds = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600 };
+        const tfSec = tfSeconds[r.timeframe] || 60;
+        let ageText = "--", ageCls = "muted", ageNum = null;
+        if (r.timestamp_ms) {
+            ageNum = (Date.now() - r.timestamp_ms) / 1000;
+            if (ageNum < 1) { ageText = "now"; ageCls = "up"; }
+            else if (ageNum < 60) { ageText = Math.round(ageNum) + "s"; ageCls = "up"; }
+            else if (ageNum < 3600) { ageText = Math.round(ageNum/60) + "m"; ageCls = ageNum > tfSec * 2 ? "down" : "up"; }
+            else if (ageNum < 86400) { ageText = Math.round(ageNum/3600) + "h"; ageCls = "down"; }
+            else { ageText = Math.round(ageNum/86400) + "d"; ageCls = "down"; }
+        }
         return `<tr>
             <td><span class="highlight">${r.symbol}</span></td>
             <td class="muted">${r.timeframe}</td>
@@ -669,6 +684,7 @@ function renderCandles(rows) {
             <td class="num">${fmtNum(r.volume)}</td>
             <td class="num ${buyPct > 60 ? 'up' : buyPct < 40 ? 'down' : ''}">${buyPct != null ? buyPct.toFixed(0) + "%" : "--"}</td>
             <td class="num">$${fmtNum(r.vwap)}</td>
+            <td class="num tiny ${ageCls}">${ageText}</td>
         </tr>`;
     }).join('');
 }

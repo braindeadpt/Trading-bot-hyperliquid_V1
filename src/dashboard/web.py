@@ -290,6 +290,13 @@ class DashboardEmitter:
         last_err = getattr(_engine, "_last_error", None)
         last_events = getattr(_engine, "_last_market_events", {})
 
+        vol_cb = getattr(_engine, "_vol_circuit", None)
+        vol_snapshot = vol_cb.snapshot() if vol_cb is not None else {}
+        vol_blocked = {
+            sym: int(st.get("block_until_ms", 0)) > time.time() * 1000
+            for sym, st in vol_snapshot.items()
+        } if vol_snapshot else {}
+
         recent = []
         for sym, evt in sorted(last_events.items(), key=lambda x: x[1].get("processed_at", 0), reverse=True)[:3]:
             recent.append({
