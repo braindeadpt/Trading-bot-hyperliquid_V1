@@ -235,14 +235,12 @@ class TrendFollow(Strategy):
         long_conditions.append(("macd_positive", macd_positive))
         # 5. Volume surge
         long_conditions.append(("volume_surge", volume_surge))
-        # 6. Buying pressure (imbalance > 0.15) OR no data
-        long_conditions.append(
-            ("buying_pressure", buying_pressure or not imbalance_present)
-        )
-        # 7. OIR confirms long (OIR > 0.6) OR no data
-        long_conditions.append(
-            ("oir_confirms_long", oir_confirms_long or not oir_present)
-        )
+        # 6. Buying pressure (imbalance > 0.15) — v3.1.18: only count if data present
+        if imbalance_present:
+            long_conditions.append(("buying_pressure", buying_pressure))
+        # 7. OIR confirms long (OIR > 0.6) — v3.1.18: only count if data present
+        if oir_present:
+            long_conditions.append(("oir_confirms_long", oir_confirms_long))
         # 8. Funding not extreme negative (not overcrowded short)
         not_overcrowded_short = (
             funding_effective is None or funding_effective > -self.FUNDING_EXTREME
@@ -266,14 +264,12 @@ class TrendFollow(Strategy):
         short_conditions.append(("macd_negative", macd_negative))
         # 5. Volume surge
         short_conditions.append(("volume_surge", volume_surge))
-        # 6. Selling pressure (imbalance < -0.15) OR no data
-        short_conditions.append(
-            ("selling_pressure", selling_pressure or not imbalance_present)
-        )
-        # 7. OIR confirms short (OIR < -0.6) OR no data
-        short_conditions.append(
-            ("oir_confirms_short", oir_confirms_short or not oir_present)
-        )
+        # 6. Selling pressure (imbalance < -0.15) — v3.1.18: only count if data present
+        if imbalance_present:
+            short_conditions.append(("selling_pressure", selling_pressure))
+        # 7. OIR confirms short (OIR < -0.6) — v3.1.18: only count if data present
+        if oir_present:
+            short_conditions.append(("oir_confirms_short", oir_confirms_short))
         # 8. Funding not extreme positive (not overcrowded long)
         not_overcrowded_long = (
             funding_effective is None or funding_effective < self.FUNDING_EXTREME
@@ -285,10 +281,15 @@ class TrendFollow(Strategy):
         # --- Evaluate confluence and generate signal ---
         long_met = sum(1 for _, v in long_conditions if v)
         short_met = sum(1 for _, v in short_conditions if v)
-        total_conditions = len(long_conditions)  # should be 9
+        total_conditions = len(long_conditions)  # up to 9 (may be 7 if OIR/imbalance missing)
 
-        # Minimum 6 of 9 conditions for entry
+        # v3.1.18: min_confluence is now relative to actual conditions
+        # evaluated, so missing data doesn't silently bump the score.
+        # Still require a strong majority of the conditions that fired.
         MIN_CONFLUENCE = 6
+        if total_conditions < MIN_CONFLUENCE:
+            # Not enough observable conditions to make a call.
+            return None
 
         signal: Optional[Signal] = None
 
@@ -372,26 +373,30 @@ class TrendFollow(Strategy):
                     metadata={"stop_price": position.stop_loss_price},
                 )
 
-        # 3. Price crosses back over VWAP (opposite direction)
-        vwap = state.last_vwap
-        if vwap is not None:
-            if position.side == "long" and current_price < vwap:
+        # 3. v3.1.18: trend-structure exit. Previously exited on VWAP
+        # reversal, which kills every trend on the first pullback to
+        # VWAP (often within 1-2R of entry). Now exit only when the
+        # trend itself breaks: close < EMA50 for longs, close > EMA50
+        # for shorts. EMA50 = trend structure intact.
+        ema_slow = state.last_ema50
+        if ema_slow is not None and ema_slow > 0:
+            if position.side == "long" and current_price < ema_slow:
                 return ExitSignal(
                     strategy=self.name,
                     symbol=position.symbol,
                     side="close",
-                    confidence=0.85,
-                    reason="vwap_reversal_long",
-                    metadata={"vwap": vwap, "price": current_price},
+                    confidence=0.9,
+                    reason="ema50_break_long",
+                    metadata={"ema50": ema_slow, "price": current_price},
                 )
-            if position.side == "short" and current_price > vwap:
+            if position.side == "short" and current_price > ema_slow:
                 return ExitSignal(
                     strategy=self.name,
                     symbol=position.symbol,
                     side="close",
-                    confidence=0.85,
-                    reason="vwap_reversal_short",
-                    metadata={"vwap": vwap, "price": current_price},
+                    confidence=0.9,
+                    reason="ema50_break_short",
+                    metadata={"ema50": ema_slow, "price": current_price},
                 )
 
         # 4. Funding flips extreme against position
