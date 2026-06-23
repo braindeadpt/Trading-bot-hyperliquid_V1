@@ -235,6 +235,14 @@ class TradingEngine:
         # that must not interleave with themselves.
         self._cross_symbol_lock = asyncio.Lock()
         self._start_time: Optional[float] = None
+        # v3.1.17 C8: pending flatten request (reason, skip_symbol) is set
+        # inside the per-symbol lock and processed *after* release, so the
+        # cross-symbol flatten call doesn't hold the symbol A lock while
+        # waiting for symbol B's lock (deadlock risk).
+        self._pending_flatten: Optional[Tuple[str, Optional[str]]] = None
+        # v3.1.17 C8: second leg of a FundingArbitrage pair (set inside the
+        # current symbol's lock; processed after release).
+        self._pending_funding_pair: Optional[Signal] = None
 
         # Track which topics we subscribed to so we can unsubscribe on stop
         self._subscribed_callbacks: Dict[str, Any] = {}
@@ -1245,8 +1253,10 @@ class TradingEngine:
                     "DRAWDOWN CIRCUIT BREAKER TRIPPED at %.2f%% — halting new entries",
                     max_dd * 100.0,
                 )
-                # CRIT-010 FIX: Flatten all open positions immediately when circuit breaker trips
-                await self._flatten_all_positions(event.price)
+                # v3.1.17 C8: defer flatten until after releasing the per-symbol
+                # lock so we don't deadlock against another symbol's tick that is
+                # currently waiting for this symbol's lock.
+                self._pending_flatten = ("drawdown_circuit_breaker", symbol)
                 # Also reset the circuit breaker notification flag so it can re-trigger
                 self._circuit_breaker_notified = True
 
@@ -1335,6 +1345,27 @@ class TradingEngine:
 
             # --- 4. Periodic snapshot (throttled) ---
             await self._maybe_save_snapshot()
+
+        # v3.1.17 C8: process any deferred flatten request *after* the
+        # per-symbol lock is released. Acquiring another symbol's lock
+        # while holding this one would risk deadlock against that
+        # symbol's tick coroutine.
+        pending = self._pending_flatten
+        if pending is not None:
+            self._pending_flatten = None
+            reason, skip_symbol = pending
+            try:
+                await self._flatten_all_positions_safe(reason, skip_symbol=skip_symbol)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Deferred flatten failed: %s", exc)
+
+        # v3.1.17 C8: process the second leg of a FundingArbitrage pair
+        # (if queued) outside this symbol's lock.
+        if self._pending_funding_pair is not None:
+            try:
+                await self._process_pending_funding_pair(event)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Deferred funding pair failed: %s", exc)
 
     def _build_market_event(self, symbol: str) -> Optional[MarketEvent]:
         """Assemble a MarketEvent from the latest cached data for *symbol*."""
@@ -1881,6 +1912,13 @@ class TradingEngine:
 
         Only runs when we have funding data for all configured symbols.
         Produces paired signals (long + short) for the engine.
+
+        v3.1.17 C8: the second leg runs *after* the per-symbol lock is
+        released (we already hold the current symbol's lock), so we
+        never try to acquire another symbol's lock while holding this
+        one (deadlock). The first leg is processed inline; the second
+        leg is queued via ``_pending_funding_pair`` and executed by
+        ``_process_pending_funding_pair`` outside the lock.
         """
         # Find the FundingArbitrage strategy instance (direct or inside ensemble)
         arb_strategy = self._find_strategy("FundingArbitrage")
@@ -1924,33 +1962,63 @@ class TradingEngine:
             return
 
         long_sig, short_sig = pair
+        # Use the correct price for each leg to avoid wrong entry_price
+        priced_long = self._price_signal(long_sig)
+        priced_short = self._price_signal(short_sig)
         logger.info(
             "FundingArbitrage PAIR selected — LONG %s @ %.2f, SHORT %s @ %.2f, spread=%.4f%%",
-            long_sig.symbol,
-            self._latest_price.get(long_sig.symbol, type('P', (), {'mid': 0.0})()).mid,
-            short_sig.symbol,
-            self._latest_price.get(short_sig.symbol, type('P', (), {'mid': 0.0})()).mid,
-            (short_sig.metadata.get("funding", 0) - long_sig.metadata.get("funding", 0)) * 100,
+            priced_long.symbol,
+            self._latest_price.get(priced_long.symbol, type('P', (), {'mid': 0.0})()).mid,
+            priced_short.symbol,
+            self._latest_price.get(priced_short.symbol, type('P', (), {'mid': 0.0})()).mid,
+            (priced_short.metadata.get("funding", 0) - priced_long.metadata.get("funding", 0)) * 100,
         )
 
-        # Process both legs through the full pipeline
-        # Use the correct price for each leg to avoid wrong entry_price
-        for sig in (long_sig, short_sig):
-            tick = self._latest_price.get(sig.symbol)
-            if tick is not None:
-                sig = Signal(
-                    strategy=sig.strategy,
-                    symbol=sig.symbol,
-                    side=sig.side,
-                    confidence=sig.confidence,
-                    size_pct=sig.size_pct,
-                    entry_price=tick.mid,
-                    stop_loss_pct=sig.stop_loss_pct,
-                    take_profit_pct=sig.take_profit_pct,
-                    reason=sig.reason,
-                    metadata=sig.metadata,
-                )
-            await self._process_entry_signal(sig, event)
+        # Process the leg whose symbol matches the current lock inline
+        # (we already hold its lock). Queue the other leg for after
+        # the lock is released.
+        current_symbol = event.symbol
+        if priced_long.symbol == current_symbol:
+            await self._process_entry_signal(priced_long, event)
+            self._pending_funding_pair = priced_short
+        elif priced_short.symbol == current_symbol:
+            await self._process_entry_signal(priced_short, event)
+            self._pending_funding_pair = priced_long
+        else:
+            # Neither leg matches the current symbol — process the
+            # first one now and queue the second.
+            await self._process_entry_signal(priced_long, event)
+            self._pending_funding_pair = priced_short
+
+    def _price_signal(self, sig: Signal) -> Signal:
+        """Return a copy of *sig* with ``entry_price`` set to the latest mid."""
+        tick = self._latest_price.get(sig.symbol)
+        if tick is None or tick.mid <= 0:
+            return sig
+        return Signal(
+            strategy=sig.strategy,
+            symbol=sig.symbol,
+            side=sig.side,
+            confidence=sig.confidence,
+            size_pct=sig.size_pct,
+            entry_price=tick.mid,
+            stop_loss_pct=sig.stop_loss_pct,
+            take_profit_pct=sig.take_profit_pct,
+            reason=sig.reason,
+            metadata=sig.metadata,
+        )
+
+    async def _process_pending_funding_pair(self, event: MarketEvent) -> None:
+        """Process the second leg of a FundingArbitrage pair (after lock release)."""
+        sig = self._pending_funding_pair
+        if sig is None:
+            return
+        self._pending_funding_pair = None
+        priced = self._price_signal(sig)
+        try:
+            await self._process_entry_signal(priced, event)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("FundingArbitrage second leg failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Cooldown manager (Task 2.4)
@@ -2801,22 +2869,56 @@ class TradingEngine:
     async def _flatten_all_positions(self, _current_price: float) -> None:
         """Emergency liquidation of all open positions (circuit breaker).
 
-        Uses per-symbol prices from _latest_price cache to avoid
-        cross-symbol price corruption (FIX: trade #22 bug).
+        Kept for backward compatibility — forwards to
+        :meth:`_flatten_all_positions_safe` which acquires each
+        symbol's per-symbol lock independently. The caller MUST NOT
+        hold any symbol's lock when invoking this method.
+        """
+        await self._flatten_all_positions_safe(
+            reason="circuit_breaker_drawdown", skip_symbol=None,
+        )
+
+    async def _flatten_all_positions_safe(
+        self,
+        reason: str,
+        skip_symbol: Optional[str] = None,
+    ) -> None:
+        """Flatten every open position, acquiring each per-symbol lock.
+
+        v3.1.17 C8: acquires ``_get_symbol_lock(symbol)`` for every
+        position before exiting it. This prevents double-exit races
+        where two coroutines exit the same position and double-count
+        PnL in the risk manager, Kelly sizer, and strategy_pnl.
+
+        ``skip_symbol`` is the symbol whose lock the caller already
+        holds; we acquire and exit every *other* symbol.
         """
         positions = await self._portfolio.positions
         if not positions:
             return
-        logger.critical("FLATTENING %d position(s) due to circuit breaker", len(positions))
-        for pos in positions.values():
+        logger.critical(
+            "FLATTENING %d position(s) — reason=%s", len(positions), reason,
+        )
+        for sym in list(positions.keys()):
+            if sym == skip_symbol:
+                continue
             try:
-                tick = self._latest_price.get(pos.symbol)
-                if tick is None or tick.mid <= 0:
-                    logger.warning("No price for %s — skipping flatten", pos.symbol)
-                    continue
-                await self._execute_exit(pos, tick.mid, reason="circuit_breaker_drawdown")
+                async with self._get_symbol_lock(sym):
+                    # Re-check: a concurrent tick may have closed this
+                    # position while we were waiting for the lock.
+                    current_positions = await self._portfolio.positions
+                    current = current_positions.get(sym)
+                    if current is None:
+                        continue
+                    tick = self._latest_price.get(sym)
+                    if tick is None or tick.mid <= 0:
+                        logger.warning("No price for %s — skipping flatten", sym)
+                        continue
+                    await self._execute_exit(
+                        current, tick.mid, reason=f"flatten:{reason}",
+                    )
             except Exception as exc:  # noqa: BLE001
-                logger.exception("Flatten failed for %s: %s", pos.symbol, exc)
+                logger.exception("Flatten failed for %s: %s", sym, exc)
 
     # ------------------------------------------------------------------
     # State persistence
