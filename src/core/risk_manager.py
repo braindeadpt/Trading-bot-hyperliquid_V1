@@ -85,6 +85,30 @@ it is not used directly in the current implementation.
             config.get("risk.max_daily_trades", self.MAX_DAILY_TRADES)
         )
 
+        # v3.1.22: read leverage from config. Capped at 20x as an
+        # absolute safety floor — a misconfigured 1000x leverage would
+        # liquidate on the first 0.1% move.
+        config_leverage = safe_float(config.get("risk.leverage_max", 1.0))
+        self._leverage_max = max(1.0, min(config_leverage, 20.0))
+
+        # v3.1.22: per-trade risk budget is 1/3 of the daily loss
+        # budget, so a worst-case 3-loss streak on the same day
+        # still keeps us under the daily CB. Configurable via
+        # risk.per_trade_risk_fraction_of_daily_loss (default 0.33).
+        daily_loss_pct = self._max_daily_loss_pct
+        per_trade_frac = safe_float(
+            config.get("risk.per_trade_risk_fraction_of_daily_loss", 33.0)
+        ) / 100.0
+        per_trade_frac = clamp(per_trade_frac, 0.05, 1.0)
+        if daily_loss_pct > 0.0:
+            capped_per_trade = daily_loss_pct * per_trade_frac
+            # Don't override a larger per_trade_risk_pct in config, but
+            # do clamp it down if the per-day budget can't support it.
+            max_per_trade = min(self._per_trade_risk_pct, capped_per_trade)
+            self._per_trade_risk_pct_effective = max_per_trade
+        else:
+            self._per_trade_risk_pct_effective = self._per_trade_risk_pct
+
         gov = config.get("strategy.portfolio_governance", {})
         self._max_directional_exposure_pct = safe_float(
             gov.get("max_directional_exposure_pct", self.MAX_DIRECTIONAL_EXPOSURE_PCT * 100.0)
@@ -330,14 +354,21 @@ it is not used directly in the current implementation.
     ) -> float:
         """Return the base-asset position size (notional / price).
 
-        Formula:
-          risk_amount        = capital × per_trade_risk_pct
-          stop_distance      = max(2 × atr_pct, min_stop_distance_pct)
-          notional_risk      = risk_amount / stop_distance  (ATR risk ceiling)
-          notional_conviction = capital × signal.size_pct  (strategy / Kelly sizing)
-          max_notional       = capital × max_position_size_pct
-          notional_final     = min(notional_risk, notional_conviction, max_notional)
-          size               = notional_final / entry_price
+        Formula (v3.1.22):
+          risk_amount         = capital × per_trade_risk_pct_effective
+          stop_distance       = max(2 × atr_pct, min_stop_distance_pct)
+          notional_risk       = risk_amount / stop_distance  (ATR risk ceiling)
+          notional_conviction = capital × signal.size_pct    (strategy / Kelly sizing)
+          max_notional        = capital × max_position_size_pct × leverage_max
+          notional_final      = min(notional_risk, notional_conviction, max_notional)
+          size                = notional_final / entry_price
+
+        Leverage is now applied to the *max_notional* ceiling so a
+        ``leverage_max: 10`` config actually allows up to 10x
+        exposure. The per-trade risk budget is capped to
+        ``per_trade_risk_fraction_of_daily_loss × max_daily_loss_pct``
+        (default 1/3) so a worst-case 3-loss day still keeps the
+        daily CB from tripping on a single streak.
 
         ``size_pct`` (and Kelly adjustments applied upstream) may reduce size below
         the risk ceiling but never increase above it.
@@ -370,8 +401,8 @@ it is not used directly in the current implementation.
                 size_pct,
             )
 
-        # Risk amount in USD
-        risk_amount = capital_f * self._per_trade_risk_pct
+        # Risk amount in USD (capped to ≤ 1/3 of daily loss budget)
+        risk_amount = capital_f * self._per_trade_risk_pct_effective
 
         # Stop distance = 2×ATR, floored at 0.5%
         stop_distance = max(2.0 * atr_pct_f, self.MIN_STOP_DISTANCE_PCT)
@@ -382,26 +413,50 @@ it is not used directly in the current implementation.
         # Strategy conviction target (Kelly multiplier applied upstream in engine)
         notional_conviction = capital_f * size_pct if size_pct > 0.0 else notional_risk
 
-        # Hard cap on position notional (v3.1.16 C6: read from config)
-        max_notional = capital_f * self._max_position_size_pct
+        # v3.1.22: hard cap on position notional now scales with
+        # leverage. max_position_size_pct is the *margin* cap (5%
+        # of capital as collateral); multiplying by leverage gives
+        # the *notional* cap (50% of capital at 10x).
+        max_notional = capital_f * self._max_position_size_pct * self._leverage_max
 
         notional_final = min(notional_risk, notional_conviction, max_notional)
 
         # Convert to base-asset size
         size = safe_divide(notional_final, price, 0.0)
 
-        logger.debug(
-            "Sizing: capital=%.2f risk_notional=%.2f conviction_notional=%.2f "
-            "final_notional=%.2f max_notional=%.2f stop=%.4f size_pct=%.4f size=%.6f",
-            capital_f,
-            notional_risk,
-            notional_conviction,
-            notional_final,
-            max_notional,
-            stop_distance,
-            size_pct,
-            size,
-        )
+        # v3.1.22: surface the effective leverage in logs so operators
+        # can confirm the config is actually being applied.
+        if self._leverage_max > 1.01:
+            effective_lev = safe_divide(notional_final, capital_f * self._max_position_size_pct, 0.0)
+            logger.debug(
+                "Sizing: capital=%.2f risk_notional=%.2f conviction_notional=%.2f "
+                "final_notional=%.2f max_notional=%.2f (margin_cap=%.2f%% x lev=%.2fx) "
+                "effective_lev=%.2fx stop=%.4f size_pct=%.4f size=%.6f",
+                capital_f,
+                notional_risk,
+                notional_conviction,
+                notional_final,
+                max_notional,
+                self._max_position_size_pct * 100.0,
+                self._leverage_max,
+                effective_lev,
+                stop_distance,
+                size_pct,
+                size,
+            )
+        else:
+            logger.debug(
+                "Sizing: capital=%.2f risk_notional=%.2f conviction_notional=%.2f "
+                "final_notional=%.2f max_notional=%.2f stop=%.4f size_pct=%.4f size=%.6f",
+                capital_f,
+                notional_risk,
+                notional_conviction,
+                notional_final,
+                max_notional,
+                stop_distance,
+                size_pct,
+                size,
+            )
         return size
 
     # ------------------------------------------------------------------
