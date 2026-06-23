@@ -31,6 +31,10 @@ class StrategyGovernor:
     def disabled_strategies(self) -> Set[str]:
         return set(self._disabled)
 
+    @property
+    def last_metrics(self) -> Dict[str, Dict[str, float]]:
+        return dict(self._last_metrics)
+
     def is_enabled(self, strategy_name: str) -> bool:
         if not self._enabled:
             return True
@@ -92,6 +96,8 @@ class StrategyGovernor:
                     metrics_out.get(name, {}).get("sharpe", 0.0),
                     int(metrics_out.get(name, {}).get("trades", 0)),
                 )
+
+        self._last_metrics = metrics_out
 
         self._last_metrics = metrics_out
 

@@ -69,6 +69,7 @@ class TradeExit:
     pnl_pct: float
     exit_reason: str
     status: str = "closed"
+    funding_paid: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -359,6 +360,7 @@ class Database:
             ("entry_market_snapshot",   "TEXT"),
             ("signal_metadata",         "TEXT"),
             ("entry_fee",               "REAL DEFAULT 0.0"),
+            ("funding_paid",            "REAL DEFAULT 0.0"),
         ]
         for col_name, col_type in new_columns:
             if col_name not in cols:
@@ -510,6 +512,7 @@ class Database:
         + entry_market_snapshot, signal_metadata) when provided.
         v3.1.16 C4: also persists entry_fee so close-after-restart can
         correctly deduct the entry commission from realized PnL.
+        v3.1.23 dashboard: funding_paid column (default 0) tracked.
         """
         sql = """
             INSERT INTO trades (
@@ -517,9 +520,10 @@ class Database:
                 strategy, sub_strategy, status,
                 entry_adx, entry_oir, entry_funding, entry_predicted_funding,
                 entry_bid_ask_imbalance, entry_volume_1m,
-                entry_market_snapshot, signal_metadata, entry_fee
+                entry_market_snapshot, signal_metadata, entry_fee,
+                funding_paid
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         with self._write_lock:
             conn = self._conn()
@@ -530,7 +534,7 @@ class Database:
                 entry.entry_predicted_funding, entry.entry_bid_ask_imbalance,
                 entry.entry_volume_1m,
                 entry.entry_market_snapshot, entry.signal_metadata,
-                entry.entry_fee,
+                entry.entry_fee, 0.0,
             ))
             trade_id = cur.lastrowid
             conn.commit()
@@ -547,7 +551,8 @@ class Database:
                 pnl_usd = ?,
                 pnl_pct = ?,
                 exit_reason = ?,
-                status = ?
+                status = ?,
+                funding_paid = COALESCE(?, funding_paid)
             WHERE id = ?
         """
         with self._write_lock:
@@ -556,6 +561,7 @@ class Database:
                 exit_update.exit_price, exit_update.exit_time,
                 exit_update.pnl_usd, exit_update.pnl_pct,
                 exit_update.exit_reason, exit_update.status,
+                getattr(exit_update, "funding_paid", None),
                 exit_update.trade_id,
             ))
             conn.commit()
@@ -580,6 +586,19 @@ class Database:
         with self._write_lock:
             conn = self._conn()
             conn.execute(sql, params)
+            conn.commit()
+
+    def update_trade_funding(self, trade_id: int, funding_paid: float) -> None:
+        """v3.1.23: write the running funding total for an open trade.
+
+        Called by the engine's funding-settlement loop every hour that a
+        position is open. The column is also written on close via
+        ``update_trade_exit`` so the final value is preserved.
+        """
+        sql = "UPDATE trades SET funding_paid = ? WHERE id = ?"
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, (funding_paid, trade_id))
             conn.commit()
 
     def get_open_trades(self, strategy: Optional[str] = None) -> List[Dict[str, Any]]:

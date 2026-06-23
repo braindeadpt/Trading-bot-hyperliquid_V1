@@ -593,6 +593,7 @@ class ExecutionEngine:
             pnl_pct=pnl_pct,
             exit_reason=reason,
             status="closed",
+            funding_paid=funding_total,
         )
         self._db.update_trade_exit(exit_record)
 

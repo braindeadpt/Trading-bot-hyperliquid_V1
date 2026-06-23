@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional, Callable
 from flask import Flask, jsonify, request, abort, render_template
 from flask_socketio import SocketIO, emit
 
+from src.utils.helpers import safe_float
+
 logger = logging.getLogger(__name__)
 
 # Globals set by main.py
@@ -283,12 +285,11 @@ class DashboardEmitter:
         self._safe_emit("funding_update", payload)
 
     def _emit_engine_monitor(self) -> None:
-        """Engine health - ticks/sec, total ticks, last error."""
+        """Engine health - ticks/sec, total ticks, last error, regime, reconciliation."""
         stats = getattr(_engine, "_tick_stats", {})
         last_err = getattr(_engine, "_last_error", None)
         last_events = getattr(_engine, "_last_market_events", {})
 
-        # Last 3 events with timestamps
         recent = []
         for sym, evt in sorted(last_events.items(), key=lambda x: x[1].get("processed_at", 0), reverse=True)[:3]:
             recent.append({
@@ -297,7 +298,6 @@ class DashboardEmitter:
                 "age_ms": int((time.time() - evt.get("processed_at", 0)) * 1000),
             })
 
-        # Collect all strategy names (ensemble + sub-strategies)
         all_strategy_names = []
         for s in getattr(_engine, "_strategies", []):
             all_strategy_names.append(getattr(s, "name", "unknown"))
@@ -306,6 +306,41 @@ class DashboardEmitter:
                 for sub_name, sub in sub_strategies.items():
                     all_strategy_names.append(getattr(sub, "name", sub_name))
 
+        regime_per_symbol: Dict[str, str] = {}
+        adx_per_symbol: Dict[str, Optional[float]] = {}
+        for sym, evt in last_events.items():
+            adx = evt.get("adx_14")
+            if adx is not None and isinstance(adx, (int, float)):
+                adx_per_symbol[sym] = float(adx)
+                if adx >= 25.0:
+                    regime_per_symbol[sym] = "trend"
+                elif adx <= 20.0:
+                    regime_per_symbol[sym] = "range"
+                else:
+                    regime_per_symbol[sym] = "transition"
+            else:
+                regime_per_symbol[sym] = "unknown"
+
+        recon_task = getattr(_engine, "_reconcile_task", None)
+        ws_task = getattr(_engine, "_ws_health_check_task", None)
+        reconcile_status = {
+            "running": recon_task is not None and not recon_task.done(),
+            "enabled": recon_task is not None,
+        }
+        ws_health_status = {
+            "running": ws_task is not None and not ws_task.done(),
+            "enabled": ws_task is not None,
+        }
+
+        governor = getattr(_engine, "_strategy_governor", None)
+        governor_info = {
+            "disabled": sorted(governor.disabled_strategies) if governor else [],
+            "active_count": sum(
+                1 for s in all_strategy_names
+                if governor is None or s not in governor.disabled_strategies
+            ) if governor else len(all_strategy_names),
+        }
+
         self._safe_emit("engine_monitor", {
             "ticks_per_second": stats.get("per_second", 0),
             "total_ticks": stats.get("total", 0),
@@ -313,6 +348,11 @@ class DashboardEmitter:
             "recent_events": recent,
             "symbols": getattr(_engine, "_symbols", []),
             "strategies": all_strategy_names,
+            "regime_per_symbol": regime_per_symbol,
+            "adx_per_symbol": adx_per_symbol,
+            "reconcile": reconcile_status,
+            "ws_health": ws_health_status,
+            "governor": governor_info,
         })
 
     def _emit_candles(self) -> None:
@@ -343,8 +383,12 @@ class DashboardEmitter:
 
     def _emit_strategies(self) -> None:
         """Strategy state — ensemble + sub-strategies, params, last signal, signals today."""
+        from src.strategies.ensemble import STRATEGY_CLASS
         strategies = getattr(_engine, "_strategies", [])
         sig_hist = getattr(_engine, "_signal_history", [])
+        governor = getattr(_engine, "_strategy_governor", None)
+        governor_metrics = governor.last_metrics if governor else {}
+        governor_disabled = governor.disabled_strategies if governor else set()
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         def _build_strategy_info(s):
@@ -354,9 +398,14 @@ class DashboardEmitter:
                 if sig.get("strategy") == name and sig.get("time", "").startswith(today_str)
             )
             last = next((sig for sig in sig_hist if sig.get("strategy") == name), None)
+            strat_class = STRATEGY_CLASS.get(name, "other")
+            is_governed = name in governor_disabled
+            metrics = governor_metrics.get(name, {})
             return {
                 "name": name,
-                "enabled": getattr(s, "enabled", True),
+                "enabled": getattr(s, "enabled", True) and not is_governed,
+                "governor_disabled": is_governed,
+                "strategy_class": strat_class,
                 "description": (getattr(s, "__doc__", "") or "No description").split("\n")[0][:80],
                 "params": str(getattr(s, "params", {})),
                 "last_signal_time": last.get("time") if last else None,
@@ -364,12 +413,13 @@ class DashboardEmitter:
                 "last_signal_confidence": last.get("confidence") if last else None,
                 "last_signal_status": last.get("status") if last else None,
                 "signals_today": today_count,
+                "sharpe_30d": safe_float(metrics.get("sharpe"), 0.0),
+                "trades_30d": int(safe_float(metrics.get("trades"), 0.0)),
             }
 
         result = []
         for s in strategies:
             result.append(_build_strategy_info(s))
-            # If this is an ensemble, also emit its sub-strategies
             sub_strategies = getattr(s, "_strategies", None)
             if sub_strategies and isinstance(sub_strategies, dict):
                 for sub in sub_strategies.values():
@@ -454,6 +504,7 @@ class DashboardEmitter:
                     "strategy": r.get("strategy"),
                     "exit_reason": r.get("exit_reason"),
                     "status": r.get("status"),
+                    "funding_paid": safe_float(r.get("funding_paid"), 0.0),
                 })
             self._safe_emit("trades", result)
         except Exception:
@@ -601,9 +652,15 @@ def create_app(config: Dict[str, Any]) -> tuple:
             data_bus_lag = None
             bus = getattr(_engine, "_bus", None)
             if bus is not None and hasattr(bus, "last_publish_age_sec"):
-                data_bus_lag = bus.last_publish_age_sec()
+                try:
+                    data_bus_lag = bus.last_publish_age_sec("price:BTC")
+                except TypeError:
+                    data_bus_lag = None
             vol_cb = getattr(_engine, "_vol_circuit", None)
             fb = getattr(_engine, "_funding_blackout", None)
+            reconcile_task = getattr(_engine, "_reconcile_task", None)
+            ws_task = getattr(_engine, "_ws_health_check_task", None)
+            governor = getattr(_engine, "_strategy_governor", None)
             body.update({
                 "running": running,
                 "uptime_sec": getattr(_engine, "uptime_sec", 0),
@@ -617,6 +674,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 "ws_healthy": bool(
                     getattr(getattr(_engine, "_hl_ws_client", None), "is_healthy", True)
                 ),
+                "reconcile_running": reconcile_task is not None and not reconcile_task.done(),
+                "ws_health_loop_running": ws_task is not None and not ws_task.done(),
+                "governor_disabled": sorted(governor.disabled_strategies) if governor else [],
             })
             if not running:
                 body["status"] = "starting"

@@ -276,11 +276,11 @@ tr:hover td { background: var(--panel-hover); }
                             <tr>
                                 <th>Time</th><th>Sym</th><th>Side</th><th class="num">Entry</th>
                                 <th class="num">Exit</th><th class="num">Size</th><th class="num">PnL</th>
-                                <th class="num">PnL%</th><th>Strat</th><th>Reason</th><th>Sts</th>
+                                <th class="num">PnL%</th><th class="num">Fund</th><th>Strat</th><th>Reason</th><th>Sts</th>
                             </tr>
                         </thead>
                         <tbody id="trades-tbody">
-                            <tr><td colspan="11" class="muted" style="text-align:center;">Loading...</td></tr>
+                            <tr><td colspan="12" class="muted" style="text-align:center;">Loading...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -339,6 +339,40 @@ tr:hover td { background: var(--panel-hover); }
                 <div class="panel-body" style="padding:4px 6px; max-height:91px; overflow-y:auto;">
                     <div id="decisions-list" class="stream-list"><span class="muted">No decisions yet</span></div>
                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- ROW 3.5: v3.1.23 Regime + Risk Gates + Governor                  -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="grid" style="margin-top:var(--gap);">
+    <div class="g-3">
+        <div class="panel" style="max-height:240px;">
+            <div class="panel-header">Regime <span class="dim">ADX per symbol</span></div>
+            <div class="panel-body" style="padding:6px 8px;">
+                <div class="mini-stats" id="regime-panel">
+                    <div class="muted" style="text-align:center;padding:20px 0;">Waiting...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="g-5">
+        <div class="panel" style="max-height:240px;">
+            <div class="panel-header">Risk Gates <span class="dim">Soft + hard (vol CB / funding blackout / recon / WS)</span></div>
+            <div class="panel-body" style="padding:6px 8px;">
+                <div class="mini-stats" id="risk-gates-panel">
+                    <div class="muted" style="text-align:center;padding:20px 0;">Waiting...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="g-4">
+        <div class="panel" style="max-height:240px;">
+            <div class="panel-header">Governor <span class="dim">Auto-disable negative Sharpe (30d)</span></div>
+            <div class="panel-body" id="governor-panel" style="padding:6px 8px; max-height:216px; overflow-y:auto;">
+                <span class="muted">Waiting...</span>
             </div>
         </div>
     </div>
@@ -673,6 +707,70 @@ function renderEngine(data) {
     }
 }
 
+// ── Regime (v3.1.23) ──
+function renderRegime(data) {
+    const div = document.getElementById("regime-panel");
+    if (!div) return;
+    const regime = data && data.regime_per_symbol ? data.regime_per_symbol : {};
+    const adx = data && data.adx_per_symbol ? data.adx_per_symbol : {};
+    const symbols = Object.keys(regime);
+    if (!symbols.length) {
+        div.innerHTML = '<div class="muted" style="text-align:center;padding:20px 0;">No data yet</div>';
+        return;
+    }
+    div.innerHTML = symbols.map(sym => {
+        const r = regime[sym] || "unknown";
+        const a = adx[sym];
+        const cls = r === "trend" ? "up" : r === "range" ? "down" : "yellow";
+        const aStr = a != null ? a.toFixed(1) : "--";
+        return `<div class="mini-row"><span class="mini-label">${sym}</span><span class="mini-value ${cls}">${r.toUpperCase()} (ADX ${aStr})</span></div>`;
+    }).join('');
+}
+
+// ── Risk Gates (v3.1.23) ──
+function renderRiskGates(data) {
+    const div = document.getElementById("risk-gates-panel");
+    if (!div) return;
+    const liveClientHealthy = !!(statusUpdate.ws_healthy);
+    const reconcileRunning = !!(data && data.reconcile && data.reconcile.running);
+    const wsHealthRunning = !!(data && data.ws_health && data.ws_health.running);
+    const fbActive = !!(data && data.funding_blackout_active);
+    const cb = !!(data && data.circuit_breaker);
+    const cbClass = cb ? "down" : "up";
+    const fbClass = fbActive ? "yellow" : "up";
+    const reconClass = reconcileRunning ? "up" : "muted";
+    const wsClass = wsHealthRunning ? "up" : "muted";
+    const liveClass = liveClientHealthy ? "up" : "down";
+    div.innerHTML = `
+        <div class="mini-row"><span class="mini-label">Circuit Breaker</span><span class="mini-value ${cbClass}">${cb ? "TRIPPED" : "OK"}</span></div>
+        <div class="mini-row"><span class="mini-label">Funding Blackout</span><span class="mini-value ${fbClass}">${fbActive ? "ACTIVE" : "OK"}</span></div>
+        <div class="mini-row"><span class="mini-label">Vol Circuit</span><span class="mini-value muted">see /health</span></div>
+        <div class="mini-row"><span class="mini-label">Reconciliation</span><span class="mini-value ${reconClass}">${reconcileRunning ? "RUNNING" : "OFF"}</span></div>
+        <div class="mini-row"><span class="mini-label">WS Health Loop</span><span class="mini-value ${wsClass}">${wsHealthRunning ? "RUNNING" : "OFF"}</span></div>
+        <div class="mini-row"><span class="mini-label">HL WS Feed</span><span class="mini-value ${liveClass}">${liveClientHealthy ? "HEALTHY" : "STALE"}</span></div>
+    `;
+}
+
+// ── Governor (v3.1.23) ──
+function renderGovernor(data) {
+    const div = document.getElementById("governor-panel");
+    if (!div) return;
+    const gov = data && data.governor ? data.governor : {};
+    const disabled = gov.disabled || [];
+    const activeCount = gov.active_count != null ? gov.active_count : 0;
+    if (!disabled.length) {
+        div.innerHTML = `<div class="muted" style="text-align:center;padding:8px 0;">All strategies active (${activeCount})</div>`;
+        return;
+    }
+    div.innerHTML = `<div class="muted" style="font-size:9px;margin-bottom:4px;">${activeCount} active, ${disabled.length} disabled by governor</div>` +
+        disabled.map(name => {
+            return `<div class="strategy-card inactive" style="padding:4px 6px;margin-bottom:3px;">
+                <div class="strategy-name" style="font-size:10px;color:var(--down);">${name} OFF</div>
+                <div class="strategy-desc" style="font-size:9px;">Sharpe < 0 over 30d</div>
+            </div>`;
+        }).join('');
+}
+
 // ── Strategies ──
 function renderStrategies(data) {
     const div = document.getElementById("strategies-panel");
@@ -680,14 +778,23 @@ function renderStrategies(data) {
     div.innerHTML = data.map(s => {
         const enabled = s.enabled !== false;
         const statusClass = s.last_signal_status === "executed" ? "pill-executed" : s.last_signal_status === "approved" ? "pill-approved" : s.last_signal_status === "rejected" ? "pill-rejected" : "pill-pending";
+        const stratClass = s.strategy_class || "other";
+        const classColors = {trend: "var(--up)", revert: "var(--accent)", carry: "var(--yellow)", micro: "var(--accent2)"};
+        const classColor = classColors[stratClass] || "var(--muted)";
+        const govTag = s.governor_disabled ? '<span style="color:var(--down);font-size:8px;margin-left:4px;">GOV-OFF</span>' : '';
+        const sharpeStr = s.trades_30d > 0 ? `Sharpe ${s.sharpe_30d >= 0 ? "+" : ""}${s.sharpe_30d.toFixed(2)}` : '';
         return `<div class="strategy-card ${enabled ? 'active' : 'inactive'}" onclick="showStrategyDetail('${s.name}')">
-            <div class="strategy-name">${s.name} ${enabled ? "●" : "○"}</div>
+            <div class="strategy-name">${s.name} ${enabled ? "●" : "○"} ${govTag}</div>
             <div class="strategy-desc">${s.description || ""}</div>
+            <div style="margin-top:2px; font-size:9px; color:var(--dim);">
+                <span style="color:${classColor};font-weight:600;">${stratClass.toUpperCase()}</span>
+                | ${s.signals_today || 0} today
+                | 30d: ${s.trades_30d || 0} trades ${sharpeStr}
+            </div>
             <div style="margin-top:2px; font-size:9px; color:var(--dim);">
                 Last: <span class="${s.last_signal_side === 'long' ? 'up' : s.last_signal_side === 'short' ? 'down' : ''}">${s.last_signal_side ? s.last_signal_side.toUpperCase() : "never"}</span>
                 ${s.last_signal_confidence != null ? `(${(s.last_signal_confidence * 100).toFixed(0)}%)` : ""}
                 <span class="pill ${statusClass}">${s.last_signal_status || "PENDING"}</span>
-                | Today: ${s.signals_today || 0}
             </div>
         </div>`;
     }).join('');
@@ -759,7 +866,7 @@ function renderPositions(data) {
 function renderTrades(data) {
     const tbody = document.getElementById("trades-tbody");
     if (!data || data.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="11" class="muted" style="text-align:center;">No trades yet</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="12" class="muted" style="text-align:center;">No trades yet</td></tr>';
         return;
     }
     tbody.innerHTML = data.map(t => {
@@ -771,7 +878,10 @@ function renderTrades(data) {
         const pnlDisplay = isOpen ? "<span class='muted'>—</span>" : ((pnl >= 0 ? "+" : "") + "$" + Math.abs(pnl).toFixed(2));
         const pnlPctDisplay = isOpen ? "<span class='muted'>—</span>" : ((t.pnl_pct >= 0 ? "+" : "") + (t.pnl_pct || 0).toFixed(2) + "%");
         const statusBadge = isOpen ? '<span class="pill pill-pending">OPEN</span>' : '<span class="pill pill-executed">CLOSED</span>';
-        return `<tr style="${isOpen ? 'background:rgba(0,229,255,0.03);' : ''}">
+        const fund = typeof t.funding_paid === "number" ? t.funding_paid : 0;
+        const fundDisplay = fund === 0 ? "<span class='muted'>0.00</span>" : ((fund >= 0 ? "+" : "") + "$" + Math.abs(fund).toFixed(2));
+        const fundClass = fund > 0 ? "down" : (fund < 0 ? "up" : "muted");
+        return `<tr style="${isOpen ? 'background:rgba(0,229,255,0.03);' : ''}" title="Funding paid: $${fund.toFixed(4)}">
             <td class="muted tiny">${entryTime}</td>
             <td><span class="highlight">${t.symbol}</span></td>
             <td class="${sideClass}">${t.side ? t.side.toUpperCase() : "--"}</td>
@@ -780,6 +890,7 @@ function renderTrades(data) {
             <td class="num">${fmtNum(t.size, 6)}</td>
             <td class="num ${pnlClass}">${pnlDisplay}</td>
             <td class="num ${pnlClass}">${pnlPctDisplay}</td>
+            <td class="num tiny ${fundClass}">${fundDisplay}</td>
             <td class="muted tiny">${t.strategy || "?"}</td>
             <td class="muted tiny">${t.exit_reason || (isOpen ? "● Active" : "")}</td>
             <td>${statusBadge}</td>
@@ -839,7 +950,7 @@ socket.on("status", (data) => {
 let _lastPortfolio = null;
 let _lastEngine = null;
 socket.on("portfolio", (data) => { _lastPortfolio = data; updateKPIs(data, _lastEngine); });
-socket.on("engine_monitor", (data) => { _lastEngine = data; renderEngine(data); updateKPIs(_lastPortfolio, data); });
+socket.on("engine_monitor", (data) => { _lastEngine = data; renderEngine(data); renderRegime(data); renderRiskGates(data); renderGovernor(data); updateKPIs(_lastPortfolio, data); });
 socket.on("live_data", (data) => { renderLiveData(data); renderVolIndicators(data); });
 socket.on("candles", (data) => renderCandles(data));
 socket.on("signals", (data) => renderSignals(data));
