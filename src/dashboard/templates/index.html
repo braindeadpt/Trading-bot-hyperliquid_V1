@@ -736,6 +736,11 @@ function renderRiskGates(data) {
     const wsHealthRunning = !!(data && data.ws_health && data.ws_health.running);
     const fbActive = !!(data && data.funding_blackout_active);
     const cb = !!(data && data.circuit_breaker);
+    const volBlocked = (data && data.vol_circuit_blocked) || {};
+    const volAnyBlocked = Object.values(volBlocked).some(v => v);
+    const volSnapshot = (data && data.vol_circuit) || {};
+    const volSamples = volSnapshot.BTC ? volSnapshot.BTC.samples : 0;
+    const volClass = volAnyBlocked ? "yellow" : (volSamples > 0 ? "up" : "muted");
     const cbClass = cb ? "down" : "up";
     const fbClass = fbActive ? "yellow" : "up";
     const reconClass = reconcileRunning ? "up" : "muted";
@@ -744,9 +749,9 @@ function renderRiskGates(data) {
     div.innerHTML = `
         <div class="mini-row"><span class="mini-label">Circuit Breaker</span><span class="mini-value ${cbClass}">${cb ? "TRIPPED" : "OK"}</span></div>
         <div class="mini-row"><span class="mini-label">Funding Blackout</span><span class="mini-value ${fbClass}">${fbActive ? "ACTIVE" : "OK"}</span></div>
-        <div class="mini-row"><span class="mini-label">Vol Circuit</span><span class="mini-value muted">see /health</span></div>
-        <div class="mini-row"><span class="mini-label">Reconciliation</span><span class="mini-value ${reconClass}">${reconcileRunning ? "RUNNING" : "OFF"}</span></div>
-        <div class="mini-row"><span class="mini-label">WS Health Loop</span><span class="mini-value ${wsClass}">${wsHealthRunning ? "RUNNING" : "OFF"}</span></div>
+        <div class="mini-row"><span class="mini-label">Vol Circuit (BTC)</span><span class="mini-value ${volClass}">${volAnyBlocked ? "BLOCKED" : (volSamples > 0 ? `OK (${volSamples} samples)` : "WARMING")}</span></div>
+        <div class="mini-row"><span class="mini-label">Reconciliation</span><span class="mini-value ${reconClass}">${reconcileRunning ? "RUNNING" : "OFF (paper)"}</span></div>
+        <div class="mini-row"><span class="mini-label">WS Health Loop</span><span class="mini-value ${wsClass}">${wsHealthRunning ? "RUNNING" : "OFF (paper)"}</span></div>
         <div class="mini-row"><span class="mini-label">HL WS Feed</span><span class="mini-value ${liveClass}">${liveClientHealthy ? "HEALTHY" : "STALE"}</span></div>
     `;
 }

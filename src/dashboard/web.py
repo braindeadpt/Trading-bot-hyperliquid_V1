@@ -353,6 +353,8 @@ class DashboardEmitter:
             "reconcile": reconcile_status,
             "ws_health": ws_health_status,
             "governor": governor_info,
+            "vol_circuit_blocked": vol_blocked,
+            "vol_circuit": vol_snapshot,
         })
 
     def _emit_candles(self) -> None:
@@ -658,6 +660,11 @@ def create_app(config: Dict[str, Any]) -> tuple:
                     data_bus_lag = None
             vol_cb = getattr(_engine, "_vol_circuit", None)
             fb = getattr(_engine, "_funding_blackout", None)
+            vol_snapshot = vol_cb.snapshot() if vol_cb is not None else {}
+            vol_blocked = {
+                sym: int(st.get("block_until_ms", 0)) > time.time() * 1000
+                for sym, st in vol_snapshot.items()
+            } if vol_snapshot else {}
             reconcile_task = getattr(_engine, "_reconcile_task", None)
             ws_task = getattr(_engine, "_ws_health_check_task", None)
             governor = getattr(_engine, "_strategy_governor", None)
@@ -667,7 +674,8 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 "last_tick_age_sec": last_tick,
                 "data_bus_lag_sec": data_bus_lag,
                 "circuit_breaker": bool(cb),
-                "vol_circuit": vol_cb.snapshot() if vol_cb is not None else {},
+                "vol_circuit": vol_snapshot,
+                "vol_circuit_blocked": vol_blocked,
                 "funding_blackout_active": bool(
                     fb.is_blocked() if fb is not None else False
                 ),
