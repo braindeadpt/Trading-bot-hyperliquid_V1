@@ -138,6 +138,12 @@ class TradingEngine:
         self._trailing_enabled = bool(trail.get("enabled", True))
         self._trailing_activation_pct = safe_float(trail.get("activation_pct", 0.005))
         self._trailing_distance_pct = safe_float(trail.get("trail_pct", 0.003))
+        raw_trail_exclude = trail.get("exclude_strategies", [])
+        self._trailing_exclude_strategies: Set[str] = (
+            {str(s) for s in raw_trail_exclude}
+            if isinstance(raw_trail_exclude, list)
+            else set()
+        )
 
         # Symbols to trade (from config — "symbols" takes priority, falls back to "assets")
         raw = config.get("symbols")
@@ -961,10 +967,47 @@ class TradingEngine:
         return _on_binance_perp_price
 
     def _make_ctx_callback(self, symbol: str):
-        """Factory: returns an async callback for ctx:* topics."""
+        """Factory: returns an async callback for ctx:* topics.
+
+        v3.1.17 C5: on every ctx update, settle funding for the open
+        position so cash + daily_pnl reflect the hourly payment.
+        """
         async def _on_ctx(ctx: HlAssetCtx) -> None:
             self._latest_ctx[symbol] = ctx
+            # Apply funding for the open position (no-op if none).
+            await self._settle_funding_for_symbol(symbol, ctx)
         return _on_ctx
+
+    async def _settle_funding_for_symbol(
+        self,
+        symbol: str,
+        ctx: HlAssetCtx,
+    ) -> None:
+        """Settle funding for the open position (if any).
+
+        Hyperliquid broadcasts a fresh ``funding_rate`` once per hour.
+        ``ctx.funding_rate`` is the *hourly* rate as a fraction of
+        notional. We apply it to the open position's cash + daily_pnl
+        via ``PortfolioState.apply_funding``.
+        """
+        if ctx is None or ctx.funding_rate is None:
+            return
+        try:
+            positions = await self._portfolio.positions
+        except Exception:
+            return
+        pos = positions.get(symbol)
+        if pos is None:
+            return
+        try:
+            await self._portfolio.apply_funding(
+                symbol=symbol,
+                funding_rate=ctx.funding_rate,
+                position_size=pos.size,
+                side=pos.side,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Funding settlement failed for %s: %s", symbol, exc)
 
     def _make_orderbook_callback(self, symbol: str):
         """Factory: returns an async callback for orderbook:* topics."""
@@ -2584,6 +2627,9 @@ class TradingEngine:
         current_price: float,
     ) -> None:
         """Ratchet stop-loss once unrealised profit exceeds activation threshold."""
+        if self._trailing_excluded_for_position(position):
+            return
+
         entry = position.entry_price
         if entry <= 0:
             return
@@ -2607,6 +2653,18 @@ class TradingEngine:
             trail["trough_price"] = trough
             new_stop = trough * (1.0 + self._trailing_distance_pct)
             await self._portfolio.update_stop_loss(position.symbol, new_stop, "short")
+
+    def _trailing_excluded_for_position(self, position: Position) -> bool:
+        """True when sub-strategy manages its own TP/exit (no engine trailing)."""
+        if not self._trailing_exclude_strategies:
+            return False
+        meta = position.metadata or {}
+        sub = str(
+            meta.get("sub_strategy")
+            or meta.get("original_strategy")
+            or ""
+        )
+        return sub in self._trailing_exclude_strategies
 
     async def _execute_exit(
         self,

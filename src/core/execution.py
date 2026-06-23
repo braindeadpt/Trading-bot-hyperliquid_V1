@@ -44,6 +44,8 @@ class TradeResult:
     reason: str
     timestamp_ms: int
     entry_fee: float = 0.0  # fee paid on entry (for portfolio cash tracking)
+    funding_total: float = 0.0  # accumulated funding cashflow over the hold
+    pnl_pct_capital: float = 0.0  # pnl_pct as fraction of total capital (for Kelly)
 
 
 class ExecutionEngine:
@@ -110,6 +112,12 @@ class ExecutionEngine:
         self._rest_client: Optional[Any] = None
         self._live_client: Optional[Any] = None
         self._live_signing_ready: bool = False
+
+        # v3.1.17 C10: cache initial capital for Kelly's pnl_pct_capital
+        # (Kelly expects PnL/capital, not PnL/notional).
+        self._initial_capital: float = safe_float(
+            config.get("risk.initial_capital", config.get("backtest.initial_capital", 10_000.0))
+        )
 
         # In-memory open trade index: symbol → TradeResult
         self._open_trades: Dict[str, TradeResult] = {}
@@ -461,6 +469,14 @@ class ExecutionEngine:
         entry_fee = safe_float(open_trade.entry_fee, 0.0)
         pnl_usd = self._compute_pnl(position, fill_exit) - exit_fee - entry_fee
         pnl_pct = safe_divide(pnl_usd, notional, 0.0)
+        # v3.1.17 C5: read accumulated funding for the trade journal.
+        funding_total = safe_float(
+            (position.metadata or {}).get("funding_total", 0.0), 0.0
+        )
+        # v3.1.17 C10: also compute PnL as a fraction of total capital
+        # (Kelly expects PnL/capital, not PnL/notional).
+        capital = safe_float(getattr(self, "_initial_capital", 0.0), 0.0)
+        pnl_pct_capital = safe_divide(pnl_usd, capital, 0.0) if capital > 0 else 0.0
 
         # Update DB
         exit_record = TradeExit(
@@ -489,6 +505,8 @@ class ExecutionEngine:
             status="closed",
             reason=reason,
             timestamp_ms=now_ms,
+            funding_total=funding_total,
+            pnl_pct_capital=pnl_pct_capital,
         )
 
         logger.info(

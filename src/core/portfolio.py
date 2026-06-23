@@ -272,6 +272,59 @@ class PortfolioState:
     # Position lifecycle
     # ------------------------------------------------------------------
 
+    async def apply_funding(
+        self,
+        symbol: str,
+        funding_rate: float,
+        position_size: float,
+        side: str,
+    ) -> float:
+        """Apply a funding payment to the open position's cash balance.
+
+        Hyperliquid settles funding hourly. When ``funding_rate > 0``,
+        longs pay shorts; when ``funding_rate < 0`` shorts pay longs.
+
+        Args:
+            symbol:        Position symbol (logged only).
+            funding_rate:  Hourly funding rate as a fraction of notional
+                           (e.g. 0.0001 = 0.01% per hour).
+            position_size: Position size in base units (e.g. BTC).
+            side:          ``"long"`` or ``"short"``.
+
+        Returns:
+            The cashflow applied (negative = paid, positive = received).
+        """
+        rate_f = safe_float(funding_rate, 0.0)
+        size_f = safe_float(position_size, 0.0)
+        if rate_f == 0.0 or size_f == 0.0:
+            return 0.0
+
+        notional = size_f * rate_f  # funding_paid magnitude in USD
+        side_norm = str(side).lower()
+        if side_norm == "long":
+            cashflow = -notional      # longs pay when funding > 0
+        elif side_norm == "short":
+            cashflow = notional       # shorts receive when funding > 0
+        else:
+            return 0.0
+
+        async with self._lock:
+            await self._check_daily_reset()
+            self._cash += cashflow
+            self._daily_pnl += cashflow
+            # Accumulate per-position funding for trade journal.
+            pos = self._positions.get(symbol)
+            if pos is not None:
+                pos.metadata["funding_total"] = safe_float(
+                    pos.metadata.get("funding_total", 0.0), 0.0,
+                ) + cashflow
+
+        logger.debug(
+            "Funding applied: %s %s rate=%s notional=%.4f cashflow=%.4f",
+            symbol, side, rate_f, notional, cashflow,
+        )
+        return cashflow
+
     async def add_position(
         self,
         position: Position,
