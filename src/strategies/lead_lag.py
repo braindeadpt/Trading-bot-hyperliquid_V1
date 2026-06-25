@@ -234,7 +234,7 @@ class LeadLag(Strategy):
             return None
         now_ms = event.timestamp_ms
         if now_ms - bn_spot_ts > self.SPOT_STALE_MAX_MS:
-            logger.debug(
+            logger.info(
                 "LeadLag/basis SKIP %s — stale Binance spot tick (%dms old)",
                 event.symbol, now_ms - bn_spot_ts,
             )
@@ -336,7 +336,7 @@ class LeadLag(Strategy):
 
         now_ms = event.timestamp_ms
         if now_ms - bn_ts > self.MAX_BINANCE_STALE_MS:
-            logger.debug(
+            logger.info(
                 "LeadLag SKIP %s — stale Binance perp tick (%dms old)",
                 event.symbol,
                 now_ms - bn_ts,
@@ -366,7 +366,7 @@ class LeadLag(Strategy):
 
         spread = event.orderbook_spread_pct
         if spread is None or spread > self.MAX_HL_SPREAD_PCT:
-            logger.debug(
+            logger.info(
                 "LeadLag SKIP %s — HL spread too wide (%.4f%% > %.4f%%)",
                 event.symbol,
                 (spread or -1.0) * 100.0,
@@ -391,7 +391,7 @@ class LeadLag(Strategy):
             return None
 
         if not self._oir_confirms(side, event.orderbook_oir):
-            logger.debug(
+            logger.info(
                 "LeadLag SKIP %s %s — OIR not aligned (oir=%s)",
                 event.symbol,
                 side,
@@ -402,7 +402,7 @@ class LeadLag(Strategy):
         gap_abs = abs(gap)
         stop_loss_pct, take_profit_pct = self._risk_reward(gap_abs)
         if stop_loss_pct is None or take_profit_pct is None:
-            logger.debug(
+            logger.info(
                 "LeadLag SKIP %s %s — R:R < %.1f (gap=%.4f%% stop=%.4f%% tp=%.4f%%)",
                 event.symbol,
                 side,

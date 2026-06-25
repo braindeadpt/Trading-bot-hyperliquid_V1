@@ -144,13 +144,13 @@ def build_ensemble(cfg: Any) -> StrategyEnsemble:
     ens = cfg.get("strategy.ensemble", {}) or {}
     exclude = ens.get("high_conviction_exclude")
     if exclude is None:
-        exclude = ["VolatilityBreakout", "VWAPDeviation"]
+        exclude = ["VWAPDeviation"]
     return StrategyEnsemble(
         strategies=subs,
         weights=active_weights,
         threshold=float(ens.get("threshold", cfg.get("strategy.ensemble.threshold", 0.18))),
         min_strategies_agreeing=int(
-            ens.get("min_agreeing", cfg.get("strategy.ensemble.min_agreeing", 2))
+            ens.get("min_agreeing", cfg.get("strategy.ensemble.min_agreeing", 1))
         ),
         high_conviction_threshold=float(
             ens.get(

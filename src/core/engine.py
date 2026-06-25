@@ -3141,6 +3141,9 @@ class TradingEngine:
                                 volume=row.volume,
                                 timestamp_ms=row.timestamp_ms,
                                 open_interest=row.oi_total,
+                                buy_volume=getattr(row, "buy_volume", 0.0) or 0.0,
+                                sell_volume=getattr(row, "sell_volume", 0.0) or 0.0,
+                                trade_count=getattr(row, "trade_count", 0) or 0,
                             )
                             candles.append(candle)
                         if candles:

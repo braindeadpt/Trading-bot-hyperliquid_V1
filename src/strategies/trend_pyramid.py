@@ -240,6 +240,12 @@ class TrendPyramid(Strategy):
 
         metrics = self._trend_metrics(state)
         if metrics is None:
+            if event.timestamp_ms - getattr(state, "_last_warmup_log_ms", 0) > 600_000:
+                state._last_warmup_log_ms = event.timestamp_ms
+                logger.info(
+                    "TrendPyramid SKIP %s — insufficient data (15m=%d/1h=%d)",
+                    event.symbol, len(state.candles_15m), len(state.candles_1h),
+                )
             return None
 
         now_ms = event.timestamp_ms
@@ -260,6 +266,16 @@ class TrendPyramid(Strategy):
         )
         if sig is not None:
             state.last_signal_ms = now_ms
+        elif event.timestamp_ms - getattr(state, "_last_reject_log_ms", 0) > 600_000:
+            state._last_reject_log_ms = event.timestamp_ms
+            side = "long" if ema_fast > ema_slow else "short" if ema_fast < ema_slow else "flat"
+            pb = abs(event.price - ema_fast) / ema_fast if ema_fast > 0 else 0
+            logger.info(
+                "TrendPyramid SKIP %s — side=%s pb=%.3f%% (need<%.3f%%) vol=%s (need<%.2f) adx=%.1f (need>%.1f)",
+                event.symbol, side, pb * 100, self.PULLBACK_THRESHOLD_PCT * 100,
+                f"{vol_ratio:.2f}" if vol_ratio else "N/A", self.PULLBACK_VOL_MAX,
+                adx, self.MIN_ADX,
+            )
         return sig
 
     def on_position(

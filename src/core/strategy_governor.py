@@ -19,8 +19,8 @@ class StrategyGovernor:
         gov = config.get("strategy.strategy_governance", {}) or {}
         self._enabled = bool(gov.get("enabled", True))
         self._lookback_days = int(gov.get("lookback_days", 30))
-        self._min_trades = int(gov.get("min_trades", 10))
-        self._min_sharpe = safe_float(gov.get("min_sharpe", 0.0))
+        self._min_trades = int(gov.get("min_trades", 30))
+        self._min_sharpe = safe_float(gov.get("min_sharpe", -1.0))
         self._eval_interval_ms = int(gov.get("eval_interval_ms", 3_600_000))
         self._db = db
         self._disabled: Set[str] = set()

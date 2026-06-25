@@ -165,7 +165,7 @@ class SpotPerpCarry(Strategy):
         ):
             basis = self._basis_pct(event.price, event.binance_mid)
             if abs(basis) > self.BASIS_STOP_PCT * 0.5:
-                logger.debug(
+                logger.info(
                     "SpotPerpCarry %s SKIP — basis %.4f%% > %.4f%% (half-stop)",
                     event.symbol,
                     basis * 100.0,
@@ -186,7 +186,7 @@ class SpotPerpCarry(Strategy):
         if self.BASIS_STOP_PCT > 0:
             rr = safe_divide(expected_gross, self.BASIS_STOP_PCT, 0.0)
             if rr < 1.0:
-                logger.debug(
+                logger.info(
                     "SpotPerpCarry %s SKIP — R:R=%.2f < 1.0 (funding=%.5f/h stop=%.4f)",
                     event.symbol, rr, funding, self.BASIS_STOP_PCT,
                 )

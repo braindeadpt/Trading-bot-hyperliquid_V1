@@ -110,6 +110,12 @@ class VolatilityBreakout(Strategy):
 
         state.squeeze_active = squeeze_ok
         if not squeeze_ok or lower is None or upper is None or middle is None:
+            if event.timestamp_ms - getattr(state, "_last_squeeze_log_ms", 0) > 600_000:
+                state._last_squeeze_log_ms = event.timestamp_ms
+                logger.info(
+                    "VolatilityBreakout SKIP %s — no squeeze (bbw_p=%.0f%%)",
+                    event.symbol, bbw_pct,
+                )
             return None
 
         price = event.price
@@ -128,7 +134,7 @@ class VolatilityBreakout(Strategy):
             if ema_fast is None or ema_slow is None:
                 return None
             if side == "long" and not (price > ema_fast and ema_fast > ema_slow):
-                logger.debug(
+                logger.info(
                     "VolatilityBreakout SKIP %s long — trend misaligned "
                     "(price=%.2f ema%d=%.2f ema%d=%.2f)",
                     event.symbol,
@@ -140,7 +146,7 @@ class VolatilityBreakout(Strategy):
                 )
                 return None
             if side == "short" and not (price < ema_fast and ema_fast < ema_slow):
-                logger.debug(
+                logger.info(
                     "VolatilityBreakout SKIP %s short — trend misaligned "
                     "(price=%.2f ema%d=%.2f ema%d=%.2f)",
                     event.symbol,
@@ -154,7 +160,7 @@ class VolatilityBreakout(Strategy):
 
         adx = event.adx_14
         if adx is not None and (adx < self.MIN_ADX or adx > self.MAX_ADX):
-            logger.debug(
+            logger.info(
                 "VolatilityBreakout SKIP %s — ADX=%.1f outside [%.1f, %.1f]",
                 event.symbol,
                 adx,
@@ -165,7 +171,7 @@ class VolatilityBreakout(Strategy):
 
         _, vol_ratio = calculate_volume_ratio(candles, lookback=24)
         if vol_ratio is None or vol_ratio < self.VOLUME_SURGE:
-            logger.debug(
+            logger.info(
                 "VolatilityBreakout SKIP %s — vol_ratio=%s (need >= %.2f)",
                 event.symbol,
                 f"{vol_ratio:.2f}" if vol_ratio is not None else "N/A",

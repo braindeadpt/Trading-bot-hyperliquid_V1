@@ -133,14 +133,14 @@ class LiquidationCatcher(Strategy):
 
         # Check if we have liquidation data
         if liq_notional is None or liq_side is None:
-            logger.debug(
+            logger.info(
                 "LiquidationCatcher SKIP %s — no liquidation data available",
                 event.symbol,
             )
             return None
 
         if self.REQUIRE_REAL_LIQUIDATION and event.liquidation_data_source != "binance":
-            logger.debug(
+            logger.info(
                 "LiquidationCatcher SKIP %s — require binance liquidations (source=%s)",
                 event.symbol,
                 event.liquidation_data_source,
@@ -153,7 +153,7 @@ class LiquidationCatcher(Strategy):
 
         # Check minimum count (avoid single large liquidation)
         if liq_count is not None and liq_count < self.MIN_LIQUIDATION_COUNT:
-            logger.debug(
+            logger.info(
                 "LiquidationCatcher SKIP %s — count=%d < min=%d",
                 event.symbol, liq_count, self.MIN_LIQUIDATION_COUNT,
             )
@@ -163,10 +163,10 @@ class LiquidationCatcher(Strategy):
 
         # Throttle: avoid chasing multiple cascades
         if state.last_signal_ms > 0 and event.timestamp_ms - state.last_signal_ms < self.SIGNAL_THROTTLE_MS:
-            logger.debug(
+            remaining_min = (self.SIGNAL_THROTTLE_MS - (event.timestamp_ms - state.last_signal_ms)) // 60_000
+            logger.info(
                 "LiquidationCatcher SKIP %s — throttle active (%d min remaining)",
-                event.symbol,
-                (self.SIGNAL_THROTTLE_MS - (event.timestamp_ms - state.last_signal_ms)) // 60_000,
+                event.symbol, remaining_min,
             )
             return None
 

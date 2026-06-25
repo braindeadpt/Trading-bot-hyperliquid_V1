@@ -16,7 +16,11 @@ from typing import Dict, List, Optional, Any, Tuple
 
 @dataclass(frozen=True)
 class Candle:
-    """OHLCV candle with optional funding and open-interest fields."""
+    """OHLCV candle with optional funding and open-interest fields.
+
+    v3.1.24: added buy_volume, sell_volume, trade_count for CVDOrderFlow
+    divergence detection and bid_ask_imbalance computation.
+    """
     symbol: str
     timestamp_ms: int
     open: float
@@ -27,6 +31,9 @@ class Candle:
     funding_rate: Optional[float] = None
     oi_total: Optional[float] = None
     oi_delta: Optional[float] = None
+    buy_volume: float = 0.0
+    sell_volume: float = 0.0
+    trade_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -115,12 +122,14 @@ class PortfolioSnapshot:
 CANDLE_COLUMNS: Tuple[str, ...] = (
     "symbol", "timestamp_ms", "open", "high", "low", "close",
     "volume", "funding_rate", "oi_total", "oi_delta",
+    "buy_volume", "sell_volume", "trade_count",
 )
 
 CANDLE_INSERT_SQL = (
     "INSERT OR REPLACE INTO {table} "
-    "(symbol, timestamp_ms, open, high, low, close, volume, funding_rate, oi_total, oi_delta) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "(symbol, timestamp_ms, open, high, low, close, volume, funding_rate, oi_total, oi_delta, "
+    "buy_volume, sell_volume, trade_count) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 
@@ -193,6 +202,7 @@ class Database:
             self._migrate_portfolio_table()
             self._migrate_trades_table()
             self._migrate_decision_audit_table()
+            self._migrate_candle_volume_columns()
             self._create_indexes()
 
     def _create_candle_tables(self) -> None:
@@ -375,6 +385,28 @@ class Database:
         """No-op for now; placeholder for future decision_audit columns."""
         return
 
+    def _migrate_candle_volume_columns(self) -> None:
+        """Add buy_volume, sell_volume, trade_count to all candle tables."""
+        for table in self.TIMEFRAME_TABLES.values():
+            existing = {
+                row[1] for row in self._conn().execute(
+                    f"PRAGMA table_info({table})"
+                ).fetchall()
+            }
+            new_cols = [
+                ("buy_volume",  "REAL DEFAULT 0"),
+                ("sell_volume", "REAL DEFAULT 0"),
+                ("trade_count", "INTEGER DEFAULT 0"),
+            ]
+            for col_name, col_type in new_cols:
+                if col_name not in existing:
+                    try:
+                        self._conn().execute(
+                            f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+
     def _create_indexes(self) -> None:
         cur = self._cursor()
         cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);")
@@ -485,6 +517,7 @@ class Database:
         return (
             c.symbol, c.timestamp_ms, c.open, c.high, c.low, c.close,
             c.volume, c.funding_rate, c.oi_total, c.oi_delta,
+            c.buy_volume, c.sell_volume, c.trade_count,
         )
 
     @staticmethod
@@ -500,6 +533,9 @@ class Database:
             funding_rate=row["funding_rate"],
             oi_total=row["oi_total"],
             oi_delta=row["oi_delta"],
+            buy_volume=row["buy_volume"] if "buy_volume" in row.keys() else 0.0,
+            sell_volume=row["sell_volume"] if "sell_volume" in row.keys() else 0.0,
+            trade_count=row["trade_count"] if "trade_count" in row.keys() else 0,
         )
 
     def _resolve_table(self, timeframe: str) -> str:

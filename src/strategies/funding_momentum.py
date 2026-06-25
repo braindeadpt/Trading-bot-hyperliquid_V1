@@ -228,8 +228,20 @@ class FundingMomentum(Strategy):
         elif funding < -self.FUNDING_FLIP_THRESHOLD:
             current_side = "short"
         else:
+            if event.timestamp_ms - getattr(state, "_last_reject_log_ms", 0) > 600_000:
+                state._last_reject_log_ms = event.timestamp_ms
+                logger.info(
+                    "FundingMomentum SKIP %s — funding=%.5f below flip threshold %.5f",
+                    event.symbol, funding, self.FUNDING_FLIP_THRESHOLD,
+                )
             return None
         if current_side == prev_side:
+            if event.timestamp_ms - getattr(state, "_last_reject_log_ms", 0) > 600_000:
+                state._last_reject_log_ms = event.timestamp_ms
+                logger.info(
+                    "FundingMomentum SKIP %s — funding=%.5f same side as previous (%s)",
+                    event.symbol, funding, prev_side,
+                )
             return None
 
         # OI direction
@@ -245,6 +257,12 @@ class FundingMomentum(Strategy):
         # Need enough 1h candles for EMA50 + ATR
         if len(state.candles_1h) < self.EMA_SLOW + 1 \
                 or len(state.candles_1h) < self.ATR_PERIOD + 1:
+            if event.timestamp_ms - getattr(state, "_last_reject_log_ms", 0) > 600_000:
+                state._last_reject_log_ms = event.timestamp_ms
+                logger.info(
+                    "FundingMomentum SKIP %s — insufficient 1h candles (%d/%d)",
+                    event.symbol, len(state.candles_1h), self.EMA_SLOW + 1,
+                )
             return None
 
         closes_1h = [c.close for c in state.candles_1h]
@@ -262,6 +280,12 @@ class FundingMomentum(Strategy):
         # ADX
         adx = safe_float(event.adx_14, 0.0)
         if adx < self.MIN_ADX:
+            if event.timestamp_ms - getattr(state, "_last_reject_log_ms", 0) > 600_000:
+                state._last_reject_log_ms = event.timestamp_ms
+                logger.info(
+                    "FundingMomentum SKIP %s %s — ADX=%.1f < %.1f",
+                    event.symbol, current_side, adx, self.MIN_ADX,
+                )
             return None
 
         # Stop and TP

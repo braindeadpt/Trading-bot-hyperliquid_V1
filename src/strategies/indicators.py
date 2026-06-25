@@ -10,7 +10,11 @@ from typing import Dict, List, Optional, Tuple
 
 @dataclass(frozen=True)
 class Candle:
-    """OHLCV candle with optional OI and timestamp."""
+    """OHLCV candle with optional OI, volume split, and timestamp.
+
+    v3.1.24: added buy_volume, sell_volume, trade_count for CVDOrderFlow
+    and bid_ask_imbalance computation.
+    """
     open: float
     high: float
     low: float
@@ -18,6 +22,9 @@ class Candle:
     volume: float
     timestamp_ms: int
     open_interest: Optional[float] = None
+    buy_volume: float = 0.0
+    sell_volume: float = 0.0
+    trade_count: int = 0
 
 
 def calculate_vwap(candles: List[Candle]) -> Optional[float]:
