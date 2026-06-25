@@ -453,6 +453,9 @@ class BacktestEngine:
             volume=c.volume,
             timestamp_ms=c.timestamp_ms,
             open_interest=c.oi_total,
+            buy_volume=getattr(c, "buy_volume", 0.0),
+            sell_volume=getattr(c, "sell_volume", 0.0),
+            trade_count=getattr(c, "trade_count", 0),
         )
 
     def _build_market_event(

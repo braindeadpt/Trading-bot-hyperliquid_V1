@@ -1210,6 +1210,9 @@ class TradingEngine:
                     funding_rate=float(getattr(candle, 'funding', 0)),
                     oi_total=float(getattr(candle, 'oi_close', 0)),
                     oi_delta=float(getattr(candle, 'oi_delta', 0)),
+                    buy_volume=float(getattr(candle, 'buy_volume', 0)),
+                    sell_volume=float(getattr(candle, 'sell_volume', 0)),
+                    trade_count=int(getattr(candle, 'trade_count', 0)),
                 )
                 self._db.save_candle(db_candle, tf_name)
             except Exception as exc:
