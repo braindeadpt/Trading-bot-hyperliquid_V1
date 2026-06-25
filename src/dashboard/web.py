@@ -646,9 +646,11 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
     @app.route("/")
     def index():
+        symbols = sorted(_allowed_symbols()) if _allowed_symbols() else ["BTC", "ETH", "SOL"]
         return render_template(
             "index.html",
             auth_required=_auth_enabled and bool(_dashboard_token),
+            symbols=symbols,
         )
 
     @app.route("/health")
@@ -917,6 +919,100 @@ def create_app(config: Dict[str, Any]) -> tuple:
             return jsonify(rows)
         except Exception:
             return jsonify([])
+
+    # ── Chart endpoints ──
+
+    VALID_TFS = frozenset(["1m", "5m", "15m", "1h"])
+
+    def _allowed_symbols() -> frozenset:
+        """Return the set of symbols configured in the engine."""
+        symbols = getattr(_engine, "_symbols", None)
+        if symbols:
+            return frozenset(symbols)
+        return frozenset()
+
+    @app.route("/api/candles")
+    def api_candles():
+        if _engine is None:
+            return jsonify([]), 503
+        db = _get_db()
+        if db is None:
+            return jsonify([]), 503
+
+        symbol = (request.args.get("symbol", "") or "").strip().upper()
+        tf = (request.args.get("tf", "") or "").strip()
+        limit_str = (request.args.get("limit", "") or "").strip()
+
+        # Whitelist symbol
+        allowed = _allowed_symbols()
+        if not allowed:
+            return jsonify({"error": "No symbols configured"}), 400
+        if symbol not in allowed:
+            return jsonify({"error": f"Invalid symbol '{symbol}'. Allowed: {sorted(allowed)}"}), 400
+
+        # Whitelist timeframe
+        if tf not in VALID_TFS:
+            return jsonify({"error": f"Invalid tf '{tf}'. Allowed: {sorted(VALID_TFS)}"}), 400
+
+        # Parse limit (safe int)
+        try:
+            limit = max(1, min(int(limit_str), 1000)) if limit_str else 200
+        except (ValueError, TypeError):
+            limit = 200
+
+        try:
+            candles = db.get_candles(symbol, tf, limit=limit)
+            result = [
+                {
+                    "time": int(c.timestamp_ms / 1000),
+                    "open": c.open,
+                    "high": c.high,
+                    "low": c.low,
+                    "close": c.close,
+                    "volume": c.volume,
+                }
+                for c in candles
+            ]
+            return jsonify(result)
+        except Exception as exc:
+            logger.error("api_candles error: %s", exc)
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/trades_chart")
+    def api_trades_chart():
+        """Trades for chart markers — filtered by symbol when provided."""
+        if _engine is None:
+            return jsonify([])
+        db = _get_db()
+        if db is None:
+            return jsonify([])
+
+        symbol = (request.args.get("symbol", "") or "").strip().upper()
+        limit_str = (request.args.get("limit", "") or "").strip()
+
+        allowed = _allowed_symbols()
+        if symbol and symbol not in allowed:
+            return jsonify({"error": f"Invalid symbol '{symbol}'"}), 400
+
+        try:
+            limit = max(1, min(int(limit_str), 500)) if limit_str else 200
+        except (ValueError, TypeError):
+            limit = 200
+
+        try:
+            if symbol:
+                sql = "SELECT * FROM trades WHERE symbol = ? ORDER BY entry_time DESC LIMIT ?"
+                params = (symbol, limit)
+            else:
+                sql = "SELECT * FROM trades ORDER BY entry_time DESC LIMIT ?"
+                params = (limit,)
+            with db._conn():
+                cur = db._conn().execute(sql, params)
+                rows = [dict(r) for r in cur.fetchall()]
+            return jsonify(rows)
+        except Exception as exc:
+            logger.error("api_trades_chart error: %s", exc)
+            return jsonify([]), 500
 
     @app.route("/api/metrics")
     def api_metrics():

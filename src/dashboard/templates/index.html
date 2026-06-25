@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Hyperliquid Trading Bot Dashboard</title>
 <script src="/socket.io.min.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <link rel="stylesheet" href="/static/dashboard.css?v=6">
 <style>
 /* Inline fallback — guaranteed to apply */
@@ -417,6 +418,36 @@ tr:hover td { background: var(--panel-hover); }
     </div>
 </div>
 
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SECTION: CHARTS — Candlestick + trades overlay              -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="section-label section-market">
+    <span class="bar"></span><span class="text">Chart</span><span class="line"></span>
+</div>
+<div class="grid">
+    <div class="g-12">
+        <div class="panel" style="max-height:450px;">
+            <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                <span>Chart <span class="dim">Candlestick + Trades</span></span>
+                <div style="display:flex;gap:6px;align-items:center;">
+                    <select id="chart-symbol" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:10px;height:20px;">
+                    </select>
+                    <select id="chart-tf" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:10px;height:20px;">
+                        <option value="1m">1m</option>
+                        <option value="5m" selected>5m</option>
+                        <option value="15m">15m</option>
+                        <option value="1h">1h</option>
+                    </select>
+                    <span class="live-dot"></span>
+                </div>
+            </div>
+            <div class="panel-body" style="padding:4px;">
+                <div id="chart-container" style="width:100%;height:380px;"><span class="muted" style="text-align:center;display:block;padding:100px 0;">Loading chart...</span></div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div id="auth-gate" class="modal-overlay">
     <div class="modal-box" style="max-width:360px;">
         <div class="modal-header">
@@ -444,6 +475,7 @@ tr:hover td { background: var(--panel-hover); }
 
 <script>
 const AUTH_REQUIRED = {{ auth_required|default(false)|tojson }};
+const DASHBOARD_SYMBOLS = {{ symbols|default(["BTC", "ETH", "SOL"])|tojson }};
 
 function getDashboardToken() {
     const params = new URLSearchParams(window.location.search);
@@ -1083,6 +1115,155 @@ function closeStrategyModal(e) {
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') document.getElementById('strategy-modal').classList.remove('active');
 });
+
+// ═══════════════════════════════════════════════════════════════════
+//  Chart — lightweight-charts candlestick + trade markers
+// ═══════════════════════════════════════════════════════════════════
+
+let chart = null;
+let candleSeries = null;
+let volumeSeries = null;
+let chartSymbol = "BTC";
+let chartTf = "5m";
+let chartRefreshTimer = null;
+
+function initChart() {
+    const container = document.getElementById("chart-container");
+    if (!container) return;
+    container.innerHTML = "";
+
+    chart = LightweightCharts.createChart(container, {
+        layout: { background: { type: "solid", color: "#0d1117" }, textColor: "#8b949e" },
+        grid: { vertLines: { color: "#1c2128" }, horzLines: { color: "#1c2128" } },
+        timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#30363d" },
+        rightPriceScale: { borderColor: "#30363d" },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        handleScroll: true,
+        handleScale: true,
+    });
+
+    candleSeries = chart.addCandlestickSeries({
+        upColor: "#3fb950", downColor: "#f85149",
+        borderUpColor: "#3fb950", borderDownColor: "#f85149",
+        wickUpColor: "#3fb950", wickDownColor: "#f85149",
+    });
+
+    volumeSeries = chart.addHistogramSeries({
+        priceFormat: { type: "volume" },
+        priceScaleId: "volume",
+    });
+    chart.priceScale("volume").applyOptions({
+        scaleMargins: { top: 0.8, bottom: 0 },
+    });
+
+    // Populate symbol select
+    const symSelect = document.getElementById("chart-symbol");
+    if (symSelect) {
+        const symbols = DASHBOARD_SYMBOLS || ["BTC", "ETH", "SOL"];
+        symbols.forEach(s => {
+            const opt = document.createElement("option");
+            opt.value = s; opt.textContent = s;
+            if (s === chartSymbol) opt.selected = true;
+            symSelect.appendChild(opt);
+        });
+        symSelect.addEventListener("change", () => {
+            chartSymbol = symSelect.value;
+            loadChartData();
+        });
+    }
+
+    const tfSelect = document.getElementById("chart-tf");
+    if (tfSelect) {
+        tfSelect.addEventListener("change", () => {
+            chartTf = tfSelect.value;
+            loadChartData();
+        });
+    }
+
+    // Initial load
+    loadChartData();
+
+    // Periodic refresh every 10s
+    if (chartRefreshTimer) clearInterval(chartRefreshTimer);
+    chartRefreshTimer = setInterval(loadChartData, 10000);
+}
+
+async function loadChartData() {
+    if (!candleSeries || !volumeSeries) return;
+    try {
+        const [candleRes, tradeRes] = await Promise.all([
+            authFetch(`/api/candles?symbol=${encodeURIComponent(chartSymbol)}&tf=${encodeURIComponent(chartTf)}&limit=300`),
+            authFetch(`/api/trades_chart?symbol=${encodeURIComponent(chartSymbol)}&limit=100`),
+        ]);
+        if (!candleRes.ok) return;
+        const candles = await candleRes.json();
+        if (!candles || !candles.length) return;
+
+        candleSeries.setData(candles);
+        volumeSeries.setData(candles.map(c => ({
+            time: c.time,
+            value: c.volume,
+            color: c.close >= c.open ? "rgba(63,185,80,0.3)" : "rgba(248,81,73,0.3)",
+        })));
+
+        // Trade markers
+        const trades = tradeRes.ok ? await tradeRes.json() : [];
+        const markers = buildTradeMarkers(trades, candles);
+        if (markers.length > 0) {
+            candleSeries.setMarkers(markers);
+        }
+
+        chart.timeScale().fitContent();
+    } catch (e) {
+        // Silently ignore fetch errors during polling
+    }
+}
+
+function buildTradeMarkers(trades, candles) {
+    const markers = [];
+    if (!trades || !trades.length) return markers;
+
+    // Build a set of candle timestamps for quick lookup
+    const candleTimes = new Set(candles.map(c => c.time));
+
+    for (const t of trades) {
+        const entryTime = t.entry_time ? Math.floor(t.entry_time / 1000) : null;
+        const exitTime = t.exit_time ? Math.floor(t.exit_time / 1000) : null;
+        const win = (t.pnl_usd || 0) > 0;
+        const color = win ? "#3fb950" : "#f85149";
+        const side = (t.side || "").toLowerCase();
+
+        // Entry marker
+        if (entryTime && candleTimes.has(entryTime)) {
+            markers.push({
+                time: entryTime,
+                position: side === "long" ? "belowBar" : "aboveBar",
+                color: "#58a6ff",
+                shape: side === "long" ? "arrowUp" : "arrowDown",
+                text: `E:${(t.strategy || "").slice(0, 8)}`,
+            });
+        }
+
+        // Exit marker
+        if (exitTime && candleTimes.has(exitTime) && t.status === "closed") {
+            markers.push({
+                time: exitTime,
+                position: "inBar",
+                color: color,
+                shape: "circle",
+                text: `X:${((t.exit_reason || "")).slice(0, 12)} ${(t.pnl_usd || 0) >= 0 ? "+" : ""}$${((t.pnl_usd || 0)).toFixed(0)}`,
+            });
+        }
+    }
+    return markers;
+}
+
+// Init chart after auth
+const origVerify = verifyAuthAndConnect;
+verifyAuthAndConnect = async function() {
+    await origVerify.call(this);
+    setTimeout(initChart, 1000);
+};
 </script>
 
 </body>
