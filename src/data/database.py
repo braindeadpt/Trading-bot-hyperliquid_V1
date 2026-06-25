@@ -438,16 +438,22 @@ class Database:
             params.append(end_ms)
 
         where_clause = " AND ".join(conditions)
+        # v3.1.24 fix: ORDER BY DESC + reverse so we return the LATEST N
+        # candles. The previous ASC LIMIT N returned the OLDEST N, which
+        # means _restore_candles_from_db loaded ancient candles (e.g. 1h
+        # candles from May 18-28 instead of June 23-25) and the dashboard
+        # Candle Watch panel showed week-old prices after every restart.
         sql = (
             f"SELECT * FROM {table} "
             f"WHERE {where_clause} "
-            f"ORDER BY timestamp_ms ASC LIMIT ?"
+            f"ORDER BY timestamp_ms DESC LIMIT ?"
         )
         params.append(limit)
-
         with self._conn():
             cur = self._conn().execute(sql, params)
             rows = cur.fetchall()
+        # Reverse to restore ASC order (chronological)
+        rows = list(reversed(rows))
         return [self._row_to_candle(row) for row in rows]
 
     def count_candles(self, symbol: str, timeframe: str) -> int:
