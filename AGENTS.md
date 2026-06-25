@@ -1,4 +1,4 @@
-# AGENTS.md — Hyperliquid Premium Trading Bot v3.1.23
+# AGENTS.md — Hyperliquid Premium Trading Bot v3.1.25
 
 > This file is intended for AI coding agents. It assumes zero prior knowledge of the project.
 
@@ -422,4 +422,4 @@ Before submitting any code change:
 
 ---
 
-*Last updated: 2026-06-23 (v3.1.23 - dashboard parity redesign: 5 sectioned panels with colored labels, funding accounting in trades UI, governor status panel, regime panel with ADX per symbol, risk gates panel with vol circuit / funding blackout / reconciliation / WS health, strategy class labels + Sharpe 30d in strategies panel. Backend: TradeExit.funding_paid, Database.update_trade_funding, StrategyGovernor.last_metrics, adx_14 in _last_market_events, vol_circuit in engine_monitor. 271+ tests across 22 files. v3.1.16-v3.1.22: 6 critical bug fixes, 5 risk/execution fixes, 7 strategy cleanups, 5 backtest realism fixes, 4 new strategies, 7 quant model/infra add-ons, 6 mainnet readiness fixes.)*
+*Last updated: 2026-06-25 (v3.1.25 — crash non-reaction fix: 8 root causes across governor (min_sharpe -1.0, min_trades 30), ensemble (min_agreeing=1), high_conviction_exclude cleanup, buy_volume/sell_volume DB persistence, INFO-level rejection logging for all 12 strategies. v3.1.24: candle restoration ORDER BY DESC fix. 271+ tests across 22 files. v3.1.16-v3.1.22: 6 critical bug fixes, 5 risk/execution fixes, 7 strategy cleanups, 5 backtest realism fixes, 4 new strategies, 7 quant model/infra add-ons, 6 mainnet readiness fixes.)*
