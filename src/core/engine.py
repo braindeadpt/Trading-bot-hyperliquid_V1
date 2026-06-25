@@ -1136,19 +1136,21 @@ class TradingEngine:
             # v3.1.23: persist the per-trade funding running total so it
             # shows up in the dashboard "Trades" panel.
             pos_after = (await self._portfolio.positions).get(symbol)
-            if pos_after is not None and pos_after.trade_id is not None:
+            if pos_after is not None:
                 funding_total = safe_float(
-                    pos_after.metadata.get("funding_total", 0.0), 0.0,
+                    (pos_after.metadata or {}).get("funding_total", 0.0), 0.0,
                 )
-                try:
-                    self._db.update_trade_funding(
-                        int(pos_after.trade_id), funding_total
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug(
-                        "DB funding persist failed for trade %s: %s",
-                        pos_after.trade_id, exc,
-                    )
+                trade_id = safe_float(
+                    (pos_after.metadata or {}).get("trade_id"), None,
+                )
+                if trade_id is not None and trade_id > 0:
+                    try:
+                        self._db.update_trade_funding(int(trade_id), funding_total)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "DB funding persist failed for trade %s: %s",
+                            trade_id, exc,
+                        )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Funding settlement failed for %s: %s", symbol, exc)
 

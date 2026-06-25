@@ -460,7 +460,7 @@ strategy:
     max_directional_exposure_pct: 60   # 4.1: max 60% book same direction
     max_sector_exposure_pct: 100       # 4.2: disabled (crypto-only bot); set <100 for multi-asset
     daily_drawdown_circuit_pct: 5      # 4.3: daily drawdown > 5% = circuit breaker
-    max_correlation: 0.70              # max |r| between any two positions (0=off)
+    max_correlation: 0.90              # v3.1.24: was 0.70 — BTC/ETH/SOL always >0.80, 0.70 blocked 1034 signals
     max_correlation_lookback: 60       # 60 periods (15m candles = 15h history)
 
   # ═══════════════════════════════════════════════════════════
@@ -476,11 +476,11 @@ strategy:
   # ═══════════════════════════════════════════════════════════
   ensemble:
     # Confluence gate: require >=2 agreeing strategies OR single high-conviction bypass.
-    # threshold 0.25 = combined weighted score must clear bar for multi-strategy entries.
+    # v3.1.24: threshold lowered 0.25→0.15 — was blocking 1802 shorts, only 8 executed.
     # min_agreeing 2 = one sub-strategy alone cannot enter unless high-conviction bypass.
     # High-conviction bypass at 0.70 — a single strong strategy (e.g. CVDOrderFlow
     # up to 0.75) can enter alone; excluded strategies below never bypass.
-    threshold: 0.25
+    threshold: 0.15
     min_agreeing: 2
     # High-conviction bypass: single strategy can enter alone above this confidence.
     high_conviction_threshold: 0.70
