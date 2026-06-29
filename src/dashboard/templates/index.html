@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Hyperliquid Trading Bot Dashboard</title>
 <script src="/socket.io.min.js"></script>
-<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script src="/static/lightweight-charts.standalone.production.js"></script>
 <link rel="stylesheet" href="/static/dashboard.css?v=6">
 <style>
 /* Inline fallback — guaranteed to apply */
@@ -438,6 +438,7 @@ tr:hover td { background: var(--panel-hover); }
                         <option value="15m">15m</option>
                         <option value="1h">1h</option>
                     </select>
+                    <span id="chart-status" class="dim" style="font-size:9px;"></span>
                     <span class="live-dot"></span>
                 </div>
             </div>
@@ -523,6 +524,7 @@ async function verifyAuthAndConnect() {
         hideAuthGate();
         connectSocket();
         pollAll();
+        scheduleChartInit();
         return;
     }
     const token = getDashboardToken();
@@ -543,6 +545,7 @@ async function verifyAuthAndConnect() {
         hideAuthGate();
         connectSocket();
         pollAll();
+        scheduleChartInit();
     } catch (e) {
         showAuthGate("Connection failed.");
     }
@@ -1061,7 +1064,6 @@ function pollAll() {
     authFetch("/api/trades").then(r => r.json()).then(d => renderTrades(d)).catch(() => {});
 }
 setInterval(pollAll, 5000);
-verifyAuthAndConnect();
 
 // Uptime ticker
 setInterval(() => {
@@ -1126,35 +1128,71 @@ let volumeSeries = null;
 let chartSymbol = "BTC";
 let chartTf = "5m";
 let chartRefreshTimer = null;
+let chartInitialized = false;
+let chartDataLoaded = false;
+
+function showChartMessage(msg) {
+    const status = document.getElementById("chart-status");
+    if (status) status.textContent = msg || "";
+}
+
+function scheduleChartInit() {
+    if (chartInitialized) return;
+    setTimeout(initChart, 300);
+}
 
 function initChart() {
+    if (chartInitialized) return;
     const container = document.getElementById("chart-container");
     if (!container) return;
-    container.innerHTML = "";
+    if (typeof LightweightCharts === "undefined") {
+        showChartMessage("Chart library failed to load");
+        return;
+    }
+    try {
+        container.innerHTML = "";
+        const width = Math.max(container.clientWidth || 0, 320);
+        const height = Math.max(container.clientHeight || 0, 380);
 
-    chart = LightweightCharts.createChart(container, {
-        layout: { background: { type: "solid", color: "#0d1117" }, textColor: "#8b949e" },
-        grid: { vertLines: { color: "#1c2128" }, horzLines: { color: "#1c2128" } },
-        timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#30363d" },
-        rightPriceScale: { borderColor: "#30363d" },
-        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-        handleScroll: true,
-        handleScale: true,
-    });
+        chart = LightweightCharts.createChart(container, {
+            width,
+            height,
+            layout: {
+                background: { type: LightweightCharts.ColorType.Solid, color: "#0d1117" },
+                textColor: "#8b949e",
+            },
+            grid: { vertLines: { color: "#1c2128" }, horzLines: { color: "#1c2128" } },
+            timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#30363d" },
+            rightPriceScale: { borderColor: "#30363d" },
+            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+            handleScroll: true,
+            handleScale: true,
+        });
 
-    candleSeries = chart.addCandlestickSeries({
-        upColor: "#3fb950", downColor: "#f85149",
-        borderUpColor: "#3fb950", borderDownColor: "#f85149",
-        wickUpColor: "#3fb950", wickDownColor: "#f85149",
-    });
+        candleSeries = chart.addCandlestickSeries({
+            upColor: "#3fb950", downColor: "#f85149",
+            borderUpColor: "#3fb950", borderDownColor: "#f85149",
+            wickUpColor: "#3fb950", wickDownColor: "#f85149",
+        });
 
-    volumeSeries = chart.addHistogramSeries({
-        priceFormat: { type: "volume" },
-        priceScaleId: "volume",
-    });
-    chart.priceScale("volume").applyOptions({
-        scaleMargins: { top: 0.8, bottom: 0 },
-    });
+        volumeSeries = chart.addHistogramSeries({
+            priceFormat: { type: "volume" },
+            priceScaleId: "volume",
+        });
+        chart.priceScale("volume").applyOptions({
+            scaleMargins: { top: 0.8, bottom: 0 },
+        });
+
+        chartInitialized = true;
+        window.addEventListener("resize", () => {
+            if (!chart || !container) return;
+            chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+        });
+    } catch (err) {
+        console.error("initChart failed:", err);
+        showChartMessage("Chart init failed — see browser console");
+        return;
+    }
 
     // Populate symbol select
     const symSelect = document.getElementById("chart-symbol");
@@ -1168,6 +1206,7 @@ function initChart() {
         });
         symSelect.addEventListener("change", () => {
             chartSymbol = symSelect.value;
+            chartDataLoaded = false;
             loadChartData();
         });
     }
@@ -1176,6 +1215,7 @@ function initChart() {
     if (tfSelect) {
         tfSelect.addEventListener("change", () => {
             chartTf = tfSelect.value;
+            chartDataLoaded = false;
             loadChartData();
         });
     }
@@ -1195,10 +1235,26 @@ async function loadChartData() {
             authFetch(`/api/candles?symbol=${encodeURIComponent(chartSymbol)}&tf=${encodeURIComponent(chartTf)}&limit=300`),
             authFetch(`/api/trades_chart?symbol=${encodeURIComponent(chartSymbol)}&limit=100`),
         ]);
-        if (!candleRes.ok) return;
+        if (!candleRes.ok) {
+            if (!chartDataLoaded) {
+                let detail = `HTTP ${candleRes.status}`;
+                try {
+                    const err = await candleRes.json();
+                    if (err && err.error) detail = err.error;
+                } catch (_) {}
+                showChartMessage(`No data: ${detail}`);
+            }
+            return;
+        }
         const candles = await candleRes.json();
-        if (!candles || !candles.length) return;
+        if (!candles || !candles.length) {
+            if (!chartDataLoaded) {
+                showChartMessage(`No ${chartTf} candles for ${chartSymbol}`);
+            }
+            return;
+        }
 
+        showChartMessage("");
         candleSeries.setData(candles);
         volumeSeries.setData(candles.map(c => ({
             time: c.time,
@@ -1214,8 +1270,11 @@ async function loadChartData() {
         }
 
         chart.timeScale().fitContent();
+        chartDataLoaded = true;
     } catch (e) {
-        // Silently ignore fetch errors during polling
+        if (!chartDataLoaded) {
+            showChartMessage("Chart load failed — is the bot running?");
+        }
     }
 }
 
@@ -1258,12 +1317,8 @@ function buildTradeMarkers(trades, candles) {
     return markers;
 }
 
-// Init chart after auth
-const origVerify = verifyAuthAndConnect;
-verifyAuthAndConnect = async function() {
-    await origVerify.call(this);
-    setTimeout(initChart, 1000);
-};
+// Boot dashboard only after chart helpers are defined (avoids TDZ on let chart* vars).
+verifyAuthAndConnect();
 </script>
 
 </body>
