@@ -18,6 +18,9 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from src.data.database import (
     Candle as DBCandle,
     Database,
+    FundingRecord,
+    LiquidationRecord,
+    OIRecord,
     PortfolioSnapshot,
     SignalRecord,
 )
@@ -338,6 +341,7 @@ class TradingEngine:
         )
         self._funding_poll_sec: int = int(_md.get("funding_poll_sec", 30))
         self._last_hl_predicted_poll: float = 0.0
+        self._last_saved_oi_total: Dict[str, float] = {}
 
         # ── Trailing stop management ──
         self._trailing_data: Dict[str, Dict] = {}  # symbol -> trailing stop state
@@ -924,6 +928,58 @@ class TradingEngine:
             )
         )
 
+    def _persist_funding_oi_snapshot(self) -> None:
+        """Write latest funding + OI to SQLite for backtest replay."""
+        now_ms = int(time.time() * 1000)
+        for sym in self._symbols:
+            agg = self._latest_agg_funding.get(sym)
+            hl = self._hl_predicted.get(sym)
+
+            predicted: Optional[float] = None
+            if hl is not None and hl.predicted_funding_hl_8h is not None:
+                predicted = float(hl.predicted_funding_hl_8h)
+
+            current: Optional[float] = None
+            if agg is not None:
+                if agg.funding_weighted is not None:
+                    current = float(agg.funding_weighted)
+                elif agg.funding_avg is not None:
+                    current = float(agg.funding_avg)
+            if current is None and predicted is not None:
+                current = predicted
+
+            if current is not None:
+                try:
+                    self._db.save_funding(
+                        FundingRecord(
+                            symbol=sym,
+                            current=current,
+                            predicted=predicted if predicted is not None else current,
+                            timestamp=now_ms,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("save_funding %s failed: %s", sym, exc)
+
+            oi_total: Optional[float] = None
+            if agg is not None and agg.oi_total is not None:
+                oi_total = float(agg.oi_total)
+            if oi_total is not None:
+                prev = self._last_saved_oi_total.get(sym)
+                oi_delta = (oi_total - prev) if prev is not None else 0.0
+                self._last_saved_oi_total[sym] = oi_total
+                try:
+                    self._db.save_oi(
+                        OIRecord(
+                            symbol=sym,
+                            oi_total=oi_total,
+                            oi_delta=oi_delta,
+                            timestamp=now_ms,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("save_oi %s failed: %s", sym, exc)
+
     async def _poll_funding_loop(self) -> None:
         """Background task: poll CEX funding/OI and HL predictedFundings."""
         while self._running:
@@ -970,6 +1026,7 @@ class TradingEngine:
                             f"{hl8:.8f}" if hl8 is not None else "N/A",
                             ",".join(sorted(snap.venues.keys())),
                         )
+                self._persist_funding_oi_snapshot()
                 self._refresh_market_data_health()
                 await self._check_market_data_alerts()
             except Exception as exc:  # noqa: BLE001
@@ -1869,6 +1926,18 @@ class TradingEngine:
         acc["source"] = source
         if source == "binance":
             self._binance_liquidation_events += 1
+            try:
+                self._db.save_liquidation(
+                    LiquidationRecord(
+                        symbol=symbol,
+                        timestamp_ms=timestamp_ms,
+                        notional_usd=notional,
+                        side=side,
+                        source=source,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("save_liquidation %s failed: %s", symbol, exc)
             if (
                 not self._liquidation_feed_ready
                 and self._binance_liquidation_events >= self._liquidation_feed_warmup

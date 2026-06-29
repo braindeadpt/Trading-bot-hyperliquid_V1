@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.core.liquidation_accumulator import LiquidationAccumulator
 from src.backtest.metrics import calculate_metrics
 from src.core.funding_blackout import FundingBlackoutFilter
 from src.core.kelly_sizer import KellySizer
@@ -67,6 +68,7 @@ class BacktestConfig:
     use_volatility_circuit: bool = True
     use_funding_blackout: bool = True
     use_size_aware_slippage: bool = True
+    use_external_feeds_replay: bool = True
     # Maker-vs-taker fee model (v3.1.19)
     maker_fee_pct: float = 0.01          # 0.01% per side
     use_maker_for_strategies: Tuple[str, ...] = (
@@ -229,6 +231,8 @@ class BacktestEngine:
 
         for idx, (ts, symbol, c1m) in enumerate(timeline):
             data = symbol_data[symbol]
+            if self.cfg.use_external_feeds_replay:
+                self._advance_liquidation_replay(data, ts)
             event = self._build_market_event(symbol, ts, c1m, data)
 
             # v3.1.19: apply hourly funding to every open position whose
@@ -370,6 +374,10 @@ class BacktestEngine:
             ),
             "funding_ts": self._load_funding_series(symbol, start_ms, end_ms),
             "oi_ts": self._load_oi_series(symbol, start_ms, end_ms),
+            "liquidations": self._load_liquidation_series(symbol, start_ms, end_ms),
+            "liq_idx": 0,
+            "liq_acc": LiquidationAccumulator(),
+            "binance_perp_ts": self._load_binance_perp_series(symbol, start_ms, end_ms),
             "candles_15m_ind": [],
             "hist_15m": [],
         }
@@ -379,18 +387,20 @@ class BacktestEngine:
         symbol: str,
         start_ms: Optional[int],
         end_ms: Optional[int],
-    ) -> List[Tuple[int, float]]:
+    ) -> List[Tuple[int, float, float]]:
         if not self.cfg.use_funding:
             return []
         rows = self.db.get_funding_history(symbol, limit=500_000)
-        out: List[Tuple[int, float]] = []
+        out: List[Tuple[int, float, float]] = []
         for r in rows:
             ts = int(r["timestamp"])
             if start_ms is not None and ts < start_ms:
                 continue
             if end_ms is not None and ts > end_ms:
                 continue
-            out.append((ts, float(r["current"])))
+            current = float(r["current"])
+            predicted = float(r["predicted"]) if r.get("predicted") is not None else current
+            out.append((ts, current, predicted))
         out.sort(key=lambda x: x[0])
         return out
 
@@ -413,6 +423,59 @@ class BacktestEngine:
             out.append((ts, float(r["oi_total"]), float(r["oi_delta"])))
         out.sort(key=lambda x: x[0])
         return out
+
+    def _load_liquidation_series(
+        self,
+        symbol: str,
+        start_ms: Optional[int],
+        end_ms: Optional[int],
+    ) -> List[Tuple[int, float, str, str]]:
+        if not self.cfg.use_external_feeds_replay:
+            return []
+        rows = self.db.get_liquidation_events(
+            symbol, limit=500_000, start_ms=start_ms, end_ms=end_ms,
+        )
+        return [
+            (
+                int(r["timestamp_ms"]),
+                float(r["notional_usd"]),
+                str(r["side"]),
+                str(r.get("source") or "binance"),
+            )
+            for r in rows
+        ]
+
+    def _load_binance_perp_series(
+        self,
+        symbol: str,
+        start_ms: Optional[int],
+        end_ms: Optional[int],
+    ) -> List[Tuple[int, float]]:
+        if not self.cfg.use_external_feeds_replay:
+            return []
+        rows = self.db.get_binance_perp_prices(
+            symbol, limit=500_000, start_ms=start_ms, end_ms=end_ms,
+        )
+        out = [(int(r["timestamp_ms"]), float(r["price"])) for r in rows]
+        out.sort(key=lambda x: x[0])
+        return out
+
+    def _advance_liquidation_replay(
+        self,
+        data: Dict[str, Any],
+        ts: int,
+    ) -> LiquidationAccumulator:
+        """Feed liquidation rows up to *ts* into the per-symbol accumulator."""
+        acc: LiquidationAccumulator = data["liq_acc"]
+        liq_list: List[Tuple[int, float, str, str]] = data.get("liquidations", [])
+        idx: int = data.get("liq_idx", 0)
+        while idx < len(liq_list) and liq_list[idx][0] <= ts:
+            _ts, notional, side, source = liq_list[idx]
+            acc.record(_ts, notional, side, source)
+            idx += 1
+        data["liq_idx"] = idx
+        acc.prune(ts)
+        return acc
 
     @staticmethod
     def _lookup_at_or_before(
@@ -496,6 +559,26 @@ class BacktestEngine:
                 oir = ((c1m.close - c1m.low) - (c1m.high - c1m.close)) / (c1m.high - c1m.low)
                 bid_ask_ratio = 1.0 + oir * 0.5
 
+        funding_current = funding_row[1] if funding_row else None
+        funding_predicted = (
+            funding_row[2] if funding_row and len(funding_row) > 2 else funding_current
+        )
+
+        liq_notional: Optional[float] = None
+        liq_side: Optional[str] = None
+        liq_count: Optional[int] = None
+        liq_source: Optional[str] = None
+        liq_feed_ready = False
+        if self.cfg.use_external_feeds_replay:
+            acc: LiquidationAccumulator = data["liq_acc"]
+            liq_notional, liq_side, liq_count = acc.stats()
+            liq_source = acc.source
+            liq_feed_ready = bool(data.get("liquidations"))
+
+        bn_perp_row = self._lookup_at_or_before(data.get("binance_perp_ts", []), ts)
+        bn_perp_mid = bn_perp_row[1] if bn_perp_row else None
+        bn_perp_ts = bn_perp_row[0] if bn_perp_row else None
+
         return MarketEvent(
             symbol=symbol,
             price=c1m.close,
@@ -504,8 +587,8 @@ class BacktestEngine:
             candle_5m=self._to_indicator_candle(c5),
             candle_15m=self._to_indicator_candle(c15),
             candle_1h=self._to_indicator_candle(c1h),
-            funding=funding_row[1] if funding_row else None,
-            predicted_funding=funding_row[1] if funding_row else None,
+            funding=funding_current,
+            predicted_funding=funding_predicted,
             oi_total=oi_row[1] if oi_row else None,
             oi_delta=oi_row[2] if oi_row else None,
             volume_1m=c1m.volume,
@@ -513,6 +596,13 @@ class BacktestEngine:
             orderbook_spread_pct=spread_pct,
             orderbook_oir=oir,
             orderbook_bid_ask_ratio=bid_ask_ratio,
+            liquidation_notional_5m=liq_notional,
+            liquidation_side_5m=liq_side,
+            liquidation_count_5m=liq_count,
+            liquidation_data_source=liq_source,
+            liquidation_feed_ready=liq_feed_ready,
+            binance_perp_mid=bn_perp_mid,
+            binance_perp_timestamp_ms=bn_perp_ts,
         )
 
     def _apply_live_parity(
