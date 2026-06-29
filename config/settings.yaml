@@ -16,6 +16,7 @@ assets:
   - "BTC"
   - "ETH"
   - "SOL"
+  - "HYPE"
 
 timeframes:
   - "1m"
@@ -82,7 +83,7 @@ risk:
 # ═══════════════════════════════════════════════════════════
 strategy:
   trend_follow:
-    enabled: true
+    enabled: false                  # Phase 1: PF 0.27 — sem edge validado
     timeframe: "15m"
     confirmation_timeframe: "5m"
     volume_surge_multiplier: 1.5
@@ -111,7 +112,7 @@ strategy:
     squeeze_lookback: 20           # bars for BB-width percentile
     squeeze_percentile: 25.0       # width in bottom 25% = squeeze
     min_squeeze_bars: 3            # consecutive tight bars before break
-    volume_surge: 1.3              # volume vs 24-bar average
+    volume_surge: 1.5              # v3.1.26: tighter (was 1.3) — filters false breakouts, +70% PnL in walk-forward
     min_adx: 12.0                  # need some momentum building
     max_adx: 38.0                  # avoid exhausted trends
     require_oi_confirm: false      # optional OI delta direction filter
@@ -120,19 +121,30 @@ strategy:
     stop_loss_atr_multiplier: 2.0      # wider stop — fewer whipsaw exits post-squeeze (was 1.5)
     take_profit_atr_multiplier: 4.0    # 2R vs stop (was 3.0 / 1.5R)
     max_hold_hours: 6
-    min_confidence: 0.45            # QW5: reduced from 0.60
+    min_confidence: 0.55            # Phase 1: subir de 0.45 — menos trades, mais qualidade
     signal_throttle_ms: 1800000    # 30 min between signals per symbol
     require_trend_alignment: true  # long only in uptrend (EMA20>EMA50), short in downtrend
     trend_ema_fast: 20
     trend_ema_slow: 50
     failed_breakout_min_hold_ms: 2700000   # 45 min before failed-breakout exit
     failed_breakout_buffer_pct: 0.0015     # 0.15% beyond BB mid (was 0.1% — less noise)
+    # --- v3.1.26 walk-forward winners (activated) ---
+    use_trailing_stop: true         # WINNER: trailing EMA9 after 1R — captures more profit
+    trailing_method: ema9           # ema9 | swing | atr  (ema9 best in W1+W3)
+    trailing_start_r: 1.0           # start trailing after 1R favourable
+    trailing_ema_period: 9
+    trailing_atr_mult: 1.5
+    trailing_swing_lookback: 5
+    # --- v3.1.26 NOT activated (no-op in walk-forward) ---
+    use_time_scaled_tp: false       # no effect — trades hit TP/SL before 3h threshold
+    time_tp_first_hours: 3.0
+    time_tp_after_r: 2.5
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: Donchian Breakout (momentum breakout)
   # ═══════════════════════════════════════════════════════════
   donchian_breakout:
-    enabled: true
+    enabled: false                  # OFF: Sharpe -7.4 na janela completa
     lookback: 20                   # channel lookback (15m candles)
     min_adx: 22.0                  # ADX must be >= 22 (trending regime)
     min_range_pct: 0.001           # 0.1% avg range minimum (anti-chop)
@@ -182,15 +194,15 @@ strategy:
   # Strategy: LeadLag (Binance → Hyperliquid short-term lag)
   # ═══════════════════════════════════════════════════════════
   lead_lag:
-    enabled: true
+    enabled: false                  # Phase 1: 0 backtest trades — validar antes de ligar
     impulse_window_ms: 10000        # 10s Binance return window (5–15s typical)
     impulse_min_pct: 0.0005         # 0.05% min Binance impulse to trigger
     gap_min_pct: 0.0003             # 0.03% min HL lag beyond fees
     min_edge_buffer_pct: 0.0002     # extra buffer above HL spread + RT fees
     taker_fee_pct: 0.00035          # per-side fee estimate for gap math
-    max_hl_spread_pct: 0.0008       # 0.08% — only enter on tight HL book
-    require_oir_confirm: true
-    oir_threshold: 0.10             # OIR must align with entry side
+    max_hl_spread_pct: 0.0012       # 0.12% — paper: HL book often wider than 0.08%
+    require_oir_confirm: false      # paper: validate entries before re-tightening
+    oir_threshold: 0.10             # used when require_oir_confirm is true
     convergence_pct: 0.0001         # gap closed → take profit (~0.01%)
     stop_gap_mult: 1.5               # stop = clamp(|gap| * mult, floor, ceiling)
     stop_floor_pct: 0.0008           # 0.08% minimum stop
@@ -283,9 +295,25 @@ strategy:
     stop_loss_atr_multiplier: 2.0   # ATR-based stop
     take_profit_r_multiple: 2.0     # 2R TP
     max_hold_hours: 4               # mean reversion is quick or wrong
-    min_confidence: 0.65            # v3.1.18: was 0.40 — restore original
+    min_confidence: 0.70            # Phase 1: subir de 0.65 — menos trades, mais qualidade
     confidence_extreme: 0.85        # v3.1.18: was 0.65 — restore original
     signal_throttle_ms: 300000      # 5 min between signals (v3.1.18: was 3 min)
+    # --- v3.1.26 walk-forward winners (activated) ---
+    use_session_filter: true        # WINNER: W1 PF 10→16.5, mcPF_p05 0.68→1.56, WR 71→83%
+    session_start_utc_h: 7          # EU session open
+    session_end_utc_h: 22           # US session close
+    session_allow_extreme_z: true   # allow |Z| >= 4 outside session (rare but high-conviction)
+    session_extreme_z: 4.0
+    # --- v3.1.26 NOT activated (no-op in walk-forward) ---
+    use_sl_to_be_after_1r: false    # no effect — VWAP reversion exits before 1R reverts to entry
+    sl_to_be_r_trigger: 1.0
+    oir_disable_extreme_z: false    # no effect — no |Z|>=4 in historical data
+    oir_extreme_z: 4.0
+    use_dynamic_z: false            # no effect — ATR ratio ≈1 (no regime extremes in window)
+    dynamic_z_min: 2.2
+    dynamic_z_max: 3.5
+    dynamic_z_atr_lookback: 168     # 7d * 24h (1h candles)
+    exit_pre_funding_min: 0         # 0 = disabled; part of all_optimisations which was WORSE
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: OrderBook Imbalance Scalper
@@ -319,21 +347,21 @@ strategy:
   # Strategy: Liquidation Catcher (Task 3.3)
   # ═══════════════════════════════════════════════════════════
   liquidation_catcher:
-    enabled: false                  # manual force-on; leave false to use auto_enable
-    auto_enable: true               # activates automatically when Binance feed is validated
+    enabled: false                  # Phase 1: 0 backtest trades — validar antes de ligar
+    auto_enable: false              # Phase 1: não auto-ativar (auto_enable=true carrega mesmo com enabled=false)
     feed_warmup_events: 1           # Binance liquidation events before auto-enable
     require_real_liquidation_data: true
-    min_notional_usd: 50000000     # v3.1.18: $50M in 5min (was $5M — restore original, only real cascades)
-    min_liquidation_count: 5       # v3.1.18: avoid single large liquidation (was 3)
-    require_oi_decreasing: true    # v3.1.18: confirm positions wiped (was false)
-    oi_delta_max: 0.0              # OI must be decreasing
-    max_adx: 40.0                  # v3.1.18: don't fade strong trends (was 45)
+    min_notional_usd: 5_000_000     # paper/test: $5M in 5min (mainnet override: $50M)
+    min_liquidation_count: 3        # avoid single large liquidation
+    require_oi_decreasing: false    # paper: OI feed not always reliable on first hours
+    oi_delta_max: 0.0              # used when require_oi_decreasing is true
+    max_adx: 45.0                  # avoid fading very strong trends
     base_size_pct: 0.005            # 0.5% — small size, catching a knife
     max_size_pct: 0.01              # 1% max
     stop_loss_atr_multiplier: 1.0  # tight stop
     max_hold_minutes: 30            # liquidation cascades resolve quickly
     take_profit_r: 2.0              # 2R take profit
-    min_confidence: 0.60            # v3.1.18: was 0.45 — restore original
+    min_confidence: 0.45            # paper: was 0.60 — allow more test entries
     signal_throttle_ms: 3600000     # 1h cooldown
 
   # ═══════════════════════════════════════════════════════════
@@ -342,7 +370,7 @@ strategy:
   # ═══════════════════════════════════════════════════════════
 
   spot_perp_carry:
-    enabled: true
+    enabled: false                  # OFF: 0 trades em backtest (precisa de Binance spot data)
     min_funding_hourly: 0.0005     # 0.05% per hour = ~55% APR
     exit_funding_hourly: 0.0001    # exit when funding normalizes
     max_hold_hours: 24
@@ -356,7 +384,7 @@ strategy:
   # Strategy: Range Grid (ping-pong in confirmed ranges)  v3.1.20
   # ═══════════════════════════════════════════════════════════
   range_grid:
-    enabled: true
+    enabled: false                  # OFF: Sharpe -4.3 em backtest
     max_adx: 18                    # confirmed range regime
     bb_period: 20
     bb_std: 2.0
@@ -375,7 +403,7 @@ strategy:
   # Strategy: Trend Pyramid (EMA20 pullback + Chandelier)  v3.1.20
   # ═══════════════════════════════════════════════════════════
   trend_pyramid:
-    enabled: true
+    enabled: false                  # Phase 1: outlier no backtest — revalidar isolado
     ema_fast: 20
     ema_slow: 50
     min_adx: 25
@@ -396,7 +424,7 @@ strategy:
   # Strategy: Funding Momentum (follow funding flips)  v3.1.20
   # ═══════════════════════════════════════════════════════════
   funding_momentum:
-    enabled: true
+    enabled: false                  # OFF: 0 trades em backtest
     funding_flip_threshold: 0.0001
     oi_lookback_hours: 4
     ema_slow: 50
@@ -414,7 +442,7 @@ strategy:
   # Strategy: CVD OrderFlow (volume-tape divergence)
   # ═══════════════════════════════════════════════════════════
   cvd_orderflow:
-    enabled: true
+    enabled: false                  # OFF: 0 trades em backtest (precisa de OIR + buy/sell volume)
     # Rolling windows (in 1m bars) for multi-timeframe divergence confirmation
     window_short_bars: 5            # 5m CVD
     window_medium_bars: 15          # 15m CVD
@@ -457,10 +485,10 @@ strategy:
   # Portfolio Heat & Governance (Task 4.1–4.3)
   # ═══════════════════════════════════════════════════════════
   portfolio_governance:
-    max_directional_exposure_pct: 60   # 4.1: max 60% book same direction
+    max_directional_exposure_pct: 40   # Phase 1: baixar de 60 — compensa correlation OFF
     max_sector_exposure_pct: 100       # 4.2: disabled (crypto-only bot); set <100 for multi-asset
-    daily_drawdown_circuit_pct: 5      # 4.3: daily drawdown > 5% = circuit breaker
-    max_correlation: 0.90              # v3.1.24: was 0.70 — BTC/ETH/SOL always >0.80, 0.70 blocked 1034 signals
+    daily_drawdown_circuit_pct: 3      # Phase 1: baixar de 5 — cortar perdas cedo
+    max_correlation: 0.98              # Phase 1: efetivamente OFF — BTC/ETH/SOL sempre >0.80
     max_correlation_lookback: 60       # 60 periods (15m candles = 15h history)
 
   # ═══════════════════════════════════════════════════════════
@@ -475,28 +503,13 @@ strategy:
   # Ensemble Configuration
   # ═══════════════════════════════════════════════════════════
   ensemble:
-    # Confluence gate: require >=2 agreeing strategies OR single high-conviction bypass.
-    # v3.1.24: threshold lowered 0.25→0.15 — was blocking 1802 shorts, only 8 executed.
-    # min_agreeing 2 = one sub-strategy alone cannot enter unless high-conviction bypass.
-    # High-conviction bypass at 0.70 — a single strong strategy (e.g. CVDOrderFlow
-    # up to 0.75) can enter alone; excluded strategies below never bypass.
-    threshold: 0.15
-    min_agreeing: 2
-    # High-conviction bypass: single strategy can enter alone above this confidence.
-    high_conviction_threshold: 0.70
-    high_conviction_enabled: true
-    high_conviction_exclude:
-      # v3.1.18: VolatilityBreakout is back on the exclude list — it is
-      # correlated with DonchianBreakout (both fire on the same breakout
-      # candle) and must not be allowed to enter alone via the bypass.
-      - VolatilityBreakout
-      - VWAPDeviation
-      - FundingExtreme
-      - LeadLag
-      # v3.1.20: RangeGrid + OrderBookScalper both fire on quiet micro
-      # structure, do not allow either to bypass the confluence gate.
-      - RangeGrid
-      - OrderBookScalper
+    # Phase 1 (2026-06-29): só VolatilityBreakout + VWAPDeviation, sem consenso ensemble.
+    enabled: false                    # sub-estratégias correm directas no engine
+    threshold: 0.40                   # se reativar: exigir 40%+ peso combinado
+    min_agreeing: 2                   # se reativar: 2+ estratégias concordando
+    high_conviction_threshold: 0.65
+    high_conviction_enabled: false    # Phase 1: sem bypass de alta convicção
+    high_conviction_exclude: []
 
   # ═══════════════════════════════════════════════════════════
   # Strategy performance governance (Phase 3)
@@ -526,13 +539,14 @@ execution:
   flatten_on_stop: true
   trailing_stop:
     enabled: true
-    activation_pct: 0.01            # trail only after +1% unrealised (was 0.5%)
-    trail_pct: 0.005                # 0.5% behind peak/trough (was 0.3%)
+    activation_pct: 0.02            # Phase 1: subir de 1% — deixar winners correr até TP
+    trail_pct: 0.008                # Phase 1: subir de 0.5% para 0.8%
     # Strategies with explicit TP/exit logic — skip engine trailing (avoids early winner cuts)
     exclude_strategies:
       - VolatilityBreakout
-      - DonchianBreakout
-      - TrendPyramid    # v3.1.20 — manages own Chandelier exit
+      - VWAPDeviation           # Phase 1: TP próprio 2R
+      - SmartMoneyFlow
+      - TrendPyramid
   maker_orders:
     enabled: true
     maker_fee_pct: 0.01             # 0.01% per side (Hyperliquid maker tier)
@@ -586,6 +600,8 @@ database:
   prune_days: 30                  # keep last 30 days of tick data
   auto_backfill_on_start: true    # fetch Binance candles if DB is empty/stale
   backfill_days: 7                # days of history per timeframe (Binance max 1000 bars)
+  backfill_funding_days: 30       # funding + OI history for backtest (scripts/backfill_funding.py)
+  backfill_perp_days: 30           # Binance USD-M perp mids for LeadLag backtest
   backfill_min_candles_15m: 80    # trigger backfill when 15m count below this
   backfill_timeframes: ["1m", "5m", "15m", "1h"]
 
@@ -640,6 +656,11 @@ mode_overrides:
         enabled: false          # too risky for mainnet (fee bleed)
       lead_lag:
         enabled: false          # latency arb needs colocation
+      liquidation_catcher:
+        min_notional_usd: 50_000_000   # production: only real cascades
+        min_liquidation_count: 5
+        require_oi_decreasing: true
+        min_confidence: 0.60
       range_grid:
         enabled: true           # safe, range trading
       spot_perp_carry:
@@ -661,6 +682,15 @@ mode_overrides:
       # preserved and reconciled on next start.
       flatten_on_stop: false
   testnet:
+    strategy:
+      lead_lag:
+        enabled: true
+      liquidation_catcher:
+        auto_enable: true
+        min_notional_usd: 5_000_000   # same $5M test threshold as paper
+        min_liquidation_count: 3
+        require_oi_decreasing: false
+        min_confidence: 0.45
     risk:
       max_daily_trades: 50        # cap for testnet (was 0)
     execution:

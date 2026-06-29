@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, List
+from typing import Any, List, Optional
 
-from src.strategies.base import Strategy
+from src.strategies.base import Strategy, MarketEvent, Signal, Position, ExitSignal
 from src.strategies.ensemble import StrategyEnsemble, StrategyWeight
 from src.strategies.cvd_orderflow import CVDOrderFlow
 from src.strategies.donchian_breakout import DonchianBreakout
@@ -109,6 +109,61 @@ def build_sub_strategies(cfg: Any) -> List[Strategy]:
         if _should_load_strategy(section):
             strategies.append(cls(section))
     return strategies
+
+
+class DirectStrategyRouter(Strategy):
+    """Run sub-strategies directly without ensemble consensus (backtest parity)."""
+
+    def __init__(self, strategies: List[Strategy]) -> None:
+        self._strategies = list(strategies)
+        self._by_name = {s.name: s for s in strategies}
+
+    @property
+    def name(self) -> str:
+        return "DirectRouter"
+
+    def on_data(self, event: MarketEvent) -> Optional[Signal]:
+        signals: List[Signal] = []
+        for strat in self._strategies:
+            if hasattr(strat, "is_active") and not strat.is_active():
+                continue
+            sig = strat.on_data(event)
+            if sig is not None:
+                signals.append(sig)
+        if not signals:
+            return None
+        return max(signals, key=lambda s: s.confidence)
+
+    def on_position(self, position: Position, event: MarketEvent) -> Optional[ExitSignal]:
+        meta = position.metadata or {}
+        owner = meta.get("strategy") or position.strategy
+        strat = self._by_name.get(owner)
+        if strat is None:
+            return None
+        return strat.on_position(position, event)
+
+
+def build_strategy_list(cfg: Any) -> List[Strategy]:
+    """Top-level strategies for live TradingEngine.
+
+    When ``strategy.ensemble.enabled`` is false, each enabled sub-strategy
+    runs directly (no consensus wrapper).
+    """
+    ens_cfg = cfg.get("strategy.ensemble", {}) or {}
+    subs = build_sub_strategies(cfg)
+    if ens_cfg.get("enabled", True) is False:
+        if not subs:
+            logger.warning("ensemble disabled but no sub-strategies are enabled")
+        return subs
+    return [build_ensemble(cfg)]
+
+
+def build_backtest_strategy(cfg: Any) -> Strategy:
+    """Single strategy object for BacktestEngine (router when ensemble is off)."""
+    ens_cfg = cfg.get("strategy.ensemble", {}) or {}
+    if ens_cfg.get("enabled", True) is False:
+        return DirectStrategyRouter(build_sub_strategies(cfg))
+    return build_ensemble(cfg)
 
 
 def build_ensemble(cfg: Any) -> StrategyEnsemble:

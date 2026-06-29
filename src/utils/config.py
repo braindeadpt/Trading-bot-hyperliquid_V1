@@ -99,10 +99,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "prune_days": 30,
         "auto_backfill_on_start": True,
         "backfill_days": 7,
+        "backfill_funding_days": 30,
+        "backfill_perp_days": 7,
         "backfill_min_candles_15m": 80,
         "backfill_timeframes": ["1m", "5m", "15m", "1h"],
     },
-    "symbols": ["BTC", "ETH", "SOL"],
+    "symbols": ["BTC", "ETH", "SOL", "HYPE"],
     "timeframes": ["1m", "5m", "15m", "1h"],
     "strategies": {
         "trend_follow": {"enabled": True},
@@ -275,7 +277,20 @@ def _apply_mode_overrides(config: Dict[str, Any]) -> None:
         if not isinstance(target, dict):
             config[section] = {}
             target = config[section]
-        target.update(values)
+        # Deep-merge strategy sub-sections so mode overrides patch keys
+        # (e.g. lead_lag.enabled) without wiping the rest of the block.
+        if section == "strategy":
+            for strat_key, strat_vals in values.items():
+                if isinstance(strat_vals, dict):
+                    existing = target.get(strat_key)
+                    if isinstance(existing, dict):
+                        target[strat_key] = _deep_merge(existing, strat_vals)
+                    else:
+                        target[strat_key] = dict(strat_vals)
+                else:
+                    target[strat_key] = strat_vals
+        else:
+            target.update(values)
 
 
 def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:

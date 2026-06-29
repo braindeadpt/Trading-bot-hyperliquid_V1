@@ -2,13 +2,13 @@
 
 Fade liquidation cascades:
   - Monitor $ notional liquidated in 5min windows per symbol
-  - If > $50M in one direction (longs or shorts liquidated):
+  - If > threshold in one direction (longs or shorts liquidated; default $5M paper):
       → Enter OPPOSITE direction immediately
   - Rationale: liquidation cascades are panic-driven, tend to overshoot
     and revert quickly
 
 Entry:
-  - liquidation_notional_5m > threshold ($50M)
+  - liquidation_notional_5m > threshold (``min_notional_usd`` in config)
   - All from the same side (longs liquidated → price drop → go LONG)
   - OI decreasing (confirms positions were wiped out, not just closed)
 
@@ -49,14 +49,14 @@ class _LiqCatcherState:
 class LiquidationCatcher(Strategy):
     """Liquidation Catcher — fade liquidation cascades.
 
-    Enters opposite to large liquidation clusters ($50M+ in 5min),
+    Enters opposite to large liquidation clusters (configurable USD in 5min),
     betting on panic-driven overshoot reversion.
     """
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         cfg = config or {}
         # Entry thresholds
-        self.MIN_NOTIONAL_USD = cfg.get("min_notional_usd", 50_000_000)  # $50M
+        self.MIN_NOTIONAL_USD = cfg.get("min_notional_usd", 5_000_000)  # $5M paper default
         self.MIN_LIQUIDATION_COUNT = cfg.get("min_liquidation_count", 10)
         # OI filter
         self.REQUIRE_OI_DECREASING = cfg.get("require_oi_decreasing", True)

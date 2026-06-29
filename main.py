@@ -60,7 +60,7 @@ from exchanges.binance_api import BinanceRESTClient, BinanceWSClient
 from exchanges.binance_futures_feed import BinanceFuturesFeed
 from data.candle_builder import CandleBuilder
 
-from strategies.factory import build_ensemble, build_sub_strategies
+from strategies.factory import build_ensemble, build_sub_strategies, build_strategy_list, build_backtest_strategy
 
 from strategies.base import Position
 from core.risk_manager import RiskManager
@@ -162,7 +162,7 @@ async def _run_backtest(
     if from_date or to_date:
         logger.info("Date range: %s → %s", from_date or "start", to_date or "end")
 
-    ensemble = build_ensemble(cfg)
+    ensemble = build_backtest_strategy(cfg)
     bt_config = BacktestConfig(
         initial_capital=float(initial_capital),
         commission_pct=float(commission_pct),
@@ -338,14 +338,21 @@ async def main() -> None:
     # 6. Initialize strategies (same ensemble as backtest)
     # -----------------------------------------------------------------------
     sub_strategies = build_sub_strategies(cfg)
-    strategies = [build_ensemble(cfg)]
-    logger.info(
-        "StrategyEnsemble loaded: %d sub-strategies, threshold=%.2f, min_agreeing=%d",
-        len(sub_strategies),
-        cfg.get("strategy.ensemble.threshold", 0.40),
-        cfg.get("strategy.ensemble.min_agreeing", 1),
-    )
-    logger.info("Sub-strategies: %s", [s.name for s in sub_strategies])
+    strategies = build_strategy_list(cfg)
+    ens_enabled = bool(cfg.get("strategy.ensemble.enabled", True))
+    if ens_enabled:
+        logger.info(
+            "StrategyEnsemble loaded: %d sub-strategies, threshold=%.2f, min_agreeing=%d",
+            len(sub_strategies),
+            cfg.get("strategy.ensemble.threshold", 0.40),
+            cfg.get("strategy.ensemble.min_agreeing", 1),
+        )
+    else:
+        logger.info(
+            "Phase 1 direct mode: %d sub-strategies (ensemble disabled)",
+            len(strategies),
+        )
+    logger.info("Active strategies: %s", [s.name for s in strategies])
 
     # -----------------------------------------------------------------------
     # 7. Initialize risk, execution (portfolio is owned by TradingEngine)
