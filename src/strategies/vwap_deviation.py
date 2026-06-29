@@ -26,6 +26,7 @@ Max hold: 4 hours (mean reversion is quick or it's wrong).
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 import collections
+import datetime as _dt
 import logging
 
 from src.strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
@@ -42,8 +43,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class _VWAPDevState:
     """Per-symbol state for VWAP deviation tracking."""
-    candles_1h: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=48))
+    candles_1h: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=200))
     last_signal_ms: int = 0
+    # v3.1.26: SL-to-BE after 1R tracking
+    last_entry_time_ms: int = 0
+    r1_hit: bool = False
 
 
 class VWAPDeviation(Strategy):
@@ -79,6 +83,31 @@ class VWAPDeviation(Strategy):
         # Throttle
         self.SIGNAL_THROTTLE_MS = cfg.get("signal_throttle_ms", 300_000)  # 5 min
         self.TAKE_PROFIT_R_MULT = float(cfg.get("take_profit_r_multiple", 2.0))
+
+        # --- v3.1.26 optimisations (all opt-in, default OFF preserves prior behaviour) ---
+        # SL-to-BE after 1R: once price moves 1R favourable, flatten at entry on revert
+        self.USE_SL_TO_BE_AFTER_1R = bool(cfg.get("use_sl_to_be_after_1r", False))
+        self.SL_TO_BE_R_TRIGGER = float(cfg.get("sl_to_be_r_trigger", 1.0))
+
+        # Session filter: only enter within UTC hours [start, end); allow extreme Z outside
+        self.USE_SESSION_FILTER = bool(cfg.get("use_session_filter", False))
+        self.SESSION_START_UTC_H = int(cfg.get("session_start_utc_h", 7))
+        self.SESSION_END_UTC_H = int(cfg.get("session_end_utc_h", 22))
+        self.SESSION_ALLOW_EXTREME_Z = bool(cfg.get("session_allow_extreme_z", True))
+        self.SESSION_EXTREME_Z = float(cfg.get("session_extreme_z", 4.0))
+
+        # OIR-disable for extreme Z: skip OIR requirement when |Z| > extreme
+        self.OIR_DISABLE_EXTREME_Z = bool(cfg.get("oir_disable_extreme_z", False))
+        self.OIR_EXTREME_Z = float(cfg.get("oir_extreme_z", 4.0))
+
+        # Dynamic Z: scale threshold by ATR regime (low vol → stricter threshold)
+        self.USE_DYNAMIC_Z = bool(cfg.get("use_dynamic_z", False))
+        self.DYNAMIC_Z_MIN = float(cfg.get("dynamic_z_min", 2.2))
+        self.DYNAMIC_Z_MAX = float(cfg.get("dynamic_z_max", 3.5))
+        self.DYNAMIC_Z_ATR_LOOKBACK = int(cfg.get("dynamic_z_atr_lookback", 168))  # 7d * 24h
+
+        # Exit N minutes before funding reset (00/08/16 UTC). 0 = disabled.
+        self.EXIT_PRE_FUNDING_MIN = int(cfg.get("exit_pre_funding_min", 0))
 
         self._state: Dict[str, _VWAPDevState] = {}
 
@@ -121,6 +150,37 @@ class VWAPDeviation(Strategy):
         if vwap is None or zscore is None:
             return None
 
+        # --- v3.1.26: dynamic Z threshold by ATR regime ---
+        # Low-vol regime → 2.5σ is a small absolute move (more fakes).
+        # Scale threshold in [DYNAMIC_Z_MIN, DYNAMIC_Z_MAX] by ATR ratio.
+        z_threshold = self.Z_THRESHOLD
+        if self.USE_DYNAMIC_Z:
+            atr_now = calculate_atr(candles_1h[-14:], 14) if len(candles_1h) >= 15 else None
+            atr_baseline = (
+                calculate_atr(candles_1h[-self.DYNAMIC_Z_ATR_LOOKBACK:], 14)
+                if len(candles_1h) >= self.DYNAMIC_Z_ATR_LOOKBACK + 1
+                else None
+            )
+            if atr_now is not None and atr_baseline is not None and atr_baseline > 0:
+                ratio = atr_now / atr_baseline
+                # ratio=1 → z_threshold unchanged; ratio<1 (low vol) → stricter; ratio>1 → looser
+                z_threshold = self.Z_THRESHOLD * max(0.7, min(1.5, ratio))
+                z_threshold = max(self.DYNAMIC_Z_MIN, min(self.DYNAMIC_Z_MAX, z_threshold))
+
+        # --- v3.1.26: session filter ---
+        if self.USE_SESSION_FILTER:
+            utc_h = _dt.datetime.utcfromtimestamp(event.timestamp_ms / 1000.0).hour
+            in_session = self.SESSION_START_UTC_H <= utc_h < self.SESSION_END_UTC_H
+            is_extreme = abs(zscore) >= self.SESSION_EXTREME_Z
+            if not in_session and not (self.SESSION_ALLOW_EXTREME_Z and is_extreme):
+                if event.timestamp_ms - getattr(state, "_last_session_skip_log_ms", 0) > 600_000:
+                    state._last_session_skip_log_ms = event.timestamp_ms
+                    logger.info(
+                        "VWAPDeviation %s SKIP — outside session (utc_h=%d, z=%.2f)",
+                        event.symbol, utc_h, zscore,
+                    )
+                return None
+
         # --- Check volume surge ---
         _, vol_ratio = calculate_volume_ratio(candles_1h, lookback=24)
         if vol_ratio is None or vol_ratio < self.VOLUME_SURGE:
@@ -144,12 +204,12 @@ class VWAPDeviation(Strategy):
             return None
 
         # --- Determine signal direction based on Z-score ---
-        # Z > 2.5 → price way above VWAP → SHORT (mean reversion down)
-        # Z < -2.5 → price way below VWAP → LONG (mean reversion up)
-        if zscore >= self.Z_THRESHOLD:
+        # Z > threshold → price way above VWAP → SHORT (mean reversion down)
+        # Z < -threshold → price way below VWAP → LONG (mean reversion up)
+        if zscore >= z_threshold:
             target_side = "short"
             deviation = zscore
-        elif zscore <= -self.Z_THRESHOLD:
+        elif zscore <= -z_threshold:
             target_side = "long"
             deviation = abs(zscore)
         else:
@@ -158,14 +218,19 @@ class VWAPDeviation(Strategy):
                 state._last_no_signal_log_ms = event.timestamp_ms
                 logger.info(
                     "VWAPDeviation %s NO SIGNAL — zscore=%.2f (threshold=%.2f), adx=%s, vol_ratio=%s",
-                    event.symbol, zscore, self.Z_THRESHOLD,
+                    event.symbol, zscore, z_threshold,
                     f"{adx:.1f}" if adx is not None else "N/A",
                     f"{vol_ratio:.2f}" if vol_ratio is not None else "N/A",
                 )
             return None  # Not extreme enough
 
         # --- OIR filter: confirm the move is one-sided ---
-        if self.REQUIRE_OIR_CONFIRM:
+        # v3.1.26: skip OIR requirement when |Z| > OIR_EXTREME_Z (orderbook already normalised)
+        skip_oir = (
+            self.OIR_DISABLE_EXTREME_Z
+            and deviation >= self.OIR_EXTREME_Z
+        )
+        if self.REQUIRE_OIR_CONFIRM and not skip_oir:
             oir = event.orderbook_oir
             if oir is not None:
                 if target_side == "short" and oir < self.OIR_THRESHOLD:
@@ -271,9 +336,63 @@ class VWAPDeviation(Strategy):
         if len(candles_1h) < 24:
             return None
 
+        # Reset r1_hit on a fresh position
+        if position.entry_time_ms != state.last_entry_time_ms:
+            state.last_entry_time_ms = position.entry_time_ms
+            state.r1_hit = False
+
+        price = event.price
+        hold_ms = event.timestamp_ms - position.entry_time_ms
+
+        # --- v3.1.26: exit N minutes before funding reset (00/08/16 UTC) ---
+        if self.EXIT_PRE_FUNDING_MIN > 0 and position.stop_loss_price is not None:
+            dt = _dt.datetime.utcfromtimestamp(event.timestamp_ms / 1000.0)
+            reset_hours = [0, 8, 16]
+            for rh in reset_hours:
+                reset_dt = dt.replace(hour=rh, minute=0, second=0, microsecond=0)
+                if reset_dt > dt:
+                    mins_to_reset = (reset_dt - dt).total_seconds() / 60.0
+                    if mins_to_reset <= self.EXIT_PRE_FUNDING_MIN:
+                        return ExitSignal(
+                            strategy=self.name,
+                            symbol=position.symbol,
+                            side=position.side,
+                            confidence=0.7,
+                            reason=f"pre_funding_exit_{int(mins_to_reset)}m",
+                        )
+                    break
+
+        # --- v3.1.26: SL-to-BE after 1R ---
+        if self.USE_SL_TO_BE_AFTER_1R and position.stop_loss_price is not None:
+            r_dist = abs(position.entry_price - position.stop_loss_price)
+            if r_dist > 0:
+                if position.side == "long":
+                    profit_r = (price - position.entry_price) / r_dist
+                else:
+                    profit_r = (position.entry_price - price) / r_dist
+                if profit_r >= self.SL_TO_BE_R_TRIGGER:
+                    state.r1_hit = True
+                if state.r1_hit:
+                    # If price reverts to entry (or beyond), exit at break-even
+                    if position.side == "long" and price <= position.entry_price:
+                        return ExitSignal(
+                            strategy=self.name,
+                            symbol=position.symbol,
+                            side=position.side,
+                            confidence=0.75,
+                            reason=f"be_after_{self.SL_TO_BE_R_TRIGGER}r",
+                        )
+                    if position.side == "short" and price >= position.entry_price:
+                        return ExitSignal(
+                            strategy=self.name,
+                            symbol=position.symbol,
+                            side=position.side,
+                            confidence=0.75,
+                            reason=f"be_after_{self.SL_TO_BE_R_TRIGGER}r",
+                        )
+
         # Time-based exit
-        hold_time = event.timestamp_ms - position.entry_time_ms
-        if hold_time >= self.MAX_HOLD_MS:
+        if hold_ms >= self.MAX_HOLD_MS:
             return ExitSignal(
                 strategy=self.name,
                 symbol=position.symbol,

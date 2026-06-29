@@ -31,9 +31,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _VolBreakoutState:
-    candles_15m: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=60))
+    candles_15m: Deque[Candle] = field(default_factory=lambda: collections.deque(maxlen=80))
     last_signal_ms: int = 0
     squeeze_active: bool = False
+    # Trailing-stop state (reset on new position entry)
+    last_entry_time_ms: int = 0
+    trail_active: bool = False
+    current_trail: float = 0.0
 
 
 class VolatilityBreakout(Strategy):
@@ -67,6 +71,21 @@ class VolatilityBreakout(Strategy):
         self.FAILED_BREAKOUT_BUFFER_PCT = float(
             cfg.get("failed_breakout_buffer_pct", 0.001)
         )
+
+        # --- v3.1.26 optimisation: trailing stop (opt-in) ---
+        self.USE_TRAILING_STOP = bool(cfg.get("use_trailing_stop", False))
+        self.TRAILING_METHOD = str(cfg.get("trailing_method", "ema9"))  # ema9|swing|atr
+        self.TRAILING_START_R = float(cfg.get("trailing_start_r", 1.0))
+        self.TRAILING_EMA_PERIOD = int(cfg.get("trailing_ema_period", 9))
+        self.TRAILING_ATR_MULT = float(cfg.get("trailing_atr_mult", 1.5))
+        self.TRAILING_SWING_LOOKBACK = int(cfg.get("trailing_swing_lookback", 5))
+
+        # --- v3.1.26 optimisation: time-scaled TP (opt-in) ---
+        # If hold > TIME_TP_FIRST_HOURS and original TP not hit yet,
+        # exit at the lower TIME_TP_AFTER_R multiple instead of waiting full MAX_HOLD.
+        self.USE_TIME_SCALED_TP = bool(cfg.get("use_time_scaled_tp", False))
+        self.TIME_TP_FIRST_HOURS = float(cfg.get("time_tp_first_hours", 3.0))
+        self.TIME_TP_AFTER_R = float(cfg.get("time_tp_after_r", 2.5))
 
         self._state: Dict[str, _VolBreakoutState] = {}
 
@@ -252,6 +271,12 @@ class VolatilityBreakout(Strategy):
         ):
             state.candles_15m.append(event.candle_15m)
 
+        # Reset trailing state on a fresh position
+        if position.entry_time_ms != state.last_entry_time_ms:
+            state.last_entry_time_ms = position.entry_time_ms
+            state.trail_active = False
+            state.current_trail = 0.0
+
         hold_ms = event.timestamp_ms - position.entry_time_ms
         if hold_ms >= self.MAX_HOLD_MS:
             return ExitSignal(
@@ -266,12 +291,80 @@ class VolatilityBreakout(Strategy):
         if len(candles) < self.BB_PERIOD + 2:
             return None
 
+        price = event.price
+
+        # --- v3.1.26: trailing stop (only after TRAILING_START_R profit) ---
+        if self.USE_TRAILING_STOP and position.stop_loss_price is not None:
+            r_dist = abs(position.entry_price - position.stop_loss_price)
+            if r_dist > 0:
+                if position.side == "long":
+                    profit_r = (price - position.entry_price) / r_dist
+                else:
+                    profit_r = (position.entry_price - price) / r_dist
+
+                if profit_r >= self.TRAILING_START_R:
+                    trail = self._compute_trail(candles, position.side)
+                    if trail is not None:
+                        # Trail only moves in profit direction
+                        if not state.trail_active:
+                            state.trail_active = True
+                            state.current_trail = trail
+                        else:
+                            if position.side == "long":
+                                state.current_trail = max(state.current_trail, trail)
+                            else:
+                                state.current_trail = min(state.current_trail, trail)
+
+                        ct = state.current_trail
+                        if position.side == "long" and price <= ct:
+                            return ExitSignal(
+                                strategy=self.name,
+                                symbol=position.symbol,
+                                side=position.side,
+                                confidence=0.8,
+                                reason=f"trailing_stop_{self.TRAILING_METHOD}_r{profit_r:.1f}",
+                            )
+                        if position.side == "short" and price >= ct:
+                            return ExitSignal(
+                                strategy=self.name,
+                                symbol=position.symbol,
+                                side=position.side,
+                                confidence=0.8,
+                                reason=f"trailing_stop_{self.TRAILING_METHOD}_r{profit_r:.1f}",
+                            )
+
+        # --- v3.1.26: time-scaled TP (exit at lower R if first_hours elapsed) ---
+        if self.USE_TIME_SCALED_TP and position.stop_loss_price is not None:
+            first_ms = int(self.TIME_TP_FIRST_HOURS * 3_600_000)
+            if hold_ms >= first_ms:
+                r_dist = abs(position.entry_price - position.stop_loss_price)
+                if r_dist > 0:
+                    if position.side == "long":
+                        eff_tp = position.entry_price + self.TIME_TP_AFTER_R * r_dist
+                        if price >= eff_tp:
+                            return ExitSignal(
+                                strategy=self.name,
+                                symbol=position.symbol,
+                                side=position.side,
+                                confidence=0.8,
+                                reason=f"time_scaled_tp_{self.TIME_TP_AFTER_R}r",
+                            )
+                    else:
+                        eff_tp = position.entry_price - self.TIME_TP_AFTER_R * r_dist
+                        if price <= eff_tp:
+                            return ExitSignal(
+                                strategy=self.name,
+                                symbol=position.symbol,
+                                side=position.side,
+                                confidence=0.8,
+                                reason=f"time_scaled_tp_{self.TIME_TP_AFTER_R}r",
+                            )
+
         closes = [c.close for c in candles]
         lower, middle, upper = self._bands(candles)
         if lower is None or upper is None:
             return None
 
-        price = event.price
         if hold_ms < self.FAILED_BREAKOUT_MIN_HOLD_MS:
             return None
 
@@ -364,6 +457,28 @@ class VolatilityBreakout(Strategy):
     ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         closes = [c.close for c in candles]
         return calculate_bollinger_bands(closes, self.BB_PERIOD, self.BB_STD)
+
+    def _compute_trail(self, candles: List[Candle], side: str) -> Optional[float]:
+        """Compute trailing-stop level for the given side."""
+        if self.TRAILING_METHOD == "ema9":
+            closes = [c.close for c in candles]
+            ema = calculate_ema(closes, self.TRAILING_EMA_PERIOD)
+            return ema
+        if self.TRAILING_METHOD == "swing":
+            lookback = self.TRAILING_SWING_LOOKBACK
+            window = candles[-lookback:] if len(candles) >= lookback else candles
+            if side == "long":
+                return min(c.low for c in window)
+            return max(c.high for c in window)
+        if self.TRAILING_METHOD == "atr":
+            atr = calculate_atr(candles, period=14)
+            if atr is None:
+                return None
+            last_close = candles[-1].close
+            if side == "long":
+                return last_close - self.TRAILING_ATR_MULT * atr
+            return last_close + self.TRAILING_ATR_MULT * atr
+        return None
 
     def _get_state(self, symbol: str) -> _VolBreakoutState:
         if symbol not in self._state:
