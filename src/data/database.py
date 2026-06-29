@@ -110,6 +110,24 @@ class OIRecord:
 
 
 @dataclass(frozen=True)
+class LiquidationRecord:
+    """Single liquidation event (Binance WS or candle-derived proxy)."""
+    symbol: str
+    timestamp_ms: int
+    notional_usd: float
+    side: str
+    source: str = "binance"
+
+
+@dataclass(frozen=True)
+class BinancePerpPriceRecord:
+    """Binance USD-M perp mid proxy (kline close or mark price)."""
+    symbol: str
+    price: float
+    timestamp_ms: int
+
+
+@dataclass(frozen=True)
 class PortfolioSnapshot:
     """Portfolio state at a point in time."""
     timestamp: int
@@ -196,6 +214,8 @@ class Database:
             self._create_signals_table()
             self._create_funding_table()
             self._create_oi_table()
+            self._create_liquidation_table()
+            self._create_binance_perp_table()
             self._create_portfolio_table()
             self._create_strategy_pnl_table()
             self._create_decision_audit_table()
@@ -277,6 +297,28 @@ class Database:
                 oi_delta  REAL    NOT NULL,
                 timestamp INTEGER NOT NULL,
                 PRIMARY KEY (symbol, timestamp)
+            ) WITHOUT ROWID;
+        """)
+
+    def _create_liquidation_table(self) -> None:
+        self._conn().execute("""
+            CREATE TABLE IF NOT EXISTS liquidation_events (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol        TEXT    NOT NULL,
+                timestamp_ms  INTEGER NOT NULL,
+                notional_usd  REAL    NOT NULL,
+                side          TEXT    NOT NULL,
+                source        TEXT    NOT NULL DEFAULT 'binance'
+            );
+        """)
+
+    def _create_binance_perp_table(self) -> None:
+        self._conn().execute("""
+            CREATE TABLE IF NOT EXISTS binance_perp_prices (
+                symbol        TEXT    NOT NULL,
+                timestamp_ms  INTEGER NOT NULL,
+                price         REAL    NOT NULL,
+                PRIMARY KEY (symbol, timestamp_ms)
             ) WITHOUT ROWID;
         """)
 
@@ -416,6 +458,8 @@ class Database:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_funding_symbol_ts ON funding_history(symbol, timestamp);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_oi_symbol_ts ON oi_history(symbol, timestamp);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_liq_symbol_ts ON liquidation_events(symbol, timestamp_ms);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_bn_perp_symbol_ts ON binance_perp_prices(symbol, timestamp_ms);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_ts ON portfolio_snapshots(timestamp);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_strategy_pnl_strategy ON strategy_pnl(strategy);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_strategy_pnl_exit_time ON strategy_pnl(exit_time);")
@@ -936,6 +980,22 @@ class Database:
             conn.execute(sql, (record.symbol, record.current, record.predicted, record.timestamp))
             conn.commit()
 
+    def save_funding_batch(self, records: List[FundingRecord]) -> None:
+        """Batch upsert funding rows (backfill)."""
+        if not records:
+            return
+        sql = """
+            INSERT OR REPLACE INTO funding_history (symbol, current, predicted, timestamp)
+            VALUES (?, ?, ?, ?)
+        """
+        params = [
+            (r.symbol, r.current, r.predicted, r.timestamp) for r in records
+        ]
+        with self._write_lock:
+            conn = self._conn()
+            conn.executemany(sql, params)
+            conn.commit()
+
     def get_funding_history(self, symbol: str, limit: int = 500) -> List[Dict[str, Any]]:
         sql = """
             SELECT * FROM funding_history
@@ -962,6 +1022,22 @@ class Database:
             conn.execute(sql, (record.symbol, record.oi_total, record.oi_delta, record.timestamp))
             conn.commit()
 
+    def save_oi_batch(self, records: List[OIRecord]) -> None:
+        """Batch upsert OI rows (backfill)."""
+        if not records:
+            return
+        sql = """
+            INSERT OR REPLACE INTO oi_history (symbol, oi_total, oi_delta, timestamp)
+            VALUES (?, ?, ?, ?)
+        """
+        params = [
+            (r.symbol, r.oi_total, r.oi_delta, r.timestamp) for r in records
+        ]
+        with self._write_lock:
+            conn = self._conn()
+            conn.executemany(sql, params)
+            conn.commit()
+
     def get_oi_history(self, symbol: str, limit: int = 500) -> List[Dict[str, Any]]:
         sql = """
             SELECT * FROM oi_history
@@ -973,6 +1049,159 @@ class Database:
             cur = self._conn().execute(sql, (symbol, limit))
             rows = cur.fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Liquidations (backtest replay + live persistence)
+    # ------------------------------------------------------------------
+
+    def save_liquidation(self, record: LiquidationRecord) -> None:
+        sql = """
+            INSERT INTO liquidation_events
+                (symbol, timestamp_ms, notional_usd, side, source)
+            VALUES (?, ?, ?, ?, ?)
+        """
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(
+                sql,
+                (
+                    record.symbol,
+                    record.timestamp_ms,
+                    record.notional_usd,
+                    record.side,
+                    record.source,
+                ),
+            )
+            conn.commit()
+
+    def save_liquidation_batch(self, records: List[LiquidationRecord]) -> None:
+        if not records:
+            return
+        sql = """
+            INSERT INTO liquidation_events
+                (symbol, timestamp_ms, notional_usd, side, source)
+            VALUES (?, ?, ?, ?, ?)
+        """
+        params = [
+            (r.symbol, r.timestamp_ms, r.notional_usd, r.side, r.source)
+            for r in records
+        ]
+        with self._write_lock:
+            conn = self._conn()
+            conn.executemany(sql, params)
+            conn.commit()
+
+    def get_liquidation_events(
+        self,
+        symbol: str,
+        limit: int = 500_000,
+        start_ms: Optional[int] = None,
+        end_ms: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses = ["symbol = ?"]
+        params: List[Any] = [symbol]
+        if start_ms is not None:
+            clauses.append("timestamp_ms >= ?")
+            params.append(start_ms)
+        if end_ms is not None:
+            clauses.append("timestamp_ms <= ?")
+            params.append(end_ms)
+        where = " AND ".join(clauses)
+        sql = f"""
+            SELECT symbol, timestamp_ms, notional_usd, side, source
+            FROM liquidation_events
+            WHERE {where}
+            ORDER BY timestamp_ms ASC
+            LIMIT ?
+        """
+        params.append(limit)
+        with self._conn():
+            cur = self._conn().execute(sql, params)
+            rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def count_liquidation_events(self, symbol: str) -> int:
+        with self._conn():
+            row = self._conn().execute(
+                "SELECT COUNT(*) AS n FROM liquidation_events WHERE symbol = ?",
+                (symbol,),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def delete_liquidation_proxy(self, symbol: str) -> int:
+        """Remove candle-derived proxy rows before regenerating."""
+        with self._write_lock:
+            conn = self._conn()
+            cur = conn.execute(
+                "DELETE FROM liquidation_events WHERE symbol = ? AND source = 'proxy'",
+                (symbol,),
+            )
+            conn.commit()
+            return int(cur.rowcount)
+
+    # ------------------------------------------------------------------
+    # Binance USD-M perp prices (LeadLag backtest replay)
+    # ------------------------------------------------------------------
+
+    def save_binance_perp(self, record: BinancePerpPriceRecord) -> None:
+        sql = """
+            INSERT OR REPLACE INTO binance_perp_prices (symbol, timestamp_ms, price)
+            VALUES (?, ?, ?)
+        """
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, (record.symbol, record.timestamp_ms, record.price))
+            conn.commit()
+
+    def save_binance_perp_batch(self, records: List[BinancePerpPriceRecord]) -> None:
+        if not records:
+            return
+        sql = """
+            INSERT OR REPLACE INTO binance_perp_prices (symbol, timestamp_ms, price)
+            VALUES (?, ?, ?)
+        """
+        params = [(r.symbol, r.timestamp_ms, r.price) for r in records]
+        with self._write_lock:
+            conn = self._conn()
+            conn.executemany(sql, params)
+            conn.commit()
+
+    def get_binance_perp_prices(
+        self,
+        symbol: str,
+        limit: int = 500_000,
+        start_ms: Optional[int] = None,
+        end_ms: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses = ["symbol = ?"]
+        params: List[Any] = [symbol]
+        if start_ms is not None:
+            clauses.append("timestamp_ms >= ?")
+            params.append(start_ms)
+        if end_ms is not None:
+            clauses.append("timestamp_ms <= ?")
+            params.append(end_ms)
+        where = " AND ".join(clauses)
+        sql = f"""
+            SELECT symbol, timestamp_ms, price
+            FROM binance_perp_prices
+            WHERE {where}
+            ORDER BY timestamp_ms ASC
+            LIMIT ?
+        """
+        params.append(limit)
+        with self._conn():
+            cur = self._conn().execute(sql, params)
+            rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def count_binance_perp_prices(self, symbol: str) -> int:
+        with self._conn():
+            row = self._conn().execute(
+                "SELECT COUNT(*) AS n FROM binance_perp_prices WHERE symbol = ?",
+                (symbol,),
+            ).fetchone()
+        return int(row["n"]) if row else 0
 
     # ------------------------------------------------------------------
     # Portfolio snapshots

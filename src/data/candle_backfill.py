@@ -29,6 +29,7 @@ from src.data.database import Candle, Database
 logger = logging.getLogger(__name__)
 
 BINANCE_BASE = "https://api.binance.com/api/v3/klines"
+BINANCE_FUTURES_BASE = "https://fapi.binance.com/fapi/v1/klines"
 
 BINANCE_INTERVALS = {
     "1m": "1m",
@@ -69,7 +70,14 @@ def kline_to_candle(k: list, symbol: str) -> Candle:
     backfilled rows had a different PK value than the live rows that
     eventually replaced them, producing duplicates and look-ahead bias
     in backtests.
+
+    v3.1.29: Populate ``buy_volume`` / ``sell_volume`` from taker-buy base
+    volume (k[9]) so CVDOrderFlow can run on backfilled 1m history.
     """
+    volume = float(k[5])
+    buy = float(k[9]) if len(k) > 9 else 0.0
+    sell = max(volume - buy, 0.0)
+    trade_count = int(k[8]) if len(k) > 8 else 0
     return Candle(
         symbol=symbol,
         timestamp_ms=int(k[6]),
@@ -77,10 +85,13 @@ def kline_to_candle(k: list, symbol: str) -> Candle:
         high=float(k[2]),
         low=float(k[3]),
         close=float(k[4]),
-        volume=float(k[5]),
+        volume=volume,
         funding_rate=None,
         oi_total=None,
         oi_delta=None,
+        buy_volume=buy,
+        sell_volume=sell,
+        trade_count=trade_count,
     )
 
 
@@ -106,8 +117,10 @@ async def _fetch_klines_page(
     interval: str,
     start_ms: int,
     end_ms: int,
+    *,
+    use_futures: bool = False,
 ) -> List[list]:
-    """Fetch one page (max 1000) of Binance klines."""
+    """Fetch one page (max 1000) of Binance klines (spot or USD-M futures)."""
     params = {
         "symbol": f"{symbol}USDT",
         "interval": interval,
@@ -116,7 +129,8 @@ async def _fetch_klines_page(
         "limit": MAX_PER_REQUEST,
     }
     timeout = aiohttp.ClientTimeout(total=PER_REQUEST_TIMEOUT_SEC)
-    async with session.get(BINANCE_BASE, params=params, timeout=timeout) as resp:
+    url = BINANCE_FUTURES_BASE if use_futures else BINANCE_BASE
+    async with session.get(url, params=params, timeout=timeout) as resp:
         if resp.status != 200:
             body = await resp.text()
             raise RuntimeError(f"Binance HTTP {resp.status}: {body[:200]}")
@@ -130,20 +144,43 @@ async def _download_range(
     start_ms: int,
     end_ms: int,
 ) -> List[Candle]:
-    """Paginated download across ``[start_ms, end_ms]``."""
-    candles: List[Candle] = []
-    cursor = start_ms
-    while cursor < end_ms:
-        page = await _fetch_klines_page(session, symbol, interval, cursor, end_ms)
-        if not page:
-            break
-        candles.extend(kline_to_candle(k, symbol) for k in page)
-        last_ts = int(page[-1][0])
-        cursor = last_ts + 1
-        if len(page) < MAX_PER_REQUEST:
-            break
-        await asyncio.sleep(PAGE_SLEEP_SEC)
-    return candles
+    """Paginated download across ``[start_ms, end_ms]``.
+
+    Tries Binance spot first; symbols listed only on USD-M (e.g. HYPE)
+    fall back to ``/fapi/v1/klines``.
+    """
+    for use_futures in (False, True):
+        candles: List[Candle] = []
+        cursor = start_ms
+        try:
+            while cursor < end_ms:
+                page = await _fetch_klines_page(
+                    session, symbol, interval, cursor, end_ms, use_futures=use_futures,
+                )
+                if not page:
+                    break
+                candles.extend(kline_to_candle(k, symbol) for k in page)
+                last_ts = int(page[-1][0])
+                cursor = last_ts + 1
+                if len(page) < MAX_PER_REQUEST:
+                    break
+                await asyncio.sleep(PAGE_SLEEP_SEC)
+            if use_futures and candles:
+                logger.info(
+                    "Candle backfill %s %s: using Binance USD-M futures klines",
+                    symbol,
+                    interval,
+                )
+            return candles
+        except RuntimeError as exc:
+            if not use_futures and "Invalid symbol" in str(exc):
+                logger.info(
+                    "Spot klines unavailable for %s — retrying via Binance futures",
+                    symbol,
+                )
+                continue
+            raise
+    return []
 
 
 # ────────────────────────────────────────────────────────────────────

@@ -358,6 +358,12 @@ class FundingOIAggregator:
             "bybit": "SOLUSDT",
             "okx": "SOL-USDT-SWAP",
         },
+        "HYPE": {
+            "coinalyze": "HYPEUSDT_PERP.A",
+            "binance": "HYPEUSDT",
+            "bybit": "HYPEUSDT",
+            "okx": "HYPE-USDT-SWAP",
+        },
     }
 
     CEX_EXCHANGES = ("binance", "bybit", "okx")

@@ -57,6 +57,7 @@ SYMBOL_FUNDING_INTERVAL_HOURS: Dict[Tuple[str, str], float] = {
     ("binance", "BTC"): 4.0,
     ("binance", "ETH"): 4.0,
     ("binance", "SOL"): 4.0,
+    ("binance", "HYPE"): 4.0,
     # Bybit / OKX are still 8h for the major pairs as of 2024-2025.
     # OKX publishes a ``fundingInterval`` field in its instrument
     # metadata; we default to 8h and let the live fetcher override
