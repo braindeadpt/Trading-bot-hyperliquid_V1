@@ -624,7 +624,9 @@ strategy:
   # Ensemble Configuration
   # ═══════════════════════════════════════════════════════════
   ensemble:
-    # Phase 1 (2026-06-29): só VolatilityBreakout + VWAPDeviation, sem consenso ensemble.
+    # Direct mode (desde v3.1.29): sem consenso ensemble — sub-estratégias correm no engine.
+    # v3.1.38: portfolio activo = VolatilityBreakout + VWAPDeviation + ChecklistMeta (3 KEEP).
+    # Todas as restantes falharam audit/walk-forward — ver docs/STRATEGY_AUDIT.md.
     enabled: false                    # sub-estratégias correm directas no engine
     threshold: 0.40                   # se reativar: exigir 40%+ peso combinado
     min_agreeing: 2                   # se reativar: 2+ estratégias concordando

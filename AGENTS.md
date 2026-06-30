@@ -384,7 +384,7 @@ Effective settings are logged once at engine start (`Effective risk: leverage=..
 | `scripts/backfill_candles.py` | Binance historical candle backfill to populate candle tables before bot start. |
 | `scripts/lookahead_audit.py` | `LOOKAHEAD-001..006` static scanner (Phase B, v3.1.9). |
 | `src/security/audit.py` | Static security scanner. If you add new file-I/O or HTTP patterns, update the auditor. |
-| `config/settings.yaml` | All tunable parameters. Add new strategy params here and in `DEFAULT_CONFIG`. |
+| `config/settings.yaml` | All tunable parameters. **Live portfolio (v3.1.38):** VB + VWAP + ChecklistMeta only (`ensemble.enabled: false`). |
 | `src/utils/config.py` | Configuration loader: defaults, deep-merge, env overrides, **`_apply_mode_overrides`**. |
 
 ---
@@ -422,4 +422,4 @@ Before submitting any code change:
 
 ---
 
-*Last updated: 2026-06-25 (v3.1.25 — crash non-reaction fix: 8 root causes across governor (min_sharpe -1.0, min_trades 30), ensemble (min_agreeing=1), high_conviction_exclude cleanup, buy_volume/sell_volume DB persistence, INFO-level rejection logging for all 12 strategies. v3.1.24: candle restoration ORDER BY DESC fix. 271+ tests across 22 files. v3.1.16-v3.1.22: 6 critical bug fixes, 5 risk/execution fixes, 7 strategy cleanups, 5 backtest realism fixes, 4 new strategies, 7 quant model/infra add-ons, 6 mainnet readiness fixes.)*
+*Last updated: 2026-06-30 (v3.1.38 — docs: 3 KEEP strategies active in direct mode — VolatilityBreakout, VWAPDeviation, ChecklistMeta; all others OFF after audit/walk-forward. v3.1.25–v3.1.37: crash fixes, 5 new strategies, sweep infra.)*

@@ -1,11 +1,42 @@
 # Strategy Audit — Backtest Profundo
 
-**Última actualização:** 2026-06-29 19:55 UTC
-**Estado:** pós walk-forward optimisation sweep (45 runs, 3 windows, Monte Carlo 1000x)
+**Última actualização:** 2026-06-30 UTC (v3.1.38)
+**Estado:** portfolio activo = **3 KEEP** (VB + VWAP + ChecklistMeta); **todas as restantes falharam** audit/walk-forward
+
+## Portfolio activo (v3.1.38)
+
+| Estratégia | Modo | Regime forte | Veredicto |
+|------------|------|--------------|-----------|
+| **VolatilityBreakout** | Direct | Trending W1/W3 | ✅ KEEP |
+| **VWAPDeviation** | Direct | Mean-reversion (sessão 07–22 UTC) | ✅ KEEP |
+| **ChecklistMeta** | Direct | Choppy W2 | ✅ KEEP (activado 2026-06-30) |
+
+- **Ensemble:** `enabled: false` — sem consenso; cada estratégia corre independentemente.
+- **Governor:** activo — desliga sub-estratégia se Sharpe rolling < 0 (30 dias, min 10 trades).
+
+### Resumo — estratégias que **não** passaram nos testes
+
+| Veredicto | Estratégias | Motivo típico |
+|-----------|-------------|---------------|
+| ❌ **KILL** | SmartMoneyFlow, DonchianBreakout, OrderBookScalper, RangeGrid, FundingArbitrage | PF < 1, Sharpe negativo, ou killed (v3.1.18) |
+| ⏳ **NO_DATA** | LeadLag, LiquidationCatcher, FundingMomentum, SpotPerpCarry | 0 trades no backtest (dados/thresholds) |
+| ⚠️ **WATCH** (OFF) | CVDOrderFlow, TrendPyramid, FundingExtreme | Marginal, outlier, ou inconsistente entre janelas |
+| ❌ **OFF pós-sweep** | SFP Reversion, VA Rejection | medPF OK mas **regime-dependent** — W2 falha; SFP integrado no ChecklistMeta |
+
+**Total:** 3 activas de ~17 sub-estratégias registadas no factory.
+
+## Combined walk-forward v3.1.38 (2026-06-30)
+
+Script: `backtest_combined_focused.py` — 48 runs, 3 janelas não-overlap, Monte Carlo 1000×.
+
+| Estratégia | medPF | ProbP | Notas | Decisão |
+|------------|-------|-------|-------|---------|
+| VB baseline_live | **2.11** | 89% | Melhor standalone; W1+W3 | KEEP (já activo) |
+| CL thr_3.5 | 1.14 | 67% | **Única PF>1 em W2** (PF 1.61) | **ACTIVATED** |
+| SFP baseline | 1.34 | 78% | Boa W1, falha W2 | OFF standalone |
+| VA vol18_wick60 | 1.12 | 57% | Regime-dependent | OFF |
 
 ## ⚠️ Nota sobre audits anteriores
-
-Os audits `strategy_audit_20260629_122340.csv` e `_132320.csv` correram **antes** do backfill
 completo de `buy_volume`/`sell_volume` (que terminou às ~14:25 UTC). O veredicto "KEEP CVDOrderFlow
 PF 3.58 Sharpe 5.41" era um **artefacto de dados incompletos** (12% dos candles tinham volume).
 
@@ -81,13 +112,16 @@ nas 2 janelas boas** e minimizam perda na má — claramente superiores ao basel
 
 ## Veredicto final (actualizado 19:55 UTC)
 
-### ✅ KEEP — activo em paper (com optimizações v3.1.26)
+### ✅ KEEP — activas em paper (direct mode)
 
-- **VolatilityBreakout** — config: `volume_surge=1.5 + trailing_ema9`. Walk-forward total: +$139 (+70% vs baseline)
-- **VWAPDeviation** — config: `session_filter 07-22 UTC`. W1 PF 16.46 / mcPF_p05 1.56 (robustez +130%)
+- **VolatilityBreakout** — `volume_surge=1.5 + trailing_ema9`. Walk-forward total: +$139 (+70% vs baseline)
+- **VWAPDeviation** — `session_filter 07-22 UTC`. W1 PF 16.46 / mcPF_p05 1.56
+- **ChecklistMeta** — `score_threshold=3.5`. Única estratégia PF>1 em W2 choppy (PF 1.61, ProbP 96%). Componentes: SFP, VWAP Z, trend structure, momentum, RSI, OI, ADX, OIR, liquidations
 
-### ⚠️ WATCH — OFF, revalidar
+### ⚠️ WATCH — OFF, não promovidas
 
+- **SFP Reversion** — medPF 1.34 no sweep v3.1.38 mas **falha W2**; integrado como componente do ChecklistMeta, não standalone
+- **VA Rejection** — medPF 1.12, regime-dependent; OFF até novo walk-forward
 - **CVDOrderFlow** — CVD sweep mostra só config **tight** com PF 1.12 + Sharpe +0.63 em D_full
   (42 trades). Outras configs todas negativas ou choppy. **Não ligar agora** — re-testar em
   30 dias com walk-forward. Se reativar: usar config tight (`min_divergence 0.45`,
@@ -127,35 +161,38 @@ nas 2 janelas boas** e minimizam perda na má — claramente superiores ao basel
 **Conclusão:** PF alto em B_2weeks vem com Sharpe negativo (equity curve choppy).
 Só config tight em D_full tem PF>1 + Sharpe>0 simultaneamente, mas marginal (n=42, PnL +$18).
 
-## Config activa em paper (Fase 1 + v3.1.26 optimisations)
+## Config activa em paper (v3.1.38 — direct mode)
 
 ```yaml
 strategy:
   volatility_breakout:
     enabled: true
     min_confidence: 0.55
-    volume_surge: 1.5              # was 1.3
-    use_trailing_stop: true        # NEW
-    trailing_method: ema9          # NEW
+    volume_surge: 1.5
+    use_trailing_stop: true
+    trailing_method: ema9
     trailing_start_r: 1.0
   vwap_deviation:
     enabled: true
     min_confidence: 0.70
-    use_session_filter: true       # NEW
+    use_session_filter: true
     session_start_utc_h: 7
     session_end_utc_h: 22
-  # tudo o resto: enabled: false
-  ensemble: {enabled: false}    # direct mode
+  checklist_meta:
+    enabled: true               # v3.1.38
+    score_threshold: 3.5
+    min_confidence: 0.60
+  # tudo o resto (~14 estratégias): enabled: false
+  ensemble: {enabled: false}    # direct mode — sem consenso
 ```
 
 ## Próximos passos
 
-1. **Manter config optimizada** — VB+VWAP com vencedores v3.1.26, paper trading 30-60 dias
-2. **Próximo optimisation cycle em 30 dias** com walk-forward em 4 janelas (regime balanceado)
+1. **Paper 30–60 dias** com portfolio de 3 KEEP — comparar live vs backtest por estratégia
+2. **Próximo optimisation cycle** com walk-forward em 4 janelas (regime balanceado)
 3. **Re-test CVD** com config tight quando houver 60+ dias de dados
-4. **Backfill LeadLag** com tick data real se quiser explorar latency arb
-5. **Regime filter futuro** — VWAP desligar em ADX>30 (trending), VB desligar em ADX<10 (choppy)
-6. **Nunca escalar** sem 3 meses de paper PF ≥ 1.3
+4. **Nunca escalar** sem 3 meses de paper PF ≥ 1.3 no portfolio combinado
+5. **Não reactivar** estratégias KILL/NO_DATA/WATCH sem novo audit isolado PF ≥ 1.3
 
 ## Scripts para re-correr
 

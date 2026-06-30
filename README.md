@@ -65,30 +65,33 @@ start.bat
 
 ## Strategies
 
-The 12 strategies are governed by `StrategyGovernor` which auto-disables
-any strategy with negative Sharpe over the last 30 days. The ensemble
-requires cross-class agreement (trend/revert/carry/micro) to avoid
-false confluence from correlated signal generators.
+**Estado actual (v3.1.38):** apenas **3 estratégias activas** em direct mode (ensemble OFF).
+Todas as restantes falharam audit ou walk-forward — ver `docs/STRATEGY_AUDIT.md`.
 
-| Strategy             | Type           | Status (typical) | Notes |
+`StrategyGovernor` auto-desactiva qualquer sub-estratégia com Sharpe rolling negativo (30 dias).
+
+| Strategy             | Type           | Status (v3.1.38) | Notes |
 |----------------------|----------------|------------------|-------|
-| TrendPyramid         | trend          | Active (v3.1.20) | EMA20 pullback entries, Chandelier exit, 4R TP |
-| SmartMoneyFlow       | trend          | Active (legacy)  | Trend follower (v3.1.18 EMA50 exit) |
-| DonchianBreakout     | trend          | Active (v3.1.18) | 15m breakout + vol filter (v3.1.18 dim fix) |
-| VolatilityBreakout   | trend          | Active           | Bollinger-squeeze breakout, regime-weighted |
-| SpotPerpCarry        | carry (v3.1.20)| Active           | Short perp + synthetic long spot, true delta-neutral |
-| FundingMomentum      | carry (v3.1.20)| Active           | Follow funding flips with OI divergence |
-| RangeGrid            | revert (v3.1.20)| Active          | Ping-pong maker limit orders in ADX<18 ranges |
-| LiquidationCatcher   | event-driven   | Active           | $50M+ Binance liquidations + OI confirm |
-| VWAPDeviation        | mean-reversion | Active (low-vol) | Z-score vs VWAP(1h); v3.1.18 thresholds restored |
-| CVDOrderFlow         | order-flow     | Active           | Multi-TF CVD divergence (5m/15m/1h); v3.1.16 USD fix |
-| LeadLag              | microstructure | Active          | Perp-vs-perp lag (default) OR BasisTrade mode |
-| FundingArbitrage     | market-neutral | Disabled (v3.1.18)| Killed — cross-asset basis risk |
-| FundingExtreme       | mean-reversion | Disabled         | Sharpe -37, kept off permanently |
+| VolatilityBreakout   | trend          | **Active**       | Bollinger squeeze + trailing EMA9; W1/W3 trending |
+| VWAPDeviation        | mean-reversion | **Active**       | Z-score vs VWAP; session filter 07–22 UTC |
+| ChecklistMeta        | meta-scoring   | **Active**       | Weighted checklist; única PF>1 em regime choppy W2 |
+| SFP Reversion        | mean-reversion | OFF              | Regime-dependent; componente do ChecklistMeta |
+| VA Rejection         | mean-reversion | OFF              | Regime-dependent; sweep v3.1.38 não passou |
+| TrendPyramid         | trend          | OFF              | Outlier distorce PF |
+| SmartMoneyFlow       | trend          | OFF              | PF 0.27 — KILL |
+| DonchianBreakout     | trend          | OFF              | Sharpe -7.4 — KILL |
+| CVDOrderFlow         | order-flow     | OFF              | Marginal; WATCH only |
+| LeadLag              | microstructure | OFF              | 0 backtest trades |
+| LiquidationCatcher   | event-driven   | OFF              | 0 backtest trades |
+| OrderBookScalper     | microstructure | OFF              | KILLED v3.1.18 |
+| RangeGrid            | revert         | OFF              | Sharpe -4.3 — KILL |
+| SpotPerpCarry        | carry          | OFF              | Sem dados spot |
+| FundingMomentum      | carry          | OFF              | 0 backtest trades |
+| FundingArbitrage     | market-neutral | OFF              | KILLED v3.1.18 |
+| FundingExtreme       | mean-reversion | OFF              | Inconsistente / bug histórico |
 
-Ensemble logic combines signals via weighted consensus with cross-class
-de-correlation (v3.1.18). High-conviction bypass requires confidence
->= 0.70 and excludes VWAPDeviation, FundingExtreme, LeadLag.
+Ensemble (`strategy.ensemble.enabled: false`) está **desligado**. Cada estratégia activa gera sinais
+de forma independente; não há consenso ponderado nem high-conviction bypass.
 
 ---
 

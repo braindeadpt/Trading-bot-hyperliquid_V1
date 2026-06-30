@@ -1,7 +1,7 @@
 # Relatório de Performance & Plano para PnL Positivo
 
-**Data:** 2026-06-29
-**Versão bot:** v3.1.28 (paper trading)
+**Data:** 2026-06-30 (actualizado v3.1.38)
+**Versão bot:** v3.1.38 (paper trading)
 **Capital:** $10,000 → **$9,699** (-3.0% all-time)
 **Trades fechados:** 123 | **Win rate all-time:** 20%
 
@@ -16,7 +16,7 @@
 | **Live all-time** (123 trades) | -$231.25, WR 20% | Perdedor |
 | **Live Jun 2026 ex-FundingExtreme** (46 trades) | -$46.40, WR 35% | Marginalmente perdedor |
 | **Ensemble sweep** (todas as 72 configs) | Sharpe -11 a -27, PF 0.12-0.56 | **TODAS perdem** |
-| **Per-strategy backtest** | Ver tabela §1.3 | Só 2 estratégias têm edge |
+| **Per-strategy backtest** | Ver tabela §1.3 + §8 | **3 estratégias KEEP** (VB, VWAP, ChecklistMeta) |
 
 **Conclusão central:** o problema **não é infraestrutura** (data feeds, dashboard, backfill estão OK). O problema é **arquitetura do ensemble + estratégias sem edge + execução que corta winners e deixa losers correr**.
 
@@ -85,11 +85,19 @@ BTC/ETH/SOL são **estruturalmente** correlacionados (>0.80 sempre). Bloquear co
 | OrderBookScalper | C (full) | 165 | 26% | 0.97 | 0.34 | -12.54 | -0.13 | ❌ Morto |
 | TrendFollow | C (full) | 160 | 34% | 2.13 | 1.09 | -0.42 | +0.09 | ⚠️ Marginal |
 
-**Apenas 2 estratégias têm edge validado em backtest:** `VolatilityBreakout` e `VWAPDeviation`.
+**Três estratégias passaram validação e estão activas (v3.1.38):**
 
-`TrendPyramid` mostra PF 2.15 mas tem 1 trade outlier (+$3,987 em `other_pnl`) — sem esse trade é marginal. Precisa de mais dados.
+| Estratégia | Regime forte | Walk-forward / audit |
+|------------|--------------|----------------------|
+| **VolatilityBreakout** | Trending (W1/W3) | medPF 2.11, ProbP 89% — melhor standalone |
+| **VWAPDeviation** | Mean-reversion (sessão EU/US) | PF 1.46–16.5 conforme janela; session filter v3.1.26 |
+| **ChecklistMeta** | Choppy (W2) | medPF 1.14; **única PF>1 em W2** (PF 1.61, ProbP 96%) |
 
-`SmartMoneyFlow` é o pior: PF 0.27 (121 trades, 11% TP rate, R:R 2.21 mas WR baixíssimo). Está **ativo em live** e perdendo -$3.54 em Junho (12 trades, WR 17%).
+**Todas as outras falharam nos testes** (KILL, NO_DATA ou WATCH sem promoção). Ver `docs/STRATEGY_AUDIT.md` para veredictos completos.
+
+`TrendPyramid` mostra PF 2.15 mas tem 1 trade outlier (+$3,987 em `other_pnl`) — sem esse trade é marginal. **OFF.**
+
+`SmartMoneyFlow` é o pior: PF 0.27 (121 trades, 11% TP rate). **OFF** desde Phase 1.
 
 ---
 
@@ -157,7 +165,7 @@ execution:
     trail_pct: 0.008            # subir de 0.5% para 0.8%
 ```
 
-**Resultado esperado:** bot faz **menos trades** (5-10/semana em vez de 20+), só com `VolatilityBreakout` + `VWAPDeviation` (ambos PF >1.4 em backtest).
+**Resultado esperado:** bot faz **menos trades** (5-10/semana em vez de 20+), só com estratégias **KEEP** (inicialmente VB + VWAP; v3.1.38 acrescentou ChecklistMeta para cobrir regime choppy).
 
 ### Fase 2 — Tuning fino (1-2 semanas de paper)
 
@@ -258,7 +266,8 @@ python scripts/_analyze_trades3.py   # exit reasons + R:R
 
 | Semana | Ação | Meta |
 |--------|------|------|
-| **Hoje** | Aplicar Fase 1 (config), reiniciar bot | Bot rodando só com VB + VWAPDev |
+| **2026-06-29** | Fase 1 aplicada | VB + VWAPDev (direct mode) |
+| **2026-06-30** | v3.1.38 ChecklistMeta activado | VB + VWAP + ChecklistMeta |
 | **Sem 1-2** | Paper trading limpo, 20-30 trades esperados | Confirmar WR ≥ 40% |
 | **Sem 3** | Avaliar Fase 1, ajustar thresholds | PF ≥ 1.2 |
 | **Sem 4-6** | Backtest TrendPyramid isolado | Decidir reativar ou não |
@@ -274,16 +283,17 @@ python scripts/_analyze_trades3.py   # exit reasons + R:R
 1. 60% da perda é 1 bug histórico (FundingExtreme) — já resolvido
 2. O ensemble atual **não tem edge** — 72/72 configs perdem em sweep
 3. 6 estratégias ativas/teóricas nunca foram validadas em backtest
-4. Apenas `VolatilityBreakout` (PF 1.64) e `VWAPDeviation` (PF 1.46) têm edge real
+4. Apenas **3 estratégias** passaram validação: `VolatilityBreakout`, `VWAPDeviation`, `ChecklistMeta` — restantes OFF
 5. Trailing stop apertado corta winners; stops largos deixam losers sangrar
 6. Correlation gate bloqueia entradas legítimas entre BTC/ETH/SOL
 
 **Plano:**
-- **Fase 1 (hoje):** desligar tudo exceto VB + VWAPDev, desligar ensemble, soltar correlation, apertar exposure cap, subir trailing stop. Sem código.
+- **Fase 1 (2026-06-29):** desligar tudo excepto VB + VWAPDev, direct mode, soltar correlation, apertar exposure cap. **Aplicada.**
+- **v3.1.38 (2026-06-30):** activar ChecklistMeta (thr 3.5) — portfolio multi-regime de 3 estratégias KEEP.
 - **Fase 2 (2 sem):** tuning fino com 30+ trades paper, avaliar ETH removal.
 - **Fase 3 (1-3 meses):** reativar estratégias só após backtest individual PF ≥ 1.3.
 
-**Meta realista:** paper trading PF 1.3-1.5 em 60 dias, mainnet small-size em 90 dias, scale em 6 meses. **"Mega eficiente" não é realista com o ensemble atual** — precisa de foco em 2 estratégias validadas + disciplina de execução.
+**Meta realista:** paper trading PF 1.3-1.5 em 60 dias, mainnet small-size em 90 dias, scale em 6 meses. **"Mega eficiente" não é realista com o ensemble actual** — foco em **3 estratégias validadas** (direct mode) + disciplina de execução.
 
 ---
 
@@ -293,7 +303,7 @@ Alterações em `config/settings.yaml` + `factory.py` / `main.py`:
 
 | Item | Antes | Depois |
 |------|-------|--------|
-| Estratégias ativas | SMF, VB, VWAP, TrendPyramid, LeadLag, LiqCatcher | **VolatilityBreakout + VWAPDeviation** |
+| Estratégias ativas | SMF, VB, VWAP, TrendPyramid, LeadLag, LiqCatcher | **VB + VWAP + ChecklistMeta** (v3.1.38) |
 | Ensemble | passthrough (min_agreeing=1) | **disabled** — direct mode |
 | max_correlation | 0.90 | **0.98** |
 | max_directional_exposure | 60% | **40%** |
@@ -303,12 +313,30 @@ Alterações em `config/settings.yaml` + `factory.py` / `main.py`:
 
 **Reiniciar o bot** após pull: `stop.bat` → `quickstart.bat`
 
-Log esperado no arranque:
+Log esperado no arranque (v3.1.38):
 ```
-Phase 1 direct mode: 2 sub-strategies (ensemble disabled)
-Active strategies: ['VolatilityBreakout', 'VWAPDeviation']
+Direct mode: 3 sub-strategies (ensemble disabled)
+Active strategies: ['VolatilityBreakout', 'VWAPDeviation', 'ChecklistMeta']
 ```
 
 ---
 
-*Análise baseada em `data/live/bot.db` (123 trades), `data/backtests/per_strategy_20260625_202340.csv`, `data/backtests/ensemble_sweep_20260625_234431.csv`, `data/backtests/exit_economics_20260625_231103.csv`.*
+## 8. v3.1.38 — Combined walk-forward + ChecklistMeta (2026-06-30)
+
+Sweep: `backtest_combined_focused.py` — 48 runs (4 estratégias × 4 param sets × 3 janelas) + Monte Carlo 1000×.
+
+| Estratégia | medPF | ProbP | W2 (choppy) | Decisão |
+|------------|-------|-------|-------------|---------|
+| VolatilityBreakout (baseline_live) | **2.11** | 89% | Perde | ✅ **KEEP** — já activo |
+| VWAPDeviation (session_filter) | — | — | OK | ✅ **KEEP** — já activo |
+| ChecklistMeta (thr 3.5) | 1.14 | 67% | **PF 1.61, ProbP 96%** | ✅ **ACTIVATED** |
+| SFP Reversion | 1.34 | 78% | Falha | ❌ OFF (regime-dependent) |
+| VA Rejection | 1.12 | 57% | Falha | ❌ OFF (regime-dependent) |
+
+**Nenhuma estratégia nova passou critério robusto em todas as janelas** (W2 mata trend/breakout). Portfolio actual = VB cobre trending + ChecklistMeta cobre chop + VWAP complementa mean-reversion.
+
+**Todas as restantes (~14 sub-estratégias) permanecem OFF** — ver tabela completa em `docs/STRATEGY_AUDIT.md`.
+
+---
+
+*Análise baseada em `data/live/bot.db` (123 trades), `data/backtests/per_strategy_20260625_202340.csv`, `data/backtests/ensemble_sweep_20260625_234431.csv`, `data/backtests/exit_economics_20260625_231103.csv`, combined walk-forward v3.1.38.*

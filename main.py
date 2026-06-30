@@ -349,7 +349,7 @@ async def main() -> None:
         )
     else:
         logger.info(
-            "Phase 1 direct mode: %d sub-strategies (ensemble disabled)",
+            "Direct mode: %d sub-strategies (ensemble disabled)",
             len(strategies),
         )
     logger.info("Active strategies: %s", [s.name for s in strategies])

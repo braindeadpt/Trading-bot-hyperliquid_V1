@@ -56,6 +56,14 @@ python scripts/backfill_candles.py --days 30
 1. Backfill dados em falta
 2. `python scripts/backtest_strategy_audit.py --quick`
 3. Rever `docs/STRATEGY_AUDIT.md`
-4. Atualizar `settings.yaml` (só KEEP + WATCH promovidos)
+4. Atualizar `settings.yaml` (**só KEEP** promovidos a `enabled: true`; WATCH/KILL/NO_DATA ficam OFF)
 5. Paper 2 semanas → comparar live vs backtest
 6. Mainnet só com PF ≥ 1.3 em paper
+
+## Portfolio activo (2026-06-30, v3.1.38)
+
+| Activa | OFF (falharam testes) |
+|--------|------------------------|
+| VolatilityBreakout, VWAPDeviation, ChecklistMeta | Todas as restantes (~14) — ver `docs/STRATEGY_AUDIT.md` |
+
+Modo: **direct** (`ensemble.enabled: false`).
