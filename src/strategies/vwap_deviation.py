@@ -36,6 +36,7 @@ from src.strategies.indicators import (
     calculate_volume_ratio,
     calculate_atr,
 )
+from src.strategies.time_filters import is_weekday_blocked, parse_weekday_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,9 @@ class VWAPDeviation(Strategy):
         # Exit N minutes before funding reset (00/08/16 UTC). 0 = disabled.
         self.EXIT_PRE_FUNDING_MIN = int(cfg.get("exit_pre_funding_min", 0))
 
+        # v3.1.36: weekday filter (opt-in)
+        self._weekday_blocks = parse_weekday_blocks(cfg) if cfg.get("use_weekday_filter", False) else []
+
         self._state: Dict[str, _VWAPDevState] = {}
 
     @property
@@ -122,6 +126,9 @@ class VWAPDeviation(Strategy):
     def on_data(self, event: MarketEvent) -> Optional[Signal]:
         """Evaluate VWAP deviation opportunity."""
         state = self._get_state(event.symbol)
+
+        if self._weekday_blocks and is_weekday_blocked(event.timestamp_ms, self._weekday_blocks):
+            return None
 
         # Update candles (deduplicate by timestamp)
         if event.candle_1h and (not state.candles_1h or state.candles_1h[-1].timestamp_ms != event.candle_1h.timestamp_ms):

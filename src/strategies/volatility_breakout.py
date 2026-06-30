@@ -15,7 +15,6 @@ import collections
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
-
 from src.strategies.base import ExitSignal, MarketEvent, Position, Signal, Strategy
 from src.strategies.indicators import (
     Candle,
@@ -24,6 +23,7 @@ from src.strategies.indicators import (
     calculate_ema,
     calculate_volume_ratio,
 )
+from src.strategies.time_filters import is_weekday_blocked, parse_weekday_blocks
 from src.utils.helpers import safe_divide
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,15 @@ class _VolBreakoutState:
     last_entry_time_ms: int = 0
     trail_active: bool = False
     current_trail: float = 0.0
+    # v3.1.35: retest entry mode state
+    pending_break_side: Optional[str] = None
+    pending_break_band_price: float = 0.0
+    pending_break_time_ms: int = 0
+    pending_break_atr: float = 0.0
+    pending_break_bbw_pct: float = 0.0
+    pending_break_confidence: float = 0.0
+    pending_break_oi_delta: Optional[float] = None
+    pending_break_adx: Optional[float] = None
 
 
 class VolatilityBreakout(Strategy):
@@ -87,6 +96,19 @@ class VolatilityBreakout(Strategy):
         self.TIME_TP_FIRST_HOURS = float(cfg.get("time_tp_first_hours", 3.0))
         self.TIME_TP_AFTER_R = float(cfg.get("time_tp_after_r", 2.5))
 
+        # --- v3.1.35: retest entry mode (opt-in) ---
+        # On break, instead of entering immediately, store the break and wait
+        # for price to pull back to the broken band ("retest"). Enter only if
+        # the retest candle rejects (closes back on the breakout side).
+        # Filters fake-outs — the retest is the trade, not the break.
+        self.USE_RETEST_ENTRY = bool(cfg.get("use_retest_entry", False))
+        self.RETEST_MAX_BARS = int(cfg.get("retest_max_bars", 8))      # ~2h on 15m
+        self.RETEST_BUFFER_PCT = float(cfg.get("retest_buffer_pct", 0.002))  # 0.2% of price
+        self.RETEST_MIN_HOLD_MS = int(cfg.get("retest_min_hold_ms", 900_000))  # wait >=1 bar
+
+        # --- v3.1.36: weekday filter (opt-in) ---
+        self._weekday_blocks = parse_weekday_blocks(cfg) if cfg.get("use_weekday_filter", False) else []
+
         self._state: Dict[str, _VolBreakoutState] = {}
 
     @property
@@ -95,6 +117,9 @@ class VolatilityBreakout(Strategy):
 
     def on_data(self, event: MarketEvent) -> Optional[Signal]:
         state = self._get_state(event.symbol)
+
+        if self._weekday_blocks and is_weekday_blocked(event.timestamp_ms, self._weekday_blocks):
+            return None
 
         if event.candle_15m and (
             not state.candles_15m
@@ -141,7 +166,21 @@ class VolatilityBreakout(Strategy):
 
         broke_up = price > upper and last.close > upper and prev.close <= upper
         broke_down = price < lower and last.close < lower and prev.close >= lower
+
+        # --- v3.1.35: retest entry mode ---
+        # If we have a pending breakout, check for retest entry FIRST
+        # (the retest is the actual trade entry, not the break).
+        if self.USE_RETEST_ENTRY and state.pending_break_side is not None:
+            retest_signal = self._check_retest_entry(
+                state, price, last, event.timestamp_ms, event,
+            )
+            if retest_signal is not None:
+                state.last_signal_ms = event.timestamp_ms
+                return retest_signal
+            # If retest timed out, pending_break_side has been cleared by _check_retest_entry
+
         if not broke_up and not broke_down:
+            # If no new break and no pending retest, nothing to do
             return None
 
         side = "long" if broke_up else "short"
@@ -224,6 +263,23 @@ class VolatilityBreakout(Strategy):
 
         confidence = 0.35 * squeeze_score + 0.35 * vol_score + 0.30 * oi_score
         confidence = min(0.95, max(self.MIN_CONFIDENCE, confidence))
+
+        # --- v3.1.35: in retest mode, store the breakout and wait for retest ---
+        if self.USE_RETEST_ENTRY:
+            band_price = upper if side == "long" else lower
+            state.pending_break_side = side
+            state.pending_break_band_price = band_price
+            state.pending_break_time_ms = event.timestamp_ms
+            state.pending_break_atr = atr
+            state.pending_break_bbw_pct = bbw_pct
+            state.pending_break_confidence = confidence
+            state.pending_break_oi_delta = event.oi_delta
+            state.pending_break_adx = adx
+            logger.info(
+                "VolatilityBreakout PENDING-RETEST %s %s band=%.4f atr=%.4f conf=%.2f — waiting retest",
+                event.symbol, side, band_price, atr, confidence,
+            )
+            return None
 
         size_pct = min(
             self.MAX_SIZE_PCT,
@@ -484,3 +540,105 @@ class VolatilityBreakout(Strategy):
         if symbol not in self._state:
             self._state[symbol] = _VolBreakoutState()
         return self._state[symbol]
+
+    def _check_retest_entry(
+        self,
+        state: _VolBreakoutState,
+        price: float,
+        last_candle: Candle,
+        now_ms: int,
+        event: MarketEvent,
+    ) -> Optional[Signal]:
+        """Check whether the latest closed candle is a valid retest entry.
+
+        A valid retest:
+          - At least ``RETEST_MIN_HOLD_MS`` has elapsed since the break
+          - Price has come back within ``RETEST_BUFFER_PCT`` of the broken band
+          - The latest closed candle closed on the breakout side of the band
+            (rejection of the retest from the opposite side)
+          - The retest happens within ``RETEST_MAX_BARS`` bars of the break
+        """
+        if state.pending_break_side is None:
+            return None
+
+        elapsed_ms = now_ms - state.pending_break_time_ms
+        if elapsed_ms < self.RETEST_MIN_HOLD_MS:
+            return None
+
+        # Timeout: clear pending state if too many bars have passed
+        max_wait_ms = self.RETEST_MAX_BARS * 15 * 60_000  # 15m bars
+        if elapsed_ms > max_wait_ms:
+            logger.info(
+                "VolatilityBreakout RETEST-TIMEOUT %s %s — no retest within %d bars",
+                event.symbol, state.pending_break_side, self.RETEST_MAX_BARS,
+            )
+            self._clear_pending_break(state)
+            return None
+
+        band = state.pending_break_band_price
+        side = state.pending_break_side
+        buffer = abs(band) * self.RETEST_BUFFER_PCT
+
+        # Distance from the broken band
+        dist_to_band = abs(price - band)
+
+        # Has price come back to the band?
+        if dist_to_band > buffer:
+            return None
+
+        # Did the latest closed candle close on the breakout side of the band?
+        # For long: close > band (rejection from below)
+        # For short: close < band (rejection from above)
+        if side == "long" and last_candle.close <= band:
+            return None
+        if side == "short" and last_candle.close >= band:
+            return None
+
+        # Valid retest entry — emit signal using stored break-time metrics
+        atr = state.pending_break_atr
+        confidence = state.pending_break_confidence
+        stop_loss_pct = safe_divide(self.STOP_ATR_MULT * atr, price, 0.015)
+        take_profit_pct = safe_divide(self.TAKE_PROFIT_ATR_MULT * atr, price, 0.03)
+        size_pct = min(
+            self.MAX_SIZE_PCT,
+            self.BASE_SIZE_PCT * (1.0 + (confidence - self.MIN_CONFIDENCE)),
+        )
+
+        logger.info(
+            "VolatilityBreakout RETEST-SIGNAL %s %s band=%.4f price=%.4f dist=%.4f conf=%.2f",
+            event.symbol, side, band, price, dist_to_band, confidence,
+        )
+
+        sig = Signal(
+            strategy=self.name,
+            symbol=event.symbol,
+            side=side,
+            confidence=confidence,
+            size_pct=size_pct,
+            entry_price=price,
+            stop_loss_pct=stop_loss_pct,
+            take_profit_pct=take_profit_pct,
+            reason=f"retest_{side}_bbw_p{state.pending_break_bbw_pct:.0f}",
+            metadata={
+                "bb_upper": band if side == "long" else None,
+                "bb_lower": band if side == "short" else None,
+                "bb_width_pct": state.pending_break_bbw_pct,
+                "atr": atr,
+                "adx": state.pending_break_adx,
+                "oi_delta": state.pending_break_oi_delta,
+                "retest_dist_to_band": dist_to_band,
+                "retest_wait_ms": elapsed_ms,
+            },
+        )
+        self._clear_pending_break(state)
+        return sig
+
+    def _clear_pending_break(self, state: _VolBreakoutState) -> None:
+        state.pending_break_side = None
+        state.pending_break_band_price = 0.0
+        state.pending_break_time_ms = 0
+        state.pending_break_atr = 0.0
+        state.pending_break_bbw_pct = 0.0
+        state.pending_break_confidence = 0.0
+        state.pending_break_oi_delta = None
+        state.pending_break_adx = None

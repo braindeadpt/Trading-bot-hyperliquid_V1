@@ -245,6 +245,51 @@ def detect_support_resistance(
     return _median(recent_lows), _median(recent_highs)
 
 
+def detect_recent_pivots(
+    candles: List[Candle],
+    lookback: int = 100,
+    max_pivots: int = 10,
+) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
+    """Return (pivot_highs, pivot_lows) as lists of (timestamp_ms, price) tuples.
+
+    Uses causal Williams Fractals: a pivot at bar ``i-2`` is confirmed when
+    its high/low is strictly greater/less than bars ``i-3`` and ``i-1`` and
+    bar ``i`` does not exceed it. Only pivots within the last ``lookback``
+    bars are returned, most-recent-first. Used by SFP detection.
+
+    Returns empty lists if not enough data.
+    """
+    if len(candles) < 5:
+        return [], []
+
+    pivot_highs: List[Tuple[int, float]] = []
+    pivot_lows: List[Tuple[int, float]] = []
+
+    start = max(3, len(candles) - lookback)
+    for i in range(start, len(candles)):
+        prev3 = candles[i - 3]
+        pivot = candles[i - 2]
+        prev1 = candles[i - 1]
+        # curr is the bar that confirms the pivot (i); it must not exceed
+        if (
+            pivot.high > prev3.high
+            and pivot.high > prev1.high
+            and pivot.high >= candles[i].high
+        ):
+            pivot_highs.append((pivot.timestamp_ms, pivot.high))
+        if (
+            pivot.low < prev3.low
+            and pivot.low < prev1.low
+            and pivot.low <= candles[i].low
+        ):
+            pivot_lows.append((pivot.timestamp_ms, pivot.low))
+
+    # Most-recent-first
+    pivot_highs.reverse()
+    pivot_lows.reverse()
+    return pivot_highs[:max_pivots], pivot_lows[:max_pivots]
+
+
 def calculate_oi_concentration(oi_history: List[float]) -> Optional[float]:
     """Estimate long/short concentration ratio from OI history.
     
@@ -634,3 +679,116 @@ def volatility_target_size(
     clamped = max(min_size_mult, min(multiplier, max_size_mult))
 
     return base_size_pct * clamped
+
+
+@dataclass(frozen=True)
+class VolumeProfileVA:
+    """Volume Profile with Value Area metrics.
+
+    - poc: Point of Control (price level with the highest volume)
+    - vah: Value Area High (top of the 70%-volume region)
+    - val: Value Area Low (bottom of the 70%-volume region)
+    - is_balanced: True when VA spans > balanced_threshold of total range (D-shape)
+    - total_volume: Sum of all bin volumes
+    - n_bins: Number of bins used
+    - bin_size: Price width of each bin
+    """
+    poc: float
+    vah: float
+    val: float
+    is_balanced: bool
+    total_volume: float
+    n_bins: int
+    bin_size: float
+
+
+def calculate_volume_profile_va(
+    candles: List[Candle],
+    bins: int = 50,
+    va_pct: float = 0.70,
+    balanced_threshold: float = 0.60,
+) -> Optional[VolumeProfileVA]:
+    """Compute Volume Profile + Value Area for a candle window.
+
+    Algorithm:
+      1. Determine price range [min(low), max(high)] over the window
+      2. Bin the range into ``bins`` equal-width bins
+      3. For each candle, distribute its volume across the bins its
+         [low, high] range overlaps (proportional to bin span covered)
+      4. POC = bin with the highest total volume
+      5. Value Area: expand up/down from POC, adding the side with more
+         volume each step, until ``va_pct`` of total volume is included
+
+    A "D-shape" (balanced) profile is flagged when the VA width exceeds
+    ``balanced_threshold`` of the total range — directional trades are
+    lower probability in this regime.
+
+    Returns None if not enough data or zero volume.
+    """
+    if len(candles) < 10 or bins < 5:
+        return None
+
+    pmin = min(c.low for c in candles)
+    pmax = max(c.high for c in candles)
+    if pmax <= pmin:
+        return None
+    bin_size = (pmax - pmin) / bins
+    if bin_size <= 0:
+        return None
+
+    bin_vol = [0.0] * bins
+    for c in candles:
+        if c.volume <= 0:
+            continue
+        lo_bin = int((c.low - pmin) / bin_size)
+        hi_bin = int((c.high - pmin) / bin_size)
+        lo_bin = max(0, min(bins - 1, lo_bin))
+        hi_bin = max(0, min(bins - 1, hi_bin))
+        span = hi_bin - lo_bin + 1
+        if span <= 0:
+            continue
+        vol_per_bin = c.volume / span
+        for i in range(lo_bin, hi_bin + 1):
+            bin_vol[i] += vol_per_bin
+
+    total_vol = sum(bin_vol)
+    if total_vol <= 0:
+        return None
+
+    poc_bin = max(range(bins), key=lambda i: bin_vol[i])
+    poc_price = pmin + (poc_bin + 0.5) * bin_size
+
+    # Value Area: expand from POC until va_pct of total volume is included
+    target = va_pct * total_vol
+    va_vol = bin_vol[poc_bin]
+    lo, hi = poc_bin, poc_bin
+    while va_vol < target and (lo > 0 or hi < bins - 1):
+        below = bin_vol[lo - 1] if lo > 0 else -1.0
+        above = bin_vol[hi + 1] if hi < bins - 1 else -1.0
+        if below < 0 and above < 0:
+            break
+        if below >= above and lo > 0:
+            lo -= 1
+            va_vol += bin_vol[lo]
+        elif hi < bins - 1:
+            hi += 1
+            va_vol += bin_vol[hi]
+        else:
+            lo -= 1
+            va_vol += bin_vol[lo]
+
+    vah = pmin + (hi + 1) * bin_size  # top edge of highest VA bin
+    val = pmin + lo * bin_size         # bottom edge of lowest VA bin
+    va_width = vah - val
+    total_range = pmax - pmin
+    is_balanced = (va_width / total_range) >= balanced_threshold if total_range > 0 else False
+
+    return VolumeProfileVA(
+        poc=poc_price,
+        vah=vah,
+        val=val,
+        is_balanced=is_balanced,
+        total_volume=total_vol,
+        n_bins=bins,
+        bin_size=bin_size,
+    )

@@ -16,11 +16,14 @@ from src.strategies.liquidation_catcher import LiquidationCatcher
 from src.strategies.mean_reversion import MeanReversion
 from src.strategies.orderbook_scalper import OrderBookScalper
 from src.strategies.range_grid import RangeGrid
+from src.strategies.sfp_reversion import SFPReversion
 from src.strategies.spot_perp_carry import SpotPerpCarry
 from src.strategies.trend_follow import TrendFollow
 from src.strategies.trend_pyramid import TrendPyramid
+from src.strategies.va_rejection import VARejection
 from src.strategies.volatility_breakout import VolatilityBreakout
 from src.strategies.vwap_deviation import VWAPDeviation
+from src.strategies.checklist_meta import ChecklistMeta
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,12 @@ _STRATEGY_REGISTRY = (
     ("strategy.range_grid", RangeGrid),
     ("strategy.trend_pyramid", TrendPyramid),
     ("strategy.funding_momentum", FundingMomentum),
+    # v3.1.33: SFP reversion (liquidity sweep + 75% magnet)
+    ("strategy.sfp_reversion", SFPReversion),
+    # v3.1.34: Volume Profile Value Area rejection
+    ("strategy.va_rejection", VARejection),
+    # v3.1.37: Checklist meta-signal (replaces ensemble with weighted bull/bear)
+    ("strategy.checklist_meta", ChecklistMeta),
 )
 
 

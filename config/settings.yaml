@@ -139,6 +139,16 @@ strategy:
     use_time_scaled_tp: false       # no effect — trades hit TP/SL before 3h threshold
     time_tp_first_hours: 3.0
     time_tp_after_r: 2.5
+    # --- v3.1.35: retest entry mode (opt-in, default OFF — sweep pending) ---
+    use_retest_entry: false
+    retest_max_bars: 8              # ~2h on 15m candles
+    retest_buffer_pct: 0.002        # 0.2% of price proximity to broken band
+    retest_min_hold_ms: 900000      # wait >=1 bar after break before accepting retest
+    # --- v3.1.36: weekday filter (opt-in) — block Friday afternoon new entries ---
+    use_weekday_filter: false
+    weekday_blocked_days: [4]       # 0=Mon ... 4=Fri (UTC)
+    weekday_blocked_start_h: 18
+    weekday_blocked_end_h: 24
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: Donchian Breakout (momentum breakout)
@@ -314,6 +324,114 @@ strategy:
     dynamic_z_max: 3.5
     dynamic_z_atr_lookback: 168     # 7d * 24h (1h candles)
     exit_pre_funding_min: 0         # 0 = disabled; part of all_optimisations which was WORSE
+
+  # ═══════════════════════════════════════════════════════════
+  # Strategy: SFP Reversion (v3.1.33) — Swing Failure Pattern + 75% magnet
+  # Liquidity sweep at pivot low/high, close back inside, target 75% retracement.
+  # ═══════════════════════════════════════════════════════════
+  sfp_reversion:
+    enabled: false                  # OFF by default; enable after walk-forward validation
+    pivot_lookback: 100             # bars to scan for pivots (~25h on 15m)
+    pivot_max_age_bars: 30          # pivot must be within last 30 bars of the sweep
+    pivot_min_separation_bars: 3    # min bars between pivot and sweep candle
+    sweep_buffer_pct: 0.001         # 0.1% below pivot = sweep
+    wick_rejection_min: 0.5         # close in upper half (long) / lower half (short)
+    volume_surge: 1.5               # 150% of 24-bar avg volume on sweep candle
+    require_oi_confirm: false       # OI rising for long / falling for short
+    range_lookback: 100             # bars for 75% magnet range
+    base_size_pct: 0.01
+    max_size_pct: 0.025
+    stop_buffer_pct: 0.003          # 0.3% beyond sweep extreme
+    stop_loss_atr_multiplier: 1.5   # alt: max(sweep-based, ATR-based)
+    take_profit_r_multiple: 2.5     # cap TP at 2.5R (magnet might be further)
+    magnet_retracement: 0.75        # 75% retracement of sweep-to-opposite-extreme
+    max_hold_hours: 6
+    min_confidence: 0.60
+    signal_throttle_ms: 1800000     # 30 min
+    max_adx: 40.0                   # don't fade strong trends
+    # Trailing stop (opt-in; same logic as VolatilityBreakout)
+    use_trailing_stop: false
+    trailing_method: ema9           # ema9 | swing | atr
+    trailing_start_r: 1.0
+    trailing_ema_period: 9
+    trailing_atr_mult: 1.5
+    trailing_swing_lookback: 5
+
+  # ═══════════════════════════════════════════════════════════
+  # Strategy: VA Rejection (v3.1.34) — Volume Profile Value Area rejection
+  # Builds 24h Volume Profile, trades sweeps at VAH/VAL boundaries.
+  # ═══════════════════════════════════════════════════════════
+  va_rejection:
+    enabled: false                  # OFF by default; enable after walk-forward validation
+    vp_lookback: 96                 # 24h of 15m candles
+    vp_bins: 50                     # price bins for volume profile
+    va_pct: 0.70                    # 70% value area
+    balanced_threshold: 0.60        # VA width / range > 0.60 = D-shape (skip)
+    skip_balanced: true             # skip D-shape regimes
+    volume_surge: 1.5               # 150% of 24-bar avg on rejection candle
+    wick_rejection_min: 0.5         # close in upper half (long) / lower half (short)
+    max_adx: 40.0                   # don't fade strong trends
+    base_size_pct: 0.01
+    max_size_pct: 0.025
+    stop_buffer_pct: 0.003          # 0.3% beyond sweep wick
+    stop_loss_atr_multiplier: 1.5
+    take_profit_r_multiple: 2.5     # cap TP at 2.5R (VA opposite extreme might be further)
+    max_hold_hours: 6
+    min_confidence: 0.60
+    signal_throttle_ms: 1800000     # 30 min
+    use_trailing_stop: false
+    trailing_method: ema9
+    trailing_start_r: 1.0
+    trailing_ema_period: 9
+    trailing_atr_mult: 1.5
+    trailing_swing_lookback: 5
+
+  # ═══════════════════════════════════════════════════════════
+  # Strategy: Checklist Meta (v3.1.37) — weighted bull/bear decision checklist
+  # Replaces ensemble with transparent scoring across multiple components.
+  # ═══════════════════════════════════════════════════════════
+  checklist_meta:
+    enabled: false                  # OFF by default; enable after walk-forward validation
+    score_threshold: 3.0            # |bull - bear| >= threshold to enter
+    min_confidence: 0.60
+    # Component weights
+    w_sfp: 1.5
+    w_vwap: 1.0
+    w_trend_structure: 1.0
+    w_momentum: 0.5
+    w_rsi_room: 0.5
+    w_oi_delta: 0.5
+    w_adx: 0.5
+    w_oir: 0.5
+    w_liquidation: 0.5
+    # Indicator params
+    ema_fast: 20
+    ema_slow: 50
+    adx_trend_min: 20.0
+    oir_threshold: 0.3
+    rsi_room_min: 40.0
+    rsi_room_max: 60.0
+    sfp_lookback: 100
+    sfp_max_age_bars: 30
+    # Sizing / risk
+    base_size_pct: 0.01
+    max_size_pct: 0.025
+    stop_loss_atr_multiplier: 1.5
+    take_profit_atr_multiplier: 3.0
+    max_hold_hours: 6
+    signal_throttle_ms: 1800000
+    # Trailing stop
+    use_trailing_stop: false
+    trailing_method: ema9
+    trailing_start_r: 1.0
+    trailing_ema_period: 9
+    trailing_atr_mult: 1.5
+    trailing_swing_lookback: 5
+    # Weekday filter
+    use_weekday_filter: false
+    weekday_blocked_days: [4]
+    weekday_blocked_start_h: 18
+    weekday_blocked_end_h: 24
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: OrderBook Imbalance Scalper
