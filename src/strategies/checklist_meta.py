@@ -54,6 +54,8 @@ class _ChecklistState:
     last_entry_time_ms: int = 0
     trail_active: bool = False
     current_trail: float = 0.0
+    # v3.1.39: SL-to-BE state
+    sl_moved_to_be: bool = False
 
 
 class ChecklistMeta(Strategy):
@@ -98,6 +100,10 @@ class ChecklistMeta(Strategy):
         self.TRAILING_EMA_PERIOD = int(cfg.get("trailing_ema_period", 9))
         self.TRAILING_ATR_MULT = float(cfg.get("trailing_atr_mult", 1.5))
         self.TRAILING_SWING_LOOKBACK = int(cfg.get("trailing_swing_lookback", 5))
+        # v3.1.39: SL-to-BE after N R profit (cut losers early once green)
+        self.USE_SL_TO_BE_AFTER_R = bool(cfg.get("use_sl_to_be_after_1r", False))
+        self.SL_TO_BE_R_TRIGGER = float(cfg.get("sl_to_be_r_trigger", 1.0))
+        self.SL_TO_BE_BUFFER_PCT = float(cfg.get("sl_to_be_buffer_pct", 0.001))  # 0.1% above entry for long
         # Weekday filter
         self._weekday_blocks = parse_weekday_blocks(cfg) if cfg.get("use_weekday_filter", False) else []
 
@@ -283,6 +289,7 @@ class ChecklistMeta(Strategy):
 
     def on_position(self, position: Position, event: MarketEvent) -> Optional[ExitSignal]:
         state = self._get_state(position.symbol)
+        price = event.price
         if event.candle_15m and (
             not state.candles_15m
             or state.candles_15m[-1].timestamp_ms != event.candle_15m.timestamp_ms
@@ -293,6 +300,7 @@ class ChecklistMeta(Strategy):
             state.last_entry_time_ms = position.entry_time_ms
             state.trail_active = False
             state.current_trail = 0.0
+            state.sl_moved_to_be = False
 
         hold_ms = event.timestamp_ms - position.entry_time_ms
         if hold_ms >= self.MAX_HOLD_MS:
@@ -301,10 +309,49 @@ class ChecklistMeta(Strategy):
                 confidence=0.8, reason=f"max_hold_{self.MAX_HOLD_HOURS}h",
             )
 
+        # v3.1.39: SL-to-BE after N R profit — cut losers early once green
+        # Returns an ExitSignal only if the position reverses back through BE.
+        # The engine's stop_loss_price is not mutated here; we emit a defensive
+        # exit when price touches BE after the move-to-BE trigger has fired.
+        if (
+            self.USE_SL_TO_BE_AFTER_R
+            and not state.sl_moved_to_be
+            and position.stop_loss_price is not None
+        ):
+            r_dist = abs(position.entry_price - position.stop_loss_price)
+            if r_dist > 0:
+                if position.side == "long":
+                    profit_r = (price - position.entry_price) / r_dist
+                else:
+                    profit_r = (position.entry_price - price) / r_dist
+                if profit_r >= self.SL_TO_BE_R_TRIGGER:
+                    state.sl_moved_to_be = True
+                    logger.info(
+                        "ChecklistMeta SL-TO-BE %s %s profit_r=%.2f >= %.2f — SL now at BE",
+                        position.symbol, position.side, profit_r, self.SL_TO_BE_R_TRIGGER,
+                    )
+
+        # If SL has been moved to BE, exit when price touches BE (no further loss)
+        if self.USE_SL_TO_BE_AFTER_R and state.sl_moved_to_be:
+            buf = self.SL_TO_BE_BUFFER_PCT
+            if position.side == "long":
+                be_price = position.entry_price * (1.0 + buf)
+                if price <= be_price:
+                    return ExitSignal(
+                        strategy=self.name, symbol=position.symbol, side=position.side,
+                        confidence=0.7, reason=f"sl_to_be_hit_r{self.SL_TO_BE_R_TRIGGER}",
+                    )
+            else:
+                be_price = position.entry_price * (1.0 - buf)
+                if price >= be_price:
+                    return ExitSignal(
+                        strategy=self.name, symbol=position.symbol, side=position.side,
+                        confidence=0.7, reason=f"sl_to_be_hit_r{self.SL_TO_BE_R_TRIGGER}",
+                    )
+
         candles = list(state.candles_15m)
         if len(candles) < 5:
             return None
-        price = event.price
 
         # Trailing stop
         if self.USE_TRAILING_STOP and position.stop_loss_price is not None:

@@ -38,6 +38,8 @@ class _VolBreakoutState:
     last_entry_time_ms: int = 0
     trail_active: bool = False
     current_trail: float = 0.0
+    # v3.1.39: SL-to-BE state
+    sl_moved_to_be: bool = False
     # v3.1.35: retest entry mode state
     pending_break_side: Optional[str] = None
     pending_break_band_price: float = 0.0
@@ -108,6 +110,11 @@ class VolatilityBreakout(Strategy):
 
         # --- v3.1.36: weekday filter (opt-in) ---
         self._weekday_blocks = parse_weekday_blocks(cfg) if cfg.get("use_weekday_filter", False) else []
+
+        # --- v3.1.39: SL-to-BE after N R profit (cut losers early once green) ---
+        self.USE_SL_TO_BE_AFTER_R = bool(cfg.get("use_sl_to_be_after_1r", False))
+        self.SL_TO_BE_R_TRIGGER = float(cfg.get("sl_to_be_r_trigger", 1.0))
+        self.SL_TO_BE_BUFFER_PCT = float(cfg.get("sl_to_be_buffer_pct", 0.001))
 
         self._state: Dict[str, _VolBreakoutState] = {}
 
@@ -321,6 +328,7 @@ class VolatilityBreakout(Strategy):
 
     def on_position(self, position: Position, event: MarketEvent) -> Optional[ExitSignal]:
         state = self._get_state(position.symbol)
+        price = event.price
         if event.candle_15m and (
             not state.candles_15m
             or state.candles_15m[-1].timestamp_ms != event.candle_15m.timestamp_ms
@@ -332,6 +340,7 @@ class VolatilityBreakout(Strategy):
             state.last_entry_time_ms = position.entry_time_ms
             state.trail_active = False
             state.current_trail = 0.0
+            state.sl_moved_to_be = False
 
         hold_ms = event.timestamp_ms - position.entry_time_ms
         if hold_ms >= self.MAX_HOLD_MS:
@@ -343,11 +352,48 @@ class VolatilityBreakout(Strategy):
                 reason=f"max_hold_{self.MAX_HOLD_HOURS}h",
             )
 
+        # v3.1.39: SL-to-BE after N R profit — cut losers early once green
+        if (
+            self.USE_SL_TO_BE_AFTER_R
+            and not state.sl_moved_to_be
+            and position.stop_loss_price is not None
+        ):
+            r_dist = abs(position.entry_price - position.stop_loss_price)
+            if r_dist > 0:
+                if position.side == "long":
+                    profit_r = (price - position.entry_price) / r_dist
+                else:
+                    profit_r = (position.entry_price - price) / r_dist
+                if profit_r >= self.SL_TO_BE_R_TRIGGER:
+                    state.sl_moved_to_be = True
+                    logger.info(
+                        "VolatilityBreakout SL-TO-BE %s %s profit_r=%.2f >= %.2f",
+                        position.symbol, position.side, profit_r, self.SL_TO_BE_R_TRIGGER,
+                    )
+
+        # If SL has been moved to BE, exit on touch (no further loss)
+        if self.USE_SL_TO_BE_AFTER_R and state.sl_moved_to_be:
+            buf = self.SL_TO_BE_BUFFER_PCT
+            if position.side == "long":
+                be_price = position.entry_price * (1.0 + buf)
+                if price <= be_price:
+                    return ExitSignal(
+                        strategy=self.name, symbol=position.symbol, side=position.side,
+                        confidence=0.7, reason=f"sl_to_be_hit_r{self.SL_TO_BE_R_TRIGGER}",
+                    )
+            else:
+                be_price = position.entry_price * (1.0 - buf)
+                if price >= be_price:
+                    return ExitSignal(
+                        strategy=self.name, symbol=position.symbol, side=position.side,
+                        confidence=0.7, reason=f"sl_to_be_hit_r{self.SL_TO_BE_R_TRIGGER}",
+                    )
+
         candles = list(state.candles_15m)
         if len(candles) < self.BB_PERIOD + 2:
             return None
 
-        price = event.price
+        price = event.price  # already defined above, kept for compat with older code below
 
         # --- v3.1.26: trailing stop (only after TRAILING_START_R profit) ---
         if self.USE_TRAILING_STOP and position.stop_loss_price is not None:

@@ -110,6 +110,11 @@ class VWAPDeviation(Strategy):
         # Exit N minutes before funding reset (00/08/16 UTC). 0 = disabled.
         self.EXIT_PRE_FUNDING_MIN = int(cfg.get("exit_pre_funding_min", 0))
 
+        # v3.1.39: configurable VWAP reversion exit threshold (was hardcoded 0.3)
+        # Lower (e.g. 0.1) = let winners run closer to VWAP cross
+        # Higher (e.g. 0.5) = exit earlier on partial reversion
+        self.EXIT_Z_THRESHOLD = float(cfg.get("exit_z_threshold", 0.3))
+
         # v3.1.36: weekday filter (opt-in)
         self._weekday_blocks = parse_weekday_blocks(cfg) if cfg.get("use_weekday_filter", False) else []
 
@@ -416,11 +421,10 @@ class VWAPDeviation(Strategy):
             return None
 
         # v3.1.18: exit when deviation normalizes close to VWAP.
-        # Previously exited at |Z| < 1.0 which fired before reaching the 2R
-        # TP when the entry was at Z=1.2 (only 0.2σ to traverse). Now wait
-        # for |Z| < 0.3 (close to full VWAP reversion) so the 2R TP has
-        # room to play out.
-        if abs(zscore) < 0.3:
+        # v3.1.39: exit Z threshold is now configurable via `exit_z_threshold`
+        # (default 0.3). Setting it lower (e.g. 0.1) lets winners run closer to
+        # the VWAP cross; setting it higher (e.g. 0.5) exits earlier.
+        if abs(zscore) < self.EXIT_Z_THRESHOLD:
             return ExitSignal(
                 strategy=self.name,
                 symbol=position.symbol,

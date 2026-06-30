@@ -119,7 +119,7 @@ strategy:
     base_size_pct: 0.01
     max_size_pct: 0.025
     stop_loss_atr_multiplier: 2.0      # wider stop — fewer whipsaw exits post-squeeze (was 1.5)
-    take_profit_atr_multiplier: 4.0    # 2R vs stop (was 3.0 / 1.5R)
+    take_profit_atr_multiplier: 6.0    # v3.1.39: was 4.0 — let winners run further (walk-forward winner)
     max_hold_hours: 6
     min_confidence: 0.55            # Phase 1: subir de 0.45 — menos trades, mais qualidade
     signal_throttle_ms: 1800000    # 30 min between signals per symbol
@@ -149,6 +149,10 @@ strategy:
     weekday_blocked_days: [4]       # 0=Mon ... 4=Fri (UTC)
     weekday_blocked_start_h: 18
     weekday_blocked_end_h: 24
+    # --- v3.1.39: SL-to-BE after N R profit (cut losers early once green) ---
+    use_sl_to_be_after_1r: true     # v3.1.39 walk-forward winner: PF W2 0.63→0.80, W3 2.95→3.57
+    sl_to_be_r_trigger: 1.0         # move SL to BE after 1R favourable
+    sl_to_be_buffer_pct: 0.001      # 0.1% beyond entry (avoid BE-exit on noise)
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: Donchian Breakout (momentum breakout)
@@ -324,6 +328,8 @@ strategy:
     dynamic_z_max: 3.5
     dynamic_z_atr_lookback: 168     # 7d * 24h (1h candles)
     exit_pre_funding_min: 0         # 0 = disabled; part of all_optimisations which was WORSE
+    # v3.1.39: VWAP reversion exit threshold (was hardcoded 0.3). Lower = let winners run.
+    exit_z_threshold: 0.3           # 0.3 = exit when |Z| < 0.3 (current default)
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: SFP Reversion (v3.1.33) — Swing Failure Pattern + 75% magnet
@@ -435,6 +441,10 @@ strategy:
     weekday_blocked_days: [4]
     weekday_blocked_start_h: 18
     weekday_blocked_end_h: 24
+    # v3.1.39: SL-to-BE after N R profit (cut losers early once green)
+    use_sl_to_be_after_1r: false    # OFF by default — sweep will validate
+    sl_to_be_r_trigger: 1.0
+    sl_to_be_buffer_pct: 0.001
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: OrderBook Imbalance Scalper
