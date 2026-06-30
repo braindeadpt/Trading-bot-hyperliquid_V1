@@ -389,10 +389,13 @@ strategy:
   # ═══════════════════════════════════════════════════════════
   # Strategy: Checklist Meta (v3.1.37) — weighted bull/bear decision checklist
   # Replaces ensemble with transparent scoring across multiple components.
+  # v3.1.38: ACTIVATED with score_threshold=3.5 (walk-forward winner)
+  # — only strategy profitable in W2 choppy regime (PF 1.61, ProbP 96%)
+  # — complements VB (which dominates W1/W3 trending regimes)
   # ═══════════════════════════════════════════════════════════
   checklist_meta:
-    enabled: false                  # OFF by default; enable after walk-forward validation
-    score_threshold: 3.0            # |bull - bear| >= threshold to enter
+    enabled: true                   # v3.1.38: ACTIVATED — walk-forward winner
+    score_threshold: 3.5            # WINNER (was 3.0) — fewer but higher-quality signals
     min_confidence: 0.60
     # Component weights
     w_sfp: 1.5
