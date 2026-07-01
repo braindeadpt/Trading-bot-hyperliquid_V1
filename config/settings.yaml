@@ -785,6 +785,7 @@ logging:
 mode_overrides:
   mainnet:
     engine:
+      # mainnet flatten até SL/TP serem trigger orders nativas via SDK
       # Flatten until SL/TP are native HL trigger orders (SDK) on entry.
       close_positions_on_shutdown: true
     strategy:
@@ -816,6 +817,7 @@ mode_overrides:
       # short-duration strategies.
       maker_orders:
         enabled: true
+      # mainnet flatten até SL/TP serem trigger orders nativas via SDK
       # Mainnet: flatten on stop while exits are bot-managed (no SDK triggers yet).
       flatten_on_stop: true
   testnet:
