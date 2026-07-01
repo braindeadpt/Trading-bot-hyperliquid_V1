@@ -134,6 +134,13 @@ class KellySizer:
 
         return multiplier
 
+    def seed_history(self, pnl_pcts: List[float]) -> int:
+        """Pre-load trade history (e.g. from DB on startup). Returns count loaded."""
+        self._trade_history.clear()
+        for pnl in pnl_pcts[-self._lookback_trades :]:
+            self._trade_history.append({"pnl_pct": float(pnl)})
+        return len(self._trade_history)
+
     def get_stats(self) -> Dict[str, Any]:
         """Return current Kelly statistics for dashboard / logging."""
         wins = [t["pnl_pct"] for t in self._trade_history if t["pnl_pct"] > 0]

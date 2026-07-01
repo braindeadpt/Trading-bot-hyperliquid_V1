@@ -13,6 +13,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
+from src.utils.helpers import safe_float
+
 
 @dataclass(frozen=True)
 class Candle:
@@ -699,6 +701,63 @@ class Database:
             cur = self._conn().execute(sql, params)
             rows = cur.fetchall()
         return [dict(row) for row in rows]
+
+    def get_recent_closed_trade_pnl_pcts(self, limit: int = 50) -> List[float]:
+        """Return the most recent closed-trade pnl_pct values in chronological order.
+
+        Used to seed KellySizer on startup. ``pnl_pct`` is stored as a fraction
+        of capital (e.g. 0.02 = +2%).
+        """
+        sql = """
+            SELECT pnl_pct FROM trades
+            WHERE status = 'closed' AND exit_time IS NOT NULL AND pnl_pct IS NOT NULL
+            ORDER BY exit_time DESC LIMIT ?
+        """
+        with self._conn():
+            cur = self._conn().execute(sql, (int(limit),))
+            rows = cur.fetchall()
+        pcts = [safe_float(row["pnl_pct"]) for row in rows]
+        pcts.reverse()
+        return pcts
+
+    def enrich_trade_stop_metadata(
+        self,
+        trade_id: int,
+        stop_loss_price: float,
+        take_profit_price: Optional[float],
+        stop_loss_pct: float,
+        take_profit_pct: Optional[float],
+    ) -> None:
+        """Merge computed stop/TP levels into an open trade's signal_metadata."""
+        with self._conn():
+            cur = self._conn().execute(
+                "SELECT signal_metadata FROM trades WHERE id = ?",
+                (trade_id,),
+            )
+            row = cur.fetchone()
+        raw = row["signal_metadata"] if row else None
+        meta: Dict[str, Any] = {}
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except (TypeError, ValueError, json.JSONDecodeError):
+                meta = {}
+        meta["stop_loss_price"] = float(stop_loss_price)
+        if take_profit_price is not None:
+            meta["take_profit_price"] = float(take_profit_price)
+        meta["stop_loss_pct"] = float(stop_loss_pct)
+        if take_profit_pct is not None:
+            meta["take_profit_pct"] = float(take_profit_pct)
+        blob = json.dumps(meta, default=str)
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(
+                "UPDATE trades SET signal_metadata = ? WHERE id = ?",
+                (blob, trade_id),
+            )
+            conn.commit()
 
     def get_trades(self, limit: int = 500, strategy: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return most recent trades (open + closed) as dicts."""

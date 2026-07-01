@@ -10,6 +10,17 @@ version: "1.0.0"
 mode: "paper"    # paper | testnet | mainnet
 
 # ═══════════════════════════════════════════════════════════
+# Engine behaviour
+# ═══════════════════════════════════════════════════════════
+engine:
+  # v3.1.42: close all positions on graceful stop?
+  # false (paper/testnet): preserve open trades in DB for restore on next start.
+  # true  (mainnet override): flatten on shutdown — required while SL/TP are
+  #   software-managed in the bot loop; switch to false once native trigger
+  #   orders (stop/take-profit) are placed via the Hyperliquid SDK on entry.
+  close_positions_on_shutdown: false
+
+# ═══════════════════════════════════════════════════════════
 # Assets & timeframes
 # ═══════════════════════════════════════════════════════════
 assets:
@@ -83,7 +94,7 @@ risk:
 # ═══════════════════════════════════════════════════════════
 strategy:
   trend_follow:
-    enabled: false                  # Phase 1: PF 0.27 — sem edge validado
+    enabled: false                  # OFF v3.1.42: 2/10 wins desde 26/06 — VWAPDeviation cobre melhor este espaço
     timeframe: "15m"
     confirmation_timeframe: "5m"
     volume_surge_multiplier: 1.5
@@ -535,7 +546,7 @@ strategy:
   # Strategy: Trend Pyramid (EMA20 pullback + Chandelier)  v3.1.20
   # ═══════════════════════════════════════════════════════════
   trend_pyramid:
-    enabled: false                  # Phase 1: outlier no backtest — revalidar isolado
+    enabled: false                  # OFF v3.1.42: 0/6 wins, −$15.77 desde 26/06 — re-avaliar só com novo walk-forward
     ema_fast: 20
     ema_slow: 50
     min_adx: 25
@@ -660,15 +671,9 @@ execution:
   tca_enabled: true
   min_edge_buffer_pct: 0.05         # 0.05% buffer above round-trip costs
   entry_debounce_ms: 5000
-  # v3.1.22: flatten all positions on graceful stop? True is safe
-  # for paper/testnet (no real money). On mainnet a sudden close
-  # can be triggered by a bot restart while live positions are
-  # still valid; flattening at stale prices can crystallise a
-  # loss that the strategy was going to recover. Override to
-  # ``false`` for mainnet (see mode_overrides.mainnet) so live
-  # positions are preserved across restarts and reconciled on
-  # next start.
-  flatten_on_stop: true
+  # v3.1.42: legacy alias — prefer engine.close_positions_on_shutdown.
+  # Paper default false (preserve positions across restarts).
+  flatten_on_stop: false
   trailing_stop:
     enabled: true
     activation_pct: 0.01            # v3.1.41: was 0.02 — trail at +1% (57700 bounce: CL had +1% but trail never fired)
@@ -779,6 +784,9 @@ logging:
 # Use to ship safer defaults for mainnet without duplicating the YAML.
 mode_overrides:
   mainnet:
+    engine:
+      # Flatten until SL/TP are native HL trigger orders (SDK) on entry.
+      close_positions_on_shutdown: true
     strategy:
       # v3.1.22: disable high-frequency / latency-sensitive strategies
       # on mainnet. Their edge depends on colocation-grade latency
@@ -808,12 +816,11 @@ mode_overrides:
       # short-duration strategies.
       maker_orders:
         enabled: true
-      # v3.1.22: a crash/restart should NOT close live mainnet
-      # positions at potentially stale prices. The on-stop flatten
-      # only fires in paper/testnet. Mainnet positions are
-      # preserved and reconciled on next start.
-      flatten_on_stop: false
+      # Mainnet: flatten on stop while exits are bot-managed (no SDK triggers yet).
+      flatten_on_stop: true
   testnet:
+    engine:
+      close_positions_on_shutdown: false  # v3.1.42: preserve like paper
     strategy:
       lead_lag:
         enabled: true
@@ -826,4 +833,4 @@ mode_overrides:
     risk:
       max_daily_trades: 50        # cap for testnet (was 0)
     execution:
-      flatten_on_stop: true       # safe in testnet (no real money)
+      flatten_on_stop: false      # v3.1.42: preserve positions across restarts

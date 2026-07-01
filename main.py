@@ -51,7 +51,7 @@ from typing import Any, Dict, Optional
 # ---------------------------------------------------------------------------
 from utils.config import Config, ConfigError
 from utils.logger import setup_logger
-from utils.helpers import safe_ensure_dir
+from utils.helpers import safe_ensure_dir, resolve_trade_stop_levels
 
 from data.database import Database
 from exchanges.hyperliquid_ws import HyperliquidWSClient, DataBus
@@ -464,22 +464,32 @@ async def main() -> None:
     # (created in __init__ at line 151 of engine.py).
     if open_trades:
         portfolio = engine._portfolio
+        db_open_by_id = {int(row["id"]): row for row in open_trades}
         for trade in list(executor._open_trades.values()):
             notional = trade.entry_price * trade.size
             total_cost = notional + getattr(trade, 'entry_fee', 0.0)
-            parts = trade.reason.split(":", 1)
-            restored_strategy = parts[1] if len(parts) == 2 else "unknown"
+            db_row = db_open_by_id.get(int(trade.trade_id), {})
+            restored_strategy = str(
+                db_row.get("strategy")
+                or (trade.reason.split(":", 1)[1] if ":" in trade.reason else "unknown")
+            )
+            sl_price, tp_price = resolve_trade_stop_levels(
+                entry_price=trade.entry_price,
+                side=trade.side,
+                signal_metadata=db_row.get("signal_metadata"),
+            )
             pos = Position(
                 symbol=trade.symbol,
                 side=trade.side,
                 entry_price=trade.entry_price,
                 size=trade.size,
                 entry_time_ms=int(trade.timestamp_ms),
-                stop_loss_price=None,
-                take_profit_price=None,
+                stop_loss_price=sl_price,
+                take_profit_price=tp_price,
                 unrealized_pnl=0.0,
                 metadata={
                     "strategy": restored_strategy,
+                    "sub_strategy": restored_strategy,
                     "trade_id": trade.trade_id,
                     "restored_from_db": True,
                 },
@@ -487,9 +497,12 @@ async def main() -> None:
             try:
                 await portfolio.add_position(pos, cost=total_cost)
                 logger.info(
-                    "Restored position into portfolio: %s %s size=%.6f @ %.2f (id=%d)",
+                    "Restored position into portfolio: %s %s size=%.6f @ %.2f "
+                    "(id=%d sl=%s tp=%s)",
                     trade.symbol, trade.side, trade.size,
                     trade.entry_price, trade.trade_id,
+                    f"{sl_price:.4f}" if sl_price else "None",
+                    f"{tp_price:.4f}" if tp_price else "None",
                 )
             except Exception as exc:
                 logger.warning(

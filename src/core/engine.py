@@ -566,6 +566,7 @@ class TradingEngine:
             dd0 * 100.0,
             self._risk.is_circuit_breaker_tripped(),
         )
+        self._seed_kelly_from_db()
 
         # 3. Subscribe to DataBus topics per symbol
         for symbol in self._symbols:
@@ -1041,6 +1042,38 @@ class TradingEngine:
             except asyncio.TimeoutError:
                 pass
 
+    def _should_close_positions_on_shutdown(self) -> bool:
+        """True when graceful stop should flatten all open positions.
+
+        Paper/testnet default is false (restore from DB on next start).
+        Mainnet override is true until SL/TP are placed as native trigger
+        orders on the exchange via the Hyperliquid SDK at entry time.
+        """
+        explicit = self._config.get("engine.close_positions_on_shutdown")
+        if explicit is not None:
+            return bool(explicit)
+        return bool(self._config.get("execution.flatten_on_stop", True))
+
+    def _seed_kelly_from_db(self) -> None:
+        """Pre-load KellySizer from recent closed trades in SQLite."""
+        kelly_cfg = self._config.get("kelly", {}) or {}
+        lookback = int(kelly_cfg.get("lookback_trades", 50))
+        try:
+            pnl_pcts = self._db.get_recent_closed_trade_pnl_pcts(limit=lookback)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("KellySizer seed skipped — DB read failed: %s", exc)
+            return
+        if not pnl_pcts:
+            logger.info("KellySizer seed: no closed trades in DB yet")
+            return
+        n = self._kelly_sizer.seed_history(pnl_pcts)
+        mult = self._kelly_sizer.get_size_multiplier()
+        logger.info(
+            "KellySizer seeded with %d historical trades (multiplier=%.3f)",
+            n,
+            mult,
+        )
+
     async def stop(self) -> None:
         """Graceful shutdown: close all positions, save state, unsubscribe."""
         if not self._running:
@@ -1073,21 +1106,15 @@ class TradingEngine:
         self._subscribed_callbacks.clear()
 
         # 2. Close all open positions (market order at last known price)
-        # v3.1.22: gated by execution.flatten_on_stop. Paper/testnet
-        # default true (safe, no real money). Mainnet defaults to
-        # false via mode_overrides — closing a live mainnet
-        # position at a stale shutdown price can crystallise a
-        # loss that the strategy was about to recover. The
-        # position will be picked up on the next start and
-        # reconciled against the exchange book.
-        flatten_on_stop = bool(
-            self._config.get("execution.flatten_on_stop", True)
-        )
+        # v3.1.42: gated by engine.close_positions_on_shutdown (fallback:
+        # execution.flatten_on_stop). Paper/testnet preserves positions;
+        # mainnet flattens until SDK native SL/TP trigger orders exist.
+        flatten_on_stop = self._should_close_positions_on_shutdown()
         positions_snapshot = await self._portfolio.positions
         if not flatten_on_stop and positions_snapshot:
             logger.info(
                 "Preserving %d open position(s) across restart "
-                "(flatten_on_stop=false); will reconcile on next start.",
+                "(close_positions_on_shutdown=false); will reconcile on next start.",
                 len(positions_snapshot),
             )
         for symbol, position in positions_snapshot.items():
@@ -2850,6 +2877,28 @@ class TradingEngine:
             },
         )
         await self._portfolio.add_position(position, cost=total_cost)
+
+        # v3.1.42: persist stop/TP levels for position restore after restart
+        try:
+            self._db.enrich_trade_stop_metadata(
+                trade_id=int(result.trade_id),
+                stop_loss_price=float(stop_loss_price),
+                take_profit_price=(
+                    float(take_profit_price) if take_profit_price is not None else None
+                ),
+                stop_loss_pct=float(stop_distance_pct),
+                take_profit_pct=(
+                    float(signal.take_profit_pct)
+                    if signal.take_profit_pct is not None
+                    else None
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to persist stop metadata for trade %s: %s",
+                result.trade_id,
+                exc,
+            )
 
         # CRIT-011 FIX: Persist portfolio snapshot after every trade entry
         await self._maybe_save_snapshot(force=True)

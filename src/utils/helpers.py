@@ -669,3 +669,45 @@ def round_decimals(value: float, decimals: int = 8) -> float:
     if d < 0:
         d = 0
     return round(safe_float(value), d)
+
+
+def resolve_trade_stop_levels(
+    entry_price: float,
+    side: str,
+    signal_metadata: Optional[Union[str, Dict[str, Any]]] = None,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Rehydrate stop-loss / take-profit prices from persisted trade metadata.
+
+    Used when restoring open positions after a restart. Prefers explicit
+    ``stop_loss_price`` / ``take_profit_price`` in metadata; falls back to
+    recomputing from ``stop_loss_pct`` / ``take_profit_pct``.
+    """
+    entry = safe_float(entry_price)
+    if entry <= 0:
+        return None, None
+
+    meta: Dict[str, Any] = {}
+    if isinstance(signal_metadata, dict):
+        meta = signal_metadata
+    elif signal_metadata:
+        parsed = safe_json_loads(signal_metadata, default={})
+        if isinstance(parsed, dict):
+            meta = parsed
+
+    sl_price = safe_float(meta.get("stop_loss_price"), default=0.0)
+    tp_price = safe_float(meta.get("take_profit_price"), default=0.0)
+    if sl_price > 0:
+        return sl_price, (tp_price if tp_price > 0 else None)
+
+    stop_pct = safe_float(meta.get("stop_loss_pct"), default=0.0)
+    if stop_pct <= 0:
+        return None, None
+
+    tp_pct = safe_float(meta.get("take_profit_pct"), default=0.0)
+    if side == "long":
+        sl = entry * (1.0 - stop_pct)
+        tp = entry * (1.0 + tp_pct) if tp_pct > 0 else None
+    else:
+        sl = entry * (1.0 + stop_pct)
+        tp = entry * (1.0 - tp_pct) if tp_pct > 0 else None
+    return sl, tp

@@ -394,9 +394,14 @@ class ExecutionEngine:
             entry_bid_ask_imbalance = market_event.bid_ask_imbalance
             entry_volume_1m = market_event.volume_1m
 
-        # Encode signal metadata for the journal
+        # Encode signal metadata for the journal (include stop/TP for restore)
         try:
-            signal_meta_json = json.dumps(signal.metadata, default=str)
+            meta = dict(signal.metadata) if signal.metadata else {}
+            if signal.stop_loss_pct is not None and signal.stop_loss_pct > 0:
+                meta["stop_loss_pct"] = float(signal.stop_loss_pct)
+            if signal.take_profit_pct is not None and signal.take_profit_pct > 0:
+                meta["take_profit_pct"] = float(signal.take_profit_pct)
+            signal_meta_json = json.dumps(meta, default=str)
         except (TypeError, ValueError):
             signal_meta_json = None
 

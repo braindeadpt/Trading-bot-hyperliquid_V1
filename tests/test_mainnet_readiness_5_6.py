@@ -33,29 +33,34 @@ def _pass(name: str, ok: bool, detail: str = "") -> None:
 # ── config wiring ────────────────────────────────────────────────
 
 
-def test_settings_yaml_has_flatten_on_stop() -> None:
+def test_settings_yaml_paper_preserves_on_shutdown() -> None:
     cfg = load_config("config/settings.yaml")
-    _pass("settings_yaml_has_flatten_on_stop",
-          cfg.get("execution.flatten_on_stop") is True)
-
-
-def test_settings_yaml_mainnet_override_disables_flatten() -> None:
-    cfg = load_config("config/settings.yaml")
-    # Simulate mainnet by forcing the mode key
-    cfg._data["mode"] = "mainnet"  # type: ignore[attr-defined]
-    from src.utils.config import _apply_mode_overrides
-    _apply_mode_overrides(cfg._data)
-    _pass("settings_yaml_mainnet_override_disables_flatten",
+    _pass("settings_yaml_paper_preserves_on_shutdown",
+          cfg.get("engine.close_positions_on_shutdown") is False)
+    _pass("settings_yaml_flatten_on_stop_false_paper",
           cfg.get("execution.flatten_on_stop") is False)
 
 
-def test_settings_yaml_testnet_override_keeps_flatten() -> None:
+def test_settings_yaml_mainnet_override_closes_on_shutdown() -> None:
+    cfg = load_config("config/settings.yaml")
+    cfg._data["mode"] = "mainnet"  # type: ignore[attr-defined]
+    from src.utils.config import _apply_mode_overrides
+    _apply_mode_overrides(cfg._data)
+    _pass("settings_yaml_mainnet_close_on_shutdown",
+          cfg.get("engine.close_positions_on_shutdown") is True)
+    _pass("settings_yaml_mainnet_flatten_on_stop",
+          cfg.get("execution.flatten_on_stop") is True)
+
+
+def test_settings_yaml_testnet_override_preserves() -> None:
     cfg = load_config("config/settings.yaml")
     cfg._data["mode"] = "testnet"  # type: ignore[attr-defined]
     from src.utils.config import _apply_mode_overrides
     _apply_mode_overrides(cfg._data)
-    _pass("settings_yaml_testnet_override_keeps_flatten",
-          cfg.get("execution.flatten_on_stop") is True)
+    _pass("settings_yaml_testnet_preserves_on_shutdown",
+          cfg.get("engine.close_positions_on_shutdown") is False)
+    _pass("settings_yaml_testnet_flatten_on_stop_false",
+          cfg.get("execution.flatten_on_stop") is False)
 
 
 # ── WS health task is started in start() ─────────────────────────
@@ -118,6 +123,9 @@ def _build_paper_engine(cfg, *, with_ws: bool) -> "TradingEngine":
     engine._risk.reset_circuit_breaker = MagicMock()
     engine._risk.check_drawdown = MagicMock()
     engine._risk.is_circuit_breaker_tripped = MagicMock(return_value=False)
+    engine._kelly_sizer = MagicMock()
+    engine._kelly_sizer.seed_history = MagicMock(return_value=0)
+    engine._kelly_sizer.get_size_multiplier = MagicMock(return_value=1.0)
 
     # Stub the recovery / background loops
     async def _recover_state():
@@ -185,6 +193,7 @@ def test_stop_skips_close_when_flatten_false() -> None:
 
     cfg = load_config("config/settings.yaml")
     cfg._data["execution"]["flatten_on_stop"] = False  # type: ignore[index]
+    cfg._data.setdefault("engine", {})["close_positions_on_shutdown"] = False  # type: ignore[index]
 
     engine = TradingEngine.__new__(TradingEngine)
     engine._running = True
@@ -239,13 +248,11 @@ def test_stop_skips_close_when_flatten_false() -> None:
 
 
 def test_stop_closes_when_flatten_true() -> None:
-    """When flatten_on_stop=True (default), stop() closes all
-    open positions via _execute_exit."""
+    """When close_positions_on_shutdown=True, stop() closes all positions."""
     from src.core.engine import TradingEngine
 
     cfg = load_config("config/settings.yaml")
-    # Default behaviour: flatten_on_stop=True
-    assert cfg.get("execution.flatten_on_stop") is True
+    cfg._data.setdefault("engine", {})["close_positions_on_shutdown"] = True  # type: ignore[index]
 
     engine = TradingEngine.__new__(TradingEngine)
     engine._running = True
@@ -298,9 +305,9 @@ def main() -> int:
     print("Mainnet readiness v3.1.22 5-6 (safe shutdown + WS health)")
     print("=" * 70)
     tests = [
-        test_settings_yaml_has_flatten_on_stop,
-        test_settings_yaml_mainnet_override_disables_flatten,
-        test_settings_yaml_testnet_override_keeps_flatten,
+        test_settings_yaml_paper_preserves_on_shutdown,
+        test_settings_yaml_mainnet_override_closes_on_shutdown,
+        test_settings_yaml_testnet_override_preserves,
         test_start_creates_ws_health_task,
         test_start_skips_ws_health_task_without_ws_client,
         test_stop_skips_close_when_flatten_false,
