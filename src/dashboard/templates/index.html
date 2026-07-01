@@ -954,7 +954,7 @@ function renderTrades(data) {
         const sideClass = t.side === "long" ? "up" : "down";
         const entryTime = t.entry_time ? fmtDate(t.entry_time) : "--";
         const pnlDisplay = isOpen ? "<span class='muted'>—</span>" : ((pnl >= 0 ? "+" : "") + "$" + Math.abs(pnl).toFixed(2));
-        const pnlPctDisplay = isOpen ? "<span class='muted'>—</span>" : ((t.pnl_pct >= 0 ? "+" : "") + (t.pnl_pct || 0).toFixed(2) + "%");
+        const pnlPctDisplay = isOpen ? "<span class='muted'>—</span>" : ((t.pnl_pct >= 0 ? "+" : "") + ((t.pnl_pct || 0) * 100).toFixed(2) + "%");
         const statusBadge = isOpen ? '<span class="pill pill-pending">OPEN</span>' : '<span class="pill pill-executed">CLOSED</span>';
         const fund = typeof t.funding_paid === "number" ? t.funding_paid : 0;
         const fundDisplay = fund === 0 ? "<span class='muted'>0.00</span>" : ((fund >= 0 ? "+" : "") + "$" + Math.abs(fund).toFixed(2));
