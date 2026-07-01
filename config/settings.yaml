@@ -442,8 +442,8 @@ strategy:
     weekday_blocked_days: [4]
     weekday_blocked_start_h: 18
     weekday_blocked_end_h: 24
-    # v3.1.39: SL-to-BE after N R profit (cut losers early once green)
-    use_sl_to_be_after_1r: false    # OFF by default — sweep will validate
+    # v3.1.41: SL-to-BE after 1R — live 01-Jul: +1% at liquidity level, SL never moved, round-trip loss
+    use_sl_to_be_after_1r: true
     sl_to_be_r_trigger: 1.0
     sl_to_be_buffer_pct: 0.001
 
@@ -671,7 +671,7 @@ execution:
   flatten_on_stop: true
   trailing_stop:
     enabled: true
-    activation_pct: 0.02            # Phase 1: subir de 1% — deixar winners correr até TP
+    activation_pct: 0.01            # v3.1.41: was 0.02 — trail at +1% (57700 bounce: CL had +1% but trail never fired)
     trail_pct: 0.008                # Phase 1: subir de 0.5% para 0.8%
     # Strategies with explicit TP/exit logic — skip engine trailing (avoids early winner cuts)
     exclude_strategies:
