@@ -19,10 +19,20 @@ from src.utils.helpers import safe_float
 
 logger = logging.getLogger(__name__)
 
+
+class _PositionsCapitalView:
+    """Minimal portfolio view for sync risk metric reads in the dashboard."""
+
+    def __init__(self, positions: Dict[str, Any], capital: float) -> None:
+        self.positions = positions
+        self.current_capital = capital
+
+
 # Globals set by main.py
 _engine: Optional[Any] = None
 _socketio: Optional[SocketIO] = None
 _emit_fn: Optional[Callable] = None
+_emitter: Optional["DashboardEmitter"] = None
 
 
 def set_engine(engine: Any) -> None:
@@ -44,6 +54,35 @@ def _get_db():
 # ═════════════════════════════════════════════════════════════════════════════
 # Background emitter - pushes real-time data every second
 # ═════════════════════════════════════════════════════════════════════════════
+
+def build_positions_payload(engine: Any) -> List[Dict[str, Any]]:
+    """Build open-positions list for Socket.IO and REST."""
+    portfolio = getattr(engine, "portfolio", None)
+    if portfolio is None:
+        return []
+    positions = getattr(portfolio, "get_positions_sync", lambda: {})()
+    result: List[Dict[str, Any]] = []
+    for sym, pos in positions.items():
+        snap = pos.to_position() if hasattr(pos, "to_position") else pos
+        entry = getattr(snap, "entry_price", 0)
+        current = getattr(snap, "current_price", entry)
+        unrealized = getattr(snap, "unrealized_pnl", 0)
+        size = getattr(snap, "size", 0)
+        pnl_pct = (unrealized / (entry * size) * 100) if entry and size else 0
+        result.append({
+            "symbol": sym,
+            "side": getattr(snap, "side", "--"),
+            "size": size,
+            "entry_price": entry,
+            "current_price": current,
+            "unrealized_pnl": unrealized,
+            "pnl_pct": pnl_pct,
+            "stop_loss": getattr(snap, "stop_loss_price", None),
+            "take_profit": getattr(snap, "take_profit_price", None),
+            "strategy": (getattr(snap, "metadata", None) or {}).get("strategy", "unknown"),
+        })
+    return result
+
 
 class DashboardEmitter:
     """Emits real-time dashboard updates via Socket.IO.
@@ -136,6 +175,9 @@ class DashboardEmitter:
             payload = method()
         except Exception as e:
             logger.warning("%s error: %s", event, e)
+            return
+        # Legacy emitters call _safe_emit internally and return None.
+        if payload is None:
             return
         try:
             blob = json.dumps(payload, sort_keys=True, default=str)
@@ -348,6 +390,24 @@ class DashboardEmitter:
             ) if governor else len(all_strategy_names),
         }
 
+        risk = getattr(_engine, "_risk", None)
+        portfolio = getattr(_engine, "portfolio", None)
+        portfolio_leverage = 0.0
+        total_notional = 0.0
+        long_exposure = 0.0
+        short_exposure = 0.0
+        leverage_max = 0.0
+        if risk is not None and portfolio is not None:
+            capital = getattr(portfolio, "sync_capital", lambda: 0)()
+            positions = getattr(portfolio, "get_positions_sync", lambda: {})()
+            if capital > 0:
+                portfolio_leverage = risk.get_portfolio_leverage(positions, capital)
+                total_notional = risk.get_portfolio_total_notional(positions)
+                long_exposure, short_exposure = risk.get_directional_exposure(
+                    _PositionsCapitalView(positions, capital)
+                )
+            leverage_max = getattr(risk, "_leverage_max", 0.0)
+
         self._safe_emit("engine_monitor", {
             "ticks_per_second": stats.get("per_second", 0),
             "total_ticks": stats.get("total", 0),
@@ -362,6 +422,12 @@ class DashboardEmitter:
             "governor": governor_info,
             "vol_circuit_blocked": vol_blocked,
             "vol_circuit": vol_snapshot,
+            "portfolio_leverage": portfolio_leverage,
+            "leverage_max": leverage_max,
+            "total_notional_usd": total_notional,
+            "directional_exposure": long_exposure + short_exposure,
+            "long_exposure_pct": long_exposure,
+            "short_exposure_pct": short_exposure,
         })
 
     def _emit_candles(self) -> None:
@@ -462,33 +528,16 @@ class DashboardEmitter:
         except Exception:
             pass
 
-    def _emit_positions(self) -> None:
-        portfolio = getattr(_engine, "portfolio", None)
-        if portfolio is None:
-            return
+    def _build_positions_payload(self) -> List[Dict[str, Any]]:
+        if _engine is None:
+            return []
+        return build_positions_payload(_engine)
+
+    def _emit_positions(self) -> List[Dict[str, Any]]:
         try:
-            positions = getattr(portfolio, "get_positions_sync", lambda: {})()
-            result = []
-            for sym, pos in positions.items():
-                entry = getattr(pos, "entry_price", 0)
-                current = getattr(pos, "current_price", entry)
-                unrealized = getattr(pos, "unrealized_pnl", 0)
-                pnl_pct = (unrealized / (entry * getattr(pos, "size", 0)) * 100) if entry and getattr(pos, "size", 0) else 0
-                result.append({
-                    "symbol": sym,
-                    "side": getattr(pos, "side", "--"),
-                    "size": getattr(pos, "size", 0),
-                    "entry_price": entry,
-                    "current_price": current,
-                    "unrealized_pnl": unrealized,
-                    "pnl_pct": pnl_pct,
-                    "stop_loss": getattr(pos, "stop_loss_price", None),
-                    "take_profit": getattr(pos, "take_profit_price", None),
-                    "strategy": getattr(pos, "metadata", {}).get("strategy", "unknown"),
-                })
-            self._safe_emit("positions", result)
+            return self._build_positions_payload()
         except Exception:
-            pass
+            return []
 
     def _emit_trades(self) -> None:
         """Emit last 50 trades from the DB (open + closed)."""
@@ -636,11 +685,13 @@ def create_app(config: Dict[str, Any]) -> tuple:
     # Start background emitter (B9) — honor configured cadence
     _dash_cfg = (config or {}).get("dashboard", {}) or {}
     _push_sec = float(_dash_cfg.get("push_interval_sec", 2.0) or 2.0)
+    global _emitter
     emitter = DashboardEmitter(
         socketio,
         fast_interval=min(0.5, max(0.1, _push_sec / 4.0)),
         slow_interval=max(1.0, _push_sec * 2.5),
     )
+    _emitter = emitter
     emitter.start()
 
 
@@ -906,6 +957,12 @@ def create_app(config: Dict[str, Any]) -> tuple:
             "daily_pnl": getattr(portfolio, "sync_daily_pnl", lambda: 0)(),
             "open_positions": len(getattr(portfolio, "get_positions_sync", lambda: {})()),
         })
+
+    @app.route("/api/positions")
+    def api_positions():
+        if _engine is None:
+            return jsonify([])
+        return jsonify(build_positions_payload(_engine))
 
     @app.route("/api/trades")
     def api_trades():

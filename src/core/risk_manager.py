@@ -229,37 +229,51 @@ it is not used directly in the current implementation.
                 )
 
         # --- 9. Directional exposure limit (FASE 4.1) ---
-        # Max 60% of book in same direction (long or short)
+        atr_pct = self._derive_atr_pct(signal)
+        new_notional_pct = safe_divide(
+            self.estimate_entry_notional(signal, capital, atr_pct),
+            capital,
+            0.0,
+        ) * 100.0
         long_exposure, short_exposure = self._calculate_directional_exposure(
             positions, capital
         )
         if signal.side == "long":
-            if long_exposure + (signal.size_pct * 100) > self._max_directional_exposure_pct * 100:
+            if long_exposure + new_notional_pct > self._max_directional_exposure_pct * 100:
                 return (
                     False,
                     f"Directional exposure limit: long={long_exposure:.1f}% + "
-                    f"{signal.size_pct * 100:.1f}% > {self._max_directional_exposure_pct * 100:.0f}%",
+                    f"{new_notional_pct:.1f}% > {self._max_directional_exposure_pct * 100:.0f}%",
                 )
         else:
-            if short_exposure + (signal.size_pct * 100) > self._max_directional_exposure_pct * 100:
+            if short_exposure + new_notional_pct > self._max_directional_exposure_pct * 100:
                 return (
                     False,
                     f"Directional exposure limit: short={short_exposure:.1f}% + "
-                    f"{signal.size_pct * 100:.1f}% > {self._max_directional_exposure_pct * 100:.0f}%",
+                    f"{new_notional_pct:.1f}% > {self._max_directional_exposure_pct * 100:.0f}%",
                 )
 
         # --- 10. Sector exposure cap (FASE 4.2) ---
-        # Max 30% of capital in crypto (if we had other asset classes)
-        # For now, all positions are crypto so this is a total book cap
         total_exposure = long_exposure + short_exposure
-        if total_exposure + (signal.size_pct * 100) > self._max_sector_exposure_pct * 100:
+        if total_exposure + new_notional_pct > self._max_sector_exposure_pct * 100:
             return (
                 False,
                 f"Sector exposure limit: total={total_exposure:.1f}% + "
-                f"{signal.size_pct * 100:.1f}% > {self._max_sector_exposure_pct * 100:.0f}%",
+                f"{new_notional_pct:.1f}% > {self._max_sector_exposure_pct * 100:.0f}%",
             )
 
-        # --- 11. Confidence after overcrowded penalty ---
+        # --- 11. Portfolio leverage limit ---
+        open_notional = self.get_portfolio_total_notional(positions)
+        new_notional = self.estimate_entry_notional(signal, capital, atr_pct)
+        projected_leverage = safe_divide(open_notional + new_notional, capital, 0.0)
+        if projected_leverage > self._leverage_max + 1e-9:
+            return (
+                False,
+                f"Portfolio leverage limit: {projected_leverage:.1f}x > "
+                f"{self._leverage_max:.1f}x",
+            )
+
+        # --- 12. Confidence after overcrowded penalty ---
         effective_confidence = self._apply_overcrowded_penalty(signal)
         if effective_confidence < 0.5:
             return (
@@ -267,7 +281,7 @@ it is not used directly in the current implementation.
                 f"Confidence too low after overcrowding penalty ({effective_confidence:.2f})",
             )
 
-        # --- 12. Minimum capital sanity check ---
+        # --- 13. Minimum capital sanity check ---
         if capital <= 0.0:
             return False, "Zero or negative capital — cannot trade"
 
@@ -343,6 +357,105 @@ it is not used directly in the current implementation.
         return (self._daily_peak_capital - capital) / self._daily_peak_capital
 
     # ------------------------------------------------------------------
+    # Sizing helpers
+    # ------------------------------------------------------------------
+
+    def _derive_atr_pct(self, signal: Signal) -> float:
+        """Estimate ATR% from signal metadata or stop distance."""
+        atr_pct = safe_float(signal.metadata.get("atr_pct"))
+        if atr_pct <= 0.0:
+            atr_pct = safe_divide(safe_float(signal.stop_loss_pct), 2.0, 0.0)
+        if atr_pct <= 0.0:
+            atr_pct = self.MIN_STOP_DISTANCE_PCT / 2.0
+        return atr_pct
+
+    def _resolve_stop_distance_pct(self, signal: Signal, atr_pct: float) -> float:
+        """Stop distance used for risk→notional conversion (matches engine exits)."""
+        sl_pct = safe_float(signal.stop_loss_pct)
+        if sl_pct > 0.0:
+            return max(sl_pct, self.MIN_STOP_DISTANCE_PCT)
+        return max(2.0 * safe_float(atr_pct), self.MIN_STOP_DISTANCE_PCT)
+
+    def _compute_notional_bounds(
+        self,
+        signal: Signal,
+        capital: float,
+        atr_pct: float,
+    ) -> Dict[str, float]:
+        """Return notional caps and the binding final notional for a signal."""
+        capital_f = safe_float(capital)
+        if capital_f <= 0.0:
+            return {
+                "notional_risk": 0.0,
+                "notional_conviction": 0.0,
+                "max_notional": 0.0,
+                "notional_final": 0.0,
+                "stop_distance": self.MIN_STOP_DISTANCE_PCT,
+                "effective_risk_pct": 0.0,
+                "implicit_leverage": 0.0,
+            }
+
+        stop_distance = self._resolve_stop_distance_pct(signal, atr_pct)
+        size_pct = max(0.0, safe_float(signal.size_pct))
+
+        risk_amount = capital_f * self._per_trade_risk_pct_effective
+        notional_risk = safe_divide(risk_amount, stop_distance, 0.0)
+
+        if size_pct > 0.0:
+            notional_conviction = safe_divide(capital_f * size_pct, stop_distance, 0.0)
+        else:
+            notional_conviction = notional_risk
+
+        max_notional = capital_f * self._max_position_size_pct * self._leverage_max
+        notional_final = min(notional_risk, notional_conviction, max_notional)
+
+        effective_risk_pct = safe_divide(
+            notional_final * stop_distance,
+            capital_f,
+            0.0,
+        )
+        implicit_leverage = safe_divide(notional_final, capital_f, 0.0)
+
+        return {
+            "notional_risk": notional_risk,
+            "notional_conviction": notional_conviction,
+            "max_notional": max_notional,
+            "notional_final": notional_final,
+            "stop_distance": stop_distance,
+            "effective_risk_pct": effective_risk_pct,
+            "implicit_leverage": implicit_leverage,
+        }
+
+    def estimate_entry_notional(
+        self,
+        signal: Signal,
+        capital: float,
+        atr_pct: Optional[float] = None,
+    ) -> float:
+        """Estimate USD notional for a proposed entry (pre-trade gate checks)."""
+        atr = safe_float(atr_pct) if atr_pct is not None else self._derive_atr_pct(signal)
+        return self._compute_notional_bounds(signal, capital, atr)["notional_final"]
+
+    @staticmethod
+    def get_portfolio_total_notional(positions: Dict[str, Any]) -> float:
+        """Sum open-position notionals (USD)."""
+        total = 0.0
+        for pos in positions.values():
+            total += safe_float(pos.entry_price) * safe_float(pos.size)
+        return total
+
+    def get_portfolio_leverage(
+        self,
+        positions: Dict[str, Any],
+        capital: float,
+    ) -> float:
+        """Portfolio leverage = total open notional / equity."""
+        capital_f = safe_float(capital)
+        if capital_f <= 0.0:
+            return 0.0
+        return safe_divide(self.get_portfolio_total_notional(positions), capital_f, 0.0)
+
+    # ------------------------------------------------------------------
     # Position sizing
     # ------------------------------------------------------------------
 
@@ -354,24 +467,23 @@ it is not used directly in the current implementation.
     ) -> float:
         """Return the base-asset position size (notional / price).
 
-        Formula (v3.1.22):
-          risk_amount         = capital × per_trade_risk_pct_effective
-          stop_distance       = max(2 × atr_pct, min_stop_distance_pct)
-          notional_risk       = risk_amount / stop_distance  (ATR risk ceiling)
-          notional_conviction = capital × signal.size_pct    (strategy / Kelly sizing)
+        ``size_pct`` is the fraction of capital to **risk** (per Signal docstring),
+        not the target notional. Kelly adjustments are applied upstream in the
+        engine before this call.
+
+        Formula:
+          stop_distance       = max(signal.stop_loss_pct, 2×ATR, min_stop_distance_pct)
+          notional_risk       = (capital × per_trade_risk_pct_effective) / stop_distance
+          notional_conviction = (capital × size_pct) / stop_distance
           max_notional        = capital × max_position_size_pct × leverage_max
           notional_final      = min(notional_risk, notional_conviction, max_notional)
           size                = notional_final / entry_price
 
-        Leverage is now applied to the *max_notional* ceiling so a
-        ``leverage_max: 10`` config actually allows up to 10x
-        exposure. The per-trade risk budget is capped to
-        ``per_trade_risk_fraction_of_daily_loss × max_daily_loss_pct``
-        (default 1/3) so a worst-case 3-loss day still keeps the
-        daily CB from tripping on a single streak.
+        Effective risk ≈ notional_final × stop_distance / capital.
+        Implicit leverage per position = notional_final / capital.
 
-        ``size_pct`` (and Kelly adjustments applied upstream) may reduce size below
-        the risk ceiling but never increase above it.
+        Example (capital $10k, size_pct 1%, stop 1.2%):
+          conviction notional ≈ $8,333 → capped to $5,000 (5%×10x) → risk ≈ 0.6%.
 
         Args:
             signal:  The entry signal (entry_price may be None → use current price)
@@ -392,71 +504,31 @@ it is not used directly in the current implementation.
 
         atr_pct_f = safe_float(atr_pct)
         if atr_pct_f <= 0.0:
-            atr_pct_f = self.MIN_STOP_DISTANCE_PCT / 2.0
+            atr_pct_f = self._derive_atr_pct(signal)
 
-        size_pct = safe_float(signal.size_pct)
-        if size_pct <= 0.0:
-            logger.warning(
-                "calculate_position_size: non-positive size_pct %.4f — using risk ceiling only",
-                size_pct,
-            )
+        bounds = self._compute_notional_bounds(signal, capital_f, atr_pct_f)
+        notional_final = bounds["notional_final"]
+        stop_distance = bounds["stop_distance"]
+        size_pct = max(0.0, safe_float(signal.size_pct))
 
-        # Risk amount in USD (capped to ≤ 1/3 of daily loss budget)
-        risk_amount = capital_f * self._per_trade_risk_pct_effective
-
-        # Stop distance = 2×ATR, floored at 0.5%
-        stop_distance = max(2.0 * atr_pct_f, self.MIN_STOP_DISTANCE_PCT)
-
-        # ATR-based risk ceiling (notional)
-        notional_risk = safe_divide(risk_amount, stop_distance, 0.0)
-
-        # Strategy conviction target (Kelly multiplier applied upstream in engine)
-        notional_conviction = capital_f * size_pct if size_pct > 0.0 else notional_risk
-
-        # v3.1.22: hard cap on position notional now scales with
-        # leverage. max_position_size_pct is the *margin* cap (5%
-        # of capital as collateral); multiplying by leverage gives
-        # the *notional* cap (50% of capital at 10x).
-        max_notional = capital_f * self._max_position_size_pct * self._leverage_max
-
-        notional_final = min(notional_risk, notional_conviction, max_notional)
-
-        # Convert to base-asset size
         size = safe_divide(notional_final, price, 0.0)
 
-        # v3.1.22: surface the effective leverage in logs so operators
-        # can confirm the config is actually being applied.
-        if self._leverage_max > 1.01:
-            effective_lev = safe_divide(notional_final, capital_f * self._max_position_size_pct, 0.0)
-            logger.debug(
-                "Sizing: capital=%.2f risk_notional=%.2f conviction_notional=%.2f "
-                "final_notional=%.2f max_notional=%.2f (margin_cap=%.2f%% x lev=%.2fx) "
-                "effective_lev=%.2fx stop=%.4f size_pct=%.4f size=%.6f",
-                capital_f,
-                notional_risk,
-                notional_conviction,
-                notional_final,
-                max_notional,
-                self._max_position_size_pct * 100.0,
-                self._leverage_max,
-                effective_lev,
-                stop_distance,
-                size_pct,
-                size,
-            )
-        else:
-            logger.debug(
-                "Sizing: capital=%.2f risk_notional=%.2f conviction_notional=%.2f "
-                "final_notional=%.2f max_notional=%.2f stop=%.4f size_pct=%.4f size=%.6f",
-                capital_f,
-                notional_risk,
-                notional_conviction,
-                notional_final,
-                max_notional,
-                stop_distance,
-                size_pct,
-                size,
-            )
+        logger.info(
+            "Sizing %s %s: capital=%.0f risk_pct=%.3f%% stop=%.3f%% "
+            "notional=%.0f (risk_cap=%.0f conviction=%.0f max=%.0f) "
+            "implicit_lev=%.2fx size=%.6f",
+            signal.symbol,
+            signal.side,
+            capital_f,
+            bounds["effective_risk_pct"] * 100.0,
+            stop_distance * 100.0,
+            notional_final,
+            bounds["notional_risk"],
+            bounds["notional_conviction"],
+            bounds["max_notional"],
+            bounds["implicit_leverage"],
+            size,
+        )
         return size
 
     # ------------------------------------------------------------------
@@ -544,10 +616,10 @@ it is not used directly in the current implementation.
     # Metrics
     # ------------------------------------------------------------------
 
-    def get_metrics(self) -> Dict[str, Any]:
+    def get_metrics(self, portfolio: Any = None) -> Dict[str, Any]:
         """Return a snapshot of current risk metrics."""
         win_rate = safe_divide(self._winning_trades, self._total_trades_closed, 0.0)
-        return {
+        metrics: Dict[str, Any] = {
             "total_trades_closed": self._total_trades_closed,
             "winning_trades": self._winning_trades,
             "win_rate": win_rate,
@@ -556,9 +628,25 @@ it is not used directly in the current implementation.
             "circuit_breaker_reason": self._circuit_breaker_reason,
             "max_positions": self._max_total_positions,
             "per_trade_risk_pct": self._per_trade_risk_pct,
+            "per_trade_risk_pct_effective": self._per_trade_risk_pct_effective,
             "max_daily_loss_pct": self._max_daily_loss_pct,
             "circuit_breaker_drawdown_pct": self._circuit_breaker_drawdown_pct,
+            "leverage_max": self._leverage_max,
+            "max_position_size_pct": self._max_position_size_pct,
         }
+        if portfolio is not None:
+            capital = portfolio.current_capital  # type: ignore
+            positions = portfolio.positions  # type: ignore
+            total_notional = self.get_portfolio_total_notional(positions)
+            lev = self.get_portfolio_leverage(positions, capital)
+            long_exp, short_exp = self._calculate_directional_exposure(positions, capital)
+            metrics.update({
+                "portfolio_leverage": lev,
+                "total_notional_usd": total_notional,
+                "long_exposure_pct": long_exp,
+                "short_exposure_pct": short_exp,
+            })
+        return metrics
 
     # ------------------------------------------------------------------
     # Dashboard-compatible properties (synchronous, read-only)

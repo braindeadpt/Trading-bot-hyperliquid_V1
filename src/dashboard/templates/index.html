@@ -324,6 +324,7 @@ tr:hover td { background: var(--panel-hover); }
                     <div class="mini-row"><span class="mini-label">Daily DD</span><span class="mini-value" id="eng-daily-dd">--</span></div>
                     <div class="mini-row"><span class="mini-label">Max DD</span><span class="mini-value" id="eng-max-dd">--</span></div>
                     <div class="mini-row"><span class="mini-label">Exposure</span><span class="mini-value" id="eng-exposure">--</span></div>
+                    <div class="mini-row"><span class="mini-label">Portfolio Lev</span><span class="mini-value" id="eng-portfolio-lev">--</span></div>
                     <div class="mini-row"><span class="mini-label">Open Risk</span><span class="mini-value" id="eng-open-risk">--</span></div>
                     <div class="mini-row"><span class="mini-label">Last Error</span><span class="mini-value" id="eng-error" style="color:var(--down);">--</span></div>
                 </div>
@@ -769,6 +770,13 @@ function renderEngine(data) {
     document.getElementById("eng-daily-dd").textContent = (data.daily_drawdown || 0).toFixed(2) + "%";
     document.getElementById("eng-max-dd").textContent = (data.max_drawdown_pct || 0).toFixed(2) + "%";
     document.getElementById("eng-exposure").textContent = (data.directional_exposure || 0).toFixed(1) + "%";
+    const lev = data.portfolio_leverage != null ? data.portfolio_leverage : 0;
+    const levMax = data.leverage_max != null ? data.leverage_max : 0;
+    const levEl = document.getElementById("eng-portfolio-lev");
+    if (levEl) {
+        levEl.textContent = lev.toFixed(2) + "x" + (levMax > 0 ? " / " + levMax.toFixed(0) + "x" : "");
+        levEl.className = "mini-value " + (levMax > 0 && lev > levMax * 0.9 ? "yellow" : "highlight");
+    }
     document.getElementById("eng-open-risk").textContent = (data.open_trade_risk || 0).toFixed(2) + "%";
     const errEl = document.getElementById("eng-error");
     if (data.last_error) {
@@ -826,6 +834,7 @@ function renderRiskGates(data) {
         <div class="mini-row"><span class="mini-label">Reconciliation</span><span class="mini-value ${reconClass}">${reconcileRunning ? "RUNNING" : "OFF (paper)"}</span></div>
         <div class="mini-row"><span class="mini-label">WS Health Loop</span><span class="mini-value ${wsClass}">${wsHealthRunning ? "RUNNING" : "OFF (paper)"}</span></div>
         <div class="mini-row"><span class="mini-label">HL WS Feed</span><span class="mini-value ${liveClass}">${liveClientHealthy ? "HEALTHY" : "STALE"}</span></div>
+        <div class="mini-row"><span class="mini-label">Portfolio Lev</span><span class="mini-value ${(data && data.portfolio_leverage > (data.leverage_max || 0) * 0.9) ? 'yellow' : 'up'}">${data && data.portfolio_leverage != null ? data.portfolio_leverage.toFixed(2) + 'x' : '--'}${data && data.leverage_max ? ' / ' + data.leverage_max.toFixed(0) + 'x max' : ''}</span></div>
     `;
 }
 
@@ -1062,6 +1071,7 @@ function pollAll() {
         statusEl.className = "badge " + (d.running ? "badge-green" : "badge-red");
     }).catch(() => {});
     authFetch("/api/trades").then(r => r.json()).then(d => renderTrades(d)).catch(() => {});
+    authFetch("/api/positions").then(r => r.json()).then(d => renderPositions(d)).catch(() => {});
 }
 setInterval(pollAll, 5000);
 

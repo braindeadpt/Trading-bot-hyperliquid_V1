@@ -561,12 +561,6 @@ class PortfolioState:
         dd = (self._peak_capital - total) / self._peak_capital
         return max(dd, 0.0) * 100.0
 
-    def get_positions_sync(self) -> Dict[str, Any]:
-        """Return a shallow copy of positions for dashboard display."""
-        return {
-            sym: p for sym, p in self._positions.items()
-        }
-
     def sync_daily_trades(self) -> int:
         """Return number of trades today."""
         return self._daily_trades

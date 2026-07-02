@@ -68,7 +68,7 @@ from src.strategies.indicators import (
     calculate_vwap_multi_tf,
 )
 from src.utils.config import Config
-from src.utils.helpers import safe_float, safe_divide, utc_timestamp_ms
+from src.utils.helpers import safe_float, safe_divide, utc_timestamp_ms, resolve_trade_stop_levels
 
 from .execution import ExecutionEngine, TradeResult
 from .portfolio import PortfolioState
@@ -3229,8 +3229,76 @@ class TradingEngine:
         else:
             logger.info("No prior portfolio snapshot found - starting fresh")
 
+        await self._sync_open_trades_to_portfolio()
+
         # 3. Restore recent candles from DB for faster strategy warm-up
         await self._restore_candles_from_db()
+
+    async def _sync_open_trades_to_portfolio(self) -> None:
+        """Mirror executor open trades into portfolio (idempotent on restart)."""
+        open_rows = self._db.get_open_trades()
+        if not open_rows:
+            return
+        by_id = {int(row["id"]): row for row in open_rows}
+        current = await self._portfolio.positions
+        for trade in list(self._executor._open_trades.values()):
+            if trade.symbol in current:
+                logger.debug(
+                    "Open trade %s already in portfolio — skip restore",
+                    trade.symbol,
+                )
+                continue
+            db_row = by_id.get(int(trade.trade_id), {})
+            restored_strategy = str(
+                db_row.get("strategy")
+                or (
+                    trade.reason.split(":", 1)[1]
+                    if ":" in (trade.reason or "")
+                    else "unknown"
+                )
+            )
+            sl_price, tp_price = resolve_trade_stop_levels(
+                entry_price=trade.entry_price,
+                side=trade.side,
+                signal_metadata=db_row.get("signal_metadata"),
+            )
+            notional = trade.entry_price * trade.size
+            total_cost = notional + safe_float(getattr(trade, "entry_fee", 0.0))
+            pos = Position(
+                symbol=trade.symbol,
+                side=trade.side,
+                entry_price=trade.entry_price,
+                size=trade.size,
+                entry_time_ms=int(trade.timestamp_ms),
+                stop_loss_price=sl_price,
+                take_profit_price=tp_price,
+                unrealized_pnl=0.0,
+                metadata={
+                    "strategy": restored_strategy,
+                    "sub_strategy": restored_strategy,
+                    "trade_id": trade.trade_id,
+                    "restored_from_db": True,
+                },
+            )
+            try:
+                await self._portfolio.add_position(pos, cost=total_cost)
+                logger.info(
+                    "Restored position into portfolio: %s %s size=%.6f @ %.2f "
+                    "(id=%d sl=%s tp=%s)",
+                    trade.symbol,
+                    trade.side,
+                    trade.size,
+                    trade.entry_price,
+                    trade.trade_id,
+                    f"{sl_price:.4f}" if sl_price else "None",
+                    f"{tp_price:.4f}" if tp_price else "None",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to restore position %s into portfolio: %s",
+                    trade.symbol,
+                    exc,
+                )
 
     async def _restore_candles_from_db(self) -> None:
         """Load recent candle history from DB into in-memory caches

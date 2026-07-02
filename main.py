@@ -465,7 +465,14 @@ async def main() -> None:
     if open_trades:
         portfolio = engine._portfolio
         db_open_by_id = {int(row["id"]): row for row in open_trades}
+        existing = await portfolio.positions
         for trade in list(executor._open_trades.values()):
+            if trade.symbol in existing:
+                logger.info(
+                    "Position %s already in portfolio — skip duplicate restore",
+                    trade.symbol,
+                )
+                continue
             notional = trade.entry_price * trade.size
             total_cost = notional + getattr(trade, 'entry_fee', 0.0)
             db_row = db_open_by_id.get(int(trade.trade_id), {})
