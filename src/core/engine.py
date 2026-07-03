@@ -1208,10 +1208,8 @@ class TradingEngine:
     ) -> None:
         """Settle funding for the open position (if any).
 
-        Hyperliquid broadcasts a fresh ``funding_rate`` once per hour.
-        ``ctx.funding_rate`` is the *hourly* rate as a fraction of
-        notional. We apply it to the open position's cash + daily_pnl
-        via ``PortfolioState.apply_funding``.
+        Hyperliquid broadcasts ctx updates frequently; funding accrues
+        hourly. ``PortfolioState.apply_funding`` enforces the 1h gate.
         """
         if ctx is None or ctx.funding_rate is None:
             return

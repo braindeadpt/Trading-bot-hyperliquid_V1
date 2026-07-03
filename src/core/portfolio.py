@@ -21,6 +21,9 @@ from src.utils.helpers import safe_float, safe_divide, utc_now
 
 logger = logging.getLogger(__name__)
 
+# Hyperliquid accrues funding hourly on open perp positions.
+FUNDING_SETTLE_INTERVAL_MS = 3_600_000
+
 
 def _utc_midnight_ms() -> int:
     """UTC midnight for the current calendar day (ms)."""
@@ -429,11 +432,15 @@ class PortfolioState:
         position_size: float,
         side: str,
         mark_price: float,
+        now_ms: Optional[int] = None,
     ) -> float:
         """Apply a funding payment to the open position's cash balance.
 
         Hyperliquid settles funding hourly. When ``funding_rate > 0``,
         longs pay shorts; when ``funding_rate < 0`` shorts pay longs.
+
+        Throttled to once per hour per position — ctx WebSocket updates
+        arrive far more often than funding accrual.
 
         Args:
             symbol:        Position symbol (logged only).
@@ -442,22 +449,38 @@ class PortfolioState:
             position_size: Position size in base units (e.g. BTC).
             side:          ``"long"`` or ``"short"``.
             mark_price:    Mark price in USD for notional conversion.
+            now_ms:        Optional clock override (tests).
 
         Returns:
             The cashflow applied (negative = paid, positive = received).
         """
         rate_f = safe_float(funding_rate, 0.0)
         size_f = safe_float(position_size, 0.0)
-        if rate_f == 0.0 or size_f == 0.0:
-            return 0.0
+        clock_ms = int(now_ms if now_ms is not None else time.time() * 1000)
 
         async with self._lock:
             await self._check_daily_reset()
+            pos = self._positions.get(symbol)
+            if pos is None:
+                return 0.0
+
+            next_ts = int(safe_float(pos.metadata.get("next_funding_settle_ms"), 0))
+            if next_ts <= 0:
+                next_ts = int(pos.entry_time_ms) + FUNDING_SETTLE_INTERVAL_MS
+            if clock_ms < next_ts:
+                return 0.0
+
+            new_next = next_ts
+            while new_next <= clock_ms:
+                new_next += FUNDING_SETTLE_INTERVAL_MS
+            pos.metadata["next_funding_settle_ms"] = new_next
+
+            if rate_f == 0.0 or size_f == 0.0:
+                return 0.0
+
             price_f = safe_float(mark_price, 0.0)
             if price_f <= 0.0:
-                pos = self._positions.get(symbol)
-                if pos is not None:
-                    price_f = safe_float(pos.current_price, 0.0) or safe_float(pos.entry_price, 0.0)
+                price_f = safe_float(pos.current_price, 0.0) or safe_float(pos.entry_price, 0.0)
             if price_f <= 0.0:
                 return 0.0
 
@@ -473,11 +496,9 @@ class PortfolioState:
 
             self._cash += cashflow
             self._daily_pnl += cashflow
-            pos = self._positions.get(symbol)
-            if pos is not None:
-                pos.metadata["funding_total"] = safe_float(
-                    pos.metadata.get("funding_total", 0.0), 0.0,
-                ) + cashflow
+            pos.metadata["funding_total"] = safe_float(
+                pos.metadata.get("funding_total", 0.0), 0.0,
+            ) + cashflow
             self._update_peak_and_drawdown()
             self._refresh_dashboard_cache_unlocked()
 
@@ -508,6 +529,10 @@ class PortfolioState:
                 metadata=deepcopy(position.metadata),
             )
             snap.current_price = position.entry_price
+            snap.metadata.setdefault(
+                "next_funding_settle_ms",
+                int(position.entry_time_ms) + FUNDING_SETTLE_INTERVAL_MS,
+            )
             self._positions[position.symbol] = snap
             self._daily_trades += 1
             self._update_peak_and_drawdown()

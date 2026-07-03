@@ -121,9 +121,36 @@ async def test_corrupt_day_start_meta_after_equity_fix() -> None:
     assert abs(metrics["daily_realized_pnl"] - 6.0) < 0.01
 
 
+async def test_funding_throttled_to_hourly() -> None:
+    """Ctx ticks must not inflate daily realised PnL every few seconds."""
+    p = PortfolioState(10_000.0)
+    entry_ms = 1_700_000_000_000
+    pos = Position(
+        symbol="BTC",
+        side="long",
+        entry_price=100_000.0,
+        size=0.04,
+        entry_time_ms=entry_ms,
+        metadata={"strategy": "test"},
+    )
+    await p.add_position(pos, cost=4_000.0)
+    due_ms = entry_ms + 3_600_000
+    rate = 0.0001
+    mark = 100_000.0
+
+    first = await p.apply_funding("BTC", rate, 0.04, "long", mark, now_ms=due_ms)
+    second = await p.apply_funding("BTC", rate, 0.04, "long", mark, now_ms=due_ms + 5_000)
+    snap = p.get_dashboard_snapshot_sync()
+
+    assert abs(first) > 0.0
+    assert second == 0.0
+    assert abs(snap.daily_realized_pnl - first) < 0.01
+
+
 if __name__ == "__main__":
     asyncio.run(test_legacy_restore_no_phantom_daily_pnl())
     asyncio.run(test_overnight_unrealized_baseline())
     asyncio.run(test_live_marks_match_positions_table())
     asyncio.run(test_corrupt_day_start_meta_after_equity_fix())
+    asyncio.run(test_funding_throttled_to_hourly())
     print("ALL PORTFOLIO DASHBOARD TESTS PASSED [OK]")
