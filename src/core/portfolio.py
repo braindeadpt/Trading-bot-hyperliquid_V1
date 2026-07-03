@@ -141,7 +141,10 @@ class PortfolioState:
 
     def get_positions_sync(self) -> Dict[str, Position]:
         """Synchronous read of open positions (for dashboard only)."""
-        return {sym: snap.to_position() for sym, snap in self._positions.items()}
+        return {
+            sym: snap.to_position()
+            for sym, snap in dict(self._positions).items()
+        }
 
 
 

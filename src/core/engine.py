@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -189,6 +190,8 @@ class TradingEngine:
 
         # In-memory cache of latest data per symbol
         self._latest_price: Dict[str, HlPriceTick] = {}
+        self._mark_prices_sync: Dict[str, float] = {}
+        self._mark_prices_lock = threading.Lock()
         self._latest_binance_mid: Dict[str, BinanceMidTick] = {}
         self._latest_binance_perp_mid: Dict[str, BinancePerpMidTick] = {}
         self._latest_ctx: Dict[str, HlAssetCtx] = {}
@@ -413,6 +416,11 @@ class TradingEngine:
     @property
     def executor(self) -> ExecutionEngine:
         return self._executor
+
+    def get_mark_prices_sync(self) -> Dict[str, float]:
+        """Thread-safe latest mids for dashboard / Telegram (updated every tick)."""
+        with self._mark_prices_lock:
+            return dict(self._mark_prices_sync)
 
     # CRIT-004: Validated setter for dashboard callback
     def set_ws_client(self, ws_client: Any) -> None:
@@ -1162,6 +1170,10 @@ class TradingEngine:
         """Factory: returns an async callback for price:* topics."""
         async def _on_price(tick: HlPriceTick) -> None:
             self._latest_price[symbol] = tick
+            mid = float(getattr(tick, "mid", 0) or 0)
+            if mid > 0:
+                with self._mark_prices_lock:
+                    self._mark_prices_sync[symbol] = mid
             await self._on_market_event(symbol)
         return _on_price
 

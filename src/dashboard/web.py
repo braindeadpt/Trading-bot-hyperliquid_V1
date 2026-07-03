@@ -60,27 +60,45 @@ def build_positions_payload(engine: Any) -> List[Dict[str, Any]]:
     portfolio = getattr(engine, "portfolio", None)
     if portfolio is None:
         return []
+    latest_prices = getattr(engine, "_latest_price", {}) or {}
+    market_events = getattr(engine, "_last_market_events", {}) or {}
+    mark_prices = getattr(engine, "get_mark_prices_sync", lambda: {})() or {}
     positions = getattr(portfolio, "get_positions_sync", lambda: {})()
     result: List[Dict[str, Any]] = []
     for sym, pos in positions.items():
-        snap = pos.to_position() if hasattr(pos, "to_position") else pos
-        entry = getattr(snap, "entry_price", 0)
-        raw_current = getattr(snap, "current_price", 0)
-        current = raw_current if raw_current and raw_current > 0 else entry
-        unrealized = getattr(snap, "unrealized_pnl", 0)
-        size = getattr(snap, "size", 0)
+        entry = float(getattr(pos, "entry_price", 0) or 0)
+        size = float(getattr(pos, "size", 0) or 0)
+        side = getattr(pos, "side", "long")
+
+        mid = float(mark_prices.get(sym, 0) or 0)
+        if mid <= 0:
+            tick = latest_prices.get(sym)
+            mid = float(getattr(tick, "mid", 0) or 0) if tick is not None else 0.0
+        if mid <= 0:
+            evt = market_events.get(sym) or {}
+            mid = float(evt.get("price", 0) or 0)
+        if mid <= 0:
+            mid = float(getattr(pos, "current_price", 0) or 0)
+        if mid <= 0:
+            mid = entry
+
+        if side == "short":
+            unrealized = (entry - mid) * size
+        else:
+            unrealized = (mid - entry) * size
+
         pnl_pct = (unrealized / (entry * size) * 100) if entry and size else 0
         result.append({
             "symbol": sym,
-            "side": getattr(snap, "side", "--"),
+            "side": side,
             "size": size,
             "entry_price": entry,
-            "current_price": current,
+            "current_price": mid,
             "unrealized_pnl": unrealized,
             "pnl_pct": pnl_pct,
-            "stop_loss": getattr(snap, "stop_loss_price", None),
-            "take_profit": getattr(snap, "take_profit_price", None),
-            "strategy": (getattr(snap, "metadata", None) or {}).get("strategy", "unknown"),
+            "stop_loss": getattr(pos, "stop_loss_price", None),
+            "take_profit": getattr(pos, "take_profit_price", None),
+            "strategy": (getattr(pos, "metadata", None) or {}).get("strategy", "unknown"),
         })
     return result
 
@@ -97,7 +115,7 @@ class DashboardEmitter:
     (coalesced push — avoids redundant network traffic on quiet markets).
     """
 
-    _FAST_EVENTS: tuple = ("live_data", "engine_monitor")
+    _FAST_EVENTS: tuple = ("live_data", "engine_monitor", "positions")
     _SLOW_EVENTS: tuple = (
         "status",
         "candles",
@@ -105,7 +123,6 @@ class DashboardEmitter:
         "signals",
         "decisions",
         "portfolio",
-        "positions",
         "trades",
         "logs",
         "market_data_health",
@@ -185,7 +202,7 @@ class DashboardEmitter:
         except (TypeError, ValueError):
             blob = repr(payload)
         h = hash(blob)
-        if self._last_payload_hash.get(event) == h:
+        if event != "positions" and self._last_payload_hash.get(event) == h:
             return
         self._last_payload_hash[event] = h
         self._safe_emit(event, payload)

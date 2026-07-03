@@ -41,7 +41,6 @@ import argparse
 import asyncio
 import logging
 import os
-import signal
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -74,7 +73,7 @@ from alerts.telegram_bot import TelegramCommandBot
 from dashboard.web import create_app as create_dashboard
 
 # ---------------------------------------------------------------------------
-# Globals for signal handling
+# Globals for graceful shutdown
 # ---------------------------------------------------------------------------
 _engine: Optional[TradingEngine] = None
 _telegram_bot: Optional[TelegramCommandBot] = None
@@ -115,34 +114,7 @@ def _resolve_path(path_str: str) -> Path:
     return p.resolve()
 
 
-def _shutdown(signum: int, frame: Any) -> None:
-    """Graceful shutdown handler — waits up to 10s for components to stop."""
-    if _logger:
-        _logger.warning(f"Received signal {signum}, initiating shutdown...")
-    loop = asyncio.get_event_loop()
-    tasks = []
-    if _engine:
-        tasks.append(asyncio.run_coroutine_threadsafe(_engine.stop(), loop))
-    if _hl_ws:
-        tasks.append(asyncio.run_coroutine_threadsafe(_hl_ws.stop(), loop))
-    if _binance_ws:
-        tasks.append(asyncio.run_coroutine_threadsafe(_binance_ws.stop(), loop))
-    if _candle_builder:
-        tasks.append(asyncio.run_coroutine_threadsafe(_candle_builder.stop(), loop))
-    # Wait up to 10s for graceful shutdown
-    timeout = 10.0
-    start = time.time()
-    while tasks and (time.time() - start) < timeout:
-        remaining = [t for t in tasks if not t.done()]
-        if not remaining:
-            break
-        time.sleep(0.2)
-    for t in tasks:
-        if not t.done():
-            t.cancel()
-    if _logger:
-        _logger.info("Shutdown complete.")
-    sys.exit(0)
+_shutdown_requested = False
 
 
 async def _run_backtest(
@@ -615,39 +587,55 @@ async def main() -> None:
         logger.info("Telegram command bot started (/status, /positions, /pnl, …)")
 
     # -----------------------------------------------------------------------
-    # 10. Signal handlers
-    # -----------------------------------------------------------------------
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
-
-    # -----------------------------------------------------------------------
-    # 11. Keep main thread alive
+    # 10. Main loop (Ctrl+C → KeyboardInterrupt → finally cleanup)
     # -----------------------------------------------------------------------
     logger.info("Bot running. Press Ctrl+C to stop.")
     try:
-        while True:
-            await asyncio.sleep(1)
-    except asyncio.CancelledError:
-        pass
+        while not _shutdown_requested:
+            await asyncio.sleep(0.5)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        if _logger:
+            _logger.warning("Shutdown requested (Ctrl+C)")
     finally:
-        if _telegram_bot is not None:
-            await _telegram_bot.stop()
-        if engine is not None:
-            await engine.stop()
-        if candle_builder is not None:
-            await candle_builder.stop()
-        if _binance_futures_feed is not None:
-            await _binance_futures_feed.stop()
-        if hl_ws is not None:
-            hl_ws._shutdown = True
-            if hl_ws._ws:
-                await hl_ws._ws.close()
-        if binance_ws is not None:
-            binance_ws._shutdown = True
-            if binance_ws._ws:
-                await binance_ws._ws.close()
-        if notifier is not None:
-            await notifier.close()
+        try:
+            if _telegram_bot is not None:
+                await _telegram_bot.stop()
+        except Exception:
+            logger.exception("Telegram bot stop failed")
+        try:
+            if engine is not None:
+                await engine.stop()
+        except Exception:
+            logger.exception("Engine stop failed")
+        try:
+            if candle_builder is not None:
+                await candle_builder.stop()
+        except Exception:
+            logger.exception("CandleBuilder stop failed")
+        try:
+            if _binance_futures_feed is not None:
+                await _binance_futures_feed.stop()
+        except Exception:
+            logger.exception("BinanceFuturesFeed stop failed")
+        try:
+            if hl_ws is not None:
+                hl_ws._shutdown = True
+                if hl_ws._ws:
+                    await hl_ws._ws.close()
+        except Exception:
+            logger.exception("Hyperliquid WS close failed")
+        try:
+            if binance_ws is not None:
+                binance_ws._shutdown = True
+                if binance_ws._ws:
+                    await binance_ws._ws.close()
+        except Exception:
+            logger.exception("Binance WS close failed")
+        try:
+            if notifier is not None:
+                await notifier.close()
+        except Exception:
+            logger.exception("Notifier close failed")
         release_instance_lock(instance_lock_path)
         logger.info("Bot stopped.")
 
@@ -657,7 +645,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
-        sys.exit(0)
     except Exception as e:
         import traceback
         tb = traceback.format_exc()

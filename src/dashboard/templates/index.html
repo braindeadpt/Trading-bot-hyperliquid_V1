@@ -576,6 +576,12 @@ function fmtNum(n, d=2) {
     if (n == null || n === undefined || isNaN(n)) return "--";
     return Number(n).toLocaleString("en-US", {minimumFractionDigits:d, maximumFractionDigits:d});
 }
+function fmtPrice(n) {
+    if (n == null || n === undefined || isNaN(n)) return "--";
+    const abs = Math.abs(Number(n));
+    const d = abs >= 1000 ? 2 : abs >= 10 ? 3 : 4;
+    return fmtNum(n, d);
+}
 function fmtM(n) {
     if (n == null || isNaN(n)) return "--";
     return (n / 1e6).toFixed(2) + "M";
@@ -938,8 +944,8 @@ function renderPositions(data) {
             <td><span class="highlight">${p.symbol}</span></td>
             <td class="${sideClass}">${p.side ? p.side.toUpperCase() : "--"}</td>
             <td class="num">${fmtNum(p.size, 6)}</td>
-            <td class="num">$${fmtNum(p.entry_price)}</td>
-            <td class="num">$${fmtNum(p.current_price)}</td>
+            <td class="num">$${fmtPrice(p.entry_price)}</td>
+            <td class="num">$${fmtPrice(p.current_price)}</td>
             <td class="num ${pnlClass}">${pnl.toFixed(2)}%</td>
             <td class="num ${unrealClass}">${(unreal >= 0 ? "+" : "") + "$" + fmtNum(Math.abs(unreal))}</td>
             <td class="muted tiny">${p.strategy || "?"}</td>

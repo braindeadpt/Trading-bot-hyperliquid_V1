@@ -56,28 +56,34 @@ def test_factory_respects_enabled_flags() -> None:
     cfg = load_config(str(ROOT / "config" / "settings.yaml"))
     subs = build_sub_strategies(cfg)
     names = {s.name for s in subs}
-    assert "OrderBookScalper" in names  # loaded via auto_enable
-    assert "FundingArbitrage" in names  # loaded via auto_enable
-    assert "LiquidationCatcher" in names  # loaded via auto_enable
-    assert "SmartMoneyFlow" in names
+    # Active paper stack (settings.yaml v3.1.42+)
+    assert "VolatilityBreakout" in names
     assert "VWAPDeviation" in names
+    assert "ChecklistMeta" in names
+    # Killed / dormant: enabled=false and auto_enable=false → not loaded by factory
+    assert "OrderBookScalper" not in names
+    assert "FundingArbitrage" not in names
+    assert "LiquidationCatcher" not in names
+    assert "SmartMoneyFlow" not in names
+
     mean_rev = cfg.get("strategy.mean_reversion", {}) or {}
     if mean_rev.get("enabled", True):
         assert "FundingExtreme" in names
     else:
         assert "FundingExtreme" not in names
 
-    liq = next(s for s in subs if s.name == "LiquidationCatcher")
-    assert liq.AUTO_ENABLE is True
-    assert liq.is_active() is False  # dormant until feed ready
-
-    arb = next(s for s in subs if s.name == "FundingArbitrage")
-    assert arb.AUTO_ENABLE is True
-    assert arb.is_active() is False  # dormant until spread threshold met
-
-    ob = next(s for s in subs if s.name == "OrderBookScalper")
+    # auto_enable lifecycle still works when explicitly configured (see tests below)
+    ob = OrderBookScalper({"enabled": False, "auto_enable": True})
     assert ob.AUTO_ENABLE is True
-    assert ob.is_active() is False  # dormant until book edge viable
+    assert ob.is_active() is False
+
+    arb = FundingArbitrage({"enabled": False, "auto_enable": True})
+    assert arb.AUTO_ENABLE is True
+    assert arb.is_active() is False
+
+    liq = LiquidationCatcher({"enabled": False, "auto_enable": True})
+    assert liq.AUTO_ENABLE is True
+    assert liq.is_active() is False
 
     ensemble = build_ensemble(cfg)
     total_weight = sum(w.weight for w in ensemble._weights.values())
