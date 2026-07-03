@@ -8,7 +8,7 @@ echo Stopping Hyperliquid Bot (this project only)...
 echo Folder: %CD%
 echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop_bot_instances.ps1" -ProjectRoot "%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop_bot_instances.ps1" -ProjectRoot "%CD%"
 
 if exist "data\live\bot.lock" (
     del /f /q "data\live\bot.lock"

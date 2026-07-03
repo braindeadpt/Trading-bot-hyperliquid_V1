@@ -793,6 +793,48 @@ class Database:
             "total_pnl_usd": float(row["total_pnl_usd"] or 0.0),
         }
 
+    def get_daily_realized_since(self, since_ms: int) -> Dict[str, float]:
+        """Sum closed-trade PnL and funding paid since *since_ms* (UTC)."""
+        sql = """
+            SELECT
+                COALESCE(SUM(pnl_usd), 0) AS pnl_usd,
+                COALESCE(SUM(funding_paid), 0) AS funding_paid,
+                COUNT(*) AS closed_trades
+            FROM trades
+            WHERE status = 'closed' AND exit_time IS NOT NULL AND exit_time >= ?
+        """
+        with self._conn():
+            cur = self._conn().execute(sql, (since_ms,))
+            row = cur.fetchone()
+        if row is None:
+            return {"pnl_usd": 0.0, "funding_paid": 0.0, "closed_trades": 0.0}
+        return {
+            "pnl_usd": float(row["pnl_usd"] or 0.0),
+            "funding_paid": float(row["funding_paid"] or 0.0),
+            "closed_trades": float(row["closed_trades"] or 0.0),
+        }
+
+    def count_trade_entries_since(self, since_ms: int) -> int:
+        """Count trade rows opened since *since_ms* (entries today)."""
+        sql = "SELECT COUNT(*) AS n FROM trades WHERE entry_time >= ?"
+        with self._conn():
+            cur = self._conn().execute(sql, (since_ms,))
+            row = cur.fetchone()
+        return int(row["n"] or 0) if row else 0
+
+    def get_first_portfolio_snapshot_since(self, since_ms: int) -> Optional[Dict[str, Any]]:
+        """Earliest portfolio snapshot at or after *since_ms*."""
+        sql = """
+            SELECT * FROM portfolio_snapshots
+            WHERE timestamp >= ?
+            ORDER BY timestamp ASC
+            LIMIT 1
+        """
+        with self._conn():
+            cur = self._conn().execute(sql, (since_ms,))
+            row = cur.fetchone()
+        return dict(row) if row else None
+
     def get_closed_trades_since(
         self,
         since_ms: int,

@@ -63,7 +63,8 @@ def build_positions_payload(engine: Any) -> List[Dict[str, Any]]:
     latest_prices = getattr(engine, "_latest_price", {}) or {}
     market_events = getattr(engine, "_last_market_events", {}) or {}
     mark_prices = getattr(engine, "get_mark_prices_sync", lambda: {})() or {}
-    positions = getattr(portfolio, "get_positions_sync", lambda: {})()
+    snap = getattr(portfolio, "get_dashboard_snapshot_sync", None)
+    positions = snap().positions if snap else getattr(portfolio, "get_positions_sync", lambda: {})()
     result: List[Dict[str, Any]] = []
     for sym, pos in positions.items():
         entry = float(getattr(pos, "entry_price", 0) or 0)
@@ -103,6 +104,36 @@ def build_positions_payload(engine: Any) -> List[Dict[str, Any]]:
     return result
 
 
+def build_portfolio_payload(engine: Any) -> Dict[str, Any]:
+    """Unified portfolio KPI payload (live marks + cached counters)."""
+    portfolio = getattr(engine, "portfolio", None)
+    if portfolio is None:
+        return {}
+    mark_prices = getattr(engine, "get_mark_prices_sync", lambda: {})() or {}
+    build_live = getattr(portfolio, "build_live_dashboard_metrics", None)
+    if build_live is None:
+        return {}
+    try:
+        metrics = build_live(mark_prices)
+        return {
+            "capital": metrics["capital"],
+            "daily_pnl": metrics["daily_pnl"],
+            "daily_pnl_pct": metrics["daily_pnl_pct"],
+            "daily_realized_pnl": metrics["daily_realized_pnl"],
+            "day_start_equity": metrics["day_start_equity"],
+            "max_drawdown_pct": metrics["max_drawdown_pct"],
+            "daily_max_drawdown_pct": metrics["daily_max_drawdown_pct"],
+            "open_positions": int(metrics["open_positions"]),
+            "daily_trades": int(metrics["daily_trades"]),
+            "total_trades": int(metrics["total_trades"]),
+            "timestamp_ms": int(metrics["timestamp_ms"]),
+            "unrealized_pnl": metrics["unrealized_pnl"],
+        }
+    except Exception as exc:
+        logger.warning("build_portfolio_payload failed: %s", exc)
+        return {}
+
+
 class DashboardEmitter:
     """Emits real-time dashboard updates via Socket.IO.
 
@@ -115,7 +146,7 @@ class DashboardEmitter:
     (coalesced push — avoids redundant network traffic on quiet markets).
     """
 
-    _FAST_EVENTS: tuple = ("live_data", "engine_monitor", "positions")
+    _FAST_EVENTS: tuple = ("live_data", "engine_monitor", "positions", "portfolio")
     _SLOW_EVENTS: tuple = (
         "status",
         "candles",
@@ -224,12 +255,15 @@ class DashboardEmitter:
     # -- Emitters --
 
     def _emit_status(self) -> None:
+        hl_ws = getattr(_engine, "_hl_ws_client", None)
+        ws_healthy = bool(getattr(hl_ws, "is_healthy", True)) if hl_ws is not None else True
         self._safe_emit("status", {
             "mode": getattr(_engine, "_config", {}).get("mode", "paper") if hasattr(_engine, "_config") else "paper",
             "uptime_sec": getattr(_engine, "uptime_sec", 0),
             "memory_mb": getattr(_engine, "memory_mb", 0),
             "circuit_breaker": "ON" if getattr(getattr(_engine, "_risk", None), "circuit_breaker_tripped", False) else "OFF",
             "running": getattr(_engine, "_running", False),
+            "ws_healthy": ws_healthy,
         })
 
     def _emit_live_data(self) -> None:
@@ -246,15 +280,22 @@ class DashboardEmitter:
             evt = events.get(sym, {})
             ob = getattr(_engine, "_latest_orderbook", {}).get(sym)
 
+            price_mid = getattr(price, "mid", None) if price else None
+            oi_coins = getattr(ctx, "open_interest", None) if ctx else None
+            oi_usd = None
+            if oi_coins is not None and price_mid:
+                oi_usd = float(oi_coins) * float(price_mid)
+
             rows.append({
                 "symbol": sym,
-                "price": getattr(price, "mid", None) if price else None,
+                "price": price_mid,
                 "bid": getattr(price, "bid", None) if price else None,
                 "ask": getattr(price, "ask", None) if price else None,
                 "spread_pct": round((getattr(price, "ask", 0) - getattr(price, "bid", 0)) / getattr(price, "mid", 1) * 100, 4) if price else None,
                 "funding": getattr(ctx, "funding_rate", None) if ctx else None,
                 "predicted": getattr(ctx, "predicted_funding", None) if ctx else None,
-                "oi": getattr(ctx, "open_interest", None) if ctx else None,
+                "oi": oi_coins,
+                "oi_usd": oi_usd,
                 "volume_1m": evt.get("volume_1m"),
                 "imbalance": evt.get("bid_ask_imbalance"),
                 "vwap": evt.get("vwap_15m"),
@@ -415,16 +456,51 @@ class DashboardEmitter:
         long_exposure = 0.0
         short_exposure = 0.0
         leverage_max = 0.0
+        open_trade_risk = 0.0
+        daily_drawdown = 0.0
+        max_drawdown_pct = 0.0
+        mark_prices = getattr(_engine, "get_mark_prices_sync", lambda: {})() or {}
+        live_metrics: Dict[str, Any] = {}
+        if portfolio is not None:
+            build_live = getattr(portfolio, "build_live_dashboard_metrics", None)
+            if build_live is not None:
+                try:
+                    live_metrics = build_live(mark_prices)
+                except Exception as exc:
+                    logger.warning("engine_monitor live metrics failed: %s", exc)
+
         if risk is not None and portfolio is not None:
-            capital = getattr(portfolio, "sync_capital", lambda: 0)()
-            positions = getattr(portfolio, "get_positions_sync", lambda: {})()
+            snap = getattr(portfolio, "get_dashboard_snapshot_sync", lambda: None)()
+            capital = live_metrics.get("capital") or (
+                snap.total_equity if snap else getattr(portfolio, "sync_capital", lambda: 0)()
+            )
+            positions = snap.positions if snap else getattr(portfolio, "get_positions_sync", lambda: {})()
             if capital > 0:
-                portfolio_leverage = risk.get_portfolio_leverage(positions, capital)
-                total_notional = risk.get_portfolio_total_notional(positions)
+                portfolio_leverage = risk.get_portfolio_leverage(positions, capital, mark_prices)
+                total_notional = risk.get_portfolio_total_notional(positions, mark_prices)
                 long_exposure, short_exposure = risk.get_directional_exposure(
                     _PositionsCapitalView(positions, capital)
                 )
+                open_trade_risk = risk.get_open_risk_pct(positions, capital)
             leverage_max = getattr(risk, "_leverage_max", 0.0)
+            if snap is not None:
+                daily_drawdown = live_metrics.get(
+                    "daily_max_drawdown_pct",
+                    snap.daily_max_drawdown_pct,
+                )
+                max_drawdown_pct = live_metrics.get(
+                    "max_drawdown_pct",
+                    snap.max_drawdown_pct,
+                )
+            else:
+                daily_drawdown = getattr(portfolio, "sync_daily_max_drawdown_pct", lambda: 0)()
+                max_drawdown_pct = getattr(portfolio, "sync_max_drawdown_pct", lambda: 0)()
+
+        fb = getattr(_engine, "_funding_blackout", None)
+        funding_blackout_active = bool(
+            fb.is_blocked(int(time.time() * 1000)) if fb is not None else False
+        )
+        circuit_breaker = bool(getattr(risk, "circuit_breaker_tripped", False)) if risk else False
 
         self._safe_emit("engine_monitor", {
             "ticks_per_second": stats.get("per_second", 0),
@@ -446,6 +522,11 @@ class DashboardEmitter:
             "directional_exposure": long_exposure + short_exposure,
             "long_exposure_pct": long_exposure,
             "short_exposure_pct": short_exposure,
+            "open_trade_risk": open_trade_risk,
+            "daily_drawdown": daily_drawdown,
+            "max_drawdown_pct": max_drawdown_pct,
+            "circuit_breaker": circuit_breaker,
+            "funding_blackout_active": funding_blackout_active,
         })
 
     def _emit_candles(self) -> None:
@@ -530,21 +611,14 @@ class DashboardEmitter:
         decisions = getattr(_engine, "_decision_history", [])[:20]
         self._safe_emit("decisions", decisions)
 
-    def _emit_portfolio(self) -> None:
-        portfolio = getattr(_engine, "portfolio", None)
-        if portfolio is None:
-            return
-        try:
-            self._safe_emit("portfolio", {
-                "capital": getattr(portfolio, "sync_capital", lambda: 0)(),
-                "daily_pnl": getattr(portfolio, "sync_daily_pnl", lambda: 0)(),
-                "max_drawdown_pct": getattr(portfolio, "sync_max_drawdown_pct", lambda: 0)(),
-                "open_positions": len(getattr(portfolio, "get_positions_sync", lambda: {})()),
-                "daily_trades": getattr(portfolio, "sync_daily_trades", lambda: 0)(),
-                "total_trades": getattr(portfolio, "sync_total_trades", lambda: 0)(),
-            })
-        except Exception:
-            pass
+    def _emit_portfolio(self) -> Optional[Dict[str, Any]]:
+        if _engine is None:
+            return None
+        payload = build_portfolio_payload(_engine)
+        if not payload:
+            logger.warning("portfolio emit skipped — empty payload")
+            return None
+        return payload
 
     def _build_positions_payload(self) -> List[Dict[str, Any]]:
         if _engine is None:
@@ -967,14 +1041,8 @@ def create_app(config: Dict[str, Any]) -> tuple:
     def api_portfolio():
         if _engine is None:
             return jsonify({})
-        portfolio = getattr(_engine, "portfolio", None)
-        if portfolio is None:
-            return jsonify({})
-        return jsonify({
-            "capital": getattr(portfolio, "sync_capital", lambda: 0)(),
-            "daily_pnl": getattr(portfolio, "sync_daily_pnl", lambda: 0)(),
-            "open_positions": len(getattr(portfolio, "get_positions_sync", lambda: {})()),
-        })
+        payload = build_portfolio_payload(_engine)
+        return jsonify(payload or {})
 
     @app.route("/api/positions")
     def api_positions():

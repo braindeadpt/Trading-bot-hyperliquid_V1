@@ -149,7 +149,7 @@ tr:hover td { background: var(--panel-hover); }
     <div class="kpi-cell">
         <span class="label">Daily PnL</span>
         <span class="value" id="kpi-daily-pnl">$--</span>
-        <span class="sub" id="kpi-pnl-pct">--%</span>
+        <span class="sub" id="kpi-pnl-pct" title="Equity change since UTC midnight (incl. open positions)">--%</span>
     </div>
     <div class="kpi-cell">
         <span class="label">Open Positions</span>
@@ -188,7 +188,7 @@ tr:hover td { background: var(--panel-hover); }
                             <tr>
                                 <th>Sym</th><th class="num">Price</th><th class="num">Bid</th><th class="num">Ask</th>
                                 <th class="num">Spr%</th><th class="num">Fund</th><th class="num">Pred</th>
-                                <th class="num">OI(M)</th><th class="num">Vol1m</th><th class="num">Imbal</th>
+                                <th class="num">OI($M)</th><th class="num">Vol1m</th><th class="num">Imbal</th>
                                 <th class="num">OIR</th><th class="num">Depth</th><th class="num">RVol</th>
                                 <th class="num">VWAP</th><th class="num">Age</th>
                             </tr>
@@ -570,6 +570,7 @@ function connectSocket() {
 
 function bindSocketHandlers() {
 let statusUpdate = {};
+let statusReceivedAt = 0;
 let lastSocketLatency = null;
 
 function fmtNum(n, d=2) {
@@ -619,13 +620,19 @@ function updateKPIs(portfolio, engine) {
     if (!portfolio) return;
     const capital = portfolio.capital || 0;
     const pnl = portfolio.daily_pnl || 0;
-    const pnlPct = capital > 0 ? (pnl / capital * 100) : 0;
+    const base = (portfolio.day_start_equity > 0) ? portfolio.day_start_equity : capital;
+    const pnlPct = (portfolio.daily_pnl_pct != null && !isNaN(portfolio.daily_pnl_pct))
+        ? portfolio.daily_pnl_pct
+        : (base > 0 ? (pnl / base * 100) : 0);
+    const realized = portfolio.daily_realized_pnl;
     document.getElementById("kpi-capital").textContent = "$" + fmtNum(capital);
     document.getElementById("kpi-capital-time").textContent = fmtTime(portfolio.timestamp_ms);
     const pnlEl = document.getElementById("kpi-daily-pnl");
     pnlEl.textContent = (pnl >= 0 ? "+" : "") + "$" + fmtNum(Math.abs(pnl));
     pnlEl.style.color = pnl >= 0 ? "var(--up)" : "var(--down)";
-    document.getElementById("kpi-pnl-pct").textContent = (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "%";
+    const pnlPctEl = document.getElementById("kpi-pnl-pct");
+    pnlPctEl.textContent = (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "%"
+        + (typeof realized === "number" ? " | Real: " + (realized >= 0 ? "+" : "") + "$" + fmtNum(Math.abs(realized)) : "");
     document.getElementById("kpi-open-pos").textContent = portfolio.open_positions || 0;
     document.getElementById("kpi-trades-count").textContent = "Daily: " + (portfolio.daily_trades || "--") + " | Total: " + (portfolio.total_trades || "--");
     document.getElementById("kpi-max-dd").textContent = (portfolio.max_drawdown_pct || 0).toFixed(2) + "%";
@@ -658,7 +665,7 @@ function renderLiveData(rows) {
     tbody.innerHTML = rows.map(r => {
         const priceClass = r.price > r.vwap ? "up" : r.price < r.vwap ? "down" : "";
         const age = r.last_update ? now - r.last_update : null;
-        const ageClass = age && age > 5 ? "yellow" : age && age > 30 ? "down" : "";
+        const ageClass = age != null ? (age > 30 ? "down" : age > 5 ? "yellow" : "") : "";
         const oirClass = r.ob_oir > 0.5 ? "up" : r.ob_oir < -0.5 ? "down" : "";
         const rvolClass = r.rvol != null ? (r.rvol > 0.40 ? "yellow" : r.rvol < 0.20 ? "up" : "") : "";
         if (age != null) { totalLatency += age * 1000; count++; }
@@ -670,7 +677,7 @@ function renderLiveData(rows) {
             <td class="num tiny">${fmtNum(r.spread_pct, 4)}</td>
             <td class="num">${fmtPct(r.funding, 4)}</td>
             <td class="num">${fmtPct(r.predicted, 4)}</td>
-            <td class="num">${fmtM(r.oi)}</td>
+            <td class="num">${fmtM(r.oi_usd != null ? r.oi_usd : (r.oi && r.price ? r.oi * r.price : null))}</td>
             <td class="num">${fmtNum(r.volume_1m)}</td>
             <td class="num ${r.imbalance > 0 ? 'up' : r.imbalance < 0 ? 'down' : ''}">${fmtNum(r.imbalance, 3)}</td>
             <td class="num ${oirClass}">${r.ob_oir != null ? r.ob_oir.toFixed(2) : "--"}</td>
@@ -1021,6 +1028,7 @@ socket.on("disconnect", () => {
 
 socket.on("status", (data) => {
     statusUpdate = data;
+    statusReceivedAt = Date.now();
     if (data.mode) document.getElementById("mode-badge").textContent = data.mode.toUpperCase();
     const statusEl = document.getElementById("status-badge");
     statusEl.textContent = data.running ? "RUNNING" : "STOPPED";
@@ -1036,7 +1044,7 @@ socket.on("status", (data) => {
     if (lastSocketLatency != null) {
         document.getElementById("latency-badge").textContent = lastSocketLatency + "ms";
     }
-    updateKPIs(null, null);
+    updateKPIs(_lastPortfolio, _lastEngine);
     updateTickBar();
 });
 
@@ -1076,15 +1084,23 @@ function pollAll() {
         statusEl.textContent = d.running ? "RUNNING" : "STOPPED";
         statusEl.className = "badge " + (d.running ? "badge-green" : "badge-red");
     }).catch(() => {});
-    authFetch("/api/trades").then(r => r.json()).then(d => renderTrades(d)).catch(() => {});
-    authFetch("/api/positions").then(r => r.json()).then(d => renderPositions(d)).catch(() => {});
+    authFetch("/api/portfolio").then(r => r.json()).then(d => {
+        if (d && d.capital != null) {
+            _lastPortfolio = d;
+            updateKPIs(d, _lastEngine);
+        }
+    }).catch(() => {});
+    if (!socket.connected) {
+        authFetch("/api/trades").then(r => r.json()).then(d => renderTrades(d)).catch(() => {});
+        authFetch("/api/positions").then(r => r.json()).then(d => renderPositions(d)).catch(() => {});
+    }
 }
 setInterval(pollAll, 5000);
 
 // Uptime ticker
 setInterval(() => {
-    if (statusUpdate.uptime_sec) {
-        const s = statusUpdate.uptime_sec;
+    if (statusUpdate.uptime_sec != null && statusReceivedAt > 0) {
+        const s = statusUpdate.uptime_sec + Math.floor((Date.now() - statusReceivedAt) / 1000);
         const h = Math.floor(s / 3600).toString().padStart(2, "0");
         const m = Math.floor((s % 3600) / 60).toString().padStart(2, "0");
         const sec = (s % 60).toString().padStart(2, "0");

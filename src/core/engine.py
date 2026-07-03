@@ -1223,11 +1223,18 @@ class TradingEngine:
         if pos is None:
             return
         try:
+            mark = safe_float(ctx.mark_price, 0.0)
+            if mark <= 0.0:
+                tick = self._latest_price.get(symbol)
+                mark = safe_float(getattr(tick, "mid", 0.0), 0.0) if tick else 0.0
+            if mark <= 0.0:
+                mark = safe_float(pos.current_price, 0.0) or safe_float(pos.entry_price, 0.0)
             await self._portfolio.apply_funding(
                 symbol=symbol,
                 funding_rate=ctx.funding_rate,
                 position_size=pos.size,
                 side=pos.side,
+                mark_price=mark,
             )
             # v3.1.23: persist the per-trade funding running total so it
             # shows up in the dashboard "Trades" panel.
@@ -3241,12 +3248,24 @@ class TradingEngine:
             try:
                 import json
                 positions_data = json.loads(snap["positions_json"])
+                meta = positions_data.pop("_meta", {}) if isinstance(positions_data, dict) else {}
+                if not isinstance(meta, dict):
+                    meta = {}
                 await self._portfolio.from_dict({
-                    "cash": snap["capital"],
+                    "capital": snap["capital"],
+                    "current_capital": snap["capital"],
                     "peak_capital": snap.get("peak_capital", snap["capital"]),
-                    "daily_peak_capital": snap.get("daily_peak_capital", snap["capital"]),
+                    "daily_peak_capital": meta.get(
+                        "daily_peak_capital",
+                        snap.get("daily_peak_capital", snap["capital"]),
+                    ),
                     "initial_capital": snap.get("initial_capital", snap["capital"]),
                     "daily_pnl": snap["daily_pnl"],
+                    "cash": meta.get("cash"),
+                    "day_start_equity": meta.get("day_start_equity"),
+                    "last_reset_date": meta.get("last_reset_date"),
+                    "daily_trades": meta.get("daily_trades"),
+                    "total_trades_closed": meta.get("total_trades_closed"),
                     "positions": positions_data,
                 })
                 logger.info("Recovered portfolio snapshot from DB: capital=%.2f", snap["capital"])
@@ -3256,6 +3275,15 @@ class TradingEngine:
             logger.info("No prior portfolio snapshot found - starting fresh")
 
         await self._sync_open_trades_to_portfolio()
+
+        snap_daily = history[0].get("daily_pnl") if history else None
+        try:
+            await self._portfolio.reconcile_daily_from_db(
+                self._db,
+                snap_daily_pnl=snap_daily,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to reconcile daily PnL from DB: %s", exc)
 
         # 3. Restore recent candles from DB for faster strategy warm-up
         await self._restore_candles_from_db()
@@ -3405,12 +3433,23 @@ class TradingEngine:
         state = await self._portfolio.to_dict()
         try:
             import json
+            positions_out = dict(state.get("positions", {}))
+            positions_out["_meta"] = {
+                "cash": state.get("cash"),
+                "day_start_equity": state.get("day_start_equity"),
+                "day_start_unrealized": state.get("day_start_unrealized"),
+                "daily_peak_capital": state.get("daily_peak_capital"),
+                "last_reset_date": state.get("last_reset_date"),
+                "daily_trades": state.get("daily_trades"),
+                "total_trades_closed": state.get("total_trades_closed"),
+                "daily_realized_pnl": state.get("daily_realized_pnl", state.get("daily_pnl")),
+            }
             snapshot = PortfolioSnapshot(
                 timestamp=utc_timestamp_ms(),
                 capital=state["current_capital"],
                 peak_capital=state["peak_capital"],
                 daily_pnl=state["daily_pnl"],
-                positions_json=json.dumps(state.get("positions", {})),
+                positions_json=json.dumps(positions_out),
             )
             self._db.save_portfolio_snapshot(snapshot)
         except Exception as exc:  # noqa: BLE001

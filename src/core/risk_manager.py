@@ -437,23 +437,70 @@ it is not used directly in the current implementation.
         return self._compute_notional_bounds(signal, capital, atr)["notional_final"]
 
     @staticmethod
-    def get_portfolio_total_notional(positions: Dict[str, Any]) -> float:
-        """Sum open-position notionals (USD)."""
+    def get_portfolio_total_notional(
+        positions: Dict[str, Any],
+        mark_prices: Optional[Dict[str, float]] = None,
+    ) -> float:
+        """Sum open-position notionals (USD), mark-to-market when prices available."""
         total = 0.0
-        for pos in positions.values():
-            total += safe_float(pos.entry_price) * safe_float(pos.size)
+        mark_prices = mark_prices or {}
+        for sym, pos in positions.items():
+            size = safe_float(getattr(pos, "size", 0))
+            if size <= 0.0:
+                continue
+            mark = safe_float(mark_prices.get(sym), 0.0)
+            if mark <= 0.0:
+                mark = safe_float(getattr(pos, "current_price", 0.0), 0.0)
+            if mark <= 0.0:
+                mark = safe_float(getattr(pos, "entry_price", 0.0), 0.0)
+            total += mark * size
         return total
 
     def get_portfolio_leverage(
         self,
         positions: Dict[str, Any],
         capital: float,
+        mark_prices: Optional[Dict[str, float]] = None,
     ) -> float:
         """Portfolio leverage = total open notional / equity."""
         capital_f = safe_float(capital)
         if capital_f <= 0.0:
             return 0.0
-        return safe_divide(self.get_portfolio_total_notional(positions), capital_f, 0.0)
+        return safe_divide(
+            self.get_portfolio_total_notional(positions, mark_prices),
+            capital_f,
+            0.0,
+        )
+
+    @staticmethod
+    def get_open_risk_pct(
+        positions: Dict[str, Any],
+        capital: float,
+    ) -> float:
+        """Capital at risk to stop-loss across open positions (% of equity)."""
+        capital_f = safe_float(capital)
+        if capital_f <= 0.0:
+            return 0.0
+        total_risk = 0.0
+        for pos in positions.values():
+            entry = safe_float(getattr(pos, "entry_price", 0.0))
+            size = safe_float(getattr(pos, "size", 0.0))
+            if entry <= 0.0 or size <= 0.0:
+                continue
+            sl = getattr(pos, "stop_loss_price", None)
+            side = str(getattr(pos, "side", "long")).lower()
+            if sl is not None and safe_float(sl) > 0.0:
+                sl_f = safe_float(sl)
+                if side == "long":
+                    total_risk += max(0.0, (entry - sl_f) * size)
+                else:
+                    total_risk += max(0.0, (sl_f - entry) * size)
+            else:
+                meta = getattr(pos, "metadata", None) or {}
+                sl_pct = safe_float(meta.get("stop_loss_pct", 0.0))
+                if sl_pct > 0.0:
+                    total_risk += entry * size * sl_pct
+        return safe_divide(total_risk, capital_f, 0.0) * 100.0
 
     # ------------------------------------------------------------------
     # Position sizing
