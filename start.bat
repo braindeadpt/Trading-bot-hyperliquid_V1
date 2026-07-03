@@ -66,7 +66,7 @@ echo.
 :: Open dashboard in default browser after server is ready (non-blocking, 3s delay)
 start "" cmd /c "timeout /t 3 /nobreak >nul && start "" http://localhost:5000"
 
-python main.py --mode paper 2>logs\paper_errors.log
+python "%~dp0main.py" --mode paper 2>logs\paper_errors.log
 if errorlevel 1 (
     echo [ERROR] Bot crashed. Check logs\paper_errors.log
     pause
@@ -79,7 +79,7 @@ echo [MODE] Testnet
 echo Dashboard: http://localhost:5000
 echo Press Ctrl+C to stop.
 echo.
-python main.py --mode testnet
+python "%~dp0main.py" --mode testnet
 goto end
 
 :mainnet
@@ -99,7 +99,7 @@ echo.
 echo [MODE] Mainnet — REAL MONEY
 echo Dashboard: http://localhost:5000
 echo.
-python main.py --mode mainnet 2>logs\mainnet_errors.log
+python "%~dp0main.py" --mode mainnet 2>logs\mainnet_errors.log
 if errorlevel 1 (
     echo [ERROR] Bot crashed. Check logs\mainnet_errors.log
     pause
@@ -115,7 +115,7 @@ set /p to_date="End date (YYYY-MM-DD, default: 2024-03-01): "
 if "!from_date!"=="" set "from_date=2024-01-01"
 if "!to_date!"=="" set "to_date=2024-03-01"
 echo Running backtest from !from_date! to !to_date!...
-python main.py --backtest --from-date !from_date! --to-date !to_date!
+python "%~dp0main.py" --backtest --from-date !from_date! --to-date !to_date!
 pause
 goto end
 
@@ -123,7 +123,7 @@ goto end
 echo.
 echo [MODE] Security Audit
 echo Scanning all source files...
-python main.py --audit
+python "%~dp0main.py" --audit
 pause
 goto end
 
@@ -170,7 +170,7 @@ echo.
 :: Open dashboard in default browser after server is ready (non-blocking, 3s delay)
 start "" cmd /c "timeout /t 3 /nobreak >nul && start "" http://localhost:5000"
 
-python run_with_recovery.py --mode paper --max-restarts 3 --cooldown 30
+python "%~dp0run_with_recovery.py" --mode paper --max-restarts 3 --cooldown 30
 pause
 goto end
 

@@ -55,6 +55,7 @@ class _PositionSnapshot:
             stop_loss_price=self.stop_loss_price,
             take_profit_price=self.take_profit_price,
             unrealized_pnl=self.unrealized_pnl,
+            current_price=self.current_price,
             metadata=meta,
         )
 

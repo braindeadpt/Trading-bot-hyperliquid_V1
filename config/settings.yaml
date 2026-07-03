@@ -759,9 +759,15 @@ dashboard:
 # ═══════════════════════════════════════════════════════════
 alerts:
   enabled: true                # send alerts to Telegram / Discord
-  min_level: "warning"         # only warning+error by default (info = trade entries, etc.)
+  min_level: "warning"         # warning+error for general alerts (trade entry/exit use trade_alerts)
+  trade_alerts: true           # always push trade entry/exit (ignores min_level)
   telegram_bot_token: ""       # or TELEGRAM_BOT_TOKEN env
   telegram_chat_id: ""         # or TELEGRAM_CHAT_ID env
+  telegram_commands_enabled: true   # interactive /status, /positions, /pnl, …
+  telegram_poll_interval_sec: 2
+  telegram_digest_hours_utc: [8, 20]   # daily digest at 08:00 and 20:00 UTC
+  telegram_weekly_digest_day: 0        # 0=Monday
+  telegram_weekly_digest_hour_utc: 8
   discord_webhook_url: ""      # or DISCORD_WEBHOOK_URL env
 
 # ═══════════════════════════════════════════════════════════

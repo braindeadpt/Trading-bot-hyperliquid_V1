@@ -27,7 +27,7 @@ echo.
 start "" cmd /c "timeout /t 3 /nobreak >nul && start "" http://localhost:5000"
 
 :: Run bot - errors go to fatal_errors.log via main.py
-python main.py --mode paper
+python "%~dp0main.py" --mode paper
 
 :: If python crashed, show error and pause
 if errorlevel 1 (

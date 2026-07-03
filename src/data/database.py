@@ -772,6 +772,44 @@ class Database:
             rows = cur.fetchall()
         return [dict(row) for row in rows]
 
+    def get_closed_trade_stats_since(self, since_ms: int) -> Dict[str, Any]:
+        """Aggregate realised PnL stats for closed trades since *since_ms*."""
+        sql = """
+            SELECT
+                COUNT(*) AS trades,
+                SUM(CASE WHEN COALESCE(pnl_usd, 0) > 0 THEN 1 ELSE 0 END) AS wins,
+                SUM(COALESCE(pnl_usd, 0)) AS total_pnl_usd
+            FROM trades
+            WHERE status = 'closed' AND exit_time IS NOT NULL AND exit_time >= ?
+        """
+        with self._conn():
+            cur = self._conn().execute(sql, (since_ms,))
+            row = cur.fetchone()
+        if row is None:
+            return {"trades": 0, "wins": 0, "total_pnl_usd": 0.0}
+        return {
+            "trades": int(row["trades"] or 0),
+            "wins": int(row["wins"] or 0),
+            "total_pnl_usd": float(row["total_pnl_usd"] or 0.0),
+        }
+
+    def get_closed_trades_since(
+        self,
+        since_ms: int,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Return most recent closed trades since *since_ms*."""
+        sql = """
+            SELECT * FROM trades
+            WHERE status = 'closed' AND exit_time IS NOT NULL AND exit_time >= ?
+            ORDER BY exit_time DESC
+            LIMIT ?
+        """
+        with self._conn():
+            cur = self._conn().execute(sql, (since_ms, int(limit)))
+            rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
     # ------------------------------------------------------------------
     # Strategy PnL (per-strategy breakdown)
     # ------------------------------------------------------------------
@@ -820,15 +858,13 @@ class Database:
         if since_ms is not None:
             where.append("exit_time >= ?")
             params.append(since_ms)
-        if strategy is not None:
-            where.append("strategy = ?")
-            params.append(strategy)
+        where.append("status = 'closed'")
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         sql = f"""
             SELECT
                 strategy,
                 COUNT(*)              AS trades,
-                SUM(is_win)           AS wins,
+                SUM(CASE WHEN COALESCE(pnl_usd, 0) > 0 THEN 1 ELSE 0 END) AS wins,
                 SUM(pnl_usd)          AS total_pnl_usd,
                 AVG(pnl_pct) * 100    AS avg_pnl_pct,
                 AVG(CASE WHEN pnl_usd > 0 THEN pnl_pct ELSE 0 END) * 100 AS avg_win_pct,
@@ -836,7 +872,7 @@ class Database:
                 MAX(pnl_usd)          AS best_trade_usd,
                 MIN(pnl_usd)          AS worst_trade_usd,
                 MAX(exit_time)        AS last_exit_ms
-            FROM strategy_pnl
+            FROM trades
             {where_sql}
             GROUP BY strategy
             ORDER BY total_pnl_usd DESC

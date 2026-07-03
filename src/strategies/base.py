@@ -120,6 +120,7 @@ class Position:
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
     unrealized_pnl: float = 0.0
+    current_price: float = 0.0  # last mark; 0 = fall back to entry_price in UI
     metadata: Dict = field(default_factory=dict)
 
 

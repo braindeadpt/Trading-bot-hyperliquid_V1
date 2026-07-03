@@ -1,6 +1,8 @@
 """Alert notification system for trading bot.
 Supports Telegram and Discord webhooks.
 """
+from __future__ import annotations
+
 import asyncio
 import aiohttp
 import logging
@@ -17,32 +19,34 @@ class AlertConfig:
     discord_webhook_url: Optional[str] = None
     enabled: bool = False
     min_level: str = "info"  # debug, info, warning, error
+    trade_alerts: bool = True  # entry/exit always push when enabled
 
 class AlertNotifier:
     """Sends alerts via Telegram and/or Discord."""
 
     def __init__(self, config: AlertConfig):
         self.cfg = config
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._http: Optional[aiohttp.ClientSession] = None
         self._last_ws_alert = 0.0
         self._last_daily_pnl = 0.0
         self._last_market_data_alert = 0.0
 
-    async def _session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._http is None or self._http.closed:
+            self._http = aiohttp.ClientSession()
+        return self._http
 
-    async def send(self, message: str, level: str = "info") -> None:
+    async def send(self, message: str, level: str = "info", *, force: bool = False) -> None:
         """Send alert to all configured channels."""
         if not self.cfg.enabled:
             return
-        if level == "debug" and self.cfg.min_level != "debug":
-            return
-        if level == "info" and self.cfg.min_level in ("warning", "error"):
-            return
-        if level == "warning" and self.cfg.min_level == "error":
-            return
+        if not force:
+            if level == "debug" and self.cfg.min_level != "debug":
+                return
+            if level == "info" and self.cfg.min_level in ("warning", "error"):
+                return
+            if level == "warning" and self.cfg.min_level == "error":
+                return
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         full_msg = f"[{timestamp}] {message}"
@@ -63,19 +67,20 @@ class AlertNotifier:
     async def _send_telegram(self, message: str) -> None:
         """Send message via Telegram Bot API."""
         try:
+            session = await self._get_session()
             url = f"https://api.telegram.org/bot{self.cfg.telegram_bot_token}/sendMessage"
             payload = {
                 "chat_id": self.cfg.telegram_chat_id,
                 "text": message,
                 "parse_mode": "HTML",
+                "disable_web_page_preview": True,
             }
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        logger.warning("Telegram alert failed: %s %s", resp.status, body)
-                    else:
-                        logger.debug("Telegram alert sent")
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.warning("Telegram alert failed: %s %s", resp.status, body)
+                else:
+                    logger.debug("Telegram alert sent")
         except Exception:
             logger.exception("Telegram alert error")
 
@@ -99,28 +104,59 @@ class AlertNotifier:
 
     # ── Convenience methods ──
 
-    async def trade_entry(self, symbol: str, side: str, size: float, price: float, strategy: str) -> None:
+    async def trade_entry(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        price: float,
+        strategy: str,
+        *,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
+        notional_usd: Optional[float] = None,
+    ) -> None:
+        if not self.cfg.trade_alerts:
+            return
+        notional = notional_usd if notional_usd is not None else size * price
+        sl_txt = f"${stop_loss:,.2f}" if stop_loss else "—"
+        tp_txt = f"${take_profit:,.2f}" if take_profit else "—"
         msg = (
             f"🟢 <b>TRADE ENTRY</b>\n"
             f"Symbol: {symbol}\n"
             f"Side: {side.upper()}\n"
-            f"Size: {size:.4f}\n"
+            f"Size: {size:.4f} (~${notional:,.0f})\n"
             f"Price: ${price:,.2f}\n"
+            f"SL: {sl_txt} | TP: {tp_txt}\n"
             f"Strategy: {strategy}"
         )
-        await self.send(msg, "info")
+        await self.send(msg, "info", force=True)
 
-    async def trade_exit(self, symbol: str, side: str, pnl: float, exit_price: float, strategy: str) -> None:
+    async def trade_exit(
+        self,
+        symbol: str,
+        side: str,
+        pnl: float,
+        exit_price: float,
+        strategy: str,
+        *,
+        exit_reason: Optional[str] = None,
+        pnl_pct: Optional[float] = None,
+    ) -> None:
+        if not self.cfg.trade_alerts:
+            return
         emoji = "🟢" if pnl >= 0 else "🔴"
+        pct_txt = f" ({pnl_pct * 100:.2f}%)" if pnl_pct is not None else ""
+        reason_txt = f"\nReason: {exit_reason}" if exit_reason else ""
         msg = (
             f"{emoji} <b>TRADE EXIT</b>\n"
             f"Symbol: {symbol}\n"
             f"Side: {side.upper()}\n"
             f"Exit Price: ${exit_price:,.2f}\n"
-            f"PnL: ${pnl:,.2f}\n"
-            f"Strategy: {strategy}"
+            f"PnL: ${pnl:,.2f}{pct_txt}\n"
+            f"Strategy: {strategy}{reason_txt}"
         )
-        await self.send(msg, "info")
+        await self.send(msg, "info", force=True)
 
     async def market_data_health_red(
         self,
@@ -186,5 +222,5 @@ class AlertNotifier:
         await self.send(f"❌ <b>ERROR</b>\n{message}", "error")
 
     async def close(self) -> None:
-        if self._session and not self._session.closed:
-            await self._session.close()
+        if self._http and not self._http.closed:
+            await self._http.close()

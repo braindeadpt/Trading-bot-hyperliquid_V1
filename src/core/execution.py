@@ -277,6 +277,25 @@ class ExecutionEngine:
                     timestamp_ms=now_ms,
                 )
 
+        # Cross-process guard: another main.py may share this SQLite DB.
+        try:
+            db_open = self._db.get_open_trades()
+            for row in db_open:
+                if str(row.get("symbol", "")).upper() == signal.symbol.upper():
+                    logger.warning(
+                        "enter_position REJECTED %s — open trade in DB (id=%s)",
+                        signal.symbol, row.get("id"),
+                    )
+                    return TradeResult(
+                        trade_id=0, symbol=signal.symbol, side=signal.side,
+                        entry_price=0.0, exit_price=None, size=0.0,
+                        pnl_usd=0.0, pnl_pct=0.0, status="rejected",
+                        reason="duplicate_position_db",
+                        timestamp_ms=now_ms,
+                    )
+        except Exception:
+            logger.exception("Failed DB duplicate-position check for %s", signal.symbol)
+
         raw_price = safe_float(signal.entry_price)
         if raw_price <= 0.0:
             logger.error("enter_position: invalid price %.4f for %s", raw_price, signal.symbol)

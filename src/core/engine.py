@@ -2867,6 +2867,7 @@ class TradingEngine:
             stop_loss_price=stop_loss_price,
             take_profit_price=take_profit_price,
             unrealized_pnl=0.0,
+            current_price=result.entry_price,
             metadata={
                 "strategy": signal.strategy,
                 "sub_strategy": sub_strategy,
@@ -2929,7 +2930,14 @@ class TradingEngine:
             )
             self._notify(
                 lambda: self._notifier.trade_entry(
-                    symbol=sym, side=side, size=size, price=price, strategy=strat,
+                    symbol=sym,
+                    side=side,
+                    size=size,
+                    price=price,
+                    strategy=strat,
+                    stop_loss=float(stop_loss_price) if stop_loss_price else None,
+                    take_profit=float(take_profit_price) if take_profit_price else None,
+                    notional_usd=size * price,
                 )
             )
 
@@ -3141,7 +3149,13 @@ class TradingEngine:
             strat = position.metadata.get("strategy", "unknown")
             self._notify(
                 lambda: self._notifier.trade_exit(
-                    symbol=sym, side=side, pnl=pnl, exit_price=exit_px, strategy=strat,
+                    symbol=sym,
+                    side=side,
+                    pnl=pnl,
+                    exit_price=exit_px,
+                    strategy=strat,
+                    exit_reason=reason,
+                    pnl_pct=float(result.pnl_pct) if hasattr(result, "pnl_pct") else None,
                 )
             )
 

@@ -29,7 +29,7 @@ echo.
 start "" cmd /c "timeout /t 3 /nobreak >nul && start "" http://localhost:5000"
 
 :: Run with crash recovery wrapper
-python run_with_recovery.py --mode paper --max-restarts 3 --cooldown 30
+python "%~dp0run_with_recovery.py" --mode paper --max-restarts 3 --cooldown 30
 
 echo.
 echo Bot stopped. Check logs/crashes.log for crash history.

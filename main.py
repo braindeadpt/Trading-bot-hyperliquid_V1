@@ -52,6 +52,7 @@ from typing import Any, Dict, Optional
 from utils.config import Config, ConfigError
 from utils.logger import setup_logger
 from utils.helpers import safe_ensure_dir, resolve_trade_stop_levels
+from utils.instance_lock import acquire_instance_lock, release_instance_lock
 
 from data.database import Database
 from exchanges.hyperliquid_ws import HyperliquidWSClient, DataBus
@@ -68,6 +69,7 @@ from core.execution import ExecutionEngine
 from core.engine import TradingEngine
 
 from alerts.notifier import AlertNotifier, AlertConfig
+from alerts.telegram_bot import TelegramCommandBot
 
 from dashboard.web import create_app as create_dashboard
 
@@ -75,12 +77,35 @@ from dashboard.web import create_app as create_dashboard
 # Globals for signal handling
 # ---------------------------------------------------------------------------
 _engine: Optional[TradingEngine] = None
+_telegram_bot: Optional[TelegramCommandBot] = None
 _dashboard_socketio: Optional[Any] = None
 _hl_ws: Optional[HyperliquidWSClient] = None
 _binance_ws: Optional[BinanceWSClient] = None
 _candle_builder: Optional[CandleBuilder] = None
 _binance_futures_feed: Optional[BinanceFuturesFeed] = None
 _logger = None
+
+
+def _resolve_telegram_credentials(cfg: Config) -> tuple[Optional[str], list[str]]:
+    """Resolve Telegram token and allowed chat IDs from YAML + env."""
+    import os
+
+    token = (cfg.get("alerts.telegram_bot_token") or "").strip()
+    if not token:
+        token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+
+    chat_ids: list[str] = []
+    raw_chat = (cfg.get("alerts.telegram_chat_id") or "").strip()
+    if not raw_chat:
+        raw_chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    if raw_chat:
+        chat_ids.append(raw_chat)
+
+    extra = (os.environ.get("TELEGRAM_CHAT_IDS") or "").strip()
+    if extra:
+        chat_ids.extend(c.strip() for c in extra.split(",") if c.strip())
+
+    return token or None, chat_ids
 
 
 def _resolve_path(path_str: str) -> Path:
@@ -249,6 +274,9 @@ async def main() -> None:
     root.setLevel(logger.level)
     for handler in logger.handlers:
         root.addHandler(handler)
+    # "Main" would otherwise emit via its own handlers AND propagate to root
+    # (same handlers) — every Main line logged twice.
+    logger.propagate = False
     global _logger
     _logger = logger
 
@@ -263,6 +291,8 @@ async def main() -> None:
     # -----------------------------------------------------------------------
     db_path = _resolve_path(cfg.get("database.path", "data/live/bot.db"))
     safe_ensure_dir(str(db_path.parent))
+    instance_lock_path = db_path.parent / "bot.lock"
+    acquire_instance_lock(instance_lock_path)
     db = Database(str(db_path))
     logger.info(f"Database ready: {db_path}")
 
@@ -360,15 +390,22 @@ async def main() -> None:
     initial_capital = cfg.get("risk.initial_capital", 10_000.0)
 
     # Alert notifier (telegram / discord)
+    tg_token, tg_chat_ids = _resolve_telegram_credentials(cfg)
     alert_cfg = AlertConfig(
         enabled=cfg.get("alerts.enabled", False),
-        telegram_bot_token=cfg.get("alerts.telegram_bot_token"),
-        telegram_chat_id=cfg.get("alerts.telegram_chat_id"),
+        telegram_bot_token=tg_token,
+        telegram_chat_id=tg_chat_ids[0] if tg_chat_ids else None,
         discord_webhook_url=cfg.get("alerts.discord_webhook_url"),
         min_level=cfg.get("alerts.min_level", "info"),
+        trade_alerts=cfg.get("alerts.trade_alerts", True),
     )
     notifier = AlertNotifier(alert_cfg)
-    logger.info("AlertNotifier ready (enabled=%s)", alert_cfg.enabled)
+    logger.info(
+        "AlertNotifier ready (enabled=%s trade_alerts=%s telegram=%s)",
+        alert_cfg.enabled,
+        alert_cfg.trade_alerts,
+        bool(tg_token and tg_chat_ids),
+    )
 
     risk_mgr = RiskManager(
         config=cfg,
@@ -555,6 +592,29 @@ async def main() -> None:
         logger.info(f"Dashboard started at http://{dashboard_cfg['host']}:{dashboard_cfg['port']}")
 
     # -----------------------------------------------------------------------
+    # 9b. Telegram command bot + digests (Phase A+B)
+    # -----------------------------------------------------------------------
+    global _telegram_bot
+    if (
+        cfg.get("alerts.telegram_commands_enabled", True)
+        and tg_token
+        and tg_chat_ids
+    ):
+        _telegram_bot = TelegramCommandBot(
+            token=tg_token,
+            allowed_chat_ids=tg_chat_ids,
+            db=db,
+            engine_getter=lambda: _engine,
+            notifier=notifier,
+            poll_interval_sec=cfg.get("alerts.telegram_poll_interval_sec", 2.0),
+            digest_hours_utc=cfg.get("alerts.telegram_digest_hours_utc", [8, 20]),
+            weekly_digest_day=cfg.get("alerts.telegram_weekly_digest_day", 0),
+            weekly_digest_hour_utc=cfg.get("alerts.telegram_weekly_digest_hour_utc", 8),
+        )
+        await _telegram_bot.start()
+        logger.info("Telegram command bot started (/status, /positions, /pnl, …)")
+
+    # -----------------------------------------------------------------------
     # 10. Signal handlers
     # -----------------------------------------------------------------------
     signal.signal(signal.SIGINT, _shutdown)
@@ -570,6 +630,8 @@ async def main() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        if _telegram_bot is not None:
+            await _telegram_bot.stop()
         if engine is not None:
             await engine.stop()
         if candle_builder is not None:
@@ -586,6 +648,7 @@ async def main() -> None:
                 await binance_ws._ws.close()
         if notifier is not None:
             await notifier.close()
+        release_instance_lock(instance_lock_path)
         logger.info("Bot stopped.")
 
 

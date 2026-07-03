@@ -1,20 +1,20 @@
 @echo off
+chcp 65001 >nul
 title Stop Hyperliquid Bot
 
 cd /d "%~dp0"
 
-echo Stopping Hyperliquid Bot...
+echo Stopping Hyperliquid Bot (this project only)...
+echo Folder: %CD%
 echo.
 
-:: Find and kill python processes running main.py
-for /f "tokens=2" %%a in ('tasklist /FI "IMAGENAME eq python.exe" /NH /FO CSV ^| findstr "main.py"') do (
-    echo Killing PID %%a...
-    taskkill /PID %%a /F /T
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop_bot_instances.ps1" -ProjectRoot "%~dp0"
+
+if exist "data\live\bot.lock" (
+    del /f /q "data\live\bot.lock"
+    echo Cleared instance lock: data\live\bot.lock
 )
 
-:: Also kill any python.exe as fallback
-taskkill /F /IM python.exe 2>nul
-
 echo.
-echo Bot stopped.
+echo Done.
 pause

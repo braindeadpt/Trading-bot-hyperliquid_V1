@@ -65,7 +65,8 @@ def build_positions_payload(engine: Any) -> List[Dict[str, Any]]:
     for sym, pos in positions.items():
         snap = pos.to_position() if hasattr(pos, "to_position") else pos
         entry = getattr(snap, "entry_price", 0)
-        current = getattr(snap, "current_price", entry)
+        raw_current = getattr(snap, "current_price", 0)
+        current = raw_current if raw_current and raw_current > 0 else entry
         unrealized = getattr(snap, "unrealized_pnl", 0)
         size = getattr(snap, "size", 0)
         pnl_pct = (unrealized / (entry * size) * 100) if entry and size else 0
