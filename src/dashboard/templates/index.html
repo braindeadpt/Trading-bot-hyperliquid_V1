@@ -138,7 +138,7 @@ tr:hover td { background: var(--panel-hover); }
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- KPI BAR — 5 compact cells                                        -->
+<!-- KPI BAR — 6 compact cells                                        -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="kpi-bar" id="kpi-bar">
     <div class="kpi-cell">
@@ -147,9 +147,14 @@ tr:hover td { background: var(--panel-hover); }
         <span class="sub" id="kpi-capital-time">--</span>
     </div>
     <div class="kpi-cell">
-        <span class="label">Daily PnL</span>
-        <span class="value" id="kpi-daily-pnl">$--</span>
-        <span class="sub" id="kpi-pnl-pct" title="Equity change since UTC midnight (incl. open positions)">--%</span>
+        <span class="label">Daily Realized</span>
+        <span class="value" id="kpi-daily-realized">$--</span>
+        <span class="sub" id="kpi-realized-pct" title="Closed trades + funding today (fixed until next close)">--%</span>
+    </div>
+    <div class="kpi-cell">
+        <span class="label">Daily Unrealized</span>
+        <span class="value" id="kpi-daily-unrealized">$--</span>
+        <span class="sub" id="kpi-unrealized-hint" title="Open positions — moves with live price">Open positions</span>
     </div>
     <div class="kpi-cell">
         <span class="label">Open Positions</span>
@@ -616,23 +621,38 @@ function fmtAge(seconds) {
 }
 
 // ── KPIs ──
+function setPnlDisplay(elId, amount) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    const v = amount || 0;
+    el.textContent = (v >= 0 ? "+" : "") + "$" + fmtNum(Math.abs(v));
+    el.style.color = v >= 0 ? "var(--up)" : "var(--down)";
+}
+
 function updateKPIs(portfolio, engine) {
     if (!portfolio) return;
     const capital = portfolio.capital || 0;
-    const pnl = portfolio.daily_pnl || 0;
+    const realized = portfolio.daily_realized_pnl != null ? portfolio.daily_realized_pnl : (portfolio.daily_pnl || 0);
+    const unrealDaily = portfolio.daily_unrealized_pnl != null ? portfolio.daily_unrealized_pnl : 0;
+    const totalDaily = realized + unrealDaily;
     const base = (portfolio.day_start_equity > 0) ? portfolio.day_start_equity : capital;
-    const pnlPct = (portfolio.daily_pnl_pct != null && !isNaN(portfolio.daily_pnl_pct))
-        ? portfolio.daily_pnl_pct
-        : (base > 0 ? (pnl / base * 100) : 0);
-    const realized = portfolio.daily_realized_pnl;
+    const realizedPct = base > 0 ? (realized / base * 100) : 0;
+    const totalPct = base > 0 ? (totalDaily / base * 100) : 0;
+
     document.getElementById("kpi-capital").textContent = "$" + fmtNum(capital);
     document.getElementById("kpi-capital-time").textContent = fmtTime(portfolio.timestamp_ms);
-    const pnlEl = document.getElementById("kpi-daily-pnl");
-    pnlEl.textContent = (pnl >= 0 ? "+" : "") + "$" + fmtNum(Math.abs(pnl));
-    pnlEl.style.color = pnl >= 0 ? "var(--up)" : "var(--down)";
-    const pnlPctEl = document.getElementById("kpi-pnl-pct");
-    pnlPctEl.textContent = (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "%"
-        + (typeof realized === "number" ? " | Real: " + (realized >= 0 ? "+" : "") + "$" + fmtNum(Math.abs(realized)) : "");
+
+    setPnlDisplay("kpi-daily-realized", realized);
+    document.getElementById("kpi-realized-pct").textContent =
+        (realizedPct >= 0 ? "+" : "") + realizedPct.toFixed(2) + "% realised";
+
+    setPnlDisplay("kpi-daily-unrealized", unrealDaily);
+    const openN = portfolio.open_positions || 0;
+    document.getElementById("kpi-unrealized-hint").textContent =
+        openN > 0
+            ? openN + " open | Total day: " + (totalPct >= 0 ? "+" : "") + totalPct.toFixed(2) + "%"
+            : "No open positions";
+
     document.getElementById("kpi-open-pos").textContent = portfolio.open_positions || 0;
     document.getElementById("kpi-trades-count").textContent = "Daily: " + (portfolio.daily_trades || "--") + " | Total: " + (portfolio.total_trades || "--");
     document.getElementById("kpi-max-dd").textContent = (portfolio.max_drawdown_pct || 0).toFixed(2) + "%";

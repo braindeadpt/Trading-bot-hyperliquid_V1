@@ -79,7 +79,8 @@ async def test_live_marks_match_positions_table() -> None:
     metrics = p.build_live_dashboard_metrics({"BTC": mark})
     expected_unreal = (mark - 100_000.0) * 0.04
     assert abs(metrics["unrealized_pnl"] - expected_unreal) < 0.01
-    assert abs(metrics["daily_pnl"] - expected_unreal) < 0.01
+    assert abs(metrics["daily_pnl"]) < 0.01, "realised daily PnL unchanged before close"
+    assert abs(metrics["daily_unrealized_pnl"] - expected_unreal) < 0.01
 
 
 async def test_corrupt_day_start_meta_after_equity_fix() -> None:
@@ -115,7 +116,8 @@ async def test_corrupt_day_start_meta_after_equity_fix() -> None:
         },
     })
     metrics = p.build_live_dashboard_metrics({"BTC": 101_000.0})
-    assert abs(metrics["daily_pnl"] - 46.0) < 0.05, metrics["daily_pnl"]
+    assert abs(metrics["daily_pnl"] - 6.0) < 0.01, metrics["daily_pnl"]
+    assert abs(metrics["daily_equity_pnl"] - 46.0) < 0.05, metrics["daily_equity_pnl"]
     assert abs(metrics["daily_realized_pnl"] - 6.0) < 0.01
 
 

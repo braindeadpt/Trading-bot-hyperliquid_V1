@@ -119,6 +119,8 @@ def build_portfolio_payload(engine: Any) -> Dict[str, Any]:
             "capital": metrics["capital"],
             "daily_pnl": metrics["daily_pnl"],
             "daily_pnl_pct": metrics["daily_pnl_pct"],
+            "daily_equity_pnl": metrics["daily_equity_pnl"],
+            "daily_unrealized_pnl": metrics["daily_unrealized_pnl"],
             "daily_realized_pnl": metrics["daily_realized_pnl"],
             "day_start_equity": metrics["day_start_equity"],
             "max_drawdown_pct": metrics["max_drawdown_pct"],

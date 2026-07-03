@@ -294,9 +294,12 @@ class PortfolioState:
         )
 
         day_start = snap.day_start_equity
-        daily_pnl = live_equity - day_start
+        day_start_unreal = snap.day_start_unrealized
+        daily_unrealized = live_unrealized - day_start_unreal
+        daily_equity_pnl = live_equity - day_start
+        daily_realized = snap.daily_realized_pnl
         day_base = day_start if day_start > 0 else live_equity
-        daily_pnl_pct = safe_divide(daily_pnl, day_base, 0.0) * 100.0
+        daily_pnl_pct = safe_divide(daily_realized, day_base, 0.0) * 100.0
 
         max_dd_pct = 0.0
         if snap.peak_capital > 0.0:
@@ -313,9 +316,11 @@ class PortfolioState:
         return {
             "capital": live_equity,
             "unrealized_pnl": live_unrealized,
-            "daily_pnl": daily_pnl,
+            "daily_pnl": daily_realized,
+            "daily_equity_pnl": daily_equity_pnl,
+            "daily_unrealized_pnl": daily_unrealized,
             "daily_pnl_pct": daily_pnl_pct,
-            "daily_realized_pnl": snap.daily_realized_pnl,
+            "daily_realized_pnl": daily_realized,
             "day_start_equity": day_start,
             "max_drawdown_pct": max_dd_pct,
             "daily_max_drawdown_pct": daily_max_dd_pct,
