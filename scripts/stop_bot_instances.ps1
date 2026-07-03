@@ -71,5 +71,11 @@ foreach ($procId in $targetPids) {
     & taskkill /PID $procId /F /T 2>$null | Out-Null
 }
 
+# Always remove stale single-instance lock after stop attempt
+if (Test-Path $lockPath) {
+    Remove-Item -Force $lockPath -ErrorAction SilentlyContinue
+    Write-Host "Cleared instance lock: $lockPath"
+}
+
 Write-Host "Stopped $($targetPids.Count) instance(s)."
 Write-Host "Other Python processes on this PC were NOT touched."
