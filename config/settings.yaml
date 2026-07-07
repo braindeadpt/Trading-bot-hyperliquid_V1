@@ -415,6 +415,10 @@ strategy:
     enabled: true                   # v3.1.38: ACTIVATED — walk-forward winner
     score_threshold: 4.0            # v3.1.40: was 3.5 — fewer, higher-conviction signals
     min_confidence: 0.60
+    # Chop / whipsaw gates (v3.1.x) — block range entries and post-stop reversals
+    min_adx_gate: 18.0              # skip when ADX_14 < this (log: chop_gate)
+    dominance_margin: 1.5           # |bull − bear| must exceed this beyond score_threshold
+    flip_block_minutes: 60          # after stop on symbol, block opposite side N minutes
     # Component weights
     w_sfp: 1.5
     w_vwap: 1.0

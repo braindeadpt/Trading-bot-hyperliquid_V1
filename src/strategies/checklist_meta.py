@@ -17,7 +17,11 @@ Bullish points (each adds to long bias):
 
 Bearish points mirror.
 
-Entry: |score| >= SCORE_THRESHOLD → directional trade.
+Entry: |score| >= SCORE_THRESHOLD AND bull/bear spread >= dominance_margin
+       AND ADX >= min_adx_gate (when available) → directional trade.
+Anti-flip: after a stop-loss on a symbol, block the opposite side for
+       flip_block_minutes (long stop → no short; short stop → no long).
+
 Exit: TP at ATR multiple, SL at ATR multiple, max hold, optional trailing.
 
 This is intentionally transparent — every component weight is visible
@@ -56,6 +60,9 @@ class _ChecklistState:
     current_trail: float = 0.0
     # v3.1.39: SL-to-BE state
     sl_moved_to_be: bool = False
+    # Anti-whipsaw: last stop-loss on this symbol (opposite side blocked briefly)
+    last_stop_ms: int = 0
+    last_stop_side: str = ""
 
 
 class ChecklistMeta(Strategy):
@@ -66,6 +73,10 @@ class ChecklistMeta(Strategy):
         # Thresholds
         self.SCORE_THRESHOLD = float(cfg.get("score_threshold", 3.0))
         self.MIN_CONFIDENCE = float(cfg.get("min_confidence", 0.60))
+        self.MIN_ADX_GATE = float(cfg.get("min_adx_gate", 18.0))
+        self.DOMINANCE_MARGIN = float(cfg.get("dominance_margin", 1.5))
+        self.FLIP_BLOCK_MINUTES = float(cfg.get("flip_block_minutes", 60.0))
+        self.FLIP_BLOCK_MS = int(self.FLIP_BLOCK_MINUTES * 60_000)
         # Component weights (overridable per regime)
         self.W_SFP = float(cfg.get("w_sfp", 1.5))
         self.W_VWAP = float(cfg.get("w_vwap", 1.0))
@@ -133,6 +144,14 @@ class ChecklistMeta(Strategy):
         if event.timestamp_ms - state.last_signal_ms < self.SIGNAL_THROTTLE_MS:
             return None
 
+        adx = event.adx_14
+        if adx is not None and adx < self.MIN_ADX_GATE:
+            logger.info(
+                "ChecklistMeta NO SIGNAL %s reason=chop_gate adx=%.1f < %.1f",
+                event.symbol, adx, self.MIN_ADX_GATE,
+            )
+            return None
+
         candles_15m = list(state.candles_15m)
         if len(candles_15m) < max(self.EMA_SLOW + 3, self.SFP_LOOKBACK + 3):
             return None
@@ -195,7 +214,6 @@ class ChecklistMeta(Strategy):
                 components["oi_falling"] = self.W_OI_DELTA
 
         # 6. ADX (trend strength, direction-neutral)
-        adx = event.adx_14
         if adx is not None and adx >= self.ADX_TREND_MIN:
             components["adx_trend"] = self.W_ADX
 
@@ -231,12 +249,32 @@ class ChecklistMeta(Strategy):
             elif directional_bear > directional_bull:
                 directional_bear += components["adx_trend"]
 
+        spread = abs(directional_bull - directional_bear)
+        block = self._entry_gates_block_reason(
+            event.symbol, directional_bull, directional_bear,
+            adx, event.timestamp_ms, spread,
+        )
+        if block is not None:
+            logger.info(
+                "ChecklistMeta NO SIGNAL %s reason=%s",
+                event.symbol, block,
+            )
+            return None
+
         score = directional_bull - directional_bear
 
         if abs(score) < self.SCORE_THRESHOLD:
             return None
 
         side = "long" if score > 0 else "short"
+
+        flip_reason = self._flip_block_reason(state, side, event.timestamp_ms)
+        if flip_reason is not None:
+            logger.info(
+                "ChecklistMeta NO SIGNAL %s reason=%s",
+                event.symbol, flip_reason,
+            )
+            return None
 
         # ATR for sizing
         atr = calculate_atr(prior, period=14) or price * 0.01
@@ -290,6 +328,16 @@ class ChecklistMeta(Strategy):
     def on_position(self, position: Position, event: MarketEvent) -> Optional[ExitSignal]:
         state = self._get_state(position.symbol)
         price = event.price
+
+        if position.stop_loss_price is not None:
+            sl = position.stop_loss_price
+            if position.side == "long" and price <= sl:
+                state.last_stop_ms = event.timestamp_ms
+                state.last_stop_side = "long"
+            elif position.side == "short" and price >= sl:
+                state.last_stop_ms = event.timestamp_ms
+                state.last_stop_side = "short"
+
         if event.candle_15m and (
             not state.candles_15m
             or state.candles_15m[-1].timestamp_ms != event.candle_15m.timestamp_ms
@@ -399,6 +447,56 @@ class ChecklistMeta(Strategy):
                     confidence=0.85, reason="checklist_tp_hit",
                 )
 
+        return None
+
+    def record_stop_exit(self, symbol: str, side: str, timestamp_ms: int) -> None:
+        """Record a stop-loss exit for anti-flip gating (tests / external hooks)."""
+        state = self._get_state(symbol)
+        state.last_stop_ms = int(timestamp_ms)
+        state.last_stop_side = str(side)
+
+    def _entry_gates_block_reason(
+        self,
+        symbol: str,
+        directional_bull: float,
+        directional_bear: float,
+        adx: Optional[float],
+        timestamp_ms: int,
+        spread: Optional[float] = None,
+    ) -> Optional[str]:
+        """Return block reason for chop/dominance gates (spread-only phase)."""
+        if adx is not None and adx < self.MIN_ADX_GATE:
+            return f"chop_gate adx={adx:.1f}"
+        bull_bear_spread = (
+            spread if spread is not None
+            else abs(directional_bull - directional_bear)
+        )
+        if bull_bear_spread < self.DOMINANCE_MARGIN:
+            return (
+                f"dominance_gate bull={directional_bull:.2f} "
+                f"bear={directional_bear:.2f}"
+            )
+        return None
+
+    def _flip_block_reason(
+        self,
+        state: _ChecklistState,
+        side: str,
+        timestamp_ms: int,
+    ) -> Optional[str]:
+        """Return a block reason if opposite-side entry is forbidden after a stop."""
+        if state.last_stop_ms <= 0 or not state.last_stop_side:
+            return None
+        elapsed = timestamp_ms - state.last_stop_ms
+        if elapsed >= self.FLIP_BLOCK_MS:
+            return None
+        opposite = "short" if state.last_stop_side == "long" else "long"
+        if side == opposite:
+            remaining_min = (self.FLIP_BLOCK_MS - elapsed) / 60_000
+            return (
+                f"flip_block after {state.last_stop_side} stop "
+                f"({remaining_min:.0f}min left)"
+            )
         return None
 
     # ------------------------------------------------------------------

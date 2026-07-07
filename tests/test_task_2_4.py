@@ -178,13 +178,13 @@ def test_cooldown_resets_after_win():
 
 def test_cooldown_resets_on_funding_normalization():
     print("=" * 60)
-    print("TEST: Cooldown resets on funding normalization")
+    print("TEST: Cooldown resets on funding normalization (funding strategies)")
     print("=" * 60)
 
     engine = make_engine_for_cooldown_test()
     now = int(time.time() * 1000)
 
-    engine._cooldown_state["SmartMoneyFlow:BTC"] = {
+    engine._cooldown_state["FundingExtreme:BTC"] = {
         "last_trade_ms": now - 30 * 60_000,
         "duration_ms": 60 * 60_000,
         "consecutive_losses": 1,
@@ -192,16 +192,49 @@ def test_cooldown_resets_on_funding_normalization():
         "funding": 0.008,
     }
 
-    # Funding normalizes to 0.1% (very mild)
+    # Funding normalizes below strong_threshold * 0.5 (0.00005)
     event = MarketEvent(
         symbol="BTC", price=50000.0, timestamp_ms=now,
-        funding=0.001, predicted_funding=0.001,
+        funding=0.00001, predicted_funding=0.00001,
     )
 
-    in_cooldown, _ = engine._is_in_cooldown("SmartMoneyFlow", "BTC", event)
-    assert not in_cooldown, "Cooldown should reset when funding normalizes"
-    assert "SmartMoneyFlow:BTC" not in engine._cooldown_state
-    print("Cooldown reset on funding normalization (0.1%)")
+    in_cooldown, _ = engine._is_in_cooldown("FundingExtreme", "BTC", event)
+    assert not in_cooldown, "FundingExtreme cooldown should reset when funding normalizes"
+    assert "FundingExtreme:BTC" not in engine._cooldown_state
+    print("Cooldown reset on funding normalization (FundingExtreme)")
+    print("[PASS]\n")
+
+
+def test_cooldown_persists_with_near_zero_funding():
+    print("=" * 60)
+    print("TEST: Cooldown persists when funding ~0 (non-funding strategy)")
+    print("=" * 60)
+
+    engine = make_engine_for_cooldown_test()
+    now = int(time.time() * 1000)
+
+    engine._cooldown_state["ChecklistMeta:SOL"] = {
+        "last_trade_ms": now - 5 * 60_000,
+        "duration_ms": 30 * 60_000,
+        "consecutive_losses": 0,
+        "adx": 18.0,
+        "funding": 0.0001,
+    }
+    engine._update_cooldown_on_exit("ChecklistMeta", "SOL", pnl_pct=-0.02)
+    state = engine._cooldown_state["ChecklistMeta:SOL"]
+    state["last_trade_ms"] = now - 5 * 60_000
+    state["duration_ms"] = 30 * 60_000
+
+    event = MarketEvent(
+        symbol="SOL", price=150.0, timestamp_ms=now,
+        funding=0.0001, predicted_funding=0.0001,
+        adx_14=18.0,
+    )
+
+    in_cooldown, reason = engine._is_in_cooldown("ChecklistMeta", "SOL", event)
+    assert in_cooldown, "ChecklistMeta must stay in cooldown despite ~0 funding"
+    assert "25.0min remaining" in reason, f"Unexpected reason: {reason}"
+    print(f"In cooldown: {reason}")
     print("[PASS]\n")
 
 
@@ -242,6 +275,7 @@ if __name__ == "__main__":
     test_cooldown_doubles_after_loss()
     test_cooldown_resets_after_win()
     test_cooldown_resets_on_funding_normalization()
+    test_cooldown_persists_with_near_zero_funding()
     test_cooldown_resets_on_regime_change()
     print("=" * 60)
     print("ALL TESTS PASSED [OK]")

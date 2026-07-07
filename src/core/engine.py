@@ -86,6 +86,13 @@ from .funding_blackout import FundingBlackoutFilter
 
 logger = logging.getLogger(__name__)
 
+# Cooldown funding-reset applies only to funding-driven strategies (Task 2.4).
+_FUNDING_COOLDOWN_STRATEGIES = frozenset({
+    "FundingExtreme",
+    "FundingArbitrage",
+    "FundingMomentum",
+})
+
 
 class TradingEngine:
     """Central orchestrator that wires data → strategies → risk → execution.
@@ -171,6 +178,9 @@ class TradingEngine:
         self._cooldown_base_ms = int(config.get("cooldown.base_minutes", 60) * 60_000)
         self._cooldown_max_ms = int(config.get("cooldown.max_minutes", 240) * 60_000)
         self._cooldown_multiplier = safe_float(config.get("cooldown.multiplier", 2.0))
+        self._funding_strong_threshold = safe_float(
+            config.get("strategy.mean_reversion.strong_threshold", 0.0001)
+        )
         # Per (strategy, symbol) cooldown state
         self._cooldown_state: Dict[str, Dict[str, Any]] = {}
 
@@ -2293,7 +2303,8 @@ class TradingEngine:
 
         Returns (in_cooldown, reason_string). Cooldown resets when:
           1. Time elapsed >= current cooldown duration
-          2. Funding normalizes (|funding| < strong_threshold * 0.5)
+          2. Funding normalizes — funding strategies only, when entry
+             funding was material (|entry| > strong_threshold)
           3. ADX regime changed from when the trade was entered
         """
         key = self._cooldown_key(strategy, symbol)
@@ -2313,16 +2324,24 @@ class TradingEngine:
             del self._cooldown_state[key]
             return False, None
 
-        # 2. Funding normalization reset
-        # Use a simple threshold: if current funding is mild, reset cooldown
-        funding = event.funding or event.predicted_funding
-        if funding is not None and abs(funding) < 0.002:  # 0.2% = "normal"
-            logger.info(
-                "Cooldown RESET %s — funding normalized to %.4f%%",
-                key, funding * 100,
-            )
-            del self._cooldown_state[key]
-            return False, None
+        # 2. Funding normalization reset (funding strategies with material entry funding)
+        if strategy in _FUNDING_COOLDOWN_STRATEGIES:
+            entry_funding = state.get("funding")
+            strong_th = self._funding_strong_threshold
+            if (
+                entry_funding is not None
+                and abs(safe_float(entry_funding, 0.0)) > strong_th
+            ):
+                funding = event.funding or event.predicted_funding
+                normalize_th = strong_th * 0.5
+                if funding is not None and abs(funding) < normalize_th:
+                    logger.info(
+                        "Cooldown RESET %s — funding normalized to %.4f%% "
+                        "(entry was %.4f%%)",
+                        key, funding * 100, entry_funding * 100,
+                    )
+                    del self._cooldown_state[key]
+                    return False, None
 
         # 3. ADX regime change reset
         current_adx = event.adx_14
