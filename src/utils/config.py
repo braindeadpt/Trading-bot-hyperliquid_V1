@@ -66,12 +66,20 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "risk": {
         "max_positions": 5,
         "max_daily_trades": 0,
+        "max_daily_stop_losses": 4,
         "max_daily_loss_pct": 3.0,
         "per_trade_risk_pct": 1.0,
         "max_position_size_pct": 5.0,
         "leverage_max": 10.0,
         "circuit_breaker_drawdown_pct": 10.0,
         "circuit_breaker_recovery_pct": 50.0,
+        "symbol_risk_multiplier": {"SOL": 0.5},
+        "chase_filter": {
+            "enabled": True,
+            "lookback_hours": 3.0,
+            "max_runup_pct": 0.008,
+            "exempt_strategies": ["VolatilityBreakout", "DonchianBreakout"],
+        },
     },
     "backtest": {
         "initial_capital": 100_000.0,

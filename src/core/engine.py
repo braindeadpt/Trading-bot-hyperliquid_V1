@@ -184,6 +184,26 @@ class TradingEngine:
         # Per (strategy, symbol) cooldown state
         self._cooldown_state: Dict[str, Dict[str, Any]] = {}
 
+        # ── Anti-chasing filter (engine-level) ──
+        _chase = config.get("risk.chase_filter", {}) or {}
+        self._chase_filter_enabled = bool(_chase.get("enabled", True))
+        self._chase_lookback_hours = safe_float(_chase.get("lookback_hours", 3.0))
+        self._chase_max_runup_pct = safe_float(_chase.get("max_runup_pct", 0.008))
+        _chase_exempt = _chase.get(
+            "exempt_strategies",
+            ["VolatilityBreakout", "DonchianBreakout"],
+        )
+        self._chase_exempt_strategies: Set[str] = (
+            set(_chase_exempt) if isinstance(_chase_exempt, list) else set()
+        )
+
+        # ── Per-symbol risk sizing multiplier ──
+        _sym_mult = config.get("risk.symbol_risk_multiplier", {}) or {}
+        self._symbol_risk_multipliers: Dict[str, float] = {
+            str(sym): safe_float(mult, 1.0)
+            for sym, mult in _sym_mult.items()
+        } if isinstance(_sym_mult, dict) else {}
+
         # ── Regime filter (ADX-based strategy weighting) ──
         self._adx_period = int(config.get("strategy.adx_period", 14))
         self._adx_trend_threshold = safe_float(
@@ -2287,6 +2307,45 @@ class TradingEngine:
             logger.exception("FundingArbitrage second leg failed: %s", exc)
 
     # ------------------------------------------------------------------
+    # Anti-chasing filter
+    # ------------------------------------------------------------------
+
+    def _directional_runup_pct(self, symbol: str, side: str) -> Optional[float]:
+        """Return favourable run-up over lookback window (fraction, e.g. 0.01 = 1%)."""
+        hist = list(self._candles_15m_history.get(symbol, []))
+        if len(hist) < 2:
+            return None
+        bars = max(2, int(self._chase_lookback_hours * 4.0))
+        window = hist[-bars:] if len(hist) >= bars else hist
+        if len(window) < 2:
+            return None
+        start_px = safe_float(getattr(window[0], "close", 0.0), 0.0)
+        end_px = safe_float(getattr(window[-1], "close", 0.0), 0.0)
+        if start_px <= 0.0:
+            return None
+        ret = (end_px - start_px) / start_px
+        if side == "long":
+            return max(ret, 0.0)
+        return max(-ret, 0.0)
+
+    def _check_chase_filter(self, signal: Signal) -> Optional[str]:
+        """Reject entries that chase an extended move (all strategies unless exempt)."""
+        if not self._chase_filter_enabled:
+            return None
+        if signal.strategy in self._chase_exempt_strategies:
+            return None
+        runup = self._directional_runup_pct(signal.symbol, signal.side)
+        if runup is None:
+            return None
+        if runup > self._chase_max_runup_pct:
+            return (
+                f"chase runup={runup * 100:.2f}% "
+                f"> {self._chase_max_runup_pct * 100:.2f}% "
+                f"over {self._chase_lookback_hours:.1f}h"
+            )
+        return None
+
+    # ------------------------------------------------------------------
     # Cooldown manager (Task 2.4)
     # ------------------------------------------------------------------
 
@@ -2516,6 +2575,27 @@ class TradingEngine:
                 signal.size_pct / kelly_mult, signal.size_pct, kelly_mult,
             )
 
+        # --- Per-symbol risk multiplier ---
+        sym_mult = safe_float(self._symbol_risk_multipliers.get(signal.symbol, 1.0), 1.0)
+        if sym_mult != 1.0:
+            base_size = signal.size_pct
+            signal = Signal(
+                strategy=signal.strategy,
+                symbol=signal.symbol,
+                side=signal.side,
+                confidence=signal.confidence,
+                size_pct=base_size * sym_mult,
+                entry_price=signal.entry_price,
+                stop_loss_pct=signal.stop_loss_pct,
+                take_profit_pct=signal.take_profit_pct,
+                reason=f"{signal.reason} (sym_risk:{sym_mult:.2f}x)",
+                metadata={**signal.metadata, "symbol_risk_multiplier": sym_mult},
+            )
+            logger.info(
+                "Symbol risk multiplier %s: %.4f → %.4f (×%.2f)",
+                signal.symbol, base_size, signal.size_pct, sym_mult,
+            )
+
         # --- Update strategy stats (Task 5.3) ---
         strat_stats = self._strategy_stats.get(signal.strategy)
         if strat_stats:
@@ -2604,6 +2684,30 @@ class TradingEngine:
             strat_stats = self._strategy_stats.get(signal.strategy)
             if strat_stats:
                 strat_stats["rejected_signals"] += 1
+            return
+
+        # --- Anti-chasing filter (before risk gates) ---
+        chase_reason = self._check_chase_filter(signal)
+        if chase_reason is not None:
+            logger.info(
+                "Signal REJECTED %s %s — %s",
+                signal.symbol, signal.side, chase_reason,
+            )
+            sig_record["status"] = "rejected"
+            sig_record["risk_reason"] = chase_reason
+            strat_stats = self._strategy_stats.get(signal.strategy)
+            if strat_stats:
+                strat_stats["rejected_signals"] += 1
+            self._persist_decision(
+                decision_type="chase",
+                symbol=signal.symbol,
+                side=signal.side,
+                strategy=signal.strategy,
+                signal_confidence=signal.confidence,
+                ts_ms=event.timestamp_ms,
+                result="rejected",
+                reason=chase_reason,
+            )
             return
 
         # --- Risk check ---

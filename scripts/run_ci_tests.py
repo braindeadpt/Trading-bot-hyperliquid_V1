@@ -13,6 +13,7 @@ TESTS = [
     "tests/test_critical_fixes.py",
     "tests/test_portfolio_dashboard.py",
     "tests/test_checklist_meta_gates.py",
+    "tests/test_forensic_fixes.py",
     "tests/test_task_2_4.py",
     "tests/test_phase2.py",
     "tests/test_phase3.py",

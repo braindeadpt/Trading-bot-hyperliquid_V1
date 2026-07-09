@@ -88,6 +88,17 @@ risk:
     minutes_before: 5               # block this many minutes before each reset
     minutes_after: 5                # block this many minutes after each reset
     resets_utc: ["00:00", "08:00", "16:00"]  # CEX 8h funding cadence
+  # ── v3.1.47: Anti-chasing + per-symbol sizing + daily stop streak ──
+  max_daily_stop_losses: 4        # block new entries after N stop_loss exits/day (UTC)
+  symbol_risk_multiplier:
+    SOL: 0.5                        # half size on SOL until gates prove recovery
+  chase_filter:
+    enabled: true
+    lookback_hours: 3.0
+    max_runup_pct: 0.008            # reject if price moved >0.8% in signal direction
+    exempt_strategies:
+      - VolatilityBreakout
+      - DonchianBreakout
 
 # ═══════════════════════════════════════════════════════════
 # Strategy: Trend Follow (Smart Money Flow)
@@ -457,10 +468,15 @@ strategy:
     weekday_blocked_days: [4]
     weekday_blocked_start_h: 18
     weekday_blocked_end_h: 24
-    # v3.1.41: SL-to-BE after 1R — live 01-Jul: +1% at liquidity level, SL never moved, round-trip loss
+    # v3.1.41: SL-to-BE after N R — vol-aware trigger (v3.1.47)
     use_sl_to_be_after_1r: true
-    sl_to_be_r_trigger: 1.0
+    sl_to_be_trigger_r: 0.6         # was 1.0R — SOL/ETH rarely reach 1R before reversal
+    sl_to_be_vol_atr_factor: 0.75   # effective = min(trigger_r, factor×ATR%/stop%)
     sl_to_be_buffer_pct: 0.001
+    # v3.1.47: forensic gates (scoring unchanged)
+    counter_trend_adx_block: 30.0   # block long if ADX≥30 & EMA20<EMA50 (and mirror for short)
+    require_oir_alignment: true
+    oir_min_alignment: 0.10         # long needs OIR≥+0.10; short needs ≤−0.10; None passes
 
   # ═══════════════════════════════════════════════════════════
   # Strategy: OrderBook Imbalance Scalper

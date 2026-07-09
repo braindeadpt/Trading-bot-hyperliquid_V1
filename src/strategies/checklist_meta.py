@@ -113,8 +113,14 @@ class ChecklistMeta(Strategy):
         self.TRAILING_SWING_LOOKBACK = int(cfg.get("trailing_swing_lookback", 5))
         # v3.1.39: SL-to-BE after N R profit (cut losers early once green)
         self.USE_SL_TO_BE_AFTER_R = bool(cfg.get("use_sl_to_be_after_1r", False))
-        self.SL_TO_BE_R_TRIGGER = float(cfg.get("sl_to_be_r_trigger", 1.0))
+        self.SL_TO_BE_R_TRIGGER = float(
+            cfg.get("sl_to_be_trigger_r", cfg.get("sl_to_be_r_trigger", 0.6))
+        )
+        self.SL_TO_BE_VOL_ATR_FACTOR = float(cfg.get("sl_to_be_vol_atr_factor", 0.75))
         self.SL_TO_BE_BUFFER_PCT = float(cfg.get("sl_to_be_buffer_pct", 0.001))  # 0.1% above entry for long
+        self.COUNTER_TREND_ADX_BLOCK = float(cfg.get("counter_trend_adx_block", 30.0))
+        self.REQUIRE_OIR_ALIGNMENT = bool(cfg.get("require_oir_alignment", True))
+        self.OIR_MIN_ALIGNMENT = float(cfg.get("oir_min_alignment", 0.10))
         # Weekday filter
         self._weekday_blocks = parse_weekday_blocks(cfg) if cfg.get("use_weekday_filter", False) else []
 
@@ -276,7 +282,17 @@ class ChecklistMeta(Strategy):
             )
             return None
 
-        # ATR for sizing
+        ct_reason = self._counter_trend_block_reason(side, adx, ema_fast, ema_slow)
+        if ct_reason is not None:
+            logger.info("ChecklistMeta NO SIGNAL %s reason=%s", event.symbol, ct_reason)
+            return None
+
+        oir_reason = self._oir_block_reason(side, oir)
+        if oir_reason is not None:
+            logger.info("ChecklistMeta NO SIGNAL %s reason=%s", event.symbol, oir_reason)
+            return None
+
+        # ATR for sizing — TP/SL scale with per-symbol ATR (see take_profit_atr_multiplier).
         atr = calculate_atr(prior, period=14) or price * 0.01
         stop_loss_pct = safe_divide(self.STOP_ATR_MULT * atr, price, 0.015)
         take_profit_pct = safe_divide(self.TAKE_PROFIT_ATR_MULT * atr, price, 0.03)
@@ -366,35 +382,38 @@ class ChecklistMeta(Strategy):
             and not state.sl_moved_to_be
             and position.stop_loss_price is not None
         ):
+            candles = list(state.candles_15m)
+            be_trigger_r = self._effective_sl_to_be_trigger_r(position, candles)
             r_dist = abs(position.entry_price - position.stop_loss_price)
             if r_dist > 0:
                 if position.side == "long":
                     profit_r = (price - position.entry_price) / r_dist
                 else:
                     profit_r = (position.entry_price - price) / r_dist
-                if profit_r >= self.SL_TO_BE_R_TRIGGER:
+                if profit_r >= be_trigger_r:
                     state.sl_moved_to_be = True
                     logger.info(
                         "ChecklistMeta SL-TO-BE %s %s profit_r=%.2f >= %.2f — SL now at BE",
-                        position.symbol, position.side, profit_r, self.SL_TO_BE_R_TRIGGER,
+                        position.symbol, position.side, profit_r, be_trigger_r,
                     )
 
         # If SL has been moved to BE, exit when price touches BE (no further loss)
         if self.USE_SL_TO_BE_AFTER_R and state.sl_moved_to_be:
             buf = self.SL_TO_BE_BUFFER_PCT
+            be_label = f"{self._effective_sl_to_be_trigger_r(position, list(state.candles_15m)):.2f}"
             if position.side == "long":
                 be_price = position.entry_price * (1.0 + buf)
                 if price <= be_price:
                     return ExitSignal(
                         strategy=self.name, symbol=position.symbol, side=position.side,
-                        confidence=0.7, reason=f"sl_to_be_hit_r{self.SL_TO_BE_R_TRIGGER}",
+                        confidence=0.7, reason=f"sl_to_be_hit_r{be_label}",
                     )
             else:
                 be_price = position.entry_price * (1.0 - buf)
                 if price >= be_price:
                     return ExitSignal(
                         strategy=self.name, symbol=position.symbol, side=position.side,
-                        confidence=0.7, reason=f"sl_to_be_hit_r{self.SL_TO_BE_R_TRIGGER}",
+                        confidence=0.7, reason=f"sl_to_be_hit_r{be_label}",
                     )
 
         candles = list(state.candles_15m)
@@ -502,6 +521,53 @@ class ChecklistMeta(Strategy):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _effective_sl_to_be_trigger_r(
+        self,
+        position: Position,
+        candles: List[Candle],
+    ) -> float:
+        """Vol-aware SL-to-BE trigger: min(config R, factor×ATR%/stop%)."""
+        base = self.SL_TO_BE_R_TRIGGER
+        if position.stop_loss_price is None or position.entry_price <= 0:
+            return base
+        stop_pct = abs(position.entry_price - position.stop_loss_price) / position.entry_price
+        if stop_pct <= 0:
+            return base
+        if len(candles) >= 15:
+            atr = calculate_atr(candles, 14)
+            if atr is not None and atr > 0:
+                atr_pct = atr / position.entry_price
+                vol_trigger = self.SL_TO_BE_VOL_ATR_FACTOR * atr_pct / stop_pct
+                return min(base, vol_trigger)
+        return base
+
+    def _counter_trend_block_reason(
+        self,
+        side: str,
+        adx: Optional[float],
+        ema_fast: Optional[float],
+        ema_slow: Optional[float],
+    ) -> Optional[str]:
+        if adx is None or ema_fast is None or ema_slow is None:
+            return None
+        if adx < self.COUNTER_TREND_ADX_BLOCK:
+            return None
+        if side == "long" and ema_fast < ema_slow:
+            return f"counter_trend_gate adx={adx:.1f} ema_fast<ema_slow"
+        if side == "short" and ema_fast > ema_slow:
+            return f"counter_trend_gate adx={adx:.1f} ema_fast>ema_slow"
+        return None
+
+    def _oir_block_reason(self, side: str, oir: Optional[float]) -> Optional[str]:
+        if not self.REQUIRE_OIR_ALIGNMENT or oir is None:
+            return None
+        if side == "long" and oir < self.OIR_MIN_ALIGNMENT:
+            return f"oir_gate long oir={oir:.3f}"
+        if side == "short" and oir > -self.OIR_MIN_ALIGNMENT:
+            return f"oir_gate short oir={oir:.3f}"
+        return None
+
     def _detect_sfp_side(self, prior: List[Candle]) -> Optional[str]:
         """Detect SFP on the latest closed candle. Returns 'long', 'short', or None."""
         if len(prior) < self.SFP_LOOKBACK + 3:

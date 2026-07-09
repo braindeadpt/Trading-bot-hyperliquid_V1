@@ -84,6 +84,14 @@ it is not used directly in the current implementation.
         self._max_daily_trades = int(
             config.get("risk.max_daily_trades", self.MAX_DAILY_TRADES)
         )
+        self._max_daily_stop_losses = int(
+            config.get("risk.max_daily_stop_losses", 4)
+        )
+
+        # Daily stop-loss streak circuit (blocks entries after N stop_loss exits/day)
+        self._daily_stop_loss_count: int = 0
+        self._daily_stop_streak_date: str = ""
+        self._daily_stop_streak_tripped: bool = False
 
         # v3.1.22: read leverage from config. Capped at 20x as an
         # absolute safety floor — a misconfigured 1000x leverage would
@@ -156,6 +164,13 @@ it is not used directly in the current implementation.
         # --- 1. Circuit breaker ---
         if self.is_circuit_breaker_tripped():
             return False, f"Circuit breaker active: {self._circuit_breaker_reason}"
+
+        # --- 1b. Daily stop-loss streak circuit ---
+        if self._is_daily_stop_streak_blocked():
+            return False, (
+                f"daily_stop_streak_circuit "
+                f"({self._daily_stop_loss_count}/{self._max_daily_stop_losses} stops today)"
+            )
 
         # --- 2. Daily reset check (embedded in portfolio) ---
         # PortfolioState auto-resets on date rollover, so we read current values.
@@ -585,13 +600,52 @@ it is not used directly in the current implementation.
     def on_trade_closed(self, trade: Any) -> None:
         """Update internal metrics when a trade closes.
 
-        *trade* is expected to have attributes: pnl_usd, pnl_pct, symbol.
+        *trade* is expected to have attributes: pnl_usd, pnl_pct, symbol, reason.
         """
         pnl = safe_float(getattr(trade, "pnl_usd", 0.0))
         self._total_trades_closed += 1
         self._total_pnl += pnl
         if pnl > 0.0:
             self._winning_trades += 1
+
+        reason = str(getattr(trade, "reason", "") or "")
+        if reason.startswith("stop_loss") and self._max_daily_stop_losses > 0:
+            self._record_daily_stop_loss()
+
+    def _reset_daily_stop_streak_if_new_day(self) -> None:
+        today = utc_now().strftime("%Y-%m-%d")
+        if self._daily_stop_streak_date != today:
+            self._daily_stop_streak_date = today
+            self._daily_stop_loss_count = 0
+            self._daily_stop_streak_tripped = False
+
+    def _is_daily_stop_streak_blocked(self) -> bool:
+        if self._max_daily_stop_losses <= 0:
+            return False
+        self._reset_daily_stop_streak_if_new_day()
+        return self._daily_stop_streak_tripped
+
+    def _record_daily_stop_loss(self) -> None:
+        self._reset_daily_stop_streak_if_new_day()
+        self._daily_stop_loss_count += 1
+        if self._daily_stop_loss_count >= self._max_daily_stop_losses:
+            self._daily_stop_streak_tripped = True
+            msg = (
+                f"daily_stop_streak_circuit: {self._daily_stop_loss_count} "
+                f"stop_loss exits today (limit {self._max_daily_stop_losses})"
+            )
+            logger.error("DAILY STOP STREAK CIRCUIT: %s", msg)
+            if self._notifier is not None:
+                try:
+                    import asyncio
+                    asyncio.create_task(
+                        self._notifier.circuit_breaker(
+                            reason=msg,
+                            action="New entries blocked until 00:00 UTC",
+                        )
+                    )
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Circuit breaker
