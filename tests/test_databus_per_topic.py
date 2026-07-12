@@ -12,6 +12,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.exchanges.hyperliquid_ws import DataBus  # noqa: E402
+import pytest
+
+pytestmark = pytest.mark.unit
 
 FAILED = 0
 

@@ -12,6 +12,9 @@ sys.path.insert(0, r"C:\Users\Braindead\Documents\trading-bot-hyperliquid")
 from src.strategies.base import MarketEvent
 from src.strategies.mean_reversion import MeanReversion, _MeanRevState
 import collections
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def test_dynamic_percentile():

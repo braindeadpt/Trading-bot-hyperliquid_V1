@@ -20,6 +20,9 @@ from src.exchanges.funding_normalize import (
     parse_optional_rate,
     register_symbol_interval,
 )
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 FAILED = 0

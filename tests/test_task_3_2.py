@@ -17,6 +17,9 @@ from src.strategies.vwap_deviation import VWAPDeviation
 from src.strategies.indicators import Candle
 from src.strategies.base import MarketEvent, Position
 import random
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def make_candles_with_deviation(n=30, base_price=100.0, deviation_factor=0.0):
@@ -182,30 +185,43 @@ def test_volume_filter():
 
 def test_exit_on_vwap_cross():
     print("=" * 60)
-    print("TEST: Exit on VWAP cross")
+    print("TEST: Exit on VWAP reversion (long side)")
     print("=" * 60)
 
+    # v3.1.18 (commit 07ab215) removed the separate "crosses VWAP" exit
+    # (side-specific zscore sign flip) and replaced it with a single
+    # unified "near-full VWAP reversion" exit at |Z| < 0.3, so a large
+    # -1500 trend that merely crosses zero no longer exits early (it
+    # would close before the 2R TP had room to play out). Build candles
+    # that revert close to VWAP instead, matching current behavior.
     vwap_dev = VWAPDeviation({"max_hold_hours": 4})
 
-    # Position entered SHORT when price was above VWAP
+    # Position entered LONG when price was below VWAP
     pos = Position(
-        symbol="BTC", side="short", entry_price=52000.0,
+        symbol="BTC", side="long", entry_price=48000.0,
         size=0.1, entry_time_ms=0,
     )
 
-    # Now price dropped below VWAP (Z < 0) → should exit
-    candles = make_candles_with_deviation(30, 50000.0, -1500.0)
+    # Deterministic small oscillation around base so price reverts close to
+    # VWAP (|Z| < 0.3) and stddev > 0, without relying on unseeded randomness.
+    candles = []
+    base = 50000.0
+    for i in range(30):
+        close_p = base + (30.0 if i % 2 == 0 else -30.0)
+        candles.append(Candle(
+            open=close_p - 20, high=close_p + 50, low=close_p - 50, close=close_p,
+            volume=2000.0, timestamp_ms=i * 3_600_000
+        ))
     for c in candles:
         vwap_dev.on_candle(c, "BTC")
 
-    current_price = candles[-1].close  # below VWAP
     event = MarketEvent(
-        symbol="BTC", price=current_price, timestamp_ms=2 * 3_600_000,
+        symbol="BTC", price=base, timestamp_ms=2 * 3_600_000,
     )
 
     exit_sig = vwap_dev.on_position(pos, event)
-    assert exit_sig is not None, "Should exit when price crosses below VWAP"
-    assert "vwap_cross" in exit_sig.reason
+    assert exit_sig is not None, "Should exit when price reverts close to VWAP"
+    assert "vwap_reverted" in exit_sig.reason
     print(f"Exit: {exit_sig.reason}")
     print("[PASS]\n")
 
@@ -222,13 +238,13 @@ def test_exit_on_normalization():
         size=0.1, entry_time_ms=0,
     )
 
-    # Price now very close to VWAP (|Z| < 1.0)
-    # Use candles with slight variation to ensure stddev > 0
+    # Price now very close to VWAP (|Z| < 0.3, v3.1.18 threshold)
+    # Deterministic small oscillation around base to give stddev > 0
+    # without relying on unseeded randomness.
     candles = []
     base = 50000.0
     for i in range(30):
-        # Small oscillation around base to give stddev > 0
-        close_p = base + random.uniform(-100, 100)
+        close_p = base + (30.0 if i % 2 == 0 else -30.0)
         candles.append(Candle(
             open=close_p-20, high=close_p+50, low=close_p-50, close=close_p,
             volume=2000.0, timestamp_ms=i * 3_600_000
@@ -244,8 +260,10 @@ def test_exit_on_normalization():
 
     exit_sig = vwap_dev.on_position(pos, event)
     assert exit_sig is not None, "Should exit when deviation normalizes"
-    # Either vwap_cross or normalization is acceptable — both mean reversion happened
-    assert "vwap_cross" in exit_sig.reason or "normalized" in exit_sig.reason
+    # v3.1.18 (commit 07ab215) renamed this exit reason from
+    # "deviation_normalized_z..." to "vwap_reverted_z..." and tightened
+    # the threshold from |Z|<1.0 to |Z|<0.3.
+    assert "vwap_reverted" in exit_sig.reason
     print(f"Exit: {exit_sig.reason}")
     print("[PASS]\n")
 

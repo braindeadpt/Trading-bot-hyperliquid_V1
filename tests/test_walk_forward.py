@@ -19,7 +19,9 @@ from src.backtest.walk_forward import (
     _train_score,
     render_report,
 )
+import pytest
 
+pytestmark = pytest.mark.integration_offline
 
 FAILED = 0
 
@@ -108,10 +110,14 @@ def test_aggregate_empty() -> None:
 def test_aggregate_single_window() -> None:
     w = WindowResult(
         window_index=0,
-        train_start_ms=0, train_end_ms=0, test_start_ms=0, test_end_ms=0,
+        train_start_ms=0, train_end_ms=0,
+        validation_start_ms=0, validation_end_ms=0,
+        test_start_ms=0, test_end_ms=0,
+        embargo_ms=0,
         best_params={}, train_metrics={},
+        validation_metrics={},
         test_metrics={"sharpe_ratio": 0.5, "win_rate": 0.6, "return_pct": 0.1,
-                      "max_drawdown_pct": 0.05, "__trades": 5.0},
+                      "max_drawdown_pct": 0.05, "n_trades": 5},
         n_param_combos=1,
     )
     agg = _aggregate([w])
@@ -125,16 +131,22 @@ def test_aggregate_single_window() -> None:
 def test_aggregate_counts_positive_windows() -> None:
     w_pos = WindowResult(
         window_index=0, train_start_ms=0, train_end_ms=0,
-        test_start_ms=0, test_end_ms=0, best_params={}, train_metrics={},
+        validation_start_ms=0, validation_end_ms=0,
+        test_start_ms=0, test_end_ms=0, embargo_ms=0,
+        best_params={}, train_metrics={},
+        validation_metrics={},
         test_metrics={"return_pct": 0.05, "sharpe_ratio": 0.1, "win_rate": 0.5,
-                      "max_drawdown_pct": 0.05, "__trades": 5.0},
+                      "max_drawdown_pct": 0.05, "n_trades": 5},
         n_param_combos=1,
     )
     w_neg = WindowResult(
         window_index=1, train_start_ms=0, train_end_ms=0,
-        test_start_ms=0, test_end_ms=0, best_params={}, train_metrics={},
+        validation_start_ms=0, validation_end_ms=0,
+        test_start_ms=0, test_end_ms=0, embargo_ms=0,
+        best_params={}, train_metrics={},
+        validation_metrics={},
         test_metrics={"return_pct": -0.05, "sharpe_ratio": -0.1, "win_rate": 0.4,
-                      "max_drawdown_pct": 0.1, "__trades": 5.0},
+                      "max_drawdown_pct": 0.1, "n_trades": 5},
         n_param_combos=1,
     )
     agg = _aggregate([w_pos, w_neg])
@@ -161,10 +173,13 @@ def test_render_report_contains_header() -> None:
     wc = WindowConfig()
     w = WindowResult(
         window_index=0, train_start_ms=1_700_000_000_000, train_end_ms=1_700_500_000_000,
-        test_start_ms=1_700_500_000_000, test_end_ms=1_701_000_000_000,
+        validation_start_ms=1_700_500_000_000, validation_end_ms=1_700_600_000_000,
+        test_start_ms=1_700_700_000_000, test_end_ms=1_701_000_000_000,
+        embargo_ms=6_000_000,
         best_params={"min_adx": 25}, train_metrics={},
+        validation_metrics={},
         test_metrics={"sharpe_ratio": 0.5, "win_rate": 0.6, "return_pct": 0.1,
-                      "max_drawdown_pct": 0.05, "__trades": 5.0},
+                      "max_drawdown_pct": 0.05, "n_trades": 5},
         n_param_combos=3,
     )
     report = WalkForwardReport(
@@ -173,6 +188,8 @@ def test_render_report_contains_header() -> None:
         window_config=wc,
         windows=[w],
         aggregate=_aggregate([w]),
+        experiment_manifest={},
+        multiple_testing={},
     )
     text = render_report(report)
     _pass("render_report_contains_header",
@@ -187,6 +204,7 @@ def test_render_report_handles_empty() -> None:
     report = WalkForwardReport(
         strategy_name="X", config_path="<inline>", window_config=wc,
         windows=[], aggregate=_aggregate([]),
+        experiment_manifest={}, multiple_testing={},
     )
     text = render_report(report)
     _pass("render_report_handles_empty", "0 windows" in text)
@@ -198,16 +216,21 @@ def test_render_report_handles_empty() -> None:
 def test_window_result_as_dict_keys() -> None:
     w = WindowResult(
         window_index=0, train_start_ms=1, train_end_ms=2,
-        test_start_ms=3, test_end_ms=4, best_params={"x": 1},
-        train_metrics={"a": 1.0}, test_metrics={"b": 2.0},
+        validation_start_ms=3, validation_end_ms=4,
+        test_start_ms=5, test_end_ms=6, embargo_ms=7,
+        best_params={"x": 1},
+        train_metrics={"a": 1.0}, validation_metrics={"c": 3.0},
+        test_metrics={"b": 2.0},
         n_param_combos=4,
     )
     d = w.as_dict()
     _pass("window_result_as_dict_keys",
           set(d.keys()) >= {
               "window_index", "train_start_ms", "train_end_ms",
-              "test_start_ms", "test_end_ms", "best_params",
-              "train_metrics", "test_metrics", "n_param_combos",
+              "validation_start_ms", "validation_end_ms",
+              "test_start_ms", "test_end_ms", "embargo_ms",
+              "best_params", "train_metrics", "validation_metrics",
+              "test_metrics", "n_param_combos",
           }
           and d["best_params"] == {"x": 1}
           and d["n_param_combos"] == 4)
@@ -221,6 +244,7 @@ def test_report_as_dict_keys() -> None:
     report = WalkForwardReport(
         strategy_name="S", config_path="<inline>", window_config=wc,
         windows=[], aggregate=_aggregate([]),
+        experiment_manifest={}, multiple_testing={},
     )
     d = report.as_dict()
     _pass("report_as_dict_keys",
@@ -229,6 +253,8 @@ def test_report_as_dict_keys() -> None:
           and "window_config" in d
           and "windows" in d
           and "aggregate" in d
+          and "experiment_manifest" in d
+          and "multiple_testing" in d
           and d["window_config"]["n_windows"] == 2)
 
 

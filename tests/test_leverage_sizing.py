@@ -17,6 +17,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.core.risk_manager import RiskManager
 from src.strategies.base import Signal
 from src.utils.config import load_config
+import pytest
+
+pytestmark = pytest.mark.unit
 
 FAILED = 0
 

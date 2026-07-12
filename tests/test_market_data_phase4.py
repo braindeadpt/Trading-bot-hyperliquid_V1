@@ -16,6 +16,9 @@ from src.exchanges.funding_normalize import (
 from src.strategies.base import MarketEvent
 from src.strategies.funding_arbitrage import FundingArbitrage
 from src.strategies.mean_reversion import MeanReversion
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def test_venue_spread() -> None:

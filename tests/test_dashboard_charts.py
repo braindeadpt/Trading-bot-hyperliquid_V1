@@ -10,6 +10,9 @@ from unittest.mock import MagicMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import src.dashboard.web as web
+import pytest
+
+pytestmark = pytest.mark.integration_offline
 
 
 def _make_mock_db():

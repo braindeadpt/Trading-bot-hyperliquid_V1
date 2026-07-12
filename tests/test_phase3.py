@@ -15,6 +15,9 @@ from src.core.strategy_governor import StrategyGovernor
 from src.data.database import Database, TradeEntry, TradeExit
 from src.strategies.base import Signal
 from src.utils.config import Config
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def test_regime_strategy_name_resolves_ensemble() -> None:

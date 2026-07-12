@@ -13,6 +13,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.strategies.base import MarketEvent, Position, ExitSignal
 from src.strategies.indicators import Candle
 from src.strategies.funding_momentum import FundingMomentum
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 FAILED = 0

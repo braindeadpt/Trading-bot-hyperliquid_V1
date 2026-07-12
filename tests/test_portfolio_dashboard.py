@@ -11,6 +11,9 @@ sys.path.insert(0, str(ROOT))
 
 from src.core.portfolio import PortfolioState
 from src.strategies.base import Position
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 async def _open_btc(p: PortfolioState, entry: float = 100_000.0, size: float = 0.04) -> None:

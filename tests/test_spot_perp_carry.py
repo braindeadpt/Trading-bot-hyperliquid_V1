@@ -12,6 +12,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.strategies.base import MarketEvent, Position, Signal, ExitSignal
 from src.strategies.spot_perp_carry import SpotPerpCarry
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 FAILED = 0

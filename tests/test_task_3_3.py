@@ -15,6 +15,9 @@ sys.path.insert(0, r"C:\Users\Braindead\Documents\trading-bot-hyperliquid")
 
 from src.strategies.liquidation_catcher import LiquidationCatcher
 from src.strategies.base import MarketEvent, Position
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def test_entry_on_liquidation():
@@ -30,12 +33,17 @@ def test_entry_on_liquidation():
     })
 
     # Longs liquidated (price drop) → go LONG
+    # v3.1.4 (commit 3220110) added a require_real_liquidation_data gate
+    # (default True) that skips signals unless liquidation_data_source
+    # == "binance", to avoid trading on unverified/proxy liquidation
+    # estimates. Set it explicitly so this test exercises real data.
     event = MarketEvent(
         symbol="BTC", price=48000.0, timestamp_ms=0,
         funding=0.001, predicted_funding=0.001,
         liquidation_notional_5m=75_000_000,
         liquidation_side_5m="long",
         liquidation_count_5m=25,
+        liquidation_data_source="binance",
     )
 
     sig = catcher.on_data(event)
@@ -57,12 +65,15 @@ def test_entry_shorts_liquidated():
         "require_oi_decreasing": False,
     })
 
+    # v3.1.4 (commit 3220110): require_real_liquidation_data gate needs
+    # liquidation_data_source == "binance" to allow a signal.
     event = MarketEvent(
         symbol="BTC", price=52000.0, timestamp_ms=0,
         funding=0.001, predicted_funding=0.001,
         liquidation_notional_5m=100_000_000,
         liquidation_side_5m="short",
         liquidation_count_5m=30,
+        liquidation_data_source="binance",
     )
 
     sig = catcher.on_data(event)

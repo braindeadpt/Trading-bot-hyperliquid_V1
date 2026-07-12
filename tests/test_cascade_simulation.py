@@ -30,6 +30,9 @@ from src.core.risk_manager import RiskManager
 from src.core.portfolio import PortfolioState
 from src.strategies.base import Position, Signal
 from src.utils.config import Config
+import pytest
+
+pytestmark = pytest.mark.integration_offline
 
 
 def _now_ms() -> int:

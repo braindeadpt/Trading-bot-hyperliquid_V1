@@ -1,8 +1,11 @@
 import asyncio
 import json
+
+import pytest
 import websockets
 
-async def test():
+
+async def _run() -> None:
     url = "wss://api.hyperliquid.xyz/ws"
     print(f"Connecting to {url}...")
     async with websockets.connect(url) as ws:
@@ -19,4 +22,12 @@ async def test():
                 print(f"Timeout waiting for msg #{i+1}")
                 break
 
-asyncio.run(test())
+
+@pytest.mark.network
+def test_hyperliquid_ws_all_mids() -> None:
+    """Manual/network smoke — connects to the real Hyperliquid WS feed."""
+    asyncio.run(_run())
+
+
+if __name__ == "__main__":
+    asyncio.run(_run())

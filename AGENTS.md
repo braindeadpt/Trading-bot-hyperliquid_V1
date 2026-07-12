@@ -1,4 +1,4 @@
-# AGENTS.md — Hyperliquid Premium Trading Bot v3.1.25
+# AGENTS.md — Hyperliquid Premium Trading Bot v3.1.47
 
 > This file is intended for AI coding agents. It assumes zero prior knowledge of the project.
 
@@ -6,7 +6,7 @@
 
 ## 1. Project Overview
 
-This is **Hyperliquid Premium Trading Bot v3.1.23** — an async Python trading bot for the Hyperliquid perpetuals exchange. It supports **paper trading** (default), **testnet**, and **mainnet** execution modes.
+This is the **Hyperliquid Premium Trading Bot** — an async Python trading bot for the Hyperliquid perpetuals exchange. It supports **paper trading** (default), **testnet**, and **mainnet** execution modes.
 
 The bot is built around a **WebSocket-first event architecture**: real-time market data from Hyperliquid (and optional Binance feeds) flows through an async pub/sub `DataBus`, gets aggregated into multi-timeframe candles, and is consumed by twelve strategy modules (including the OrderBook Imbalance Scalper for tick-level orderbook micro-patterns, the CVD OrderFlow strategy for volume-tape divergence, the SpotPerpCarry delta-neutral funding arb, the RangeGrid maker grid, the TrendPyramid EMA pullback trend follower, and the FundingMomentum funding-flip strategy). A central `TradingEngine` orchestrates signal generation, risk gating, position sizing, and execution. All state is persisted to a local SQLite database, and a Flask + Socket.IO dashboard provides real-time monitoring.
 
@@ -16,6 +16,20 @@ The bot is built around a **WebSocket-first event architecture**: real-time mark
 - Deterministic risk management shared between backtest and live runs.
 - Encrypted credential vault + static security auditor.
 - No `eval`, `exec`, `pickle.loads`, or dynamic imports anywhere in core code.
+
+**Current operational status (check before suggesting live/OOS work):**
+- Live-executing strategies (`strategy.phase08.execution_strategies` in
+  `config/settings.yaml`): VolatilityBreakout, VWAPDeviation — both currently
+  **paper-only** (`strategy.phase08.paper_only: true`) pending OOS
+  (out-of-sample / walk-forward) validation.
+- Shadow-mode strategies (`strategy.phase08.shadow_strategies`, signal-tracked
+  but never executed): CVDOrderFlow, OrderBookScalper, FundingArbitrage,
+  FundingMomentum, SpotPerpCarry, ChecklistMeta.
+- **GoldRush candle-data readiness is not yet validated.** Do not run OOS,
+  parameter tuning, holdout, or performance backtests against GoldRush-sourced
+  data until this is resolved.
+- **Mainnet execution is blocked** pending the OOS validation and data
+  readiness items above.
 
 ---
 
@@ -56,7 +70,7 @@ trading-bot-hyperliquid/
 │   ├── alerts/                # Telegram / Discord notifier
 │   ├── backtest/              # Backtest engine + performance metrics
 │   └── utils/                 # Config loader, logger, helpers, crash recovery, log monitor
-├── tests/                     # Test suite (hybrid: unittest + manual assertion scripts)
+├── tests/                     # pytest suite (unit / integration_offline / network / testnet_live markers)
 ├── data/
 │   ├── historical/            # Backfill / historical CSV or DB data
 │   └── live/                  # Runtime SQLite DB (auto-created)
@@ -199,51 +213,46 @@ python run_with_recovery.py --mode paper --max-restarts 3 --cooldown 30
 ## 7. Testing Instructions
 
 ### Test Framework
-The project uses a **hybrid approach**:
-- **Manual assertion-based tests** — most files (`test_task_*.py`, `test_fase_4.py`, etc.) are standalone scripts using `assert` + `print()`. Run them individually:
-  ```bash
-  python tests/test_task_2_3.py
-  python tests/test_fase_4.py
-  ```
-- **unittest** — only `tests/test_basic.py` uses Python's built-in `unittest` framework. Run it with:
-  ```bash
-  python -m unittest tests.test_basic
-  # or
-  python tests/test_basic.py
-  ```
+The project uses **pytest** (`pytest.ini` at repo root, `asyncio_mode = auto`).
+Tests are split into four markers (see `tests/conftest.py` and `pytest.ini`):
+
+| Marker                | Meaning                                                                          | Run by default CI? |
+|------------------------|-----------------------------------------------------------------------------------|---------------------|
+| `unit`                 | Fast, no network, no cross-module wiring                                          | Yes |
+| `integration_offline`  | Multi-component (OMS, reconciliation, engine boot/shutdown, walk-forward), mocks only, no network | Yes |
+| `network`              | Real HTTP/WebSocket calls to external APIs (GoldRush, Hyperliquid, Coinalyze)      | No (opt-in) |
+| `testnet_live`         | Live Hyperliquid testnet connection / real order placement                        | No (opt-in) |
+
+Most files still carry `if __name__ == "__main__":` blocks for direct
+invocation, but the canonical entry point is pytest.
 
 ### Running the Full Test Battery
 ```bash
-python tests/test_tasks_1_4_2_1_2_2.py   # ADX, regime weights, slippage, SmartMoneyFlow
-python tests/test_task_2_3.py            # Dynamic thresholds, cross-exchange, OI filter
-python tests/test_task_2_4.py            # Cooldown state machine, doubling, auto-reset
-python tests/test_task_3_1.py            # FundingArbitrage pair selection, spread, exit
-python tests/test_task_3_2.py            # VWAPDeviation Z-score, entry, ADX filter, exit
-python tests/test_task_3_3.py            # LiquidationCatcher entry, filters, 2R exit, max hold
-python tests/test_fase_4.py              # Portfolio governance: drawdown, exposure, Kelly
-python tests/test_basic.py               # unittest smoke tests for core components
-python tests/test_cascade_simulation.py  # Phase C: vol circuit + funding blackout + DD CB
-python tests/test_cvd_orderflow.py       # CVDOrderFlow: divergence, MTF alignment, ADX/OIR/volume filters
-python tests/test_qw_observability.py    # v3.1.12: decision_audit table + trade journal enrichment
-python tests/test_log_rotation.py        # v3.1.12: TimedRotatingFileHandler (daily, 14 backups)
-python tests/test_databus_per_topic.py   # v3.1.13: DataBus per-topic rate limit override
-python tests/test_volume_indicators.py    # v3.1.15: OBV + OBV-slope + MFI + VWAP multi-TF (16 tests)
-python scripts/lookahead_audit.py --ci   # Phase B: static scan for future-data leakage
+python scripts/run_ci_tests.py                       # unit + integration_offline (default CI)
+python scripts/run_ci_tests.py --network              # + network suite
+python scripts/run_ci_tests.py --network --testnet-live
+
+python -m pytest -m unit                              # ad-hoc: unit only
+python -m pytest tests/test_cvd_orderflow.py -v       # ad-hoc: single file
 ```
 
 ### Notes
-- `test_funding.py` and `test_ws*.py` are **live integration tests** — they require network access and API keys.
-- There is **no centralized test runner** (no `pytest.ini`, `tox.ini`, or CI pipeline).
-- `pytest` and `pytest-asyncio` are listed as commented-out optional dependencies in `requirements.txt`.
-- **`tests/test_critical_fixes.py`** — tests for the v3.1.1 patch (drawdown circuit, portfolio restore, FundingArbitrage lifecycle, execution exit price fix). Always run this after modifying core engine, portfolio, risk, or execution.
-- **`tests/test_cascade_simulation.py`** (Phase C, v3.1.10) — 7 stress tests covering VolatilityCircuitBreaker trip/extend/per-symbol isolation/snapshot, FundingBlackoutFilter 9 boundary cases, DD CB regression, and cold-start guard.
-- **`tests/test_cvd_orderflow.py`** (v3.1.11) — 20 unit tests for CVDOrderFlow: bullish/bearish divergence, MTF alignment, ADX band, OIR confirmation, volume gate, throttling, exit logic (TP/SL/max-hold/opposite-divergence), and signal metadata completeness.
-- **`tests/test_qw_observability.py`** (v3.1.12, Quick Wins) — 11 unit tests for the new `decision_audit` table (save/get/count/filters, indexes, metadata roundtrip, special chars) and trade journal enrichment (new columns on `trades` table, JSON snapshot, migration of pre-existing bot.db). Best-effort writes — never disrupt live trading.
-- **`tests/test_log_rotation.py`** (v3.1.12) — 9 unit tests for the new `TimedRotatingFileHandler` config: default handler type, custom `when`/`interval`/`backupCount`/`utc`, size cap on 3.13+, idempotent re-setup, manual `doRollover`, file handler disabled when `log_file=None`.
-- **`tests/test_databus_per_topic.py`** (v3.1.13) — 7 unit tests for the per-topic rate limit override: default fallback, override applied, no spillover to other topics, most-specific prefix wins, partial drop at higher cap, full drop at default cap, `rate_limit_hz=0` disables globally.
-- **`tests/test_volume_indicators.py`** (v3.1.15) — 16 unit tests for the new pure-observability volume indicators: `calculate_obv` (classic trend, mixed direction, flat-candle skip, insufficient data), `calculate_obv_slope` (positive/bearish-divergence/insufficient), `calculate_mfi` (all-rising/all-falling/mid-range/insufficient), `calculate_vwap_multi_tf` (empty/single/multi/zero-volume/missing-tf). All 16 tests pass.
-- **`scripts/lookahead_audit.py --ci`** (Phase B, v3.1.9) — static scan for future-data access (LOOKAHEAD-001..006). Fails CI on any non-LOW finding.
-- **`tests/test_cvd_orderflow.py`** (v3.1.14) — added `test_volume_unit_conversion` (3 sub-assertions) covering the bug where `CVDOrderFlow._extract_bar` returned raw token units (e.g. 160 BTC) while the volume gate was denominated in USD ($50_000). Fix multiplies by `c.close` to normalize. All 21 tests now pass.
+- `tests/test_ws.py`, `tests/test_ws_coin.py`, `tests/test_ws_ctx.py`, and
+  `tests/test_funding.py` are marked `network` — they make real calls and are
+  excluded from default CI.
+- `scripts/manual/manual_socketio_client_check.py` and
+  `manual_socketio_ws_check.py` (moved out of `tests/` — they were plain
+  connect-and-print scripts with no assertions) require a locally running
+  Socket.IO server and are not part of any CI suite.
+- `tests/test_monte_carlo.py` is excluded from collection via
+  `tests/conftest.py` — it targets a `MCResult`/`PercentileCI`/`run_monte_carlo`
+  API removed from `src/backtest/monte_carlo.py` (current API: `MCMetrics`,
+  `bootstrap_metrics`, `block_bootstrap_metrics`). Needs a rewrite before
+  re-enabling.
+- **`tests/test_critical_fixes.py`** — drawdown circuit, portfolio restore, FundingArbitrage lifecycle, execution exit price fix. Always run after modifying core engine, portfolio, risk, or execution.
+- **`tests/test_cascade_simulation.py`** — VolatilityCircuitBreaker trip/extend/per-symbol isolation/snapshot, FundingBlackoutFilter boundary cases, DD CB regression, cold-start guard.
+- **`tests/test_engine_boot_integration.py`** — full boot/shutdown cycle against a fully-stubbed `TradingEngine`: feed subscription, OMS poller start, startup reconciliation, then graceful shutdown (background task cancellation, unsubscribe, OMS stop). Companion to `tests/test_mainnet_readiness_5_6.py`, which covers `start()`/`stop()` in isolation.
+- **`scripts/lookahead_audit.py --ci`** — static scan for future-data access (LOOKAHEAD-001..006). Fails CI on any non-LOW finding.
 
 ### Component Health Check
 ```bash
@@ -422,4 +431,4 @@ Before submitting any code change:
 
 ---
 
-*Last updated: 2026-06-25 (v3.1.25 — crash non-reaction fix: 8 root causes across governor (min_sharpe -1.0, min_trades 30), ensemble (min_agreeing=1), high_conviction_exclude cleanup, buy_volume/sell_volume DB persistence, INFO-level rejection logging for all 12 strategies. v3.1.24: candle restoration ORDER BY DESC fix. 271+ tests across 22 files. v3.1.16-v3.1.22: 6 critical bug fixes, 5 risk/execution fixes, 7 strategy cleanups, 5 backtest realism fixes, 4 new strategies, 7 quant model/infra add-ons, 6 mainnet readiness fixes.)*
+*Last updated: 2026-07-12 (Fase 09 — CI reorganized onto pytest with `unit` / `integration_offline` / `network` / `testnet_live` markers; `scripts/run_ci_tests.py` rewritten to drive suites by marker instead of a hardcoded file list; added `tests/test_engine_boot_integration.py` characterizing engine start/stop with feeds+OMS+reconciliation mocked; split mixed-category test files; removed subjective scoring language.)*

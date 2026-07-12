@@ -17,6 +17,9 @@ from src.core.regime import regime_strategy_name
 from src.data.database import Database
 from src.strategies.base import MarketEvent, Signal
 from src.utils.config import Config
+import pytest
+
+pytestmark = pytest.mark.integration_offline
 
 
 class _PortfolioStub:

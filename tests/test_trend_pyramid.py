@@ -13,6 +13,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.strategies.base import MarketEvent, Position, ExitSignal
 from src.strategies.indicators import Candle
 from src.strategies.trend_pyramid import TrendPyramid
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 FAILED = 0

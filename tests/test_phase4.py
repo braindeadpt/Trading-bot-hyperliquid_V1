@@ -14,6 +14,9 @@ from src.core.order_router import resolve_order_routing
 from src.core.tca import passes_tca_check, round_trip_cost_from_spec
 from src.strategies.base import Signal
 from src.utils.config import Config
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 @dataclass

@@ -9,6 +9,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.strategies.base import MarketEvent
 from src.strategies.orderbook_scalper import OrderBookScalper
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def _scalper(**overrides: object) -> OrderBookScalper:

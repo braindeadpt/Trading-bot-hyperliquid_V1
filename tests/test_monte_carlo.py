@@ -1,272 +1,233 @@
-"""Tests for the Monte Carlo bootstrap module (v3.1.21)."""
+"""Tests for the Monte Carlo bootstrap module (src/backtest/monte_carlo.py).
 
+Rewritten against the current public API: ``MCMetrics``, ``bootstrap_metrics``,
+``block_bootstrap_metrics``, ``group_trades_into_blocks``, plus a handful of
+pure internal helpers with clear contracts. The previous version of this file
+targeted a stale API (``MCResult``, ``PercentileCI``, ``run_monte_carlo``) that
+no longer exists and was excluded from collection; this file replaces it.
+"""
 from __future__ import annotations
 
-import json
 import math
-import sys
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+import pytest
 
 from src.backtest.monte_carlo import (
-    MCResult,
-    PercentileCI,
-    _max_drawdown,
-    _sharpe,
-    run_monte_carlo,
+    MCMetrics,
+    _empty_mc,
+    _pct,
+    _trade_annualization_factor,
+    block_bootstrap_metrics,
+    bootstrap_metrics,
+    group_trades_into_blocks,
 )
 
-
-FAILED = 0
-
-
-def _pass(name: str, ok: bool, detail: str = "") -> None:
-    global FAILED
-    mark = "PASS" if ok else "FAIL"
-    print(f"[{mark}] {name}{(' - ' + detail) if detail else ''}")
-    if not ok:
-        FAILED += 1
+pytestmark = pytest.mark.unit
 
 
-# ── Pure helpers ───────────────────────────────────────────────────
-
-
-def test_max_drawdown_flat() -> None:
-    import numpy as np
-    eq = np.array([100.0, 100.0, 100.0])
-    _pass("max_drawdown_flat", abs(_max_drawdown(eq) - 0.0) < 1e-9)
-
-
-def test_max_drawdown_known() -> None:
-    import numpy as np
-    # 100 → 110 → 80 → 95. Peak 110, trough 80 → dd = (110-80)/110 = 0.2727
-    eq = np.array([100.0, 110.0, 80.0, 95.0])
-    dd = _max_drawdown(eq)
-    _pass("max_drawdown_known", abs(dd - 0.2727272727) < 1e-6,
-          f"got {dd:.6f}")
-
-
-def test_max_drawdown_empty() -> None:
-    import numpy as np
-    eq = np.array([], dtype=np.float64)
-    _pass("max_drawdown_empty", _max_drawdown(eq) == 0.0)
-
-
-def test_sharpe_zero_for_constant() -> None:
-    import numpy as np
-    r = np.array([1.0, 1.0, 1.0, 1.0])
-    _pass("sharpe_zero_for_constant", _sharpe(r) == 0.0)
-
-
-def test_sharpe_computed() -> None:
-    import numpy as np
-    r = np.array([0.01, 0.02, 0.015, 0.005, 0.018])
-    val = _sharpe(r)
-    _pass("sharpe_computed", val > 0.0 and math.isfinite(val))
-
-
-# ── run_monte_carlo happy path ─────────────────────────────────────
-
-
-def test_run_monte_carlo_returns_ci_for_all_metrics() -> None:
-    pnls = [10.0, -5.0, 20.0, -8.0, 15.0, -3.0, 12.0, -7.0, 18.0, -4.0] * 10
-    result = run_monte_carlo(pnls, iterations=2000, seed=0)
-    _pass("run_monte_carlo_returns_ci_for_all_metrics",
-          isinstance(result, MCResult)
-          and result.iterations == 2000
-          and result.n_trades == len(pnls))
-
-
-def test_run_monte_carlo_probabilities_sum_to_one() -> None:
-    pnls = [10.0, -5.0, 20.0, -8.0] * 25
-    result = run_monte_carlo(pnls, iterations=1000, seed=0)
-    _pass("run_monte_carlo_probabilities_sum_to_one",
-          all(abs(sum(ci.p05 for ci in [result.sharpe]) - 0) >= 0
-              for _ in [None])  # smoke test
-          and result.sharpe.p05 <= result.sharpe.p50 <= result.sharpe.p95)
-
-
-def test_run_monte_carlo_percentile_ordering() -> None:
-    """For each metric, p05 <= p25 <= p50 <= p75 <= p95."""
-    pnls = [10.0, -5.0, 20.0, -8.0, 15.0, -3.0, 12.0, -7.0, 18.0, -4.0] * 10
-    result = run_monte_carlo(pnls, iterations=1000, seed=0)
-    for name, ci in [
-        ("total_return", result.total_return),
-        ("max_drawdown", result.max_drawdown),
-        ("win_rate", result.win_rate),
-    ]:
-        ok = ci.p05 <= ci.p25 <= ci.p50 <= ci.p75 <= ci.p95
-        _pass(f"percentile_ordering_{name}", ok,
-              f"p05={ci.p05} p25={ci.p25} p50={ci.p50} p75={ci.p75} p95={ci.p95}")
-
-
-def test_run_monte_carlo_win_rate_around_base() -> None:
-    """Bootstrap mean win rate should be close to the empirical input rate."""
-    # 60% win rate, 500 trades
-    rng_seed = 0
-    import numpy as np
-    rng = np.random.default_rng(rng_seed)
-    n = 500
-    n_wins = 0
-    pnls: list[float] = []
-    for _ in range(n):
-        if rng.random() < 0.60:
-            pnls.append(10.0)
-            n_wins += 1
-        else:
-            pnls.append(-10.0)
-    empirical_win_rate = n_wins / n
-    result = run_monte_carlo(pnls, iterations=5000, seed=rng_seed)
-    err = abs(result.win_rate.mean - empirical_win_rate)
-    _pass("run_monte_carlo_win_rate_around_base", err < 0.02,
-          f"empirical={empirical_win_rate:.3f} bootstrap_mean={result.win_rate.mean:.3f}")
-
-
-def test_run_monte_carlo_reproducible() -> None:
-    """Same seed → identical result."""
-    pnls = [10.0, -5.0, 20.0, -8.0] * 25
-    r1 = run_monte_carlo(pnls, iterations=500, seed=42)
-    r2 = run_monte_carlo(pnls, iterations=500, seed=42)
-    _pass("run_monte_carlo_reproducible",
-          r1.total_return.p50 == r2.total_return.p50
-          and r1.sharpe.p50 == r2.sharpe.p50)
-
-
-def test_run_monte_carlo_total_return_matches_input_sum() -> None:
-    """Mean total return should be close to the sum of trade PnLs."""
-    pnls = [10.0, -5.0, 20.0, -8.0] * 100
-    expected = sum(pnls)
-    result = run_monte_carlo(pnls, iterations=2000, seed=0)
-    # Mean of bootstrap = expected (each draw is a full resample)
-    err = abs(result.total_return.mean - expected) / max(abs(expected), 1.0)
-    _pass("run_monte_carlo_total_return_matches_input_sum", err < 0.05,
-          f"expected={expected:.1f} got={result.total_return.mean:.1f}")
-
-
-# ── Edge cases ─────────────────────────────────────────────────────
-
-
-def test_run_monte_carlo_empty_returns_degenerate() -> None:
-    result = run_monte_carlo([], iterations=1000, seed=0)
-    _pass("run_monte_carlo_empty_returns_degenerate",
-          result.iterations == 0
-          and result.total_return.p50 == 0.0)
-
-
-def test_run_monte_carlo_single_trade_returns_degenerate() -> None:
-    result = run_monte_carlo([10.0], iterations=1000, seed=0)
-    _pass("run_monte_carlo_single_trade_returns_degenerate",
-          result.iterations == 0)
-
-
-def test_run_monte_carlo_all_wins() -> None:
-    """If every trade is a win, win rate CI is [1.0, 1.0]."""
-    pnls = [10.0] * 50
-    result = run_monte_carlo(pnls, iterations=200, seed=0)
-    _pass("run_monte_carlo_all_wins",
-          result.win_rate.p05 == 1.0
-          and result.win_rate.p95 == 1.0)
-
-
-def test_run_monte_carlo_all_losses() -> None:
-    """If every trade is a loss, win rate CI is [0.0, 0.0]."""
-    pnls = [-10.0] * 50
-    result = run_monte_carlo(pnls, iterations=200, seed=0)
-    _pass("run_monte_carlo_all_losses",
-          result.win_rate.p05 == 0.0
-          and result.win_rate.p95 == 0.0)
-
-
-# ── Serialization ──────────────────────────────────────────────────
-
-
-def test_mcresult_as_dict() -> None:
-    pnls = [10.0, -5.0, 20.0, -8.0] * 25
-    result = run_monte_carlo(pnls, iterations=500, seed=0)
-    d = result.as_dict()
-    _pass("mcresult_as_dict",
-          set(d.keys())
-          >= {"iterations", "seed", "n_trades", "total_return",
-              "max_drawdown", "sharpe", "win_rate"})
-
-
-def test_mcresult_json_roundtrip() -> None:
-    pnls = [10.0, -5.0, 20.0, -8.0] * 25
-    result = run_monte_carlo(pnls, iterations=500, seed=0)
-    j = json.dumps(result.as_dict())
-    _pass("mcresult_json_roundtrip", "total_return" in j and "p50" in j)
-
-
-def test_mcresult_summary() -> None:
-    pnls = [10.0, -5.0, 20.0, -8.0] * 25
-    result = run_monte_carlo(pnls, iterations=500, seed=0)
-    s = result.summary()
-    _pass("mcresult_summary",
-          "total_return" in s
-          and "max_drawdown" in s
-          and "sharpe" in s
-          and "win_rate" in s)
-
-
-# ── PercentileCI ───────────────────────────────────────────────────
-
-
-def test_percentile_ci_ci_90() -> None:
-    ci = PercentileCI(
-        p05=0.1, p25=0.2, p50=0.3, p75=0.4, p95=0.5, mean=0.3, std=0.1, n=100,
-    )
-    _pass("percentile_ci_ci_90", ci.ci_90 == (0.1, 0.5))
-
-
-def test_percentile_ci_ci_50() -> None:
-    ci = PercentileCI(
-        p05=0.1, p25=0.2, p50=0.3, p75=0.4, p95=0.5, mean=0.3, std=0.1, n=100,
-    )
-    _pass("percentile_ci_ci_50", ci.ci_50 == (0.2, 0.4))
-
-
-def main() -> int:
-    print("=" * 70)
-    print("Monte Carlo bootstrap tests")
-    print("=" * 70)
-    tests = [
-        test_max_drawdown_flat,
-        test_max_drawdown_known,
-        test_max_drawdown_empty,
-        test_sharpe_zero_for_constant,
-        test_sharpe_computed,
-        test_run_monte_carlo_returns_ci_for_all_metrics,
-        test_run_monte_carlo_probabilities_sum_to_one,
-        test_run_monte_carlo_percentile_ordering,
-        test_run_monte_carlo_win_rate_around_base,
-        test_run_monte_carlo_reproducible,
-        test_run_monte_carlo_total_return_matches_input_sum,
-        test_run_monte_carlo_empty_returns_degenerate,
-        test_run_monte_carlo_single_trade_returns_degenerate,
-        test_run_monte_carlo_all_wins,
-        test_run_monte_carlo_all_losses,
-        test_mcresult_as_dict,
-        test_mcresult_json_roundtrip,
-        test_mcresult_summary,
-        test_percentile_ci_ci_90,
-        test_percentile_ci_ci_50,
+def _make_trades(pnls, start_ts=1_700_000_000_000, step_ms=3_600_000):
+    return [
+        {"pnl_usd": p, "exit_time": start_ts + i * step_ms}
+        for i, p in enumerate(pnls)
     ]
-    for t in tests:
-        try:
-            t()
-        except AssertionError as e:
-            _pass(t.__name__, False, f"AssertionError: {e}")
-        except Exception as e:  # noqa: BLE001
-            _pass(t.__name__, False, f"{type(e).__name__}: {e}")
-    print("=" * 70)
-    if FAILED == 0:
-        print(f"ALL TESTS PASSED ({len(tests)}/{len(tests)})")
-        return 0
-    print(f"FAILED: {FAILED}/{len(tests)}")
-    return 1
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+# ---------------------------------------------------------------------------
+# bootstrap_metrics (IID resampling)
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_metrics_deterministic_with_seed():
+    trades = _make_trades([10.0, -5.0, 20.0, -8.0, 15.0, -3.0, 12.0, -7.0, 18.0, -4.0])
+    a = bootstrap_metrics(trades, n_iter=300, seed=123)
+    b = bootstrap_metrics(trades, n_iter=300, seed=123)
+    assert a.pf_median == b.pf_median
+    assert a.sharpe_median == b.sharpe_median
+    assert a.pnl_median == b.pnl_median
+    assert a.max_dd_median == b.max_dd_median
+
+
+def test_bootstrap_metrics_percentile_ordering():
+    trades = _make_trades(
+        [10.0, -5.0, 20.0, -8.0, 15.0, -3.0, 12.0, -7.0, 18.0, -4.0] * 5
+    )
+    m = bootstrap_metrics(trades, n_iter=500, seed=7)
+    assert m.pf_p05 <= m.pf_median <= m.pf_p95
+    assert m.sharpe_p05 <= m.sharpe_median <= m.sharpe_p95
+    assert m.pnl_p05 <= m.pnl_median <= m.pnl_p95
+    assert m.max_dd_median <= m.max_dd_p95
+
+
+def test_bootstrap_metrics_sane_fields():
+    trades = _make_trades([10.0, -5.0, 20.0, -8.0])
+    m = bootstrap_metrics(trades, n_iter=200, seed=0)
+    assert isinstance(m, MCMetrics)
+    assert m.n_trades == 4
+    assert m.n_iter == 200
+    assert m.bootstrap_mode == "iid"
+    assert m.block_count == 0
+    assert 0.0 <= m.prob_profitable <= 1.0
+
+
+def test_bootstrap_metrics_empty_trades_returns_empty_mc():
+    m = bootstrap_metrics([], n_iter=500, seed=0)
+    expected = _empty_mc(500, mode="iid")
+    assert m == expected
+    assert m.n_trades == 0
+    assert m.bootstrap_mode == "iid"
+    assert m.pf_median == 0.0
+    assert m.prob_profitable == 0.0
+
+
+def test_bootstrap_metrics_single_trade_does_not_crash():
+    trades = _make_trades([10.0])
+    m = bootstrap_metrics(trades, n_iter=100, seed=0)
+    assert m.n_trades == 1
+    # Every resample degenerates to the same single value -> zero spread.
+    assert m.pf_median == m.pf_p05 == m.pf_p95
+    assert m.pnl_median == 10.0
+    # A single-point return series has zero variance -> sharpe is defined as 0.
+    assert m.sharpe_median == 0.0
+
+
+def test_bootstrap_metrics_all_losses_pf_zero_and_never_profitable():
+    trades = _make_trades([-10.0] * 20)
+    m = bootstrap_metrics(trades, n_iter=200, seed=0)
+    assert m.pf_median == 0.0
+    assert m.prob_profitable == 0.0
+
+
+def test_bootstrap_metrics_all_wins_pf_sentinel_and_always_profitable():
+    trades = _make_trades([10.0] * 20)
+    m = bootstrap_metrics(trades, n_iter=200, seed=0)
+    assert m.prob_profitable == 1.0
+    # Infinite profit factor (no losses) is mapped to the 99.0 sentinel.
+    assert m.pf_median == 99.0
+
+
+# ---------------------------------------------------------------------------
+# group_trades_into_blocks
+# ---------------------------------------------------------------------------
+
+
+def test_group_trades_into_blocks_day_mode_groups_by_utc_day():
+    trades = [
+        {"pnl_usd": 10.0, "exit_time": 1_700_000_000_000},
+        {"pnl_usd": -5.0, "exit_time": 1_700_000_000_000 + 3_600_000},
+        {"pnl_usd": 20.0, "exit_time": 1_700_086_400_000},
+    ]
+    blocks = group_trades_into_blocks(trades, mode="day")
+    assert len(blocks) == 2
+    assert sum(len(b) for b in blocks) == 3
+    assert sorted(len(b) for b in blocks) == [1, 2]
+
+
+def test_group_trades_into_blocks_regime_mode_groups_by_regime():
+    day_a = 1_700_000_000_000
+    day_b = day_a + 86_400_000
+    trades = [
+        {"pnl_usd": 1.0, "exit_time": day_a, "metadata": {}},
+        {"pnl_usd": 2.0, "exit_time": day_a + 3_600_000, "metadata": {}},
+        {"pnl_usd": 3.0, "exit_time": day_b, "metadata": {"regime": "trend"}},
+        {"pnl_usd": 4.0, "exit_time": day_b + 3_600_000, "metadata": {"regime": "trend"}},
+    ]
+    blocks = group_trades_into_blocks(trades, mode="regime")
+    assert len(blocks) == 2
+    assert sorted(len(b) for b in blocks) == [2, 2]
+
+
+def test_group_trades_into_blocks_regime_invalid_labels_fallback_to_utc_day():
+    """Trades with no/invalid regime label fall back to a UTC-day bucket."""
+    ts = 1_700_000_000_000
+    trades = [
+        {"pnl_usd": 1.0, "exit_time": ts, "metadata": {"regime": "none"}},
+        {"pnl_usd": 2.0, "exit_time": ts + 3_600_000, "metadata": {"regime": None}},
+    ]
+    blocks = group_trades_into_blocks(trades, mode="regime")
+    assert len(blocks) == 1
+    assert sorted(blocks[0]) == [1.0, 2.0]
+
+
+def test_group_trades_into_blocks_empty():
+    assert group_trades_into_blocks([], mode="day") == []
+
+
+# ---------------------------------------------------------------------------
+# block_bootstrap_metrics
+# ---------------------------------------------------------------------------
+
+
+def test_block_bootstrap_metrics_valid_mcmetrics_and_block_count():
+    trades = [
+        {"pnl_usd": 12.0, "exit_time": 1_700_000_000_000 + i * 86_400_000}
+        for i in range(8)
+    ]
+    m = block_bootstrap_metrics(trades, n_iter=200, seed=123, block_mode="day")
+    assert isinstance(m, MCMetrics)
+    assert m.bootstrap_mode == "block_day"
+    assert m.block_count == 8  # each trade lands on its own UTC day
+    assert m.n_trades == 8
+
+
+def test_block_bootstrap_metrics_reproducible_with_seed():
+    trades = [
+        {"pnl_usd": 12.0, "exit_time": 1_700_000_000_000 + i * 86_400_000}
+        for i in range(8)
+    ]
+    a = block_bootstrap_metrics(trades, n_iter=200, seed=123)
+    b = block_bootstrap_metrics(trades, n_iter=200, seed=123)
+    assert a.pf_median == b.pf_median
+    assert a.sharpe_median == b.sharpe_median
+    assert a.pnl_median == b.pnl_median
+
+
+def test_block_bootstrap_metrics_regime_mode():
+    day_a = 1_700_000_000_000
+    day_b = day_a + 86_400_000
+    trades = [
+        {"pnl_usd": 1.0, "exit_time": day_a, "metadata": {}},
+        {"pnl_usd": 2.0, "exit_time": day_a + 3_600_000, "metadata": {}},
+        {"pnl_usd": 3.0, "exit_time": day_b, "metadata": {"regime": "trend"}},
+        {"pnl_usd": 4.0, "exit_time": day_b + 3_600_000, "metadata": {"regime": "trend"}},
+    ]
+    m = block_bootstrap_metrics(trades, n_iter=100, seed=1, block_mode="regime")
+    assert m.bootstrap_mode == "block_regime"
+    assert m.block_count == 2
+
+
+def test_block_bootstrap_metrics_empty_trades_returns_empty_mc():
+    m = block_bootstrap_metrics([], n_iter=100, seed=0, block_mode="day")
+    assert m.n_trades == 0
+    assert m.bootstrap_mode == "block_day"
+    assert m.block_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers with clear contracts
+# ---------------------------------------------------------------------------
+
+
+def test_pct_helper_bounds_and_ordering():
+    values = sorted([1.0, 2.0, 3.0, 4.0, 5.0])
+    assert _pct(values, 0.0) == 1.0
+    assert _pct(values, 1.0) == 5.0
+    assert _pct(values, 0.5) <= _pct(values, 0.95)
+
+
+def test_pct_helper_empty_list_returns_zero():
+    assert _pct([], 0.5) == 0.0
+
+
+def test_trade_annualization_factor_defaults_for_too_few_trades():
+    assert _trade_annualization_factor([], 0) == math.sqrt(365.25)
+    assert _trade_annualization_factor([{"exit_time": 1}], 1) == math.sqrt(365.25)
+
+
+def test_trade_annualization_factor_scales_with_trade_frequency():
+    trades = [
+        {"exit_time": 1_700_000_000_000},
+        {"exit_time": 1_700_000_000_000 + 86_400_000},
+    ]
+    factor = _trade_annualization_factor(trades, 2)
+    assert factor >= 1.0
+    assert math.isfinite(factor)

@@ -1,16 +1,27 @@
-# Hyperliquid Premium Trading Bot v3.1.23
+# Hyperliquid Premium Trading Bot v3.1.47
 
 Professional automated trading bot for Hyperliquid perpetuals exchange.
-Modular async architecture, real-time WebSocket data, 12 pluggable
+Modular async architecture, real-time WebSocket data, pluggable
 strategies, deterministic risk management, paper / testnet / mainnet
-execution, and a Flask + Socket.IO dashboard with 12 real-time panels.
+execution, and a Flask + Socket.IO dashboard with real-time panels.
 
-Current score: **9.5/10** (Phases A, B, C hardening + QW observability
-+ v3.1.14 CVDOrderFlow volume unit fix + v3.1.15 volume observability
-panel + v3.1.16-v3.1.22 critical bug fixes, 4 new strategies, HMM regime
-detection, Monte Carlo bootstrap, walk-forward optimization, OMS order
-tracking, leverage-aware sizing, L2 slippage, position reconciliation,
-funding payment accounting + v3.1.23 dashboard parity redesign).
+## Project Status
+
+- **Live execution is currently limited to VolatilityBreakout and
+  VWAPDeviation** (`strategy.phase08.execution_strategies`), and both run
+  **paper-only** — mainnet execution is gated pending out-of-sample (OOS)
+  validation (walk-forward, Phase06). See `strategy.phase08.paper_only` in
+  `config/settings.yaml`.
+- **Shadow-mode strategies** (signal-tracked, never executed): CVDOrderFlow,
+  OrderBookScalper, FundingArbitrage, FundingMomentum, SpotPerpCarry,
+  ChecklistMeta (`strategy.phase08.shadow_strategies`).
+- **GoldRush candle-data readiness is not yet validated.** Do not run OOS,
+  parameter tuning, holdout, or performance backtests against GoldRush-sourced
+  data until this is resolved. Parity/validation tooling lives in
+  `scripts/goldrush_parity_diagnostic.py` and
+  `scripts/goldrush_secondary_validation.py`.
+- **Mainnet execution is blocked** until the above OOS validation and data
+  readiness items are closed.
 
 ---
 
@@ -113,8 +124,8 @@ trading-bot-hyperliquid/
     alerts/                    # Telegram / Discord notifier
     backtest/                  # Backtest engine + performance metrics
     utils/                     # config loader, logger, helpers, crash recovery
-  tests/                       # Hybrid suite: unittest + assertion scripts
-  scripts/                     # backfill, lookahead audit, CI runner
+  tests/                       # pytest suite (unit / integration_offline / network / testnet_live markers)
+  scripts/                     # backfill, lookahead audit, CI runner, manual/ (non-pytest network scripts)
   data/                        # Runtime SQLite DB (auto-created, gitignored)
   logs/                        # Rotating logs (auto-created, gitignored)
   docs/
@@ -202,46 +213,43 @@ Secrets live in `.env` (gitignored) or in the encrypted vault at
 
 ## Testing
 
-The suite is hybrid (unittest + standalone assertion scripts).
-271+ tests across 22 files. No central pytest runner; each test is invoked directly.
+The suite runs on **pytest** (`pytest.ini` at repo root), split into four
+markers so CI can choose what to run:
+
+| Marker                  | Meaning                                                                 | Run in default CI? |
+|--------------------------|--------------------------------------------------------------------------|---------------------|
+| `unit`                   | Fast, no network, no cross-module wiring                                 | Yes |
+| `integration_offline`    | OMS, reconciliation, engine boot/shutdown, walk-forward — mocks only, no network | Yes |
+| `network`                | Real HTTP/WebSocket calls (GoldRush, Hyperliquid, Coinalyze)              | No (opt-in) |
+| `testnet_live`           | Live Hyperliquid testnet connection / real order placement               | No (opt-in) |
 
 ```bash
-# Core smoke + regression
-python -m unittest tests.test_basic               # 11 unittest smoke
-python tests/test_critical_fixes.py               # v3.1.1 regression (5 tests)
-python tests/test_cascade_simulation.py           # Phase C stress (7 tests)
+# Default CI battery (unit + integration_offline)
+python scripts/run_ci_tests.py
 
-# Strategy tests
-python tests/test_cvd_orderflow.py                # CVDOrderFlow (23 tests, v3.1.16 USD fix)
-python tests/test_volume_indicators.py            # OBV + MFI + VWAP-multi-TF (16 tests, v3.1.15)
-python tests/test_spot_perp_carry.py              # SpotPerpCarry (10 tests, v3.1.20)
-python tests/test_range_grid.py                   # RangeGrid (10 tests, v3.1.20)
-python tests/test_trend_pyramid.py                # TrendPyramid (10 tests, v3.1.20)
-python tests/test_funding_momentum.py             # FundingMomentum (11 tests, v3.1.20)
+# Everything including network-dependent tests
+python scripts/run_ci_tests.py --network --testnet-live
 
-# Risk + execution
-python tests/test_leverage_sizing.py              # Leverage-aware sizing (16 tests, v3.1.22)
-python tests/test_execution_oms.py                # OMS order tracking (19 tests, v3.1.22)
-python tests/test_reconcile.py                    # Position reconciliation (3 tests, v3.1.17)
-python tests/test_dashboard_v3123.py              # Dashboard v3.1.23 features (13 tests)
+# Ad-hoc: run a single suite directly with pytest
+python -m pytest -m unit
+python -m pytest -m integration_offline
+python -m pytest -m network              # requires network access
+python -m pytest tests/test_execution_oms.py -v
+```
 
-# Quant models + data
-python tests/test_hmm_regime.py                   # HMM regime detection (17 tests, v3.1.21)
-python tests/test_monte_carlo.py                  # Monte Carlo bootstrap (20 tests, v3.1.21)
-python tests/test_walk_forward.py                 # Walk-forward optimization (19 tests, v3.1.21)
-python tests/test_funding_normalize.py            # Per-symbol funding intervals (23 tests, v3.1.21)
-python tests/test_funding_stale_detection.py      # Stale funding detection (11 tests, v3.1.21)
+`tests/test_monte_carlo.py` is excluded from collection (see
+`tests/conftest.py`) — it imports a `MCResult`/`PercentileCI`/`run_monte_carlo`
+API that no longer exists in `src/backtest/monte_carlo.py` (current API:
+`MCMetrics`, `bootstrap_metrics`, `block_bootstrap_metrics`). It needs a
+rewrite against the current module before it can be re-enabled.
 
-# Observability + infra
-python tests/test_qw_observability.py             # decision_audit + trade journal (11 tests, v3.1.12)
-python tests/test_log_rotation.py                 # TimedRotatingFileHandler (9 tests, v3.1.12)
-python tests/test_databus_per_topic.py            # DataBus per-topic rate limit (10 tests, v3.1.13)
-python tests/test_mainnet_readiness_5_6.py        # Mainnet safe shutdown + WS health (7 tests, v3.1.22)
+Manual (non-pytest) network smoke scripts that connect to a local Socket.IO
+server live in `scripts/manual/` — they are not part of any CI suite.
 
-# Audits
-python scripts/lookahead_audit.py --ci            # Future-data leakage scanner (CI mode)
-python audit_all.py                               # Component health (14 strategies + ensemble)
-python -m src.security.audit                      # Static security (9 AUDIT rules)
+```bash
+python audit_all.py                               # Component health check
+python -m security.audit --src-dir src             # Static security audit
+python scripts/lookahead_audit.py --ci             # Future-data leakage scanner
 ```
 
 ---

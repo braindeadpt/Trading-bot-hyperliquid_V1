@@ -12,6 +12,9 @@ sys.path.insert(0, r"C:\Users\Braindead\Documents\trading-bot-hyperliquid")
 
 from src.strategies.funding_arbitrage import FundingArbitrage
 from src.strategies.base import MarketEvent, Position
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def test_pair_selection():

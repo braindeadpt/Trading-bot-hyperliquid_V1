@@ -10,6 +10,9 @@ sys.path.insert(0, str(ROOT))
 
 from src.strategies.base import MarketEvent
 from src.strategies.checklist_meta import ChecklistMeta
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def test_chop_gate_blocks_low_adx() -> None:

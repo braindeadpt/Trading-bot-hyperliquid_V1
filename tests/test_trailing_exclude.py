@@ -12,6 +12,9 @@ sys.path.insert(0, str(ROOT))
 from src.core.engine import TradingEngine
 from src.strategies.base import Position
 from src.utils.config import Config
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def _engine_with_trailing_exclude() -> TradingEngine:

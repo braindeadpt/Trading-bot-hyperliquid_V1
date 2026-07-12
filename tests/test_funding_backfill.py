@@ -8,6 +8,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.data.candle_backfill import kline_to_candle
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def test_kline_to_candle_buy_sell_split() -> None:

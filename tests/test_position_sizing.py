@@ -13,6 +13,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.core.risk_manager import RiskManager
 from src.strategies.base import Position, Signal
 from src.utils.config import load_config
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def _make_rm(

@@ -18,6 +18,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.utils.config import load_config
+import pytest
+
+pytestmark = pytest.mark.integration_offline
 
 FAILED = 0
 
@@ -126,6 +129,9 @@ def _build_paper_engine(cfg, *, with_ws: bool) -> "TradingEngine":
     engine._kelly_sizer = MagicMock()
     engine._kelly_sizer.seed_history = MagicMock(return_value=0)
     engine._kelly_sizer.get_size_multiplier = MagicMock(return_value=1.0)
+    engine._kelly_enabled = False
+    engine._reconciliation_enabled = False
+    engine._reconciler = None
 
     # Stub the recovery / background loops
     async def _recover_state():
@@ -137,6 +143,8 @@ def _build_paper_engine(cfg, *, with_ws: bool) -> "TradingEngine":
             await asyncio.sleep(1)
     engine._poll_funding_loop = _no_loop
     engine._periodic_summary_loop = _no_loop
+    engine._ws_health_loop = _no_loop
+    engine._reconcile_loop = _no_loop
     return engine
 
 
@@ -199,6 +207,15 @@ def test_stop_skips_close_when_flatten_false() -> None:
     engine._running = True
     engine._shutdown_event = asyncio.Event()
     engine._config = cfg
+    engine._mode = "paper"
+    engine._db = MagicMock()
+    engine._cooldown_state = {}
+    engine._risk = MagicMock()
+    engine._risk.snapshot_for_persist = MagicMock(return_value={})
+    engine._funding_poll_task = None
+    engine._ws_health_check_task = None
+    engine._summary_task = None
+    engine._reconcile_task = None
 
     # Two open positions
     pos_btc = MagicMock()
@@ -258,6 +275,15 @@ def test_stop_closes_when_flatten_true() -> None:
     engine._running = True
     engine._shutdown_event = asyncio.Event()
     engine._config = cfg
+    engine._mode = "paper"
+    engine._db = MagicMock()
+    engine._cooldown_state = {}
+    engine._risk = MagicMock()
+    engine._risk.snapshot_for_persist = MagicMock(return_value={})
+    engine._funding_poll_task = None
+    engine._ws_health_check_task = None
+    engine._summary_task = None
+    engine._reconcile_task = None
 
     pos_btc = MagicMock()
     pos_btc.symbol = "BTC"

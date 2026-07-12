@@ -21,6 +21,9 @@ from src.strategies.base import MarketEvent, Position, Signal
 from src.strategies.checklist_meta import ChecklistMeta
 from src.strategies.indicators import Candle
 from src.utils.config import Config
+import pytest
+
+pytestmark = pytest.mark.integration_offline
 
 
 def _make_candles(

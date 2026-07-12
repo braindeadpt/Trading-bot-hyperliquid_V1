@@ -18,6 +18,9 @@ from src.core.portfolio import PortfolioState
 from src.core.risk_manager import RiskManager
 from src.strategies.funding_arbitrage import FundingArbitrage
 from src.utils.config import Config
+import pytest
+
+pytestmark = pytest.mark.integration_offline
 
 
 def test_equity_stable_on_position_open():

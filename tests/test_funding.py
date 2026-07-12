@@ -4,6 +4,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.exchanges.funding_aggregator import FundingOIAggregator
+import pytest
+
+pytestmark = pytest.mark.network
 
 
 async def _run_funding_poll() -> None:

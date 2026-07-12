@@ -16,6 +16,9 @@ import tempfile
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.data.database import TradeEntry, TradeExit  # noqa: E402
+import pytest
+
+pytestmark = pytest.mark.integration_offline
 
 
 def test_trade_exit_has_funding_paid():

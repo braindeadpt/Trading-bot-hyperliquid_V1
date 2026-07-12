@@ -21,6 +21,9 @@ from src.core.hmm_regime import (
     build_feature_matrix,
     build_regime_detector,
 )
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 FAILED = 0

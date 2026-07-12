@@ -20,6 +20,9 @@ from src.exchanges.hl_predicted_funding import (
     parse_predicted_fundings_response,
 )
 from src.strategies.base import MarketEvent
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def test_parse_optional_rate() -> None:

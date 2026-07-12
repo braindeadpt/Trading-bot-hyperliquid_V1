@@ -21,6 +21,9 @@ from alerts.telegram_reports import (
     utc_midnight_ms,
 )
 from data.database import Database, TradeEntry, TradeExit
+import pytest
+
+pytestmark = pytest.mark.integration_offline
 
 
 class TestTelegramReports(unittest.TestCase):

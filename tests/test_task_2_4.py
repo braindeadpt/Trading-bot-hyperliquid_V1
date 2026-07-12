@@ -1,58 +1,110 @@
 """Quick test for Task 2.4: Cooldown inteligente.
 
-Validates:
-  - Cooldown blocks entry during active cooldown
-  - Cooldown doubles after loss (1h -> 2h -> 4h)
-  - Cooldown resets after win
-  - Cooldown resets when funding normalizes
-  - Cooldown resets when ADX regime changes
+Validates strategy.cooldown paths (30/120) and legacy top-level fallback.
 """
 
+from __future__ import annotations
+
 import sys
+import time
+
 sys.path.insert(0, r"C:\Users\Braindead\Documents\trading-bot-hyperliquid")
 
 from src.strategies.base import MarketEvent
 from src.core.engine import TradingEngine
-import time
+from src.utils.config import Config, get_strategy_section
+import pytest
+
+pytestmark = pytest.mark.integration_offline
 
 
-def make_engine_for_cooldown_test():
+def make_engine_for_cooldown_test(config: Config | None = None) -> TradingEngine:
     """Build a minimal engine instance for cooldown testing."""
-    # We can't fully instantiate TradingEngine without all deps,
-    # but we can test the cooldown methods by creating a minimal mock.
     from src.data.database import Database
-    from src.core.portfolio import PortfolioState
     from src.core.risk_manager import RiskManager
     from src.core.execution import ExecutionEngine
     from src.exchanges.hyperliquid_ws import DataBus
-    from src.utils.config import Config
 
-    # Use a minimal config
-    config = Config({
-        "symbols": ["BTC"],
-        "cooldown.base_minutes": 60,
-        "cooldown.max_minutes": 240,
-        "cooldown.multiplier": 2.0,
-        "risk.max_position_size_pct": 20.0,
-        "risk.leverage_max": 10.0,
-        "risk.max_slippage_pct": 0.2,
-        "risk.min_fill_ratio": 0.8,
-        "strategy.adx_trend_threshold": 25.0,
-        "strategy.adx_range_threshold": 20.0,
-    })
+    if config is None:
+        config = Config({
+            "symbols": ["BTC"],
+            "strategy": {
+                "cooldown": {
+                    "base_minutes": 30,
+                    "max_minutes": 120,
+                    "multiplier": 2.0,
+                },
+                "adx_trend_threshold": 25.0,
+                "adx_range_threshold": 20.0,
+            },
+            "risk": {
+                "max_position_size_pct": 20.0,
+                "leverage_max": 10.0,
+                "max_slippage_pct": 0.2,
+                "min_fill_ratio": 0.8,
+            },
+        })
 
     db = Database(":memory:")
-    portfolio = PortfolioState(config)
     risk = RiskManager(config, db)
     bus = DataBus()
     executor = ExecutionEngine(config, db, "paper")
-    strategies = []  # empty list for cooldown test
-
-    engine = TradingEngine(config, db, bus, strategies, risk, executor)
-    return engine
+    return TradingEngine(config, db, bus, [], risk, executor)
 
 
-def test_cooldown_blocks_entry():
+def test_cooldown_reads_strategy_section_30_120() -> None:
+    print("=" * 60)
+    print("TEST: strategy.cooldown 30/120 paths")
+    print("=" * 60)
+
+    cfg = Config({
+        "symbols": ["BTC"],
+        "strategy": {
+            "cooldown": {
+                "base_minutes": 30,
+                "max_minutes": 120,
+                "multiplier": 2.0,
+            },
+        },
+        "risk": {"max_position_size_pct": 5.0, "leverage_max": 5.0},
+    })
+    section = get_strategy_section(cfg, "cooldown")
+    assert section["base_minutes"] == 30
+    assert section["max_minutes"] == 120
+
+    engine = make_engine_for_cooldown_test(cfg)
+    assert engine._cooldown_base_ms == 30 * 60_000
+    assert engine._cooldown_max_ms == 120 * 60_000
+    print("[PASS]\n")
+
+
+def test_cooldown_legacy_top_level_fallback() -> None:
+    print("=" * 60)
+    print("TEST: legacy top-level cooldown fallback")
+    print("=" * 60)
+
+    cfg = Config({
+        "symbols": ["BTC"],
+        "cooldown": {
+            "base_minutes": 45,
+            "max_minutes": 180,
+            "multiplier": 3.0,
+        },
+        "risk": {"max_position_size_pct": 5.0, "leverage_max": 5.0},
+    })
+    assert "cooldown" not in (cfg.get("strategy") or {})
+    section = get_strategy_section(cfg, "cooldown")
+    assert section["base_minutes"] == 45
+    assert section["max_minutes"] == 180
+
+    engine = make_engine_for_cooldown_test(cfg)
+    assert engine._cooldown_base_ms == 45 * 60_000
+    assert engine._cooldown_max_ms == 180 * 60_000
+    assert engine._cooldown_multiplier == 3.0
+    print("[PASS]\n")
+
+
+def test_cooldown_blocks_entry() -> None:
     print("=" * 60)
     print("TEST: Cooldown blocks entry")
     print("=" * 60)
@@ -60,10 +112,9 @@ def test_cooldown_blocks_entry():
     engine = make_engine_for_cooldown_test()
     now = int(time.time() * 1000)
 
-    # Simulate an entry 30 minutes ago
     engine._cooldown_state["SmartMoneyFlow:BTC"] = {
-        "last_trade_ms": now - 30 * 60_000,  # 30 min ago
-        "duration_ms": 60 * 60_000,  # 1h cooldown
+        "last_trade_ms": now - 15 * 60_000,
+        "duration_ms": 30 * 60_000,
         "consecutive_losses": 0,
         "adx": 15.0,
         "funding": 0.005,
@@ -75,13 +126,13 @@ def test_cooldown_blocks_entry():
     )
 
     in_cooldown, reason = engine._is_in_cooldown("SmartMoneyFlow", "BTC", event)
-    assert in_cooldown, "Should be in cooldown (30 min < 60 min)"
-    assert "30.0min remaining" in reason, f"Unexpected reason: {reason}"
+    assert in_cooldown, "Should be in cooldown (15 min < 30 min base)"
+    assert "15.0min remaining" in reason, f"Unexpected reason: {reason}"
     print(f"In cooldown: {in_cooldown}, reason: {reason}")
     print("[PASS]\n")
 
 
-def test_cooldown_expires():
+def test_cooldown_expires() -> None:
     print("=" * 60)
     print("TEST: Cooldown expires after time")
     print("=" * 60)
@@ -89,10 +140,9 @@ def test_cooldown_expires():
     engine = make_engine_for_cooldown_test()
     now = int(time.time() * 1000)
 
-    # Simulate an entry 90 minutes ago (cooldown = 60 min)
     engine._cooldown_state["SmartMoneyFlow:BTC"] = {
         "last_trade_ms": now - 90 * 60_000,
-        "duration_ms": 60 * 60_000,
+        "duration_ms": 30 * 60_000,
         "consecutive_losses": 0,
         "adx": 15.0,
         "funding": 0.005,
@@ -103,54 +153,45 @@ def test_cooldown_expires():
         funding=0.005, predicted_funding=0.005,
     )
 
-    in_cooldown, reason = engine._is_in_cooldown("SmartMoneyFlow", "BTC", event)
-    assert not in_cooldown, "Cooldown should have expired (90 min > 60 min)"
-    assert "SmartMoneyFlow:BTC" not in engine._cooldown_state, "State should be deleted"
+    in_cooldown, _reason = engine._is_in_cooldown("SmartMoneyFlow", "BTC", event)
+    assert not in_cooldown, "Cooldown should have expired (90 min > 30 min)"
+    assert "SmartMoneyFlow:BTC" not in engine._cooldown_state
     print("Cooldown expired correctly")
     print("[PASS]\n")
 
 
-def test_cooldown_doubles_after_loss():
+def test_cooldown_doubles_after_loss() -> None:
     print("=" * 60)
-    print("TEST: Cooldown doubles after loss")
+    print("TEST: Cooldown doubles after loss (30 -> 60 -> 120 cap)")
     print("=" * 60)
 
     engine = make_engine_for_cooldown_test()
     now = int(time.time() * 1000)
 
-    # Enter with base cooldown
     engine._update_cooldown_on_entry("SmartMoneyFlow", "BTC", MarketEvent(
         symbol="BTC", price=50000.0, timestamp_ms=now,
         funding=0.005, predicted_funding=0.005,
     ))
-    assert engine._cooldown_state["SmartMoneyFlow:BTC"]["duration_ms"] == 60 * 60_000
-    print(f"Initial cooldown: {engine._cooldown_state['SmartMoneyFlow:BTC']['duration_ms'] / 60_000} min")
+    assert engine._cooldown_state["SmartMoneyFlow:BTC"]["duration_ms"] == 30 * 60_000
 
-    # Loss -> doubles
     engine._update_cooldown_on_exit("SmartMoneyFlow", "BTC", pnl_pct=-0.01)
     state = engine._cooldown_state["SmartMoneyFlow:BTC"]
-    assert state["duration_ms"] == 120 * 60_000, f"Expected 120 min, got {state['duration_ms'] / 60_000}"
+    assert state["duration_ms"] == 60 * 60_000
     assert state["consecutive_losses"] == 1
-    print(f"After 1 loss: {state['duration_ms'] / 60_000} min, losses={state['consecutive_losses']}")
 
-    # Another loss -> doubles again (capped at 240 min)
     engine._update_cooldown_on_exit("SmartMoneyFlow", "BTC", pnl_pct=-0.02)
     state = engine._cooldown_state["SmartMoneyFlow:BTC"]
-    assert state["duration_ms"] == 240 * 60_000, f"Expected 240 min, got {state['duration_ms'] / 60_000}"
+    assert state["duration_ms"] == 120 * 60_000
     assert state["consecutive_losses"] == 2
-    print(f"After 2 losses: {state['duration_ms'] / 60_000} min, losses={state['consecutive_losses']}")
 
-    # Third loss -> stays at cap
     engine._update_cooldown_on_exit("SmartMoneyFlow", "BTC", pnl_pct=-0.03)
     state = engine._cooldown_state["SmartMoneyFlow:BTC"]
-    assert state["duration_ms"] == 240 * 60_000
+    assert state["duration_ms"] == 120 * 60_000
     assert state["consecutive_losses"] == 3
-    print(f"After 3 losses: {state['duration_ms'] / 60_000} min (capped), losses={state['consecutive_losses']}")
-
     print("[PASS]\n")
 
 
-def test_cooldown_resets_after_win():
+def test_cooldown_resets_after_win() -> None:
     print("=" * 60)
     print("TEST: Cooldown resets after win")
     print("=" * 60)
@@ -158,25 +199,22 @@ def test_cooldown_resets_after_win():
     engine = make_engine_for_cooldown_test()
     now = int(time.time() * 1000)
 
-    # Setup: 2 losses -> 4h cooldown
     engine._cooldown_state["SmartMoneyFlow:BTC"] = {
         "last_trade_ms": now,
-        "duration_ms": 240 * 60_000,
+        "duration_ms": 120 * 60_000,
         "consecutive_losses": 2,
         "adx": 15.0,
         "funding": 0.005,
     }
 
-    # Win -> reset
     engine._update_cooldown_on_exit("SmartMoneyFlow", "BTC", pnl_pct=0.05)
     state = engine._cooldown_state["SmartMoneyFlow:BTC"]
-    assert state["duration_ms"] == 60 * 60_000, f"Expected 60 min, got {state['duration_ms'] / 60_000}"
+    assert state["duration_ms"] == 30 * 60_000
     assert state["consecutive_losses"] == 0
-    print(f"After win: {state['duration_ms'] / 60_000} min, losses={state['consecutive_losses']}")
     print("[PASS]\n")
 
 
-def test_cooldown_resets_on_funding_normalization():
+def test_cooldown_resets_on_funding_normalization() -> None:
     print("=" * 60)
     print("TEST: Cooldown resets on funding normalization (funding strategies)")
     print("=" * 60)
@@ -185,27 +223,25 @@ def test_cooldown_resets_on_funding_normalization():
     now = int(time.time() * 1000)
 
     engine._cooldown_state["FundingExtreme:BTC"] = {
-        "last_trade_ms": now - 30 * 60_000,
-        "duration_ms": 60 * 60_000,
+        "last_trade_ms": now - 10 * 60_000,
+        "duration_ms": 30 * 60_000,
         "consecutive_losses": 1,
         "adx": 15.0,
         "funding": 0.008,
     }
 
-    # Funding normalizes below strong_threshold * 0.5 (0.00005)
     event = MarketEvent(
         symbol="BTC", price=50000.0, timestamp_ms=now,
         funding=0.00001, predicted_funding=0.00001,
     )
 
     in_cooldown, _ = engine._is_in_cooldown("FundingExtreme", "BTC", event)
-    assert not in_cooldown, "FundingExtreme cooldown should reset when funding normalizes"
+    assert not in_cooldown
     assert "FundingExtreme:BTC" not in engine._cooldown_state
-    print("Cooldown reset on funding normalization (FundingExtreme)")
     print("[PASS]\n")
 
 
-def test_cooldown_persists_with_near_zero_funding():
+def test_cooldown_persists_with_near_zero_funding() -> None:
     print("=" * 60)
     print("TEST: Cooldown persists when funding ~0 (non-funding strategy)")
     print("=" * 60)
@@ -216,14 +252,10 @@ def test_cooldown_persists_with_near_zero_funding():
     engine._cooldown_state["ChecklistMeta:SOL"] = {
         "last_trade_ms": now - 5 * 60_000,
         "duration_ms": 30 * 60_000,
-        "consecutive_losses": 0,
+        "consecutive_losses": 1,
         "adx": 18.0,
         "funding": 0.0001,
     }
-    engine._update_cooldown_on_exit("ChecklistMeta", "SOL", pnl_pct=-0.02)
-    state = engine._cooldown_state["ChecklistMeta:SOL"]
-    state["last_trade_ms"] = now - 5 * 60_000
-    state["duration_ms"] = 30 * 60_000
 
     event = MarketEvent(
         symbol="SOL", price=150.0, timestamp_ms=now,
@@ -232,13 +264,12 @@ def test_cooldown_persists_with_near_zero_funding():
     )
 
     in_cooldown, reason = engine._is_in_cooldown("ChecklistMeta", "SOL", event)
-    assert in_cooldown, "ChecklistMeta must stay in cooldown despite ~0 funding"
-    assert "25.0min remaining" in reason, f"Unexpected reason: {reason}"
-    print(f"In cooldown: {reason}")
+    assert in_cooldown
+    assert "25.0min remaining" in reason
     print("[PASS]\n")
 
 
-def test_cooldown_resets_on_regime_change():
+def test_cooldown_resets_on_regime_change() -> None:
     print("=" * 60)
     print("TEST: Cooldown resets on ADX regime change")
     print("=" * 60)
@@ -246,16 +277,14 @@ def test_cooldown_resets_on_regime_change():
     engine = make_engine_for_cooldown_test()
     now = int(time.time() * 1000)
 
-    # Last trade in RANGE regime (ADX=15)
     engine._cooldown_state["SmartMoneyFlow:BTC"] = {
-        "last_trade_ms": now - 30 * 60_000,
-        "duration_ms": 60 * 60_000,
+        "last_trade_ms": now - 10 * 60_000,
+        "duration_ms": 30 * 60_000,
         "consecutive_losses": 1,
-        "adx": 15.0,  # range
+        "adx": 15.0,
         "funding": 0.005,
     }
 
-    # Now ADX=30 (trend regime)
     event = MarketEvent(
         symbol="BTC", price=50000.0, timestamp_ms=now,
         funding=0.005, predicted_funding=0.005,
@@ -263,13 +292,14 @@ def test_cooldown_resets_on_regime_change():
     )
 
     in_cooldown, _ = engine._is_in_cooldown("SmartMoneyFlow", "BTC", event)
-    assert not in_cooldown, "Cooldown should reset when regime changes"
+    assert not in_cooldown
     assert "SmartMoneyFlow:BTC" not in engine._cooldown_state
-    print("Cooldown reset on regime change: range (ADX=15) -> trend (ADX=30)")
     print("[PASS]\n")
 
 
 if __name__ == "__main__":
+    test_cooldown_reads_strategy_section_30_120()
+    test_cooldown_legacy_top_level_fallback()
     test_cooldown_blocks_entry()
     test_cooldown_expires()
     test_cooldown_doubles_after_loss()

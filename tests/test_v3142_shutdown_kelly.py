@@ -13,6 +13,9 @@ from src.core.engine import TradingEngine
 from src.data.database import Database
 from src.utils.config import load_config
 from src.utils.helpers import resolve_trade_stop_levels
+import pytest
+
+pytestmark = pytest.mark.integration_offline
 
 
 def test_resolve_trade_stop_levels_from_pct() -> None:
@@ -43,6 +46,15 @@ def test_stop_skips_close_when_close_on_shutdown_false() -> None:
     engine._running = True
     engine._shutdown_event = asyncio.Event()
     engine._config = cfg
+    engine._mode = "paper"
+    engine._db = MagicMock()
+    engine._cooldown_state = {}
+    engine._risk = MagicMock()
+    engine._risk.snapshot_for_persist = MagicMock(return_value={})
+    engine._funding_poll_task = None
+    engine._ws_health_check_task = None
+    engine._summary_task = None
+    engine._reconcile_task = None
 
     pos = MagicMock()
     pos.symbol = "BTC"
@@ -91,6 +103,15 @@ def test_stop_closes_when_close_on_shutdown_true() -> None:
     engine._running = True
     engine._shutdown_event = asyncio.Event()
     engine._config = cfg
+    engine._mode = "paper"
+    engine._db = MagicMock()
+    engine._cooldown_state = {}
+    engine._risk = MagicMock()
+    engine._risk.snapshot_for_persist = MagicMock(return_value={})
+    engine._funding_poll_task = None
+    engine._ws_health_check_task = None
+    engine._summary_task = None
+    engine._reconcile_task = None
 
     pos = MagicMock()
     pos.symbol = "BTC"

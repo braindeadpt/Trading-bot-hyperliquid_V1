@@ -19,6 +19,9 @@ from src.strategies.trend_follow import TrendFollow
 from src.strategies.mean_reversion import MeanReversion
 from datetime import datetime, timezone
 import time
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def make_candles_trending(n=50, start_price=100.0):

@@ -36,6 +36,9 @@ from src.strategies.base import (  # noqa: E402
     Position,
     ExitSignal,
 )
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 # ── Test helpers ─────────────────────────────────────────────────────────

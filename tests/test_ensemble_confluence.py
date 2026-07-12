@@ -11,6 +11,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.strategies.base import MarketEvent, Position, Signal, Strategy
 from src.strategies.ensemble import StrategyEnsemble, StrategyWeight
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 class _StubStrategy(Strategy):

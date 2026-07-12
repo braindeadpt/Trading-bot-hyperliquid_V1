@@ -12,6 +12,9 @@ sys.path.insert(0, str(ROOT))
 from src.strategies.base import MarketEvent
 from src.strategies.indicators import Candle
 from src.strategies.volatility_breakout import VolatilityBreakout
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def _mixed_candles(ts_start: int) -> list:

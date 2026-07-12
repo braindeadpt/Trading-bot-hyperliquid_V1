@@ -1,8 +1,11 @@
 import asyncio
 import json
+
+import pytest
 import websockets
 
-async def test():
+
+async def _run() -> None:
     url = "wss://api.hyperliquid.xyz/ws"
     async with websockets.connect(url) as ws:
         # Test subscribing to specific coin
@@ -15,4 +18,12 @@ async def test():
         except asyncio.TimeoutError:
             print("No data received")
 
-asyncio.run(test())
+
+@pytest.mark.network
+def test_hyperliquid_ws_active_asset_ctx_coin() -> None:
+    """Manual/network smoke — connects to the real Hyperliquid WS feed."""
+    asyncio.run(_run())
+
+
+if __name__ == "__main__":
+    asyncio.run(_run())

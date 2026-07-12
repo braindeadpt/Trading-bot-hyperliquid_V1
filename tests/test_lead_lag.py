@@ -10,6 +10,9 @@ sys.path.insert(0, str(ROOT))
 
 from src.strategies.base import MarketEvent, Position
 from src.strategies.lead_lag import LeadLag
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def _cfg() -> dict:

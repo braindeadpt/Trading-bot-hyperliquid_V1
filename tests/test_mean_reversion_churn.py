@@ -9,6 +9,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.strategies.base import MarketEvent, Position
 from src.strategies.mean_reversion import MeanReversion
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def _mr(**overrides: object) -> MeanReversion:

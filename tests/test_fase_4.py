@@ -14,6 +14,9 @@ from src.core.risk_manager import RiskManager
 from src.core.kelly_sizer import KellySizer
 from src.strategies.base import Signal, Position
 from src.utils.config import Config
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 # Mock portfolio for testing
@@ -121,13 +124,18 @@ def test_sector_exposure_cap():
             self.entry_price = entry_price
             self.size = size
 
-    # Already 25% exposed — adding 10% more should fail
+    # v3.1.43 (commit d45cea6) switched position sizing from a direct
+    # size_pct-to-notional mapping to risk-based sizing bounded by
+    # risk.max_position_size_pct * leverage_max (default 5% * 1x = $5K on
+    # $100K capital), so a "10% more" signal here only contributes ~5% of
+    # notional regardless of the requested size_pct. Use a larger existing
+    # position (27.5%) so 27.5% + ~5% new still clears the 30% sector cap.
     positions = {
-        "BTC": Pos("long", 50000.0, 0.5),   # $25K = 25%
+        "BTC": Pos("long", 50000.0, 0.55),   # $27.5K = 27.5%
     }
     portfolio = MockPortfolio(capital=100_000.0, positions=positions)
 
-    sig = make_signal(symbol="ETH", size_pct=0.10)  # 10% more
+    sig = make_signal(symbol="ETH", size_pct=0.10)  # requested size; risk-sized down to ~5%
     approved, reason = risk.can_enter(sig, portfolio)
 
     assert not approved, "Should reject when sector exposure > 30%"

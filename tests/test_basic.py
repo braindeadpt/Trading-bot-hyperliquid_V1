@@ -17,6 +17,9 @@ from src.core.correlation_monitor import CorrelationMonitor
 from src.data.database import Database
 from src.strategies.base import MarketEvent
 from src.alerts import AlertNotifier, AlertConfig
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 class TestConfig(unittest.TestCase):

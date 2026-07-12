@@ -10,6 +10,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.core.engine import TradingEngine
 from src.strategies.base import MarketEvent, Signal
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 class _InactiveStrategy:

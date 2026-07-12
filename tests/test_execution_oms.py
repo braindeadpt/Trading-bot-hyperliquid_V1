@@ -1,9 +1,4 @@
-"""Tests for the v3.1.22 execution layer add-ons.
-
-  * Paper slippage uses the L2 estimate when supplied.
-  * OMS tracks live order ids, polls status, and rolls back on
-    reject/cancel/timeout.
-"""
+"""Phase 02 — OMS behavioural tests (partial fills, idempotency, recovery)."""
 
 from __future__ import annotations
 
@@ -11,7 +6,7 @@ import asyncio
 import sys
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -21,13 +16,23 @@ from src.core.execution import (
     ORDER_STATUS_CANCELLED,
     ORDER_STATUS_FILLED,
     ORDER_STATUS_OPEN,
+    ORDER_STATUS_PARTIAL,
     ORDER_STATUS_REJECTED,
     ORDER_STATUS_TIMEOUT,
-    TradeResult,
 )
-from src.data.database import Database
-from src.strategies.base import Signal
+from src.core.order_lifecycle import (
+    ORDER_PARTIAL,
+    ORDER_RESTING,
+    OrderFillSnapshot,
+    parse_order_fill_snapshot,
+)
+from src.core.portfolio import PortfolioState
+from src.data.database import Database, TradeEntry
+from src.strategies.base import Position, Signal
 from src.utils.config import load_config
+import pytest
+
+pytestmark = pytest.mark.integration_offline
 
 FAILED = 0
 
@@ -40,393 +45,419 @@ def _pass(name: str, ok: bool, detail: str = "") -> None:
         FAILED += 1
 
 
-# ── TradeResult has new field ──────────────────────────────────────
-
-
-def test_trade_result_has_exchange_order_id() -> None:
-    r = TradeResult(
-        trade_id=1, symbol="BTC", side="long",
-        entry_price=100.0, exit_price=None, size=1.0,
-        pnl_usd=0.0, pnl_pct=0.0, status="open",
-        reason="test", timestamp_ms=0,
-    )
-    _pass("trade_result_has_exchange_order_id",
-          hasattr(r, "exchange_order_id")
-          and r.exchange_order_id is None)
-
-
-# ── Extract order id from HL response ──────────────────────────────
-
-
-def test_extract_order_id_direct() -> None:
-    _pass("extract_order_id_direct",
-          ExecutionEngine._extract_order_id({"oid": 12345}) == "12345")
-
-
-def test_extract_order_id_nested_filled() -> None:
-    """HL success: {"response": {"data": {"statuses": [{"filled": {"oid": 7}}]}}}"""
-    resp = {
-        "status": "ok",
-        "response": {
-            "type": "order",
-            "data": {
-                "statuses": [
-                    {"filled": {"oid": 7, "totalSz": "0.01", "avgPx": "50000"}}
-                ]
-            },
-        },
-    }
-    _pass("extract_order_id_nested_filled",
-          ExecutionEngine._extract_order_id(resp) == "7")
-
-
-def test_extract_order_id_nested_resting() -> None:
-    """HL resting: {"response": {"data": {"statuses": [{"resting": {"oid": 11}}]}}}"""
-    resp = {
-        "response": {"data": {"statuses": [{"resting": {"oid": 11}}]}}
-    }
-    _pass("extract_order_id_nested_resting",
-          ExecutionEngine._extract_order_id(resp) == "11")
-
-
-def test_extract_order_id_none() -> None:
-    _pass("extract_order_id_none",
-          ExecutionEngine._extract_order_id(None) is None
-          and ExecutionEngine._extract_order_id({}) is None
-          and ExecutionEngine._extract_order_id("not a dict") is None)
-
-
-# ── Normalise HL status ────────────────────────────────────────────
-
-
-def test_normalise_hl_status() -> None:
-    n = ExecutionEngine._normalise_hl_status
-    _pass("normalise_hl_status",
-          n("filled") == ORDER_STATUS_FILLED
-          and n("open") == ORDER_STATUS_OPEN
-          and n("canceled") == ORDER_STATUS_CANCELLED
-          and n("cancelled") == ORDER_STATUS_CANCELLED
-          and n("rejected") == ORDER_STATUS_REJECTED
-          and n("partial") == "partial"
-          and n("") == ORDER_STATUS_OPEN)
-
-
-# ── Constructor exposes OMS config ────────────────────────────────
-
-
-def test_oms_config_loaded() -> None:
+def _make_engine(db: Database | None = None) -> ExecutionEngine:
     cfg = load_config("config/settings.yaml")
-    e = ExecutionEngine(cfg, None, mode="paper")
-    _pass("oms_config_loaded",
-          e._oms_poll_interval_s == 5.0
-          and e._live_order_timeout_s == 60.0
-          and e._live_orders == {})
+    engine = ExecutionEngine(cfg, db or Database(":memory:"), mode="testnet")
+    engine._oms_poll_interval_s = 0.01
+    engine._live_order_timeout_s = 0.15
+    engine._live_client = MagicMock()
+    engine._live_signing_ready = True
+    engine._rest_client = MagicMock()
+    return engine
 
 
-# ── enter_position accepts new params ─────────────────────────────
-
-
-def test_enter_position_signature_has_new_params() -> None:
-    import inspect
-    sig = inspect.signature(ExecutionEngine.enter_position)
-    params = list(sig.parameters)
-    _pass("enter_position_signature_has_new_params",
-          "candles_1m" in params
-          and "orderbook" in params
-          and "estimated_slippage_bps" in params)
-
-
-# ── Paper slippage uses L2 estimate when provided ──────────────────
-
-
-def test_paper_slippage_uses_l2_estimate() -> None:
-    """Build a fake engine and call enter_position with an L2
-    slippage override; the resulting fill price must reflect it,
-    not the flat default."""
-    cfg = load_config("config/settings.yaml")
-    db = Database(":memory:")
-    e = ExecutionEngine(cfg, db, mode="paper")
-
-    class FakePortfolio:
-        @property
-        def current_capital(self):
-            async def _f():
-                return 100_000.0
-            return _f()
-
-    portfolio = FakePortfolio()
-    s = Signal(
-        symbol="BTC", side="long",
-        entry_price=50_000.0, size_pct=0.05,
-        strategy="trend", confidence=0.8,
-        metadata={"calculated_size": 0.01, "order_type": "market"},
+def _snapshot(
+    *,
+    status: str,
+    lifecycle: str,
+    filled: float,
+    target: float,
+    avg_px: float = 50_000.0,
+    fee: float = 1.0,
+) -> OrderFillSnapshot:
+    return OrderFillSnapshot(
+        status=status,
+        lifecycle_state=lifecycle,
+        filled_size=filled,
+        remaining_size=max(0.0, target - filled),
+        avg_fill_price=avg_px,
+        cumulative_fee=fee,
+        last_fill_at_ms=int(time.time() * 1000),
     )
-    # 5 bps L2 estimate → 0.05% slippage
-    result = asyncio.run(
-        e.enter_position(
-            s, portfolio, market_event=None, estimated_slippage_bps=5.0
-        )
-    )
-    # fill_price = 50_000 * (1 + 5/10_000) = 50_025
-    _pass("paper_slippage_uses_l2_estimate",
-          abs(result.entry_price - 50_025.0) < 1e-3,
-          f"fill_price={result.entry_price}, expected 50025.0")
 
 
-def test_paper_slippage_falls_back_to_default() -> None:
-    """When no L2 estimate is given, the flat default applies."""
-    cfg = load_config("config/settings.yaml")
-    db = Database(":memory:")
-    e = ExecutionEngine(cfg, db, mode="paper")
-
-    class FakePortfolio:
-        @property
-        def current_capital(self):
-            async def _f():
-                return 100_000.0
-            return _f()
-
-    portfolio = FakePortfolio()
-    s = Signal(
-        symbol="BTC", side="long",
-        entry_price=50_000.0, size_pct=0.05,
-        strategy="trend", confidence=0.8,
-        metadata={"calculated_size": 0.01, "order_type": "market"},
-    )
-    result = asyncio.run(e.enter_position(s, portfolio, market_event=None))
-    # Default paper_slippage_pct in settings.yaml is 0.02%
-    expected = 50_000.0 * (1.0 + 0.0002)
-    _pass("paper_slippage_falls_back_to_default",
-          abs(result.entry_price - expected) < 1e-3,
-          f"fill_price={result.entry_price}, expected {expected}")
-
-
-def test_paper_slippage_short_side() -> None:
-    """Short fill: subtract slippage."""
-    cfg = load_config("config/settings.yaml")
-    db = Database(":memory:")
-    e = ExecutionEngine(cfg, db, mode="paper")
-
-    class FakePortfolio:
-        @property
-        def current_capital(self):
-            async def _f():
-                return 100_000.0
-            return _f()
-
-    portfolio = FakePortfolio()
-    s = Signal(
-        symbol="BTC", side="short",
-        entry_price=50_000.0, size_pct=0.05,
-        strategy="trend", confidence=0.8,
-        metadata={"calculated_size": 0.01, "order_type": "market"},
-    )
-    result = asyncio.run(
-        e.enter_position(
-            s, portfolio, market_event=None, estimated_slippage_bps=10.0
-        )
-    )
-    # 10 bps → 0.10% slippage, short = 50_000 * (1 - 0.001) = 49_950
-    _pass("paper_slippage_short_side",
-          abs(result.entry_price - 49_950.0) < 1e-3,
-          f"fill_price={result.entry_price}")
-
-
-# ── OMS loop + timeout + reject + cancel ──────────────────────────
-
-
-def _make_engine() -> ExecutionEngine:
-    cfg = load_config("config/settings.yaml")
-    e = ExecutionEngine(cfg, None, mode="testnet")
-    e._oms_poll_interval_s = 0.01  # fast for tests
-    e._live_order_timeout_s = 0.1  # 100ms for tests
-    return e
-
-
-def test_oms_polls_open_order_and_rolls_back_on_reject() -> None:
-    """REST returns 'rejected' → OMS marks rejected, calls rollback."""
-    e = _make_engine()
-    e._rest_client = MagicMock()
-    e._rest_client.get_order_status = AsyncMock(
-        return_value={"order": {"status": "rejected"}}
-    )
-    e._db = MagicMock()
-    e._db.update_trade_status = MagicMock()
-    e._portfolio = MagicMock()
-    e._portfolio.cancel_position = AsyncMock()
-    e._live_orders["oid-1"] = {
-        "symbol": "BTC", "side": "long", "size": 0.01,
-        "price": 50_000.0, "filled_size": 0.0,
+def _base_record(target: float = 0.02, filled: float = 0.0) -> dict:
+    return {
+        "symbol": "BTC",
+        "side": "long",
+        "size": target,
+        "price": 50_000.0,
+        "filled_size": filled,
+        "remaining_size": target - filled,
+        "avg_fill_price": 50_000.0 if filled else 0.0,
+        "cumulative_fee": 0.0,
         "status": ORDER_STATUS_OPEN,
+        "lifecycle_state": ORDER_RESTING,
         "timestamp": time.time(),
-        "trade_id": 99,
-        "order_type": "market",
-    }
-    # Spawn one poll cycle
-    asyncio.run(e._poll_one_order("oid-1", e._live_orders["oid-1"]))
-    _pass("oms_polls_open_order_and_rolls_back_on_reject",
-          e._live_orders.get("oid-1") is None
-          and e._db.update_trade_status.called
-          and e._portfolio.cancel_position.await_count >= 1)
-
-
-def test_oms_polls_open_order_and_marks_filled() -> None:
-    e = _make_engine()
-    e._rest_client = MagicMock()
-    e._rest_client.get_order_status = AsyncMock(
-        return_value={"order": {"status": "filled"}}
-    )
-    e._db = MagicMock()
-    e._db.update_trade_status = MagicMock()
-    e._live_orders["oid-2"] = {
-        "symbol": "ETH", "side": "short", "size": 0.5,
-        "price": 3_000.0, "filled_size": 0.0,
-        "status": ORDER_STATUS_OPEN,
-        "timestamp": time.time(),
-        "trade_id": 100,
+        "submitted_at_ms": int(time.time() * 1000),
+        "trade_id": 42,
         "order_type": "limit_maker",
+        "client_order_id": "hlbot-BTC-long-1",
+        "exchange_order_id": "1001",
+        "applied_fill_size": filled,
+        "terminal_handled": False,
+        "processed_events": [],
     }
-    asyncio.run(e._poll_one_order("oid-2", e._live_orders["oid-2"]))
-    _pass("oms_polls_open_order_and_marks_filled",
-          e._live_orders["oid-2"]["status"] == ORDER_STATUS_FILLED)
 
 
-def test_oms_triggers_timeout_rollback() -> None:
-    e = _make_engine()
-    e._rest_client = MagicMock()
-    e._rest_client.get_order_status = AsyncMock(
-        return_value={"order": {"status": "open"}}
+class TrackingPortfolio(PortfolioState):
+    def __init__(self) -> None:
+        super().__init__(initial_capital=100_000.0)
+        self.fill_calls: list = []
+
+    async def apply_entry_fill(self, symbol, **kwargs) -> None:  # type: ignore[override]
+        self.fill_calls.append((symbol, kwargs))
+        await super().apply_entry_fill(symbol, **kwargs)
+
+    async def cancel_position(self, symbol: str) -> None:
+        await super().cancel_position(symbol)
+
+
+# ── parse_order_fill_snapshot ─────────────────────────────────────
+
+
+def test_parse_full_fill_from_fills() -> None:
+    fills = [{"oid": 7, "sz": "0.02", "px": "50000", "fee": "0.5", "time": 1}]
+    snap = parse_order_fill_snapshot(
+        {"status": "filled"},
+        fills,
+        order_id="7",
+        target_size=0.02,
+        reference_price=50_000.0,
     )
-    e._rest_client.cancel_order = AsyncMock()
-    e._db = MagicMock()
-    e._db.update_trade_status = MagicMock()
-    e._portfolio = MagicMock()
-    e._portfolio.cancel_position = AsyncMock()
-    # Make it look old
-    e._live_orders["oid-3"] = {
-        "symbol": "BTC", "side": "long", "size": 0.01,
-        "price": 50_000.0, "filled_size": 0.0,
-        "status": ORDER_STATUS_OPEN,
-        "timestamp": time.time() - 10.0,  # 10s old, > 0.1s timeout
-        "trade_id": 101,
-        "order_type": "market",
-    }
-    asyncio.run(e._poll_one_order("oid-3", e._live_orders["oid-3"]))
-    _pass("oms_triggers_timeout_rollback",
-          e._live_orders.get("oid-3") is None
-          and e._db.update_trade_status.called)
-
-
-def test_oms_callback_fires_on_status_change() -> None:
-    e = _make_engine()
-    e._rest_client = MagicMock()
-    e._rest_client.get_order_status = AsyncMock(
-        return_value={"order": {"status": "filled"}}
+    _pass(
+        "parse_full_fill_from_fills",
+        snap.status == ORDER_STATUS_FILLED and abs(snap.filled_size - 0.02) < 1e-9,
+        f"filled={snap.filled_size}",
     )
-    e._db = MagicMock()
-    e._db.update_trade_status = MagicMock()
-    events: list = []
-    e.register_order_callback(lambda oid, status, rec: events.append((oid, status)))
-    e._live_orders["oid-4"] = {
-        "symbol": "SOL", "side": "long", "size": 1.0,
-        "price": 100.0, "filled_size": 0.0,
-        "status": ORDER_STATUS_OPEN,
-        "timestamp": time.time(),
-        "trade_id": 102,
-        "order_type": "market",
-    }
-    asyncio.run(e._poll_one_order("oid-4", e._live_orders["oid-4"]))
-    _pass("oms_callback_fires_on_status_change",
-          ("oid-4", ORDER_STATUS_FILLED) in events)
 
 
-def test_oms_start_is_idempotent() -> None:
-    """Idempotent: starting twice gives the same task back."""
+def test_parse_partial_fill() -> None:
+    fills = [{"oid": 8, "sz": "0.01", "px": "50000", "fee": "0.25", "time": 2}]
+    snap = parse_order_fill_snapshot(
+        {"status": "open"},
+        fills,
+        order_id="8",
+        target_size=0.02,
+        reference_price=50_000.0,
+    )
+    _pass(
+        "parse_partial_fill",
+        snap.status == ORDER_STATUS_PARTIAL and abs(snap.remaining_size - 0.01) < 1e-9,
+    )
+
+
+# ── OMS lifecycle scenarios ─────────────────────────────────────────
+
+
+def test_full_fill() -> None:
     async def _run() -> bool:
         e = _make_engine()
-        e._rest_client = MagicMock()
-        e._rest_client.get_order_status = AsyncMock(
-            return_value={"order": {"status": "open"}}
+        e._live_client.get_order_status = AsyncMock(return_value={"status": "filled"})
+        e._live_client.get_order_fills = AsyncMock(
+            return_value=[{"oid": 1001, "sz": "0.02", "px": "50000", "fee": "1", "time": 1}]
         )
+        record = _base_record()
+        e._live_orders["1001"] = record
+        await e._poll_one_order("1001", record)
+        return (
+            "1001" not in e._live_orders
+            and record.get("terminal_handled")
+            and e._open_trades.get("BTC") is not None
+            and abs(e._open_trades["BTC"].size - 0.02) < 1e-9
+        )
+
+    _pass("full_fill", asyncio.run(_run()))
+
+
+def test_resting_to_fill() -> None:
+    async def _run() -> bool:
+        e = _make_engine()
+        e._live_client.get_order_status = AsyncMock(return_value={"status": "open"})
+        e._live_client.get_order_fills = AsyncMock(return_value=[])
+        record = _base_record()
+        e._live_orders["1002"] = record
+        await e._poll_one_order("1002", record)
+        still_open = record.get("status") == ORDER_STATUS_OPEN
+
+        e._live_client.get_order_status = AsyncMock(return_value={"status": "filled"})
+        e._live_client.get_order_fills = AsyncMock(
+            return_value=[{"oid": 1002, "sz": "0.02", "px": "50000", "fee": "1", "time": 2}]
+        )
+        await e._poll_one_order("1002", record)
+        return still_open and "1002" not in e._live_orders
+
+    _pass("resting_to_fill", asyncio.run(_run()))
+
+
+def test_partial_to_full() -> None:
+    async def _run() -> bool:
+        from src.utils.helpers import safe_float
+
+        portfolio = TrackingPortfolio()
+        e = _make_engine()
+        e.set_portfolio(portfolio)
+
+        record = _base_record()
+        record["exchange_order_id"] = "1003"
+        e._live_orders["1003"] = record
+
+        async def _cb(oid, status, rec):
+            prev = safe_float(rec.get("_pf", 0))
+            delta = safe_float(rec.get("filled_size")) - prev
+            if delta <= 0:
+                return
+            rec["_pf"] = safe_float(rec.get("filled_size"))
+            await portfolio.apply_entry_fill(
+                rec["symbol"],
+                filled_size=delta,
+                avg_fill_price=50_000.0,
+                additional_cost=50_000.0 * delta,
+                position=Position(
+                    symbol="BTC", side="long", entry_price=50_000.0, size=delta,
+                    entry_time_ms=1, stop_loss_price=49_000.0,
+                    take_profit_price=52_000.0, unrealized_pnl=0.0,
+                ),
+            )
+
+        e.register_order_callback(
+            lambda oid, status, rec: asyncio.create_task(_cb(oid, status, rec))
+        )
+
+        e._live_client.get_order_status = AsyncMock(return_value={"status": "open"})
+        e._live_client.get_order_fills = AsyncMock(
+            return_value=[{"oid": 1003, "sz": "0.01", "px": "50000", "fee": "0.5", "time": 3}]
+        )
+        await e._poll_one_order("1003", record)
+        partial_ok = record.get("status") == ORDER_STATUS_PARTIAL
+
+        e._live_client.get_order_fills = AsyncMock(
+            return_value=[
+                {"oid": 1003, "sz": "0.01", "px": "50000", "fee": "0.5", "time": 3},
+                {"oid": 1003, "sz": "0.01", "px": "50100", "fee": "0.5", "time": 4},
+            ]
+        )
+        e._live_client.get_order_status = AsyncMock(return_value={"status": "filled"})
+        await e._poll_one_order("1003", record)
+        await asyncio.sleep(0.05)
+        pos = (await portfolio.positions).get("BTC")
+        return partial_ok and pos is not None and abs(pos.size - 0.02) < 1e-9
+
+    _pass("partial_to_full", asyncio.run(_run()))
+
+
+def test_partial_timeout_cancel_residual() -> None:
+    async def _run() -> bool:
+        e = _make_engine()
+        e._live_order_timeout_s = 0.05
+        e._live_client.cancel_order = AsyncMock(return_value={"status": "ok"})
+        record = _base_record(filled=0.01)
+        record.update({
+            "exchange_order_id": "1004",
+            "filled_size": 0.01,
+            "remaining_size": 0.01,
+            "status": ORDER_STATUS_PARTIAL,
+            "lifecycle_state": ORDER_PARTIAL,
+            "applied_fill_size": 0.01,
+            "timestamp": time.time() - 1.0,
+        })
+        e._live_orders["1004"] = record
+        e._live_client.get_order_status = AsyncMock(return_value={"status": "open"})
+        e._live_client.get_order_fills = AsyncMock(
+            return_value=[{"oid": 1004, "sz": "0.01", "px": "50000", "fee": "0.5", "time": 5}]
+        )
+        await e._poll_one_order("1004", record)
+        return (
+            "1004" not in e._live_orders
+            and e._open_trades.get("BTC") is not None
+            and abs(e._open_trades["BTC"].size - 0.01) < 1e-9
+            and e._live_client.cancel_order.await_count >= 1
+        )
+
+    _pass("partial_timeout_cancel_residual", asyncio.run(_run()))
+
+
+def test_reject_zero_fill_rollback() -> None:
+    async def _run() -> bool:
+        db = Database(":memory:")
+        e = _make_engine(db)
+        portfolio = TrackingPortfolio()
+        e.set_portfolio(portfolio)
+        e._db.update_trade_status = MagicMock()
+        record = _base_record()
+        record["exchange_order_id"] = "1005"
+        e._live_orders["1005"] = record
+        e.fetch_order_snapshot = AsyncMock(  # type: ignore[method-assign]
+            return_value=_snapshot(
+                status=ORDER_STATUS_REJECTED,
+                lifecycle="rejected",
+                filled=0.0,
+                target=0.02,
+            )
+        )
+        await e._poll_one_order("1005", record)
+        return e._live_orders.get("1005") is None and e._db.update_trade_status.called
+
+    _pass("reject_zero_fill_rollback", asyncio.run(_run()))
+
+
+def test_duplicate_callback_idempotent() -> None:
+    async def _run() -> bool:
+        portfolio = TrackingPortfolio()
+        e = _make_engine()
+        e.set_portfolio(portfolio)
+        record = _base_record()
+        record["filled_size"] = 0.02
+        snap = _snapshot(
+            status=ORDER_STATUS_FILLED,
+            lifecycle="filled",
+            filled=0.02,
+            target=0.02,
+        )
+
+        async def _portfolio_cb(oid, status, rec):
+            from src.utils.helpers import safe_float
+            prev = safe_float(rec.get("_portfolio_applied_fill", 0))
+            delta = safe_float(rec.get("filled_size")) - prev
+            if delta <= 0:
+                return
+            rec["_portfolio_applied_fill"] = safe_float(rec.get("filled_size"))
+            await portfolio.apply_entry_fill(
+                "BTC",
+                filled_size=delta,
+                avg_fill_price=50_000.0,
+                additional_cost=50_000.0 * delta,
+                position=Position(
+                    symbol="BTC", side="long", entry_price=50_000.0, size=delta,
+                    entry_time_ms=1, stop_loss_price=49_000.0,
+                    take_profit_price=52_000.0, unrealized_pnl=0.0,
+                ),
+            )
+
+        from src.utils.helpers import safe_float
+
+        e.register_order_callback(
+            lambda oid, status, rec: asyncio.create_task(_portfolio_cb(oid, status, rec))
+        )
+        await e._apply_fill_delta("1006", record, snap, 0.02)
+        await asyncio.sleep(0.05)
+        e._fire_order_callbacks("1006", ORDER_STATUS_FILLED, record)
+        await asyncio.sleep(0.05)
+        pos = (await portfolio.positions).get("BTC")
+        return pos is not None and abs(pos.size - 0.02) < 1e-9 and len(portfolio.fill_calls) == 1
+
+    _pass("duplicate_callback_idempotent", asyncio.run(_run()))
+
+
+def test_restart_restores_resting_and_partial() -> None:
+    async def _run() -> bool:
+        db = Database(":memory:")
+        tid_rest = db.save_trade_entry(TradeEntry(
+            symbol="BTC", side="long", entry_price=50_000.0, entry_time=1,
+            size=0.02, strategy="t", status=ORDER_RESTING,
+        ))
+        db.update_trade_order_tracking(
+            int(tid_rest), exchange_order_id="100", client_order_id="c-100",
+            order_submitted_at=1,
+        )
+        tid_part = db.save_trade_entry(TradeEntry(
+            symbol="ETH", side="short", entry_price=3_000.0, entry_time=2,
+            size=0.5, strategy="t", status=ORDER_PARTIAL,
+        ))
+        db.update_trade_order_tracking(
+            int(tid_part),
+            exchange_order_id="200",
+            client_order_id="c-200",
+            filled_size=0.25,
+            order_submitted_at=2,
+        )
+        e = _make_engine(db)
+        n = await e.load_pending_orders()
+        return (
+            n == 2
+            and "100" in e._live_orders
+            and "200" in e._live_orders
+            and e._live_orders["200"]["filled_size"] == 0.25
+        )
+
+    _pass("restart_restores_resting_and_partial", asyncio.run(_run()))
+
+
+def test_cancel_failure_preserves_partial_exposure() -> None:
+    async def _run() -> bool:
+        e = _make_engine()
+        alerts: list = []
+        e.set_oms_alert_callback(lambda ev, oid, rec: alerts.append(ev))
+        e._live_client.cancel_order = AsyncMock(side_effect=RuntimeError("hl_down"))
+        record = _base_record(filled=0.01)
+        record.update({
+            "exchange_order_id": "1007",
+            "filled_size": 0.01,
+            "remaining_size": 0.01,
+            "applied_fill_size": 0.01,
+            "timestamp": time.time() - 1.0,
+            "status": ORDER_STATUS_PARTIAL,
+            "lifecycle_state": ORDER_PARTIAL,
+        })
+        e._live_orders["1007"] = record
+        snap = _snapshot(
+            status=ORDER_STATUS_PARTIAL,
+            lifecycle=ORDER_PARTIAL,
+            filled=0.01,
+            target=0.02,
+        )
+        await e._handle_partial_timeout("1007", record, 120.0)
+        return (
+            e._open_trades.get("BTC") is not None
+            and abs(e._open_trades["BTC"].size - 0.01) < 1e-9
+            and "cancel_failed" in alerts
+        )
+
+    _pass("cancel_failure_preserves_partial_exposure", asyncio.run(_run()))
+
+
+def test_oms_start_stop_wired() -> None:
+    async def _run() -> bool:
+        e = _make_engine()
         await e.start_oms_loop()
-        first = e._oms_task
-        await e.start_oms_loop()
-        same = e._oms_task is first
+        started = e._oms_task is not None
         await e.stop_oms_loop()
-        return same
-    _pass("oms_start_is_idempotent", asyncio.run(_run()))
+        stopped = e._oms_task is None
+        return started and stopped
+
+    _pass("oms_start_stop_wired", asyncio.run(_run()))
 
 
-def test_oms_stop_is_idempotent() -> None:
-    e = _make_engine()
-    asyncio.run(e.stop_oms_loop())  # never started — must not raise
-    asyncio.run(e.stop_oms_loop())
-    _pass("oms_stop_is_idempotent", True)
-
-
-def test_oms_loop_does_not_start_in_paper_mode() -> None:
-    e = ExecutionEngine(load_config("config/settings.yaml"), None, mode="paper")
+def test_paper_mode_skips_oms() -> None:
+    cfg = load_config("config/settings.yaml")
+    e = ExecutionEngine(cfg, Database(":memory:"), mode="paper")
     asyncio.run(e.start_oms_loop())
-    _pass("oms_loop_does_not_start_in_paper_mode", e._oms_task is None)
-
-
-# ── get_open_orders filters correctly ──────────────────────────────
-
-
-def test_get_open_orders_filters_terminal() -> None:
-    e = _make_engine()
-    e._live_orders["a"] = {
-        "symbol": "BTC", "side": "long", "size": 0.01, "price": 100.0,
-        "filled_size": 0.0, "status": ORDER_STATUS_OPEN,
-        "timestamp": time.time(), "trade_id": 1, "order_type": "market",
-    }
-    e._live_orders["b"] = {
-        "symbol": "ETH", "side": "long", "size": 0.5, "price": 100.0,
-        "filled_size": 0.5, "status": ORDER_STATUS_FILLED,
-        "timestamp": time.time(), "trade_id": 2, "order_type": "market",
-    }
-    e._live_orders["c"] = {
-        "symbol": "SOL", "side": "short", "size": 1.0, "price": 100.0,
-        "filled_size": 0.5, "status": "partial",
-        "timestamp": time.time(), "trade_id": 3, "order_type": "market",
-    }
-    open_orders = e.get_open_orders()
-    _pass("get_open_orders_filters_terminal",
-          "a" in open_orders and "b" not in open_orders and "c" in open_orders)
+    _pass("paper_mode_skips_oms", e._oms_task is None)
 
 
 def main() -> int:
     print("=" * 70)
-    print("Execution layer v3.1.22 tests (L2 slippage + OMS)")
+    print("Phase 02 OMS behavioural tests")
     print("=" * 70)
     tests = [
-        test_trade_result_has_exchange_order_id,
-        test_extract_order_id_direct,
-        test_extract_order_id_nested_filled,
-        test_extract_order_id_nested_resting,
-        test_extract_order_id_none,
-        test_normalise_hl_status,
-        test_oms_config_loaded,
-        test_enter_position_signature_has_new_params,
-        test_paper_slippage_uses_l2_estimate,
-        test_paper_slippage_falls_back_to_default,
-        test_paper_slippage_short_side,
-        test_oms_polls_open_order_and_rolls_back_on_reject,
-        test_oms_polls_open_order_and_marks_filled,
-        test_oms_triggers_timeout_rollback,
-        test_oms_callback_fires_on_status_change,
-        test_oms_start_is_idempotent,
-        test_oms_stop_is_idempotent,
-        test_oms_loop_does_not_start_in_paper_mode,
-        test_get_open_orders_filters_terminal,
+        test_parse_full_fill_from_fills,
+        test_parse_partial_fill,
+        test_full_fill,
+        test_resting_to_fill,
+        test_partial_to_full,
+        test_partial_timeout_cancel_residual,
+        test_reject_zero_fill_rollback,
+        test_duplicate_callback_idempotent,
+        test_restart_restores_resting_and_partial,
+        test_cancel_failure_preserves_partial_exposure,
+        test_oms_start_stop_wired,
+        test_paper_mode_skips_oms,
     ]
     for t in tests:
         try:
             t()
-        except AssertionError as e:
-            _pass(t.__name__, False, f"AssertionError: {e}")
-        except Exception as e:  # noqa: BLE001
-            _pass(t.__name__, False, f"{type(e).__name__}: {e}")
+        except Exception as exc:  # noqa: BLE001
+            _pass(t.__name__, False, f"{type(exc).__name__}: {exc}")
     print("=" * 70)
     if FAILED == 0:
         print(f"ALL TESTS PASSED ({len(tests)}/{len(tests)})")

@@ -10,6 +10,9 @@ import sys
 sys.path.insert(0, r"C:\Users\Braindead\Documents\trading-bot-hyperliquid")
 
 from src.core.correlation_monitor import CorrelationMonitor
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def test_correlation_monitor():

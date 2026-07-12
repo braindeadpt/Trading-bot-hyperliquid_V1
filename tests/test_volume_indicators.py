@@ -25,6 +25,9 @@ from src.strategies.indicators import (  # noqa: E402
     calculate_obv_slope,
     calculate_vwap_multi_tf,
 )
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 def make_candle(open_: float, high: float, low: float, close: float,

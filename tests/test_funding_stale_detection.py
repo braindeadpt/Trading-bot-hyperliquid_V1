@@ -22,6 +22,9 @@ from src.exchanges.funding_aggregator import (
     FundingOI,
     FundingOIAggregator,
 )
+import pytest
+
+pytestmark = pytest.mark.unit
 
 FAILED = 0
 

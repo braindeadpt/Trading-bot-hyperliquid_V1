@@ -74,5 +74,5 @@ pycparser==2.22           # Required by cffi
 # ═════════════════════════════════════════════════════════════════════════════
 # Dev / Test (optional)
 # ═════════════════════════════════════════════════════════════════════════════
-# pytest==8.3.5           # Unit test framework (if migrating from manual tests)
-# pytest-asyncio==0.26.0  # Async test support
+pytest==8.4.2             # Unit test framework
+pytest-asyncio==0.26.0    # Async test support
