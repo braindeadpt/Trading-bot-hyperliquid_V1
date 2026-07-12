@@ -76,3 +76,11 @@ pycparser==2.22           # Required by cffi
 # ═════════════════════════════════════════════════════════════════════════════
 pytest==8.4.2             # Unit test framework
 pytest-asyncio==0.26.0    # Async test support
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Optional: node_trades S3 rebuild (GoldRush parity fallback)
+# ═════════════════════════════════════════════════════════════════════════════
+# boto3==1.35.0           # Required only for real S3 downloads via
+#                         # scripts/hl_node_trades_rebuild.py --execute
+#                         # (requester-pays; AWS credentials required)
+# lz4==4.3.3              # Optional: decompress LZ4-framed node_trades archives
