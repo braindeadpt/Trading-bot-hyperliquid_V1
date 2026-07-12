@@ -116,6 +116,30 @@ def safe_json_load(path: Union[str, Path], default: Any = None) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def optional_float(value: Any) -> Optional[float]:
+    """Convert to float or return ``None`` — never silently map missing to zero."""
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, (int, np.integer)):
+        return float(value)
+    if isinstance(value, str):
+        value = value.strip().replace(",", "")
+        if value == "":
+            return None
+        try:
+            f = float(value)
+            if math.isnan(f) or math.isinf(f):
+                return None
+            return f
+        except ValueError:
+            return None
+    return None
+
+
 def safe_float(value: Any, default: float = 0.0) -> float:
     """
     Convert *value* to ``float`` safely.

@@ -25,6 +25,8 @@ from typing import Any, List, Optional, Sequence, Tuple
 import aiohttp
 
 from src.data.database import Candle, Database
+from src.data.hl_research_backfill import split_taker_volume_from_kline
+from src.utils.config import get_trading_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +77,7 @@ def kline_to_candle(k: list, symbol: str) -> Candle:
     volume (k[9]) so CVDOrderFlow can run on backfilled 1m history.
     """
     volume = float(k[5])
-    buy = float(k[9]) if len(k) > 9 else 0.0
-    sell = max(volume - buy, 0.0)
+    buy, sell, has_taker = split_taker_volume_from_kline(k, volume)
     trade_count = int(k[8]) if len(k) > 8 else 0
     return Candle(
         symbol=symbol,
@@ -89,8 +90,8 @@ def kline_to_candle(k: list, symbol: str) -> Candle:
         funding_rate=None,
         oi_total=None,
         oi_delta=None,
-        buy_volume=buy,
-        sell_volume=sell,
+        buy_volume=buy if has_taker else None,
+        sell_volume=sell if has_taker else None,
         trade_count=trade_count,
     )
 
@@ -292,7 +293,7 @@ def ensure_candle_history(
     if not config.get("database.auto_backfill_on_start", True):
         return 0
 
-    symbols = list(config.get("assets", config.get("symbols", ["BTC", "ETH", "SOL"])))
+    symbols = get_trading_symbols(config)
     min_15m = int(config.get("database.backfill_min_candles_15m", 80))
     days = int(config.get("database.backfill_days", 7))
     timeframes = config.get("database.backfill_timeframes", list(DEFAULT_TIMEFRAMES))

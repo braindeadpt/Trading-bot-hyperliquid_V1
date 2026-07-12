@@ -14,6 +14,23 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from src.core.order_lifecycle import (
+    ORDER_CANCELLED,
+    ORDER_CLOSE_PENDING,
+    ORDER_FILLED,
+    ORDER_PARTIAL,
+    ORDER_PENDING_SUBMISSION,
+    ORDER_REJECTED,
+    ORDER_RESTING,
+    ORDER_SUBMISSION_UNKNOWN,
+    AmbiguousOrderResponse,
+    LiveExecutionError,
+    OrderFillSnapshot,
+    extract_order_id,
+    parse_hyperliquid_close_response,
+    parse_hyperliquid_entry_response,
+    parse_order_fill_snapshot,
+)
 from src.data.database import Database, TradeEntry, TradeExit
 from src.core.regime import regime_strategy_name
 from src.strategies.base import MarketEvent, Position, Signal
@@ -65,6 +82,16 @@ class TradeResult:
     funding_total: float = 0.0  # accumulated funding cashflow over the hold
     pnl_pct_capital: float = 0.0  # pnl_pct as fraction of total capital (for Kelly)
     exchange_order_id: Optional[str] = None  # v3.1.22: HL order id for OMS tracking
+
+
+@dataclass
+class KillSwitchResult:
+    """Outcome of a live kill-switch invocation."""
+
+    orders_cancelled: int = 0
+    positions_closed: List[str] = field(default_factory=list)
+    exchange_flat: bool = False
+    errors: List[str] = field(default_factory=list)
 
 
 class ExecutionEngine:
@@ -161,10 +188,140 @@ class ExecutionEngine:
             config.get("execution.live_order_timeout_s", DEFAULT_LIVE_ORDER_TIMEOUT_S)
         )
         self._oms_task: Optional[asyncio.Task[Any]] = None
+        self._oms_alert_callback: Optional[Any] = None
+
+        # Phase 01: portfolio reference for rollback (injected by engine)
+        self._portfolio: Optional[Any] = None
+
+        # Phase 01: symbols blocked after ambiguous HL responses
+        self._blocked_symbols: Dict[str, str] = {}
+
+        # Phase 01: idempotency — client order ids already submitted
+        self._submitted_client_order_ids: Dict[str, int] = {}
+
+        # Phase 01: align clamp semantics with RiskManager
+        config_max_pos_pct = safe_float(
+            config.get("risk.max_position_size_pct", 5.0)
+        ) / 100.0
+        self._max_position_size_pct = min(
+            config_max_pos_pct,
+            self.MAX_POSITION_SIZE_CEILING,
+        )
+        config_leverage = safe_float(config.get("risk.leverage_max", 1.0))
+        self._leverage_max = max(1.0, min(config_leverage, 20.0))
+
+        native_cfg = config.get("execution.native_protection", {}) or {}
+        self._native_protection_enabled = bool(native_cfg.get("enabled", True))
+
+        # Phase 03: injected by engine after live client is ready
+        self._protection_manager: Optional[Any] = None
+        self._reconciler: Optional[Any] = None
+
+    MAX_POSITION_SIZE_CEILING: float = 0.20
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    def set_portfolio(self, portfolio: Any) -> None:
+        """Inject PortfolioState for live rollback paths (Phase 01)."""
+        self._portfolio = portfolio
+
+    def set_protection_manager(self, manager: Any) -> None:
+        """Inject :class:`NativeProtectionManager` (Phase 03)."""
+        self._protection_manager = manager
+
+    def set_reconciler(self, reconciler: Any) -> None:
+        """Inject :class:`ExchangeReconciler` for entry gating (Phase 03)."""
+        self._reconciler = reconciler
+
+    def reconciliation_blocks_entries(self) -> bool:
+        recon = self._reconciler
+        if recon is None:
+            return False
+        return bool(getattr(recon, "entries_blocked", lambda: False)())
+
+    def reconciliation_block_reason(self) -> Optional[str]:
+        recon = self._reconciler
+        if recon is None:
+            return None
+        return getattr(recon, "block_reason", lambda: None)()
+
+    def set_oms_alert_callback(self, cb: Any) -> None:
+        """Register ``cb(event: str, order_id: str, record: dict)`` for OMS alerts."""
+        if callable(cb):
+            self._oms_alert_callback = cb
+
+    def is_symbol_blocked(self, symbol: str) -> bool:
+        return symbol.upper() in {
+            k.upper() for k in self._blocked_symbols
+        }
+
+    def get_symbol_block_reason(self, symbol: str) -> Optional[str]:
+        for key, reason in self._blocked_symbols.items():
+            if key.upper() == symbol.upper():
+                return reason
+        return None
+
+    def block_symbol(self, symbol: str, reason: str) -> None:
+        self._blocked_symbols[symbol.upper()] = reason
+        logger.error(
+            "ExecutionEngine blocked entries for %s — %s",
+            symbol,
+            reason,
+        )
+
+    def unblock_symbol(self, symbol: str) -> None:
+        self._blocked_symbols.pop(symbol.upper(), None)
+
+    def _require_live_execution_ready(self) -> None:
+        """Fail closed when live prerequisites are missing."""
+        if self._rest_client is None:
+            raise LiveExecutionError("rest_client_unavailable")
+        if not self._live_signing_ready or self._live_client is None:
+            raise LiveExecutionError("signing_not_configured")
+
+    @staticmethod
+    def _make_client_order_id(symbol: str, side: str, timestamp_ms: int) -> str:
+        return f"hlbot-{symbol.upper()}-{side}-{timestamp_ms}"
+
+    def _map_lifecycle_to_oms_status(self, lifecycle_state: str) -> str:
+        mapping = {
+            ORDER_PENDING_SUBMISSION: ORDER_STATUS_OPEN,
+            ORDER_RESTING: ORDER_STATUS_OPEN,
+            ORDER_PARTIAL: ORDER_STATUS_PARTIAL,
+            ORDER_FILLED: ORDER_STATUS_FILLED,
+            ORDER_CLOSE_PENDING: ORDER_STATUS_OPEN,
+            ORDER_SUBMISSION_UNKNOWN: ORDER_STATUS_OPEN,
+        }
+        return mapping.get(lifecycle_state, ORDER_STATUS_OPEN)
+
+    async def _rollback_live_entry(
+        self,
+        portfolio: Any,
+        symbol: str,
+        trade_id: int,
+        reason: str,
+    ) -> None:
+        """Atomic rollback after a failed live entry."""
+        target = portfolio if portfolio is not None else self._portfolio
+        if target is not None:
+            try:
+                await target.cancel_position(symbol)
+            except Exception as inner_exc:  # noqa: BLE001
+                logger.exception("cancel_position rollback failed: %s", inner_exc)
+        async with self._lock:
+            self._open_trades.pop(symbol, None)
+            self._last_entry_ms.pop(symbol, None)
+        if trade_id > 0:
+            try:
+                self._db.update_trade_status(
+                    trade_id,
+                    status="cancelled",
+                    reason=reason[:100],
+                )
+            except Exception as inner_exc:  # noqa: BLE001
+                logger.exception("update_trade_status rollback failed: %s", inner_exc)
 
     async def open(self) -> None:
         """Prepare the execution engine (open REST session if needed)."""
@@ -200,6 +357,7 @@ class ExecutionEngine:
 
     async def close(self) -> None:
         """Gracefully close any open REST session."""
+        await self.stop_oms_loop()
         self._live_client = None
         self._live_signing_ready = False
         if self._rest_client is not None:
@@ -296,6 +454,52 @@ class ExecutionEngine:
         except Exception:
             logger.exception("Failed DB duplicate-position check for %s", signal.symbol)
 
+        if self._mode in ("testnet", "mainnet") and self.reconciliation_blocks_entries():
+            block_reason = self.reconciliation_block_reason() or "reconciliation_blocked"
+            logger.warning(
+                "enter_position REJECTED %s — reconciliation gate (%s)",
+                signal.symbol,
+                block_reason,
+            )
+            return TradeResult(
+                trade_id=0, symbol=signal.symbol, side=signal.side,
+                entry_price=0.0, exit_price=None, size=0.0,
+                pnl_usd=0.0, pnl_pct=0.0, status="rejected",
+                reason=f"reconciliation_blocked:{block_reason}",
+                timestamp_ms=now_ms,
+            )
+
+        if self._mode in ("testnet", "mainnet") and self.is_symbol_blocked(signal.symbol):
+            block_reason = self.get_symbol_block_reason(signal.symbol) or "symbol_blocked"
+            logger.warning(
+                "enter_position REJECTED %s — blocked until reconciliation (%s)",
+                signal.symbol,
+                block_reason,
+            )
+            return TradeResult(
+                trade_id=0, symbol=signal.symbol, side=signal.side,
+                entry_price=0.0, exit_price=None, size=0.0,
+                pnl_usd=0.0, pnl_pct=0.0, status="rejected",
+                reason=f"symbol_blocked:{block_reason}",
+                timestamp_ms=now_ms,
+            )
+
+        client_order_id = self._make_client_order_id(signal.symbol, signal.side, now_ms)
+        if client_order_id in self._submitted_client_order_ids:
+            prior_trade = self._submitted_client_order_ids[client_order_id]
+            logger.warning(
+                "enter_position REJECTED %s — duplicate client_order_id (trade_id=%s)",
+                signal.symbol,
+                prior_trade,
+            )
+            return TradeResult(
+                trade_id=0, symbol=signal.symbol, side=signal.side,
+                entry_price=0.0, exit_price=None, size=0.0,
+                pnl_usd=0.0, pnl_pct=0.0, status="rejected",
+                reason="duplicate_client_order_id",
+                timestamp_ms=now_ms,
+            )
+
         raw_price = safe_float(signal.entry_price)
         if raw_price <= 0.0:
             logger.error("enter_position: invalid price %.4f for %s", raw_price, signal.symbol)
@@ -330,24 +534,24 @@ class ExecutionEngine:
         else:
             fill_price = raw_price
 
-        # CRIT-003 FIX: Clamp position size to hard limits
-        # Max position size = 20% of capital, max leverage consideration
-        max_position_size_pct = 0.20  # 20% of capital
+        # Phase 01: clamp using the same config semantics as RiskManager
         capital = await portfolio.current_capital
-        max_size_by_capital = (capital * max_position_size_pct) / fill_price if fill_price > 0 else 0.0
-        
-        # Also enforce max notional limit
-        max_notional = capital * max_position_size_pct
+        max_notional = capital * self._max_position_size_pct * self._leverage_max
         current_notional = fill_price * size
-        
-        if current_notional > max_notional:
+
+        if current_notional > max_notional and fill_price > 0:
             old_size = size
-            size = max_notional / fill_price if fill_price > 0 else size
+            size = max_notional / fill_price
             logger.warning(
-                "CRIT-003: POSITION SIZE CLAMPED for %s — %.6f → %.6f "
-                "(notional $%.2f > max $%.2f, %.1f%% of capital)",
-                signal.symbol, old_size, size, current_notional, max_notional,
-                (current_notional / capital * 100) if capital > 0 else 0,
+                "POSITION SIZE CLAMPED for %s — %.6f → %.6f "
+                "(notional $%.2f > max $%.2f, cap=%.1f%% × %.1fx)",
+                signal.symbol,
+                old_size,
+                size,
+                current_notional,
+                max_notional,
+                self._max_position_size_pct * 100.0,
+                self._leverage_max,
             )
 
         notional = fill_price * size
@@ -424,6 +628,48 @@ class ExecutionEngine:
         except (TypeError, ValueError):
             signal_meta_json = None
 
+        exchange_order_id: Optional[str] = None
+        lifecycle_state = ORDER_FILLED if self._mode == "paper" else ORDER_PENDING_SUBMISSION
+
+        if self._mode in ("testnet", "mainnet"):
+            self._require_live_execution_ready()
+            try:
+                hl_response = await self._submit_live_order(
+                    signal, size, fill_price
+                )
+                parsed = parse_hyperliquid_entry_response(hl_response)
+                if parsed.ambiguous:
+                    lifecycle_state = ORDER_SUBMISSION_UNKNOWN
+                    exchange_order_id = parsed.exchange_order_id
+                    self.block_symbol(
+                        signal.symbol,
+                        f"submission_unknown:{parsed.error_message or 'ambiguous'}",
+                    )
+                elif parsed.error_message and parsed.lifecycle_state == ORDER_REJECTED:
+                    raise LiveExecutionError(parsed.error_message)
+                else:
+                    lifecycle_state = parsed.lifecycle_state
+                    exchange_order_id = parsed.exchange_order_id
+            except LiveExecutionError:
+                raise
+            except AmbiguousOrderResponse:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "Live order failed for %s before DB persist: %s",
+                    signal.symbol,
+                    exc,
+                    exc_info=True,
+                )
+                raise LiveExecutionError(str(exc)) from exc
+
+        trade_status = "open"
+        if self._mode in ("testnet", "mainnet"):
+            if lifecycle_state == ORDER_RESTING:
+                trade_status = ORDER_RESTING
+            elif lifecycle_state in (ORDER_PENDING_SUBMISSION, ORDER_SUBMISSION_UNKNOWN):
+                trade_status = lifecycle_state
+
         entry_record = TradeEntry(
             symbol=signal.symbol,
             side=signal.side,
@@ -432,7 +678,7 @@ class ExecutionEngine:
             size=size,
             strategy=signal.strategy,
             sub_strategy=str(sub_strategy) if sub_strategy else None,
-            status="open",
+            status=trade_status,
             entry_adx=entry_adx,
             entry_oir=entry_oir,
             entry_funding=entry_funding,
@@ -443,62 +689,65 @@ class ExecutionEngine:
             signal_metadata=signal_meta_json,
             entry_fee=entry_fee,
         )
-        trade_id = self._db.save_trade_entry(entry_record)
 
-        # v3.1.22: HL order id (only set in live mode after _submit_live_order)
-        exchange_order_id: Optional[str] = None
+        trade_id = self._db.save_trade_entry(entry_record)
+        self._submitted_client_order_ids[client_order_id] = int(trade_id)
 
         if self._mode in ("testnet", "mainnet"):
-            # v3.1.17 C9: on live order failure, roll back the phantom
-            # position we just wrote to the DB and portfolio so we are
-            # not left holding inventory that the exchange never saw.
-            try:
-                hl_response = await self._submit_live_order(
-                    signal, size, fill_price
+            self._db.update_trade_order_tracking(
+                int(trade_id),
+                exchange_order_id=exchange_order_id,
+                client_order_id=client_order_id,
+                order_submitted_at=now_ms,
+                filled_size=float(size) if lifecycle_state == ORDER_FILLED else 0.0,
+            )
+
+        if self._mode in ("testnet", "mainnet") and exchange_order_id:
+            oms_status = self._map_lifecycle_to_oms_status(lifecycle_state)
+            target_size = float(size)
+            filled = target_size if lifecycle_state == ORDER_FILLED else 0.0
+            self._live_orders[exchange_order_id] = {
+                "symbol": signal.symbol,
+                "side": signal.side,
+                "size": target_size,
+                "price": float(fill_price),
+                "filled_size": filled,
+                "remaining_size": max(0.0, target_size - filled),
+                "avg_fill_price": float(fill_price) if filled > 0 else 0.0,
+                "cumulative_fee": float(entry_fee) if filled > 0 else 0.0,
+                "status": oms_status,
+                "lifecycle_state": lifecycle_state,
+                "timestamp": time.time(),
+                "submitted_at_ms": now_ms,
+                "last_fill_at_ms": now_ms if filled > 0 else None,
+                "trade_id": int(trade_id),
+                "order_type": order_type,
+                "client_order_id": client_order_id,
+                "exchange_order_id": exchange_order_id,
+                "applied_fill_size": filled,
+                "terminal_handled": lifecycle_state in (ORDER_FILLED, ORDER_REJECTED),
+                "processed_events": [],
+            }
+            logger.info(
+                "OMS: tracking order %s state=%s (symbol=%s trade_id=%d)",
+                exchange_order_id,
+                lifecycle_state,
+                signal.symbol,
+                trade_id,
+            )
+            if lifecycle_state == ORDER_FILLED:
+                self._fire_order_callbacks(
+                    exchange_order_id,
+                    ORDER_STATUS_FILLED,
+                    self._live_orders[exchange_order_id],
                 )
-                # v3.1.22: capture the HL order id for OMS tracking.
-                # HL responses come back as either
-                # {"status": "ok", "response": {"data": {"statuses": [...]}}}
-                # or {"raw": ...}. Try the common locations.
-                exchange_order_id = self._extract_order_id(hl_response)
-                if exchange_order_id:
-                    self._live_orders[exchange_order_id] = {
-                        "symbol": signal.symbol,
-                        "side": signal.side,
-                        "size": float(size),
-                        "price": float(fill_price),
-                        "filled_size": 0.0,
-                        "status": ORDER_STATUS_OPEN,
-                        "timestamp": time.time(),
-                        "trade_id": int(trade_id),
-                        "order_type": order_type,
-                    }
-                    logger.info(
-                        "OMS: tracking order %s (symbol=%s trade_id=%d)",
-                        exchange_order_id, signal.symbol, trade_id,
-                    )
-            except Exception as exc:
-                logger.error(
-                    "Live order failed for %s — rolling back trade_id=%d: %s",
-                    signal.symbol, trade_id, exc,
-                    exc_info=True,
-                )
-                try:
-                    await self._portfolio.cancel_position(signal.symbol)
-                except Exception as inner_exc:  # noqa: BLE001
-                    logger.exception("cancel_position rollback failed: %s", inner_exc)
-                async with self._lock:
-                    self._open_trades.pop(signal.symbol, None)
-                    self._last_entry_ms.pop(signal.symbol, None)
-                try:
-                    self._db.update_trade_status(
-                        trade_id,
-                        status="cancelled",
-                        reason=f"live_order_failed: {str(exc)[:100]}",
-                    )
-                except Exception as inner_exc:  # noqa: BLE001
-                    logger.exception("update_trade_status rollback failed: %s", inner_exc)
-                raise
+
+        result_status = "open"
+        if self._mode in ("testnet", "mainnet") and lifecycle_state not in (
+            ORDER_FILLED,
+            ORDER_PARTIAL,
+        ):
+            result_status = "pending"
 
         result = TradeResult(
             trade_id=trade_id,
@@ -509,7 +758,7 @@ class ExecutionEngine:
             size=size,
             pnl_usd=0.0,
             pnl_pct=0.0,
-            status="open",
+            status=result_status,
             reason=signal.reason,
             timestamp_ms=now_ms,
             entry_fee=entry_fee,
@@ -517,7 +766,8 @@ class ExecutionEngine:
         )
 
         async with self._lock:
-            self._open_trades[signal.symbol] = result
+            if result_status == "open":
+                self._open_trades[signal.symbol] = result
             self._last_entry_ms[signal.symbol] = now_ms
 
         logger.info(
@@ -608,7 +858,41 @@ class ExecutionEngine:
         capital = safe_float(getattr(self, "_initial_capital", 0.0), 0.0)
         pnl_pct_capital = safe_divide(pnl_usd, capital, 0.0) if capital > 0 else 0.0
 
-        # Update DB
+        if self._mode in ("testnet", "mainnet"):
+            self._require_live_execution_ready()
+            if self._protection_manager is not None:
+                await self._protection_manager.cancel_protection(position.symbol)
+            try:
+                hl_response = await self._submit_live_close(position, fill_exit)
+                parsed = parse_hyperliquid_close_response(hl_response)
+                if parsed.lifecycle_state != ORDER_FILLED:
+                    if parsed.ambiguous:
+                        self.block_symbol(
+                            position.symbol,
+                            f"ambiguous_close:{parsed.error_message or 'unknown'}",
+                        )
+                        raise AmbiguousOrderResponse(
+                            parsed.error_message or "ambiguous_close_response"
+                        )
+                    raise LiveExecutionError(
+                        parsed.error_message or "live_close_rejected"
+                    )
+            except (LiveExecutionError, AmbiguousOrderResponse):
+                async with self._lock:
+                    self._open_trades[position.symbol] = open_trade
+                raise
+            except Exception as exc:
+                logger.error(
+                    "Live close failed for %s — keeping trade_id=%d open: %s",
+                    position.symbol,
+                    open_trade.trade_id,
+                    exc,
+                    exc_info=True,
+                )
+                async with self._lock:
+                    self._open_trades[position.symbol] = open_trade
+                raise LiveExecutionError(str(exc)) from exc
+
         exit_record = TradeExit(
             trade_id=open_trade.trade_id,
             exit_price=fill_exit,
@@ -620,31 +904,6 @@ class ExecutionEngine:
             funding_paid=funding_total,
         )
         self._db.update_trade_exit(exit_record)
-
-        if self._mode in ("testnet", "mainnet"):
-            # v3.1.17 C9: if the live close fails, revert the DB status
-            # back to 'open' so reconciliation can re-attempt. Also
-            # re-insert the open_trades entry we popped above.
-            try:
-                await self._submit_live_close(position, fill_exit)
-            except Exception as exc:
-                logger.error(
-                    "Live close failed for %s — rolling back trade_id=%d: %s",
-                    position.symbol, open_trade.trade_id, exc,
-                    exc_info=True,
-                )
-                try:
-                    self._db.update_trade_status(
-                        open_trade.trade_id,
-                        status="open",
-                        reason=f"live_close_failed: {str(exc)[:100]}",
-                    )
-                except Exception as inner_exc:  # noqa: BLE001
-                    logger.exception("update_trade_status rollback failed: %s", inner_exc)
-                # Re-insert the open trade so the in-memory index matches DB.
-                async with self._lock:
-                    self._open_trades[position.symbol] = open_trade
-                raise
 
         result = TradeResult(
             trade_id=open_trade.trade_id,
@@ -725,14 +984,10 @@ class ExecutionEngine:
     ) -> Dict[str, Any]:
         """Submit a signed order to Hyperliquid (testnet or mainnet).
 
-        v3.1.22: returns the raw HL response dict so the caller can
-        extract the order id for OMS tracking. When signing is not
-        configured we return an empty dict (callers treat missing id
-        as "best-effort, no tracking").
+        Phase 01: caller must run ``_require_live_execution_ready`` first.
+        Raises on SDK/network failure; returns the raw HL response dict.
         """
-        if self._rest_client is None:
-            logger.error("REST client not available in live mode")
-            return {}
+        self._require_live_execution_ready()
 
         meta = signal.metadata or {}
         order_type = str(meta.get("order_type", "market"))
@@ -757,75 +1012,30 @@ class ExecutionEngine:
                 price,
             )
 
-        if not self._live_signing_ready or self._live_client is None:
-            logger.warning(
-                "Skipping live order submission for %s — signing not configured",
-                signal.symbol,
-            )
-            return {}
-
-        try:
-            return await self._live_client.place_entry(
-                signal.symbol,
-                signal.side,
-                size,
-                order_type=order_type,
-                limit_price=limit_price,
-                post_only=post_only,
-            )
-        except Exception as exc:
-            logger.error(
-                "Live order failed %s %s: %s",
-                signal.symbol,
-                signal.side,
-                exc,
-                exc_info=True,
-            )
-            raise
+        return await self._live_client.place_entry(
+            signal.symbol,
+            signal.side,
+            size,
+            order_type=order_type,
+            limit_price=limit_price,
+            post_only=post_only,
+        )
 
     @staticmethod
     def _extract_order_id(hl_response: Optional[Dict[str, Any]]) -> Optional[str]:
-        """Pull the HL order id out of a (potentially nested) response.
-
-        Hyperliquid responses come back as:
-          {"status": "ok", "response": {"data": {"statuses": [
-              {"filled": {"oid": 123, ...}},
-              {"resting": {"oid": 456, ...}}
-          ]}}}
-        or the exchange may return the order id under "oid" directly.
-        """
-        if not isinstance(hl_response, dict):
-            return None
-        # Direct key
-        for key in ("oid", "orderId", "order_id", "id"):
-            if key in hl_response and hl_response[key] is not None:
-                return str(hl_response[key])
-        # Nested under response.data.statuses[*]
-        try:
-            statuses = (
-                hl_response.get("response", {})
-                .get("data", {})
-                .get("statuses", [])
-            )
-            if statuses:
-                first = statuses[0]
-                if isinstance(first, dict):
-                    for sub in first.values():
-                        if isinstance(sub, dict) and "oid" in sub:
-                            return str(sub["oid"])
-        except (AttributeError, TypeError):
-            pass
-        return None
+        """Pull the HL order id out of a (potentially nested) response."""
+        return extract_order_id(hl_response)
 
     async def _submit_live_close(
         self,
         position: Position,
         exit_price: float,
-    ) -> None:
-        """Submit a signed closing order to Hyperliquid."""
-        if self._rest_client is None:
-            logger.error("REST client not available in live mode")
-            return
+    ) -> Dict[str, Any]:
+        """Submit a signed closing order to Hyperliquid.
+
+        Phase 01: returns the raw HL response; raises on failure.
+        """
+        self._require_live_execution_ready()
 
         close_side = "short" if position.side == "long" else "long"
         logger.info(
@@ -836,22 +1046,123 @@ class ExecutionEngine:
             exit_price,
         )
 
-        if not self._live_signing_ready or self._live_client is None:
-            logger.warning(
-                "Skipping live close for %s — signing not configured",
-                position.symbol,
-            )
+        return await self._live_client.close_position(position.symbol, position.size)
+
+    # ------------------------------------------------------------------
+    # Phase 03 hooks — native SL/TP (not implemented in Phase 01)
+    # ------------------------------------------------------------------
+
+    async def place_native_stop_loss(
+        self,
+        position: Position,
+        stop_price: float,
+    ) -> Optional[str]:
+        """Place a reduce-only native stop trigger (Phase 03)."""
+        if not self._native_protection_enabled or self._protection_manager is None:
+            return None
+        result = await self._protection_manager.ensure_protection(
+            position,
+            filled_size=position.size,
+            stop_price=stop_price,
+            take_profit_price=position.take_profit_price,
+            trade_id=(position.metadata or {}).get("trade_id"),
+        )
+        return result.sl_order_id
+
+    async def place_native_take_profit(
+        self,
+        position: Position,
+        take_profit_price: float,
+    ) -> Optional[str]:
+        """Place a reduce-only native take-profit trigger (Phase 03)."""
+        if not self._native_protection_enabled or self._protection_manager is None:
+            return None
+        result = await self._protection_manager.ensure_protection(
+            position,
+            filled_size=position.size,
+            stop_price=position.stop_loss_price,
+            take_profit_price=take_profit_price,
+            trade_id=(position.metadata or {}).get("trade_id"),
+        )
+        return result.tp_order_id
+
+    async def cancel_native_protection(
+        self,
+        symbol: str,
+        trigger_order_ids: List[str],
+    ) -> None:
+        """Cancel native SL/TP triggers for *symbol* (Phase 03)."""
+        if self._protection_manager is not None:
+            await self._protection_manager.cancel_protection(symbol)
             return
+        if self._live_client is None:
+            return
+        for oid in trigger_order_ids:
+            if not oid:
+                continue
+            try:
+                await self._live_client.cancel_order(symbol, int(oid))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cancel_native_protection %s oid=%s: %s", symbol, oid, exc)
+
+    async def kill_switch(self) -> KillSwitchResult:
+        """Cancel all orders, flatten positions, confirm exchange is flat."""
+        result = KillSwitchResult()
+        if self._mode not in ("testnet", "mainnet"):
+            result.exchange_flat = True
+            return result
+        self._require_live_execution_ready()
+        try:
+            result.orders_cancelled = await self._live_client.cancel_all_orders()
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"cancel_orders:{exc}")
 
         try:
-            await self._live_client.close_position(position.symbol, position.size)
-        except Exception as exc:
-            logger.error(
-                "Live close failed %s: %s",
-                position.symbol,
-                exc,
-                exc_info=True,
-            )
+            flat_results = await self._live_client.flatten_all_positions()
+            for item in flat_results:
+                if item.get("ok"):
+                    sym = str(item.get("symbol", ""))
+                    if sym:
+                        result.positions_closed.append(sym)
+                else:
+                    result.errors.append(
+                        f"flatten_{item.get('symbol')}:{item.get('error')}"
+                    )
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"flatten:{exc}")
+
+        try:
+            result.exchange_flat = await self._live_client.confirm_flat()
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"confirm_flat:{exc}")
+            result.exchange_flat = False
+
+        if self._protection_manager is not None:
+            for sym in list(result.positions_closed):
+                try:
+                    await self._protection_manager.cancel_protection(sym)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if self._portfolio is not None:
+            mem = await self._portfolio.positions
+            for sym in list(mem.keys()):
+                try:
+                    await self._portfolio.cancel_position(sym)
+                except Exception as exc:  # noqa: BLE001
+                    result.errors.append(f"local_cancel_{sym}:{exc}")
+
+        async with self._lock:
+            self._open_trades.clear()
+
+        logger.warning(
+            "KILL SWITCH complete: cancelled=%d closed=%s flat=%s errors=%d",
+            result.orders_cancelled,
+            result.positions_closed,
+            result.exchange_flat,
+            len(result.errors),
+        )
+        return result
 
     # ------------------------------------------------------------------
     # State recovery
@@ -897,8 +1208,52 @@ class ExecutionEngine:
         logger.info("Loaded %d open trades from DB", len(loaded))
         return loaded
 
+    async def load_pending_orders(self) -> int:
+        """Restore in-flight live orders from DB after restart."""
+        if self._mode not in ("testnet", "mainnet"):
+            return 0
+        rows = self._db.get_pending_live_orders()
+        restored = 0
+        now_s = time.time()
+        for row in rows:
+            oid = str(row.get("exchange_order_id") or "")
+            if not oid or oid in self._live_orders:
+                continue
+            target = safe_float(row.get("size"))
+            filled = safe_float(row.get("filled_size", 0.0))
+            lifecycle = str(row.get("status") or ORDER_RESTING)
+            self._live_orders[oid] = {
+                "symbol": row["symbol"],
+                "side": row["side"],
+                "size": target,
+                "price": safe_float(row.get("entry_price")),
+                "filled_size": filled,
+                "remaining_size": max(0.0, target - filled),
+                "avg_fill_price": safe_float(row.get("avg_fill_price", row.get("entry_price"))),
+                "cumulative_fee": safe_float(row.get("cumulative_order_fee", row.get("entry_fee"))),
+                "status": self._map_lifecycle_to_oms_status(lifecycle),
+                "lifecycle_state": lifecycle,
+                "timestamp": now_s,
+                "submitted_at_ms": int(row.get("order_submitted_at") or row.get("entry_time") or 0),
+                "last_fill_at_ms": row.get("last_fill_at"),
+                "trade_id": int(row["id"]),
+                "order_type": "market",
+                "client_order_id": row.get("client_order_id"),
+                "exchange_order_id": oid,
+                "applied_fill_size": filled,
+                "terminal_handled": False,
+                "processed_events": [],
+            }
+            client_id = row.get("client_order_id")
+            if client_id:
+                self._submitted_client_order_ids[str(client_id)] = int(row["id"])
+            restored += 1
+        if restored:
+            logger.info("OMS: restored %d pending live order(s) from DB", restored)
+        return restored
+
     # ------------------------------------------------------------------
-    # v3.1.22: OMS — live order tracking + background poller
+    # v3.1.22 / Phase 02: OMS — live order tracking + background poller
     # ------------------------------------------------------------------
 
     def register_order_callback(self, cb: Any) -> None:
@@ -923,39 +1278,52 @@ class ExecutionEngine:
             if rec.get("status") in (ORDER_STATUS_OPEN, ORDER_STATUS_PARTIAL)
         }
 
-    async def check_order_status(self, order_id: str) -> str:
-        """Query Hyperliquid REST for the current status of *order_id*.
-
-        Returns one of the ``ORDER_STATUS_*`` constants. Returns
-        ``ORDER_STATUS_OPEN`` if the order id is unknown to HL (e.g.
-        the bot was restarted and lost the in-memory record); the
-        OMS poller treats that as a soft signal to keep watching.
-        """
-        if self._rest_client is None:
-            return ORDER_STATUS_OPEN
+    async def fetch_order_snapshot(self, order_id: str, record: Dict[str, Any]) -> OrderFillSnapshot:
+        """Query Hyperliquid for fill-aware order status."""
+        target_size = safe_float(record.get("size"))
+        reference_price = safe_float(record.get("price"))
+        if self._live_client is None:
+            return OrderFillSnapshot(
+                status=record.get("status", ORDER_STATUS_OPEN),
+                lifecycle_state=str(record.get("lifecycle_state", ORDER_RESTING)),
+                filled_size=safe_float(record.get("filled_size")),
+                remaining_size=safe_float(record.get("remaining_size")),
+                avg_fill_price=safe_float(record.get("avg_fill_price")),
+                cumulative_fee=safe_float(record.get("cumulative_fee")),
+                last_fill_at_ms=record.get("last_fill_at_ms"),
+            )
         try:
-            resp = await self._rest_client.get_order_status(order_id)
+            status_resp = await self._live_client.get_order_status(order_id)
+            fills = await self._live_client.get_order_fills(order_id)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "check_order_status: REST error for %s: %s",
-                order_id, exc,
-            )
-            return self._live_orders.get(order_id, {}).get(
-                "status", ORDER_STATUS_OPEN
+            logger.warning("fetch_order_snapshot: HL error for %s: %s", order_id, exc)
+            return OrderFillSnapshot(
+                status=record.get("status", ORDER_STATUS_OPEN),
+                lifecycle_state=str(record.get("lifecycle_state", ORDER_RESTING)),
+                filled_size=safe_float(record.get("filled_size")),
+                remaining_size=safe_float(record.get("remaining_size")),
+                avg_fill_price=safe_float(record.get("avg_fill_price")),
+                cumulative_fee=safe_float(record.get("cumulative_fee")),
+                last_fill_at_ms=record.get("last_fill_at_ms"),
+                raw_status="query_error",
             )
 
-        if not isinstance(resp, dict):
-            return ORDER_STATUS_OPEN
+        snapshot = parse_order_fill_snapshot(
+            status_resp,
+            fills,
+            order_id=order_id,
+            target_size=target_size,
+            reference_price=reference_price,
+        )
+        if snapshot.raw_status.lower() in ("unknown", "") and snapshot.filled_size <= 0:
+            self._emit_oms_alert("unknown_status", order_id, record)
+        return snapshot
 
-        # HL returns either:
-        #   {"order": {"status": "filled", ...}}
-        #   {"statuses": ["open"]}
-        order = resp.get("order")
-        if isinstance(order, dict):
-            raw = str(order.get("status", "open")).lower()
-            return self._normalise_hl_status(raw)
-        raw = str(resp.get("status", "open")).lower()
-        return self._normalise_hl_status(raw)
+    async def check_order_status(self, order_id: str) -> str:
+        """Return OMS status string for *order_id* (legacy helper)."""
+        record = self._live_orders.get(order_id, {})
+        snapshot = await self.fetch_order_snapshot(order_id, record)
+        return snapshot.status
 
     @staticmethod
     def _normalise_hl_status(raw: str) -> str:
@@ -1015,63 +1383,320 @@ class ExecutionEngine:
             logger.exception("OMS loop crashed: %s", exc)
 
     async def _poll_one_order(self, order_id: str, record: Dict[str, Any]) -> None:
-        """Check one order; update its status; take action if terminal."""
-        status = await self.check_order_status(order_id)
+        """Check one order; apply fill deltas; handle terminal/timeout paths."""
+        if record.get("terminal_handled"):
+            return
+
+        snapshot = await self.fetch_order_snapshot(order_id, record)
         now_ts = time.time()
         age_s = now_ts - safe_float(record.get("timestamp", now_ts), now_ts)
 
-        previous = record.get("status", ORDER_STATUS_OPEN)
-        if status == previous and status not in (ORDER_STATUS_OPEN, ORDER_STATUS_PARTIAL):
+        event_key = (
+            f"{snapshot.status}:{snapshot.filled_size:.8f}:"
+            f"{snapshot.remaining_size:.8f}"
+        )
+        processed = record.setdefault("processed_events", [])
+        if event_key in processed and snapshot.status in (
+            ORDER_STATUS_OPEN,
+            ORDER_STATUS_PARTIAL,
+        ):
+            if age_s <= self._live_order_timeout_s:
+                return
+        processed.append(event_key)
+
+        self._apply_snapshot_to_record(record, snapshot)
+
+        applied_before = safe_float(record.get("applied_fill_size"))
+        fill_delta = snapshot.filled_size - applied_before
+        if fill_delta > 0:
+            await self._apply_fill_delta(order_id, record, snapshot, fill_delta)
+            record["applied_fill_size"] = snapshot.filled_size
+            trade_id = int(record.get("trade_id", 0))
+            if trade_id > 0:
+                try:
+                    self._db.update_trade_native_protection(
+                        trade_id,
+                        applied_fill_size=snapshot.filled_size,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("applied_fill_size persist failed: %s", exc)
+
+        if snapshot.status == ORDER_STATUS_FILLED:
+            await self._finalize_filled_order(order_id, record, snapshot)
             return
 
-        if status in (ORDER_STATUS_FILLED, ORDER_STATUS_PARTIAL, ORDER_STATUS_CANCELLED, ORDER_STATUS_REJECTED):
-            record["status"] = status
-            self._fire_order_callbacks(order_id, status, record)
-            if status == ORDER_STATUS_REJECTED:
-                logger.error(
-                    "OMS: order %s REJECTED — rolling back trade_id=%s",
-                    order_id, record.get("trade_id"),
-                )
-                await self._rollback_order(order_id, record, reason="rejected")
-            elif status == ORDER_STATUS_CANCELLED:
-                logger.warning(
-                    "OMS: order %s CANCELLED — rolling back trade_id=%s",
-                    order_id, record.get("trade_id"),
-                )
-                await self._rollback_order(order_id, record, reason="cancelled")
-            elif status == ORDER_STATUS_FILLED:
-                logger.info(
-                    "OMS: order %s FILLED (symbol=%s trade_id=%s age=%.1fs)",
-                    order_id, record.get("symbol"), record.get("trade_id"), age_s,
-                )
+        if snapshot.status == ORDER_STATUS_REJECTED:
+            await self._handle_terminal_order(
+                order_id, record, reason="rejected", snapshot=snapshot,
+            )
             return
 
-        # Status still open/partial: check timeout
+        if snapshot.status == ORDER_STATUS_CANCELLED:
+            await self._handle_terminal_order(
+                order_id, record, reason="cancelled", snapshot=snapshot,
+            )
+            return
+
+        if snapshot.status == ORDER_STATUS_PARTIAL:
+            self._fire_order_callbacks(order_id, ORDER_STATUS_PARTIAL, record)
+            self._persist_order_record(record)
+            if age_s > self._live_order_timeout_s:
+                await self._handle_partial_timeout(order_id, record, age_s)
+            return
+
+        # Still open/resting
         if age_s > self._live_order_timeout_s:
-            logger.error(
-                "OMS: order %s TIMEOUT after %.1fs — cancelling and rolling back",
-                order_id, age_s,
+            await self._handle_open_timeout(order_id, record, age_s)
+
+    def _apply_snapshot_to_record(
+        self,
+        record: Dict[str, Any],
+        snapshot: OrderFillSnapshot,
+    ) -> None:
+        record["status"] = snapshot.status
+        record["lifecycle_state"] = snapshot.lifecycle_state
+        record["filled_size"] = snapshot.filled_size
+        record["remaining_size"] = snapshot.remaining_size
+        if snapshot.avg_fill_price > 0:
+            record["avg_fill_price"] = snapshot.avg_fill_price
+        if snapshot.cumulative_fee > 0:
+            record["cumulative_fee"] = snapshot.cumulative_fee
+        if snapshot.last_fill_at_ms:
+            record["last_fill_at_ms"] = snapshot.last_fill_at_ms
+
+    async def _apply_fill_delta(
+        self,
+        order_id: str,
+        record: Dict[str, Any],
+        snapshot: OrderFillSnapshot,
+        fill_delta: float,
+    ) -> None:
+        """Notify callbacks of newly confirmed fill size (idempotent by delta)."""
+        self._fire_order_callbacks(order_id, snapshot.status, record)
+        logger.info(
+            "OMS: order %s fill delta=%.6f total=%.6f (symbol=%s trade_id=%s)",
+            order_id,
+            fill_delta,
+            snapshot.filled_size,
+            record.get("symbol"),
+            record.get("trade_id"),
+        )
+
+    async def _finalize_filled_order(
+        self,
+        order_id: str,
+        record: Dict[str, Any],
+        snapshot: OrderFillSnapshot,
+    ) -> None:
+        if record.get("terminal_handled"):
+            return
+        record["terminal_handled"] = True
+        self._fire_order_callbacks(order_id, ORDER_STATUS_FILLED, record)
+        trade_id = int(record.get("trade_id", 0))
+        symbol = str(record.get("symbol", ""))
+        avg_px = safe_float(snapshot.avg_fill_price, safe_float(record.get("price")))
+        fee = safe_float(snapshot.cumulative_fee)
+        try:
+            self._db.update_trade_order_tracking(
+                trade_id,
+                status="open",
+                filled_size=snapshot.filled_size,
+                size=snapshot.filled_size,
+                avg_fill_price=avg_px,
+                cumulative_order_fee=fee,
+                entry_price=avg_px,
+                entry_fee=fee,
+                last_fill_at=snapshot.last_fill_at_ms,
             )
-            record["status"] = ORDER_STATUS_TIMEOUT
-            self._fire_order_callbacks(order_id, ORDER_STATUS_TIMEOUT, record)
-            await self._cancel_timed_out_order(order_id)
-            await self._rollback_order(
-                order_id, record, reason=f"timeout_{age_s:.0f}s"
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("OMS finalize: DB update failed: %s", exc)
+
+        async with self._lock:
+            existing = self._open_trades.get(symbol)
+            if existing is None:
+                self._open_trades[symbol] = TradeResult(
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    side=str(record.get("side", "long")),
+                    entry_price=avg_px,
+                    exit_price=None,
+                    size=snapshot.filled_size,
+                    pnl_usd=0.0,
+                    pnl_pct=0.0,
+                    status="open",
+                    reason="oms_filled",
+                    timestamp_ms=int(record.get("submitted_at_ms", 0)),
+                    entry_fee=fee,
+                    exchange_order_id=order_id,
+                )
+            else:
+                existing.size = snapshot.filled_size
+                existing.entry_price = avg_px
+                existing.entry_fee = fee
+                existing.status = "open"
+
+        self._live_orders.pop(order_id, None)
+        logger.info(
+            "OMS: order %s FILLED (symbol=%s trade_id=%s size=%.6f)",
+            order_id, symbol, trade_id, snapshot.filled_size,
+        )
+
+    async def _handle_terminal_order(
+        self,
+        order_id: str,
+        record: Dict[str, Any],
+        *,
+        reason: str,
+        snapshot: OrderFillSnapshot,
+    ) -> None:
+        if record.get("terminal_handled"):
+            return
+        record["terminal_handled"] = True
+        filled = safe_float(snapshot.filled_size)
+        if filled > 0:
+            await self._apply_fill_delta(order_id, record, snapshot, filled - safe_float(record.get("applied_fill_size")))
+            record["applied_fill_size"] = filled
+            await self._finalize_partial_exposure(order_id, record, snapshot, reason)
+            return
+
+        self._fire_order_callbacks(order_id, snapshot.status, record)
+        logger.error(
+            "OMS: order %s %s — rolling back trade_id=%s",
+            order_id, reason.upper(), record.get("trade_id"),
+        )
+        await self._rollback_order(order_id, record, reason=reason)
+
+    async def _finalize_partial_exposure(
+        self,
+        order_id: str,
+        record: Dict[str, Any],
+        snapshot: OrderFillSnapshot,
+        reason: str,
+    ) -> None:
+        """Keep confirmed partial fill; drop residual tracking only."""
+        trade_id = int(record.get("trade_id", 0))
+        symbol = str(record.get("symbol", ""))
+        avg_px = safe_float(snapshot.avg_fill_price, safe_float(record.get("price")))
+        fee = safe_float(snapshot.cumulative_fee)
+        try:
+            self._db.update_trade_order_tracking(
+                trade_id,
+                status="open",
+                filled_size=snapshot.filled_size,
+                size=snapshot.filled_size,
+                avg_fill_price=avg_px,
+                cumulative_order_fee=fee,
+                entry_price=avg_px,
+                entry_fee=fee,
+                last_fill_at=snapshot.last_fill_at_ms,
+                reason=f"oms_partial_{reason}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("OMS partial finalize: DB update failed: %s", exc)
+
+        async with self._lock:
+            self._open_trades[symbol] = TradeResult(
+                trade_id=trade_id,
+                symbol=symbol,
+                side=str(record.get("side", "long")),
+                entry_price=avg_px,
+                exit_price=None,
+                size=snapshot.filled_size,
+                pnl_usd=0.0,
+                pnl_pct=0.0,
+                status="open",
+                reason=f"oms_partial_{reason}",
+                timestamp_ms=int(record.get("submitted_at_ms", 0)),
+                entry_fee=fee,
+                exchange_order_id=order_id,
             )
 
-    async def _cancel_timed_out_order(self, order_id: str) -> None:
-        """Best-effort cancel of a timed-out live order."""
-        record = self._live_orders.get(order_id)
-        if not record or self._rest_client is None:
+        self._emit_oms_alert("partial_residual", order_id, record)
+        self._live_orders.pop(order_id, None)
+        logger.warning(
+            "OMS: order %s partial preserved size=%.6f after %s",
+            order_id, snapshot.filled_size, reason,
+        )
+
+    async def _handle_open_timeout(self, order_id: str, record: Dict[str, Any], age_s: float) -> None:
+        if record.get("terminal_handled"):
+            return
+        record["terminal_handled"] = True
+        record["status"] = ORDER_STATUS_TIMEOUT
+        self._fire_order_callbacks(order_id, ORDER_STATUS_TIMEOUT, record)
+        self._emit_oms_alert("timeout", order_id, record)
+        logger.error(
+            "OMS: order %s TIMEOUT after %.1fs — cancelling and rolling back",
+            order_id, age_s,
+        )
+        await self._cancel_timed_out_order(order_id)
+        await self._rollback_order(order_id, record, reason=f"timeout_{age_s:.0f}s")
+
+    async def _handle_partial_timeout(
+        self,
+        order_id: str,
+        record: Dict[str, Any],
+        age_s: float,
+    ) -> None:
+        if record.get("terminal_handled"):
+            return
+        record["terminal_handled"] = True
+        record["status"] = ORDER_STATUS_TIMEOUT
+        self._fire_order_callbacks(order_id, ORDER_STATUS_TIMEOUT, record)
+        self._emit_oms_alert("timeout", order_id, record)
+        logger.error(
+            "OMS: partial order %s TIMEOUT after %.1fs — cancelling residual %.6f",
+            order_id,
+            age_s,
+            safe_float(record.get("remaining_size")),
+        )
+        cancel_ok = await self._cancel_timed_out_order(order_id)
+        snapshot = OrderFillSnapshot(
+            status=ORDER_STATUS_PARTIAL,
+            lifecycle_state=ORDER_PARTIAL,
+            filled_size=safe_float(record.get("filled_size")),
+            remaining_size=0.0,
+            avg_fill_price=safe_float(record.get("avg_fill_price")),
+            cumulative_fee=safe_float(record.get("cumulative_fee")),
+            last_fill_at_ms=record.get("last_fill_at_ms"),
+        )
+        if not cancel_ok:
+            self._emit_oms_alert("cancel_failed", order_id, record)
+        await self._finalize_partial_exposure(
+            order_id, record, snapshot, reason=f"timeout_{age_s:.0f}s",
+        )
+
+    def _persist_order_record(self, record: Dict[str, Any]) -> None:
+        trade_id = int(record.get("trade_id", 0))
+        if trade_id <= 0:
             return
         try:
-            symbol = record.get("symbol", "")
-            await self._rest_client.cancel_order(symbol, order_id)
+            self._db.update_trade_order_tracking(
+                trade_id,
+                status=str(record.get("lifecycle_state", ORDER_PARTIAL)),
+                filled_size=safe_float(record.get("filled_size")),
+                avg_fill_price=safe_float(record.get("avg_fill_price")),
+                cumulative_order_fee=safe_float(record.get("cumulative_fee")),
+                last_fill_at=record.get("last_fill_at_ms"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("OMS persist failed: %s", exc)
+
+    async def _cancel_timed_out_order(self, order_id: str) -> bool:
+        """Best-effort cancel of a timed-out live order. Returns success flag."""
+        record = self._live_orders.get(order_id)
+        if not record or self._live_client is None:
+            return False
+        try:
+            symbol = str(record.get("symbol", ""))
+            await self._live_client.cancel_order(symbol, int(order_id))
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "OMS: cancel failed for %s: %s (will rely on auto-cancel)",
+                "OMS: cancel failed for %s: %s (partial exposure preserved if any)",
                 order_id, exc,
             )
+            return False
 
     async def _rollback_order(
         self,
@@ -1083,7 +1708,7 @@ class ExecutionEngine:
         symbol = record.get("symbol", "")
         trade_id = record.get("trade_id", 0)
         try:
-            portfolio = getattr(self, "_portfolio", None)
+            portfolio = self._portfolio
             if portfolio is not None:
                 await portfolio.cancel_position(symbol)
         except Exception as exc:  # noqa: BLE001
@@ -1104,6 +1729,15 @@ class ExecutionEngine:
             logger.exception("OMS rollback: update_trade_status failed: %s", exc)
         # Drop the tracking record so we don't keep polling a dead order
         self._live_orders.pop(order_id, None)
+
+    def _emit_oms_alert(self, event: str, order_id: str, record: Dict[str, Any]) -> None:
+        cb = self._oms_alert_callback
+        if cb is None:
+            return
+        try:
+            cb(event, order_id, record)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OMS alert callback raised: %s", exc)
 
     def _fire_order_callbacks(
         self,

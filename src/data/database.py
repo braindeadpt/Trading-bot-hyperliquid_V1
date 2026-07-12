@@ -33,8 +33,8 @@ class Candle:
     funding_rate: Optional[float] = None
     oi_total: Optional[float] = None
     oi_delta: Optional[float] = None
-    buy_volume: float = 0.0
-    sell_volume: float = 0.0
+    buy_volume: Optional[float] = None
+    sell_volume: Optional[float] = None
     trade_count: int = 0
 
 
@@ -221,6 +221,7 @@ class Database:
             self._create_portfolio_table()
             self._create_strategy_pnl_table()
             self._create_decision_audit_table()
+            self._create_runtime_state_table()
             self._migrate_portfolio_table()
             self._migrate_trades_table()
             self._migrate_decision_audit_table()
@@ -415,6 +416,17 @@ class Database:
             ("signal_metadata",         "TEXT"),
             ("entry_fee",               "REAL DEFAULT 0.0"),
             ("funding_paid",            "REAL DEFAULT 0.0"),
+            ("exchange_order_id",       "TEXT"),
+            ("client_order_id",         "TEXT"),
+            ("filled_size",             "REAL DEFAULT 0"),
+            ("avg_fill_price",          "REAL"),
+            ("cumulative_order_fee",    "REAL DEFAULT 0"),
+            ("order_submitted_at",      "INTEGER"),
+            ("last_fill_at",            "INTEGER"),
+            ("applied_fill_size",     "REAL DEFAULT 0"),
+            ("native_sl_order_id",    "TEXT"),
+            ("native_tp_order_id",    "TEXT"),
+            ("native_protected_size", "REAL DEFAULT 0"),
         ]
         for col_name, col_type in new_columns:
             if col_name not in cols:
@@ -424,6 +436,63 @@ class Database:
                     )
                 except sqlite3.OperationalError:
                     pass  # Race or already added — safe to ignore
+
+    def _create_runtime_state_table(self) -> None:
+        self._conn().execute("""
+            CREATE TABLE IF NOT EXISTS runtime_state (
+                state_key   TEXT PRIMARY KEY,
+                value_json  TEXT NOT NULL,
+                updated_ms  INTEGER NOT NULL
+            );
+        """)
+
+    def save_runtime_state(self, state_key: str, payload: Dict[str, Any]) -> None:
+        """Upsert a JSON runtime-state blob (cooldown, risk circuits, etc.)."""
+        from src.utils.helpers import utc_timestamp_ms
+
+        blob = json.dumps(payload, default=str)
+        now_ms = utc_timestamp_ms()
+        sql = """
+            INSERT INTO runtime_state (state_key, value_json, updated_ms)
+            VALUES (?, ?, ?)
+            ON CONFLICT(state_key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_ms = excluded.updated_ms
+        """
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, (state_key, blob, now_ms))
+            conn.commit()
+
+    def load_runtime_state(self, state_key: str) -> Optional[Dict[str, Any]]:
+        """Load a persisted runtime-state blob."""
+        with self._conn():
+            cur = self._conn().execute(
+                "SELECT value_json FROM runtime_state WHERE state_key = ?",
+                (state_key,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        try:
+            parsed = json.loads(row["value_json"])
+            return parsed if isinstance(parsed, dict) else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def count_stop_loss_exits_since(self, since_ms: int) -> int:
+        """Count closed trades whose exit_reason starts with stop_loss since UTC midnight."""
+        sql = """
+            SELECT COUNT(*) AS n FROM trades
+            WHERE status = 'closed'
+              AND exit_time IS NOT NULL
+              AND exit_time >= ?
+              AND exit_reason LIKE 'stop_loss%'
+        """
+        with self._conn():
+            cur = self._conn().execute(sql, (since_ms,))
+            row = cur.fetchone()
+        return int(row["n"] or 0) if row else 0
 
     def _migrate_decision_audit_table(self) -> None:
         """No-op for now; placeholder for future decision_audit columns."""
@@ -579,8 +648,8 @@ class Database:
             funding_rate=row["funding_rate"],
             oi_total=row["oi_total"],
             oi_delta=row["oi_delta"],
-            buy_volume=row["buy_volume"] if "buy_volume" in row.keys() else 0.0,
-            sell_volume=row["sell_volume"] if "sell_volume" in row.keys() else 0.0,
+            buy_volume=row["buy_volume"] if "buy_volume" in row.keys() and row["buy_volume"] is not None else None,
+            sell_volume=row["sell_volume"] if "sell_volume" in row.keys() and row["sell_volume"] is not None else None,
             trade_count=row["trade_count"] if "trade_count" in row.keys() else 0,
         )
 
@@ -701,6 +770,119 @@ class Database:
             cur = self._conn().execute(sql, params)
             rows = cur.fetchall()
         return [dict(row) for row in rows]
+
+    def get_trades_by_status(self, status: str) -> List[Dict[str, Any]]:
+        """Return trade rows matching *status*."""
+        sql = "SELECT * FROM trades WHERE status = ? ORDER BY entry_time ASC"
+        with self._conn():
+            cur = self._conn().execute(sql, (status,))
+            rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def get_pending_live_orders(self) -> List[Dict[str, Any]]:
+        """Return trades with live order lifecycle still in flight."""
+        sql = (
+            "SELECT * FROM trades WHERE status IN (?, ?, ?, ?) "
+            "AND exchange_order_id IS NOT NULL "
+            "ORDER BY entry_time ASC"
+        )
+        with self._conn():
+            cur = self._conn().execute(sql, (
+                "pending_submission", "resting", "partial", "submission_unknown",
+            ))
+            rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def get_trade_by_id(self, trade_id: int) -> Optional[Dict[str, Any]]:
+        """Return a single trade row by primary key."""
+        with self._conn():
+            row = self._conn().execute(
+                "SELECT * FROM trades WHERE id = ?",
+                (int(trade_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_trade_order_tracking(
+        self,
+        trade_id: int,
+        *,
+        exchange_order_id: Optional[str] = None,
+        client_order_id: Optional[str] = None,
+        status: Optional[str] = None,
+        filled_size: Optional[float] = None,
+        size: Optional[float] = None,
+        avg_fill_price: Optional[float] = None,
+        cumulative_order_fee: Optional[float] = None,
+        order_submitted_at: Optional[int] = None,
+        last_fill_at: Optional[int] = None,
+        entry_price: Optional[float] = None,
+        entry_fee: Optional[float] = None,
+        reason: Optional[str] = None,
+        applied_fill_size: Optional[float] = None,
+    ) -> None:
+        """Persist OMS tracking fields on a trade row."""
+        updates: List[str] = []
+        params: List[Any] = []
+        field_map = {
+            "exchange_order_id": exchange_order_id,
+            "client_order_id": client_order_id,
+            "status": status,
+            "filled_size": filled_size,
+            "size": size,
+            "avg_fill_price": avg_fill_price,
+            "cumulative_order_fee": cumulative_order_fee,
+            "order_submitted_at": order_submitted_at,
+            "last_fill_at": last_fill_at,
+            "entry_price": entry_price,
+            "entry_fee": entry_fee,
+            "applied_fill_size": applied_fill_size,
+        }
+        for col, val in field_map.items():
+            if val is not None:
+                updates.append(f"{col} = ?")
+                params.append(val)
+        if reason is not None:
+            updates.append("exit_reason = ?")
+            params.append(reason)
+        if not updates:
+            return
+        params.append(int(trade_id))
+        sql = f"UPDATE trades SET {', '.join(updates)} WHERE id = ?"
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, tuple(params))
+            conn.commit()
+
+    def update_trade_native_protection(
+        self,
+        trade_id: int,
+        *,
+        sl_order_id: Optional[str] = None,
+        tp_order_id: Optional[str] = None,
+        protected_size: Optional[float] = None,
+        applied_fill_size: Optional[float] = None,
+    ) -> None:
+        """Persist native SL/TP trigger ids and protected/applied fill sizes."""
+        updates: List[str] = []
+        params: List[Any] = []
+        field_map = {
+            "native_sl_order_id": sl_order_id,
+            "native_tp_order_id": tp_order_id,
+            "native_protected_size": protected_size,
+            "applied_fill_size": applied_fill_size,
+        }
+        for col, val in field_map.items():
+            if val is not None:
+                updates.append(f"{col} = ?")
+                params.append(val)
+        if not updates:
+            return
+        params.append(int(trade_id))
+        sql = f"UPDATE trades SET {', '.join(updates)} WHERE id = ?"
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, tuple(params))
+            conn.commit()
 
     def get_recent_closed_trade_pnl_pcts(self, limit: int = 50) -> List[float]:
         """Return the most recent closed-trade pnl_pct values in chronological order.

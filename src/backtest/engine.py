@@ -5,11 +5,9 @@ Walks merged multi-symbol 1m candles chronologically, feeds MarketEvents
 to a strategy (typically StrategyEnsemble), and simulates fills with fees
 and slippage.
 
-v3.1.19: backtest now uses the *real* RiskManager (drawdown circuit,
-exposure caps, correlation rejection, ATR sizing), the volatility
-circuit breaker, the funding-reset blackout, dynamic cooldown, and
-size-aware slippage. The full set of gates that protect live trading
-now also protect backtest results.
+Phase 05: shared SignalPipeline gate ordering, RiskManager sizing,
+maker/taker fees via order_router, intrabar stop/TP on 1m high/low, and
+run manifests for reproducibility.
 """
 
 from __future__ import annotations
@@ -18,20 +16,37 @@ import bisect
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from src.core.liquidation_accumulator import LiquidationAccumulator
 from src.backtest.metrics import calculate_metrics
+from src.backtest.data_contract import (
+    DataContractResult,
+    assert_data_contract_or_raise,
+    evaluate_data_contract,
+)
+from src.backtest.mfe_mae import (
+    ExcursionTracker,
+    build_price_index,
+    compute_intrade_excursion_fields,
+    enrich_trades_post_exit,
+    strip_post_exit_from_trades,
+)
+from src.backtest.continuous_segments import DEFAULT_RESEARCH_GAP_MS, is_cross_gap, resolve_gap_ms
+from src.backtest.replay_data_quality import ReplayDataQualityGate
+from src.backtest.run_manifest import build_run_manifest
+from src.backtest.symbol_rounding import round_position_size
 from src.core.funding_blackout import FundingBlackoutFilter
-from src.core.kelly_sizer import KellySizer
-from src.core.regime import apply_regime_weights, regime_strategy_name
+from src.core.liquidation_accumulator import LiquidationAccumulator
+from src.core.order_router import OrderSpec
+from src.core.regime import regime_strategy_name
 from src.core.risk_manager import RiskManager
-from src.core.tca import passes_tca_check
+from src.core.signal_pipeline import PipelineContext, SignalPipeline
 from src.core.volatility_circuit import VolatilityCircuitBreaker
 from src.data.database import Candle as DBCandle
 from src.data.database import Database
 from src.strategies.base import MarketEvent, Position, Signal, Strategy
 from src.strategies.indicators import Candle, calculate_adx
+from src.utils.config import Config, get_strategy_section, resolve_kelly_enabled
 from src.utils.helpers import safe_divide, safe_float
 
 logger = logging.getLogger(__name__)
@@ -52,8 +67,8 @@ class BacktestConfig:
     paper_slippage_pct: float = 0.05    # percent per side (for TCA when no L2)
     use_regime_weights: bool = True
     use_cooldown: bool = True
-    use_kelly: bool = True
     use_microstructure_proxy: bool = True
+    intrabar_conflict_policy: str = "pessimistic"  # pessimistic | optimistic
     regime_weights: Dict[str, Dict[str, float]] = field(default_factory=dict)
     adx_trend_threshold: float = 25.0
     adx_range_threshold: float = 20.0
@@ -69,12 +84,6 @@ class BacktestConfig:
     use_funding_blackout: bool = True
     use_size_aware_slippage: bool = True
     use_external_feeds_replay: bool = True
-    # Maker-vs-taker fee model (v3.1.19)
-    maker_fee_pct: float = 0.01          # 0.01% per side
-    use_maker_for_strategies: Tuple[str, ...] = (
-        "OrderBookScalper", "VWAPDeviation", "DonchianBreakout",
-        "VolatilityBreakout", "CVDOrderFlow",
-    )
 
 
 @dataclass
@@ -95,6 +104,8 @@ class _OpenPosition:
     funding_paid: float = 0.0
     # Last funding settlement timestamp (next settlement = this + 1h).
     next_funding_ts: int = 0
+    # Phase 07: excursion tracker key (stored separately on engine)
+    excursion_id: int = 0
 
 
 class _BacktestPortfolioProxy:
@@ -151,7 +162,7 @@ class BacktestEngine:
         strategy: Strategy,
         config: Optional[BacktestConfig] = None,
         symbols: Optional[List[str]] = None,
-        risk_config: Optional[Dict[str, Any]] = None,
+        risk_config: Optional[Union[Config, Dict[str, Any]]] = None,
     ) -> None:
         self.db = database
         self.strategy = strategy
@@ -162,23 +173,33 @@ class BacktestEngine:
         self.closed_trades: List[Dict[str, Any]] = []
         self.equity_curve: List[Tuple[int, float]] = []
         self._next_position_id = 1
-        self._cooldown_state: Dict[str, int] = {}
-        self._consecutive_losses: Dict[str, int] = {}
         self._daily_trade_count: Dict[str, int] = {}
         self._current_day: Optional[str] = None
         self._daily_pnl: float = 0.0
         self._capital: float = float(self.cfg.initial_capital)
         self._peak_capital: float = float(self.cfg.initial_capital)
         self._max_drawdown_pct: float = 0.0
-        self._kelly = KellySizer(min_trades=20, half_kelly=True)
+        self._pipeline_ctx = PipelineContext()
+        self._full_config: Optional[Config] = None
+        self._last_candle_close: Dict[str, float] = {}
+        self._excursion_trackers: Dict[int, ExcursionTracker] = {}
+        self._next_excursion_id = 1
+        self._data_contract: Optional[DataContractResult] = None
+        self._price_index: Dict[str, List[Tuple[int, float]]] = {}
+        self._research_gap_ms = DEFAULT_RESEARCH_GAP_MS
+        if risk_config is not None:
+            self._full_config = (
+                risk_config if isinstance(risk_config, Config) else Config(risk_config)
+            )
 
-        # v3.1.19: real RiskManager (drawdown circuit, exposure caps,
-        # correlation, max-positions, daily loss, etc.). db=None is OK
-        # because backtest never calls into DB-bound helpers.
         self._risk_manager: Optional[RiskManager] = None
-        if self.cfg.use_risk_manager:
+        self._pipeline: Optional[SignalPipeline] = None
+        self._vol_circuit: Optional[VolatilityCircuitBreaker] = None
+        self._funding_blackout: Optional[FundingBlackoutFilter] = None
+
+        if self.cfg.use_risk_manager and self._full_config is not None:
             try:
-                self._risk_manager = RiskManager(risk_config or {}, db=None)
+                self._risk_manager = RiskManager(self._full_config, db=None)
                 logger.info("Backtest: real RiskManager enabled")
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -187,23 +208,31 @@ class BacktestEngine:
                 )
                 self._risk_manager = None
 
-        # v3.1.19: intraday volatility circuit breaker (soft gate).
-        self._vol_circuit: Optional[VolatilityCircuitBreaker] = None
-        if self.cfg.use_volatility_circuit and risk_config is not None:
-            try:
-                vol_cfg = risk_config.get("volatility_circuit_breaker", {}) or {}
-                self._vol_circuit = VolatilityCircuitBreaker.from_config_dict(vol_cfg)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Backtest: vol_circuit init failed: %s", exc)
-
-        # v3.1.19: time-of-day funding-reset blackout.
-        self._funding_blackout: Optional[FundingBlackoutFilter] = None
-        if self.cfg.use_funding_blackout and risk_config is not None:
-            try:
-                fb_cfg = risk_config.get("funding_blackout", {}) or {}
-                self._funding_blackout = FundingBlackoutFilter.from_config_dict(fb_cfg)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Backtest: funding_blackout init failed: %s", exc)
+        if self._full_config is not None and self._risk_manager is not None:
+            if self.cfg.use_volatility_circuit:
+                try:
+                    vol_cfg = self._full_config.get("risk.volatility_circuit_breaker", {}) or {}
+                    self._vol_circuit = VolatilityCircuitBreaker.from_config_dict(vol_cfg)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Backtest: vol_circuit init failed: %s", exc)
+            if self.cfg.use_funding_blackout:
+                try:
+                    fb_cfg = self._full_config.get("risk.funding_blackout", {}) or {}
+                    self._funding_blackout = FundingBlackoutFilter.from_config_dict(fb_cfg)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Backtest: funding_blackout init failed: %s", exc)
+            self._pipeline = SignalPipeline(
+                self._full_config,
+                self._risk_manager,
+                vol_circuit=self._vol_circuit,
+                funding_blackout=self._funding_blackout,
+                replay_quality=ReplayDataQualityGate.from_config(self._full_config),
+                use_regime_weights=self.cfg.use_regime_weights,
+                use_cooldown=self.cfg.use_cooldown,
+                use_debounce=True,
+                tca_enabled=self.cfg.tca_enabled,
+                for_backtest=True,
+            )
 
     def run(
         self,
@@ -220,10 +249,55 @@ class BacktestEngine:
                 f"No 1m candles found for {self.symbols} in the requested range"
             )
 
+        if self._full_config is not None:
+            from src.data.research_database import ResearchDatabase
+
+            is_research_db = isinstance(self.db, ResearchDatabase)
+            refuse_on_fail = is_research_db and bool(
+                self._full_config.get("research.refuse_insufficient_feeds", True)
+            )
+            strict = bool(self._full_config.get("research.strict_mode", False))
+            strat_names = self._active_strategy_names()
+            self._data_contract = evaluate_data_contract(
+                self.db,
+                self.symbols,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                config=self._full_config,
+                active_strategies=strat_names,
+                refuse_on_fail=refuse_on_fail,
+                strict_research=strict and is_research_db,
+            )
+            if refuse_on_fail:
+                assert_data_contract_or_raise(self._data_contract)
+
+        self._price_index = build_price_index(timeline)
+
         symbol_data = {
             sym: self._load_symbol_data(sym, start_ms, end_ms)
             for sym in self.symbols
         }
+
+        self._pipeline_ctx.replay_audit = {
+            sym: ReplayDataQualityGate.audit_symbol_window(
+                sym,
+                symbol_data[sym].get("candles_1m", []),
+                start_ms,
+                end_ms,
+                funding_ts=symbol_data[sym].get("funding_ts"),
+                oi_ts=symbol_data[sym].get("oi_ts"),
+            )
+            for sym in self.symbols
+        }
+
+        research_cfg = (self._full_config.get("research", {}) or {}) if self._full_config else {}
+        research_gap_ms = resolve_gap_ms(
+            "1m",
+            gap_intervals=int(research_cfg.get("gap_intervals", 2)),
+            gap_intervals_by_tf=research_cfg.get("gap_intervals_by_tf"),
+            max_gap_ms=research_cfg.get("max_gap_ms"),
+        )
+        self._research_gap_ms = research_gap_ms
 
         capital = self.cfg.initial_capital
         self._capital = capital
@@ -231,76 +305,96 @@ class BacktestEngine:
 
         for idx, (ts, symbol, c1m) in enumerate(timeline):
             data = symbol_data[symbol]
+            prev_bar = self._pipeline_ctx.last_bar_ts.get(symbol)
+            if is_cross_gap(prev_bar, ts, max_gap_ms=self._research_gap_ms):
+                capital = self._flatten_symbol_at_gap(symbol, ts, c1m.close, capital)
             if self.cfg.use_external_feeds_replay:
                 self._advance_liquidation_replay(data, ts)
             event = self._build_market_event(symbol, ts, c1m, data)
+            if self._pipeline is not None:
+                funding_row = self._lookup_at_or_before(data.get("funding_ts", []), ts)
+                if funding_row is not None:
+                    self._pipeline_ctx.funding_ts_at[symbol] = int(funding_row[0])
+                oi_row = self._lookup_at_or_before(data.get("oi_ts", []), ts)
+                if oi_row is not None:
+                    self._pipeline_ctx.oi_ts_at[symbol] = int(oi_row[0])
 
             # v3.1.19: apply hourly funding to every open position whose
             # settlement boundary has been crossed since the last bar.
             capital = self._settle_funding(event, capital, ts)
 
-            capital = self._process_exits(event, capital)
+            self._update_excursions(symbol, c1m, ts)
+            capital = self._process_exits(event, capital, c1m)
 
             if (
                 symbol not in self.positions_by_symbol
                 and len(self.positions) < self.cfg.max_positions
             ):
-                # v3.1.19: feed 1h ATR to the volatility circuit breaker
-                # (soft gate). Falls through silently if disabled.
                 if self._vol_circuit is not None and event.candle_1h is not None:
                     atr = self._atr_pct(event.candle_1h)
                     if atr is not None:
                         self._vol_circuit.update(symbol, atr, ts)
 
-                # v3.1.19: time-of-day funding-reset blackout.
+                self._roll_day(ts)
+
                 if (
-                    self._funding_blackout is not None
-                    and self._funding_blackout.is_blocked(ts)
+                    self.cfg.max_daily_trades > 0
+                    and self._daily_trade_count.get(self._current_day or "", 0)
+                    >= self.cfg.max_daily_trades
                 ):
                     continue
 
                 signal = self.strategy.on_data(event)
-                if signal is not None:
-                    signal = self._apply_live_parity(signal, event, ts)
+                if signal is None:
+                    continue
+
+                if self._pipeline is not None:
+                    signal = self._pipeline.preprocess_signal(signal, event)
                     if signal is None:
                         continue
 
-                    # v3.1.19: real RiskManager gate.
-                    if self._risk_manager is not None:
-                        ok, reason = self._risk_manager.can_enter(
-                            signal, _BacktestPortfolioProxy(self),
-                        )
-                        if not ok:
-                            logger.debug(
-                                "Backtest: %s %s rejected by risk gate: %s",
-                                signal.symbol, signal.side, reason,
-                            )
-                            continue
+                signal, order_spec = self._resolve_fees(signal)
 
-                    # v3.1.19: volatility circuit breaker check.
-                    if (
-                        self._vol_circuit is not None
-                        and self._vol_circuit.is_blocked(symbol, ts)
-                    ):
+                if self._pipeline is not None:
+                    decision = self._pipeline.evaluate_gates(
+                        signal,
+                        event,
+                        _BacktestPortfolioProxy(self),
+                        self._pipeline_ctx,
+                        order_spec=order_spec,
+                        has_orderbook=False,
+                        skip_tca=False,
+                    )
+                    if not decision.approved:
                         logger.debug(
-                            "Backtest: %s rejected by vol circuit (block_remaining_sec=%d)",
-                            symbol, self._vol_circuit.block_remaining_sec(symbol, ts),
+                            "Backtest: %s %s rejected by %s: %s",
+                            signal.symbol, signal.side, decision.gate, decision.reason,
+                        )
+                        continue
+                    signal = decision.signal or signal
+                elif self._risk_manager is not None:
+                    ok, reason = self._risk_manager.can_enter(
+                        signal, _BacktestPortfolioProxy(self),
+                    )
+                    if not ok:
+                        logger.debug(
+                            "Backtest: %s %s rejected by risk gate: %s",
+                            signal.symbol, signal.side, reason,
                         )
                         continue
 
-                    if self.cfg.tca_enabled:
-                        fee_frac = self.cfg.commission_pct / 100.0
-                        slip_frac = self.cfg.paper_slippage_pct / 100.0
-                        buffer_frac = self.cfg.min_edge_buffer_pct / 100.0
-                        ok, _ = passes_tca_check(
-                            signal, fee_frac, slip_frac, buffer_frac,
-                        )
-                        if not ok:
-                            continue
-                    capital = self._open_position(signal, event.price, ts, capital)
-                    self._capital = capital
-                    day = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
-                    self._daily_trade_count[day] = self._daily_trade_count.get(day, 0) + 1
+                capital = self._open_position(
+                    signal, event.price, ts, capital, order_spec=order_spec,
+                )
+                self._capital = capital
+                if signal.symbol in self.positions_by_symbol and self._pipeline is not None:
+                    self._pipeline.record_trade_opened(
+                        signal.strategy, signal.symbol, event, self._pipeline_ctx,
+                    )
+                day = self._current_day or time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
+                self._daily_trade_count[day] = self._daily_trade_count.get(day, 0) + 1
+
+            self._pipeline_ctx.last_bar_ts[symbol] = ts
 
             if ts - last_snapshot_ts >= 3_600_000 or idx == len(timeline) - 1:
                 open_pnl = self._unrealised_pnl(event.price, symbol)
@@ -329,13 +423,57 @@ class BacktestEngine:
             0.0,
         )
 
+        trade_analytics = enrich_trades_post_exit(self.closed_trades, self._price_index)
+        execution_trades = strip_post_exit_from_trades(self.closed_trades)
+
+        manifest = {}
+        if self._full_config is not None:
+            tca_mode = str(self._full_config.get("backtest.tca_mode", "proxy"))
+            dc_tier = (
+                self._data_contract.fidelity_tier if self._data_contract else None
+            )
+            dc_summary = (
+                self._data_contract.summary() if self._data_contract else None
+            )
+            data_source = (
+                self._data_contract.data_source if self._data_contract else "sqlite_candles"
+            )
+            manifest = build_run_manifest(
+                self._full_config,
+                symbols=self.symbols,
+                data_source=data_source,
+                use_microstructure_proxy=self.cfg.use_microstructure_proxy,
+                kelly_effective=resolve_kelly_enabled(self._full_config, for_backtest=True),
+                tca_mode=tca_mode,
+                data_contract_tier=dc_tier,
+                data_contract_summary=dc_summary,
+                gate_manifest=(
+                    self._pipeline.gate_manifest() if self._pipeline is not None else None
+                ),
+            )
+
         return {
             "equity_curve": self.equity_curve,
-            "trades": self.closed_trades,
+            "trades": execution_trades,
+            "trade_analytics": trade_analytics,
             "metrics": metrics,
             "capital": capital,
             "total_return": metrics["total_return"],
+            "manifest": manifest,
         }
+
+    def _active_strategy_names(self) -> List[str]:
+        """Collect strategy names for per-strategy fidelity evaluation."""
+        names: List[str] = []
+        try:
+            if hasattr(self.strategy, "strategies"):
+                for s in self.strategy.strategies:
+                    names.append(str(getattr(s, "name", s.__class__.__name__)))
+            else:
+                names.append(str(getattr(self.strategy, "name", self.strategy.__class__.__name__)))
+        except Exception:
+            names.append(str(getattr(self.strategy, "name", "unknown")))
+        return names
 
     # ------------------------------------------------------------------
     # Data loading
@@ -363,6 +501,9 @@ class BacktestEngine:
         end_ms: Optional[int],
     ) -> Dict[str, Any]:
         return {
+            "candles_1m": self.db.get_candles(
+                symbol, "1m", limit=500_000, start_ms=start_ms, end_ms=end_ms
+            ),
             "candles_5m": self.db.get_candles(
                 symbol, "5m", limit=500_000, start_ms=start_ms, end_ms=end_ms
             ),
@@ -398,8 +539,13 @@ class BacktestEngine:
                 continue
             if end_ms is not None and ts > end_ms:
                 continue
+            if r.get("current") is None:
+                continue
             current = float(r["current"])
-            predicted = float(r["predicted"]) if r.get("predicted") is not None else current
+            predicted_raw = r.get("predicted")
+            predicted = (
+                float(predicted_raw) if predicted_raw is not None else current
+            )
             out.append((ts, current, predicted))
         out.sort(key=lambda x: x[0])
         return out
@@ -420,7 +566,12 @@ class BacktestEngine:
                 continue
             if end_ms is not None and ts > end_ms:
                 continue
-            out.append((ts, float(r["oi_total"]), float(r["oi_delta"])))
+            if r.get("oi_total") is None:
+                continue
+            oi_total = float(r["oi_total"])
+            oi_delta_raw = r.get("oi_delta")
+            oi_delta = float(oi_delta_raw) if oi_delta_raw is not None else 0.0
+            out.append((ts, oi_total, oi_delta))
         out.sort(key=lambda x: x[0])
         return out
 
@@ -516,8 +667,8 @@ class BacktestEngine:
             volume=c.volume,
             timestamp_ms=c.timestamp_ms,
             open_interest=c.oi_total,
-            buy_volume=getattr(c, "buy_volume", 0.0),
-            sell_volume=getattr(c, "sell_volume", 0.0),
+            buy_volume=c.buy_volume,
+            sell_volume=c.sell_volume,
             trade_count=getattr(c, "trade_count", 0),
         )
 
@@ -541,6 +692,15 @@ class BacktestEngine:
                     data["hist_15m"] = hist[-50:]
                 else:
                     data["hist_15m"] = hist
+            self._pipeline_ctx.candles_15m_history[symbol] = list(data["hist_15m"])
+            if self._pipeline is not None:
+                prev = self._last_candle_close.get(symbol)
+                curr = float(c15.close)
+                if prev is not None and prev > 0.0:
+                    self._pipeline.correlation_monitor.add_candle_return(
+                        symbol, prev, curr,
+                    )
+                self._last_candle_close[symbol] = curr
 
         funding_row = self._lookup_at_or_before(data["funding_ts"], ts)
         oi_row = self._lookup_at_or_before(data["oi_ts"], ts)
@@ -605,92 +765,51 @@ class BacktestEngine:
             binance_perp_timestamp_ms=bn_perp_ts,
         )
 
-    def _apply_live_parity(
-        self,
-        signal: Signal,
-        event: MarketEvent,
-        ts: int,
-    ) -> Optional[Signal]:
-        """Regime weights, cooldown, Kelly sizing, daily trade cap."""
+    def _roll_day(self, ts: int) -> None:
         day = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
         if self._current_day != day:
             self._current_day = day
             self._daily_trade_count = {}
-            self._daily_pnl = 0.0  # v3.1.19: reset daily PnL on day roll
+            self._daily_pnl = 0.0
 
-        if (
-            self.cfg.max_daily_trades > 0
-            and self._daily_trade_count.get(day, 0) >= self.cfg.max_daily_trades
-        ):
-            return None
+    def _resolve_fees(self, signal: Signal) -> Tuple[Signal, OrderSpec]:
+        if self._pipeline is not None:
+            return self._pipeline.resolve_order_fees(signal)
+        fee = self.cfg.commission_pct / 100.0
+        slip = self.cfg.paper_slippage_pct / 100.0
+        spec = OrderSpec(
+            order_type="market",
+            limit_price=None,
+            entry_fee_pct=fee,
+            exit_fee_pct=fee,
+            entry_slippage_pct=slip,
+            exit_slippage_pct=slip,
+        )
+        return signal, spec
 
-        strat_key = regime_strategy_name(signal)
-        if self.cfg.use_cooldown:
-            until = self._cooldown_state.get(f"{strat_key}:{signal.symbol}", 0)
-            if ts < until:
-                return None
-
-        adjusted = [signal]
-        if self.cfg.use_regime_weights and self.cfg.regime_weights:
-            adjusted = apply_regime_weights(
-                adjusted,
-                event.adx_14,
-                self.cfg.regime_weights,
-                self.cfg.adx_trend_threshold,
-                self.cfg.adx_range_threshold,
+    def _note_trade_closed(
+        self,
+        pos: _OpenPosition,
+        pnl_pct: float,
+        exit_reason: str,
+    ) -> None:
+        strat = (pos.metadata or {}).get("original_strategy") or pos.strategy
+        if self._pipeline is not None:
+            self._pipeline.record_trade_closed(
+                strat, pos.symbol, pnl_pct, self._pipeline_ctx,
             )
-            if not adjusted:
-                return None
-            signal = adjusted[0]
-
-        if self.cfg.use_kelly:
-            mult = self._kelly.get_size_multiplier()
-            signal = Signal(
-                strategy=signal.strategy,
-                symbol=signal.symbol,
-                side=signal.side,
-                confidence=signal.confidence,
-                size_pct=min(signal.size_pct * mult, 0.20),
-                entry_price=signal.entry_price,
-                stop_loss_pct=signal.stop_loss_pct,
-                take_profit_pct=signal.take_profit_pct,
-                reason=signal.reason,
-                metadata=signal.metadata,
-            )
-
-        return signal
-
-    def _note_trade_closed(self, pos: _OpenPosition, ts: int, pnl_pct: float) -> None:
-        if self.cfg.use_cooldown:
-            strat = (pos.metadata or {}).get("original_strategy") or pos.strategy
-            key = f"{strat}:{pos.symbol}"
-            if pnl_pct < 0:
-                # v3.1.19: dynamic doubling on consecutive losses,
-                # matches the live cooldown governor. Reset on win.
-                consecutive = self._consecutive_losses.get(key, 0) + 1
-                self._consecutive_losses[key] = consecutive
-                cooldown_ms = min(
-                    self.cfg.cooldown_base_ms
-                    * (self.cfg.cooldown_multiplier ** (consecutive - 1)),
-                    self.cfg.cooldown_max_ms,
-                )
-                self._cooldown_state[key] = ts + int(cooldown_ms)
-            else:
-                self._cooldown_state.pop(key, None)
-                self._consecutive_losses.pop(key, None)
-        if self._kelly:
-            self._kelly.record_trade(pnl_pct)
-
-    # ------------------------------------------------------------------
-    # v3.1.19: live-parity helpers
-    # ------------------------------------------------------------------
+        if self._risk_manager is not None:
+            class _Trade:
+                pass
+            t = _Trade()
+            t.pnl_usd = 0.0
+            t.pnl_pct = pnl_pct
+            t.symbol = pos.symbol
+            t.reason = exit_reason
+            self._risk_manager.on_trade_closed(t)
 
     def _atr_pct(self, candle: Any) -> Optional[float]:
-        """ATR(1) proxy from a single candle: range / close.
-
-        Sufficient for the volatility circuit breaker; no need for a
-        full 14-bar ATR over the 1h series in backtest.
-        """
+        """ATR(1) proxy from a single candle: range / close."""
         try:
             close = float(candle.close)
             high = float(candle.high)
@@ -750,28 +869,67 @@ class BacktestEngine:
         price: float,
         ts: int,
         capital: float,
+        *,
+        order_spec: Optional[OrderSpec] = None,
     ) -> float:
         if signal.symbol in self.positions_by_symbol:
             return capital
 
-        # size_pct is a fraction of capital (0.01 = 1%)
-        notional = capital * safe_float(signal.size_pct, 0.0)
-        if notional <= 0 or notional > capital:
+        entry_price_raw = safe_float(signal.entry_price, 0.0) or price
+        atr_pct = safe_float((signal.metadata or {}).get("atr_pct"), 0.0)
+        if atr_pct <= 0.0:
+            atr_pct = safe_float(signal.stop_loss_pct, 0.0) / 2.0
+        if atr_pct <= 0.0:
+            atr_pct = 0.005
+
+        sized_signal = Signal(
+            strategy=signal.strategy,
+            symbol=signal.symbol,
+            side=signal.side,
+            confidence=signal.confidence,
+            size_pct=signal.size_pct,
+            entry_price=entry_price_raw,
+            stop_loss_pct=signal.stop_loss_pct,
+            take_profit_pct=signal.take_profit_pct,
+            reason=signal.reason,
+            metadata={**(signal.metadata or {}), "atr_pct": atr_pct},
+        )
+
+        if self._risk_manager is not None:
+            size = self._risk_manager.calculate_position_size(
+                sized_signal, capital, atr_pct,
+            )
+        else:
+            stop = safe_float(signal.stop_loss_pct, 0.01)
+            notional = safe_divide(capital * safe_float(signal.size_pct, 0.0), stop, 0.0)
+            size = safe_divide(notional, entry_price_raw, 0.0)
+
+        size = round_position_size(
+            signal.symbol, size, self._full_config,
+        )
+        if size <= 0.0:
             return capital
 
+        slip_bps = self.cfg.slippage_bps
+        if order_spec is not None and order_spec.entry_slippage_pct > 0:
+            slip_bps = order_spec.entry_slippage_pct * 10_000.0
+        notional_est = size * entry_price_raw
         entry_price = self._apply_slippage(
-            price, signal.side, "entry", order_size_usd=notional,
+            entry_price_raw,
+            signal.side,
+            "entry",
+            order_size_usd=notional_est,
+            slippage_bps_override=slip_bps if order_spec and order_spec.order_type == "limit_maker" else None,
         )
         if entry_price <= 0.0:
             return capital
 
-        # v3.1.19: maker vs taker fee based on strategy routing
-        attr_strategy = regime_strategy_name(signal)
-        if attr_strategy in self.cfg.use_maker_for_strategies:
-            fee_rate = self.cfg.maker_fee_pct / 100.0
+        if order_spec is not None:
+            fee_rate = order_spec.entry_fee_pct
         else:
             fee_rate = self.cfg.commission_pct / 100.0
-        entry_commission = notional * fee_rate
+        entry_notional = entry_price * size
+        entry_commission = entry_notional * fee_rate
         capital -= entry_commission
 
         stop_loss_pct = safe_float(signal.stop_loss_pct, 0.0)
@@ -790,6 +948,14 @@ class BacktestEngine:
             else:
                 tp = entry_price * (1.0 - tp_pct)
 
+        meta = dict(signal.metadata or {})
+        if order_spec is not None:
+            meta["entry_fee_pct"] = order_spec.entry_fee_pct
+            meta["exit_fee_pct"] = order_spec.exit_fee_pct
+            meta["entry_slippage_pct"] = order_spec.entry_slippage_pct
+            meta["exit_slippage_pct"] = order_spec.exit_slippage_pct
+            meta["order_type"] = order_spec.order_type
+
         pos = _OpenPosition(
             id=self._next_position_id,
             strategy=signal.strategy,
@@ -797,16 +963,49 @@ class BacktestEngine:
             side=signal.side,
             entry_price=entry_price,
             entry_time_ms=ts,
-            size=notional / entry_price if entry_price > 0 else 0.0,
+            size=size,
             stop_loss_price=stop,
             take_profit_price=tp,
-            metadata=dict(signal.metadata or {}),
-            next_funding_ts=ts + 3_600_000,  # v3.1.19: first settlement 1h after entry
+            metadata=meta,
+            next_funding_ts=ts + 3_600_000,
+            excursion_id=self._next_excursion_id,
         )
+        risk_usd = 0.0
+        if stop is not None and entry_price > 0 and size > 0:
+            if signal.side == "long":
+                risk_usd = abs(entry_price - stop) * size
+            else:
+                risk_usd = abs(stop - entry_price) * size
+        self._excursion_trackers[self._next_excursion_id] = ExcursionTracker(
+            entry_price=entry_price,
+            entry_time_ms=ts,
+            side=signal.side,
+            risk_usd=risk_usd,
+        )
+        self._next_excursion_id += 1
         self.positions[pos.id] = pos
         self.positions_by_symbol[signal.symbol] = pos.id
         self._next_position_id += 1
         return capital
+
+    def _flatten_symbol_at_gap(
+        self,
+        symbol: str,
+        ts: int,
+        price: float,
+        capital: float,
+    ) -> float:
+        """Force-close open positions when replay crosses a research data gap."""
+        pos_id = self.positions_by_symbol.get(symbol)
+        if pos_id is None:
+            return capital
+        logger.info(
+            "Backtest gap flatten %s at %d (gap > %dms)",
+            symbol,
+            ts,
+            self._research_gap_ms,
+        )
+        return self._close_position(pos_id, price, ts, "research_gap_flatten", capital)
 
     def _close_position(
         self,
@@ -828,13 +1027,16 @@ class BacktestEngine:
         )
         exit_notional = exit_price * pos.size
 
-        # v3.1.19: maker vs taker fee based on strategy routing
-        attr_strategy = (pos.metadata or {}).get("original_strategy") or pos.strategy
-        if attr_strategy in self.cfg.use_maker_for_strategies:
-            fee_rate = self.cfg.maker_fee_pct / 100.0
-        else:
-            fee_rate = self.cfg.commission_pct / 100.0
-        total_fees = (entry_notional + exit_notional) * fee_rate
+        # Fees from order routing metadata (maker/taker parity with live)
+        entry_fee_rate = safe_float(
+            (pos.metadata or {}).get("entry_fee_pct"),
+            self.cfg.commission_pct / 100.0,
+        )
+        exit_fee_rate = safe_float(
+            (pos.metadata or {}).get("exit_fee_pct"),
+            self.cfg.commission_pct / 100.0,
+        )
+        total_fees = (entry_notional * entry_fee_rate) + (exit_notional * exit_fee_rate)
 
         if pos.side == "long":
             gross_pnl = (exit_price - pos.entry_price) * pos.size
@@ -846,10 +1048,19 @@ class BacktestEngine:
         pnl_pct = safe_divide(net_pnl, entry_notional, 0.0)
         capital += net_pnl
         self._daily_pnl += net_pnl
-        self._note_trade_closed(pos, ts, pnl_pct)
+        self._note_trade_closed(pos, pnl_pct, reason)
         self._capital = capital
 
-        self.closed_trades.append({
+        risk_usd = 0.0
+        if pos.stop_loss_price is not None and pos.entry_price > 0 and pos.size > 0:
+            if pos.side == "long":
+                risk_usd = abs(pos.entry_price - pos.stop_loss_price) * pos.size
+            else:
+                risk_usd = abs(pos.stop_loss_price - pos.entry_price) * pos.size
+        r_multiple = safe_divide(net_pnl, risk_usd, 0.0) if risk_usd > 0 else 0.0
+
+        attr_strategy = (pos.metadata or {}).get("original_strategy") or pos.strategy
+        trade_record: Dict[str, Any] = {
             "id": pos.id,
             "strategy": pos.strategy,
             "sub_strategy": attr_strategy,
@@ -862,13 +1073,47 @@ class BacktestEngine:
             "size": pos.size,
             "pnl_usd": round(net_pnl, 4),
             "pnl_pct": round(pnl_pct * 100, 4),
+            "risk_usd": round(risk_usd, 4),
+            "r_multiple": round(r_multiple, 4),
             "exit_reason": reason,
             "funding_paid": round(pos.funding_paid, 4),
             "fees_paid": round(total_fees, 4),
-        })
+        }
+        tracker = self._excursion_trackers.pop(pos.excursion_id, None)
+        if tracker is not None:
+            trade_record.update(
+                compute_intrade_excursion_fields(
+                    tracker,
+                    size=pos.size,
+                    net_pnl_usd=net_pnl,
+                    fees_paid=total_fees,
+                )
+            )
+        self.closed_trades.append(trade_record)
         return capital
 
-    def _process_exits(self, event: MarketEvent, capital: float) -> float:
+    def _update_excursions(self, symbol: str, c1m: DBCandle, ts: int) -> None:
+        """Update running MFE/MAE for open position on this symbol."""
+        pos_id = self.positions_by_symbol.get(symbol)
+        if pos_id is None:
+            return
+        pos = self.positions.get(pos_id)
+        if pos is None:
+            return
+        tracker = self._excursion_trackers.get(pos.excursion_id)
+        if tracker is None:
+            return
+        high = safe_float(c1m.high, 0.0)
+        low = safe_float(c1m.low, 0.0)
+        if high > 0 and low > 0:
+            tracker.update_bar(high, low, ts)
+
+    def _process_exits(
+        self,
+        event: MarketEvent,
+        capital: float,
+        c1m: DBCandle,
+    ) -> float:
         pos_id = self.positions_by_symbol.get(event.symbol)
         if pos_id is None:
             return capital
@@ -896,19 +1141,48 @@ class BacktestEngine:
         if exit_sig is not None:
             return self._close_position(pos_id, price, event.timestamp_ms, exit_sig.reason, capital)
 
-        if pos.stop_loss_price is not None:
-            if pos.side == "long" and price <= pos.stop_loss_price:
-                return self._close_position(pos_id, price, event.timestamp_ms, "stop_loss", capital)
-            if pos.side == "short" and price >= pos.stop_loss_price:
-                return self._close_position(pos_id, price, event.timestamp_ms, "stop_loss", capital)
-
-        if pos.take_profit_price is not None:
-            if pos.side == "long" and price >= pos.take_profit_price:
-                return self._close_position(pos_id, price, event.timestamp_ms, "take_profit", capital)
-            if pos.side == "short" and price <= pos.take_profit_price:
-                return self._close_position(pos_id, price, event.timestamp_ms, "take_profit", capital)
+        intrabar = self._intrabar_stop_tp(pos, c1m)
+        if intrabar is not None:
+            reason, fill_price = intrabar
+            return self._close_position(pos_id, fill_price, event.timestamp_ms, reason, capital)
 
         return capital
+
+    def _intrabar_stop_tp(
+        self,
+        pos: _OpenPosition,
+        c1m: DBCandle,
+    ) -> Optional[Tuple[str, float]]:
+        """Resolve stop/TP using 1m high/low; pessimistic when both touch."""
+        high = safe_float(c1m.high, 0.0)
+        low = safe_float(c1m.low, 0.0)
+        if high <= 0.0 or low <= 0.0 or high < low:
+            return None
+
+        sl_hit = False
+        tp_hit = False
+        if pos.stop_loss_price is not None:
+            if pos.side == "long" and low <= pos.stop_loss_price:
+                sl_hit = True
+            elif pos.side == "short" and high >= pos.stop_loss_price:
+                sl_hit = True
+        if pos.take_profit_price is not None:
+            if pos.side == "long" and high >= pos.take_profit_price:
+                tp_hit = True
+            elif pos.side == "short" and low <= pos.take_profit_price:
+                tp_hit = True
+
+        if not sl_hit and not tp_hit:
+            return None
+
+        pessimistic = self.cfg.intrabar_conflict_policy != "optimistic"
+        if sl_hit and tp_hit:
+            if pessimistic:
+                return ("stop_loss", float(pos.stop_loss_price))
+            return ("take_profit", float(pos.take_profit_price))
+        if sl_hit:
+            return ("stop_loss", float(pos.stop_loss_price))
+        return ("take_profit", float(pos.take_profit_price))
 
     def _unrealised_pnl(self, current_price: float, symbol: str) -> float:
         pos_id = self.positions_by_symbol.get(symbol)
@@ -927,16 +1201,12 @@ class BacktestEngine:
         side: str,
         direction: str,
         order_size_usd: float = 0.0,
+        slippage_bps_override: Optional[float] = None,
     ) -> float:
-        """Apply slippage to a fill price.
-
-        v3.1.19: size-aware scaling. The base ``slippage_bps`` is the
-        cost of a "typical" order (1% of initial capital). Larger orders
-        scale by ``sqrt(order_size / typical)`` — square-root impact
-        model is a reasonable approximation for crypto L2 books where
-        impact grows slower than linearly.
-        """
-        bps = self.cfg.slippage_bps
+        """Apply slippage to a fill price."""
+        if slippage_bps_override is not None and slippage_bps_override <= 0:
+            return price
+        bps = slippage_bps_override if slippage_bps_override is not None else self.cfg.slippage_bps
         if self.cfg.use_size_aware_slippage and order_size_usd > 0:
             typical = float(self.cfg.initial_capital) * 0.01
             if typical > 0:
@@ -950,3 +1220,35 @@ class BacktestEngine:
         if direction == "entry":
             return price * (1.0 - bps_frac)
         return price * (1.0 + bps_frac)
+
+
+def build_backtest_config_from_yaml(cfg: Union[Config, Dict[str, Any]]) -> BacktestConfig:
+    """Construct BacktestConfig from merged application config."""
+    if not isinstance(cfg, Config):
+        cfg = Config(cfg)
+    from src.utils.config import get_strategy_section, phase08_enabled
+
+    cooldown_cfg = get_strategy_section(cfg, "cooldown")
+    use_regime = bool(cfg.get("backtest.use_regime_weights", True))
+    if phase08_enabled(cfg):
+        use_regime = False
+    return BacktestConfig(
+        initial_capital=float(cfg.get("backtest.initial_capital", 100_000.0)),
+        commission_pct=float(cfg.get("backtest.commission_pct", cfg.get("risk.taker_fee_pct", 0.04))),
+        slippage_bps=float(cfg.get("backtest.slippage_bps", 2.0)),
+        max_positions=int(cfg.get("risk.max_positions", 5)),
+        tca_enabled=bool(cfg.get("execution.tca_enabled", True)),
+        min_edge_buffer_pct=float(cfg.get("execution.min_edge_buffer_pct", 0.05)),
+        paper_slippage_pct=float(cfg.get("risk.paper_slippage_pct", 0.05)),
+        use_regime_weights=use_regime,
+        use_cooldown=bool(cfg.get("backtest.use_cooldown", True)),
+        use_microstructure_proxy=bool(cfg.get("backtest.use_microstructure_proxy", True)),
+        intrabar_conflict_policy=str(cfg.get("backtest.intrabar_conflict_policy", "pessimistic")),
+        regime_weights=cfg.get("strategy.regime_weights", {}),
+        adx_trend_threshold=float(cfg.get("strategy.adx_trend_threshold", 25.0)),
+        adx_range_threshold=float(cfg.get("strategy.adx_range_threshold", 20.0)),
+        cooldown_base_ms=int(safe_float(cooldown_cfg.get("base_minutes", 60)) * 60_000),
+        cooldown_max_ms=int(safe_float(cooldown_cfg.get("max_minutes", 240)) * 60_000),
+        cooldown_multiplier=safe_float(cooldown_cfg.get("multiplier", 2.0)),
+        max_daily_trades=int(cfg.get("risk.max_daily_trades", 5)),
+    )

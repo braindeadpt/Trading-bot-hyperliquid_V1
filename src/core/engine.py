@@ -68,8 +68,8 @@ from src.strategies.indicators import (
     calculate_obv_slope,
     calculate_vwap_multi_tf,
 )
-from src.utils.config import Config
-from src.utils.helpers import safe_float, safe_divide, utc_timestamp_ms, resolve_trade_stop_levels
+from src.utils.config import Config, get_strategy_section, get_trading_symbols, resolve_kelly_enabled
+from src.utils.helpers import safe_float, optional_float, safe_divide, utc_timestamp_ms, resolve_trade_stop_levels
 
 from .execution import ExecutionEngine, TradeResult
 from .portfolio import PortfolioState
@@ -77,10 +77,15 @@ from .risk_manager import RiskManager
 from .kelly_sizer import KellySizer
 from .correlation_monitor import CorrelationMonitor
 from .strategy_governor import StrategyGovernor
+from .runtime_state import restore_runtime_state
 from .regime import apply_regime_weights as apply_regime_weights_fn
 from .regime import regime_strategy_name
+from .phase08_regime_router import route_phase08_signals, SequentialContradictionGuard
+from src.utils.config import phase08_enabled
 from .order_router import resolve_order_routing
-from .tca import passes_tca_check
+from .signal_pipeline import PipelineContext, SignalPipeline
+from .background_tasks import BackgroundTasks
+from .risk_state import RiskState
 from .volatility_circuit import VolatilityCircuitBreaker
 from .funding_blackout import FundingBlackoutFilter
 
@@ -113,18 +118,21 @@ class TradingEngine:
         risk_manager: RiskManager,
         executor: ExecutionEngine,
         notifier: Optional[Any] = None,
+        shadow_strategies: Optional[List[Strategy]] = None,
     ) -> None:
         self._config = config
         self._db = db
         self._bus = data_bus
         self._strategies = list(strategies)
+        self._shadow_strategies = list(shadow_strategies or [])
         self._risk = risk_manager
         self._executor = executor
         self._notifier = notifier
         self._mode = str(config.get("mode", "paper"))
 
         # ── Kelly Criterion sizer (Task 4.4) ──
-        kelly_cfg = config.get("kelly", {})
+        kelly_cfg = get_strategy_section(config, "kelly")
+        self._kelly_enabled = resolve_kelly_enabled(config, for_backtest=False)
         self._kelly_sizer = KellySizer(
             min_trades=int(kelly_cfg.get("min_trades", 20)),
             half_kelly=bool(kelly_cfg.get("half_kelly", True)),
@@ -137,6 +145,38 @@ class TradingEngine:
         for strat in self._strategies:
             if hasattr(strat, "set_governor"):
                 strat.set_governor(self._strategy_governor)
+
+        self._shadow_recorder: Optional[Any] = None
+        if self._shadow_strategies:
+            from src.research.shadow_recorder import ShadowRecorder
+
+            self._shadow_recorder = ShadowRecorder()
+            logger.info(
+                "Phase08 shadow mode: %d strategies (no execution) — %s",
+                len(self._shadow_strategies),
+                [s.name for s in self._shadow_strategies],
+            )
+
+        p08 = config.get("strategy.phase08", {}) or {}
+        self._phase08_enabled = phase08_enabled(config)
+        router_cfg = p08.get("regime_router", {}) or {}
+        self._phase08_regime_router = (
+            self._phase08_enabled and bool(router_cfg.get("enabled", True))
+        )
+        self._phase08_adx_range = float(
+            router_cfg.get("adx_range_threshold", config.get("strategy.adx_range_threshold", 20.0))
+        )
+        self._phase08_adx_trend = float(
+            router_cfg.get("adx_trend_threshold", config.get("strategy.adx_trend_threshold", 25.0))
+        )
+        self._phase08_paper_only = bool(p08.get("paper_only", True))
+        seq_ms = int(router_cfg.get("sequential_contradiction_block_ms", 3_600_000))
+        self._phase08_seq_guard: Optional[SequentialContradictionGuard] = (
+            SequentialContradictionGuard(seq_ms) if self._phase08_regime_router else None
+        )
+        adx_cfg = p08.get("adx", {}) or {}
+        self._adx_tf_s = int(adx_cfg.get("timeframe_s", 900))
+        self._adx_closed_only = bool(adx_cfg.get("closed_candles_only", True))
 
         # ── C1: Intraday volatility circuit breaker (per-symbol) ──
         vol_cfg = config.get("risk.volatility_circuit_breaker", {}) or {}
@@ -157,12 +197,8 @@ class TradingEngine:
             else set()
         )
 
-        # Symbols to trade (from config — "symbols" takes priority, falls back to "assets")
-        raw = config.get("symbols")
-        if raw is None:
-            raw = config.get("assets", ["BTC", "ETH", "SOL"])
-            logger.warning("config key 'symbols' not found — falling back to 'assets': %s", raw)
-        self._symbols: List[str] = list(raw)
+        # Symbols to trade — canonical list from config (assets/symbols unified at load).
+        self._symbols: List[str] = get_trading_symbols(config)
 
         # Slippage threshold (fraction, e.g. 0.002 = 0.2%)
         self._max_slippage_pct = safe_float(
@@ -175,9 +211,10 @@ class TradingEngine:
         )
 
         # ── Cooldown manager (Task 2.4) ──
-        self._cooldown_base_ms = int(config.get("cooldown.base_minutes", 60) * 60_000)
-        self._cooldown_max_ms = int(config.get("cooldown.max_minutes", 240) * 60_000)
-        self._cooldown_multiplier = safe_float(config.get("cooldown.multiplier", 2.0))
+        cooldown_cfg = get_strategy_section(config, "cooldown")
+        self._cooldown_base_ms = int(safe_float(cooldown_cfg.get("base_minutes", 60)) * 60_000)
+        self._cooldown_max_ms = int(safe_float(cooldown_cfg.get("max_minutes", 240)) * 60_000)
+        self._cooldown_multiplier = safe_float(cooldown_cfg.get("multiplier", 2.0))
         self._funding_strong_threshold = safe_float(
             config.get("strategy.mean_reversion.strong_threshold", 0.0001)
         )
@@ -203,6 +240,29 @@ class TradingEngine:
             str(sym): safe_float(mult, 1.0)
             for sym, mult in _sym_mult.items()
         } if isinstance(_sym_mult, dict) else {}
+
+        # Realized correlation monitor (positions heat) — before SignalPipeline
+        _gov = config.get("strategy.portfolio_governance", {})
+        corr_lookback = int(
+            _gov.get("max_correlation_lookback", config.get("portfolio.max_correlation_lookback", 60))
+        )
+        self._correlation_monitor = CorrelationMonitor(lookback=corr_lookback)
+        self._last_candle_close: Dict[str, float] = {}
+
+        self._pipeline_ctx = PipelineContext(cooldown_state=self._cooldown_state)
+        self._signal_pipeline = SignalPipeline(
+            config,
+            risk_manager,
+            kelly_sizer=self._kelly_sizer,
+            vol_circuit=self._vol_circuit,
+            funding_blackout=self._funding_blackout,
+            correlation_monitor=self._correlation_monitor,
+            feed_block_fn=self._entry_feed_block_reason,
+            use_regime_weights=False,
+            kelly_enabled=self._kelly_enabled,
+            tca_enabled=bool(config.get("execution.tca_enabled", True)),
+            for_backtest=False,
+        )
 
         # ── Regime filter (ADX-based strategy weighting) ──
         self._adx_period = int(config.get("strategy.adx_period", 14))
@@ -249,14 +309,7 @@ class TradingEngine:
         )
         self._portfolio = PortfolioState(initial_capital)
 
-        # Realized correlation monitor (positions heat)
-        _gov = config.get("strategy.portfolio_governance", {})
-        corr_lookback = int(
-            _gov.get("max_correlation_lookback", config.get("portfolio.max_correlation_lookback", 60))
-        )
-        self._correlation_monitor = CorrelationMonitor(lookback=corr_lookback)
-        # Last close per symbol for return calc
-        self._last_candle_close: Dict[str, float] = {}
+        # Volatility circuit + funding blackout wired above via SignalPipeline
 
         # Internal state
         self._running: bool = False
@@ -298,6 +351,19 @@ class TradingEngine:
         self._summary_task: Optional[asyncio.Task] = None
         # v3.1.17 C9: reconciliation loop (testnet/mainnet only)
         self._reconcile_task: Optional[asyncio.Task] = None
+        self._reconciler: Optional[Any] = None
+        self._protection_manager: Optional[Any] = None
+        recon_cfg = config.get("reconciliation", {}) or {}
+        self._reconciliation_enabled = bool(recon_cfg.get("enabled", True))
+        self._reconciliation_interval_sec = float(recon_cfg.get("interval_sec", 60))
+        self._reconciliation_block_when_stale = bool(
+            recon_cfg.get("block_entries_when_stale", True)
+        )
+        native_cfg = config.get("execution.native_protection", {}) or {}
+        self._native_protection_enabled = bool(native_cfg.get("enabled", True))
+        self._software_stop_redundancy = bool(
+            native_cfg.get("software_stop_redundancy", True)
+        )
         self._last_ws_healthy_time: float = time.time()
         self._ws_disconnect_start: Optional[float] = None
         self._ws_health_warned: bool = False
@@ -361,6 +427,15 @@ class TradingEngine:
         self._md_red_since: Optional[float] = None
         self._md_alert_after_sec = float(_md.get("alert_red_after_sec", 300))
         self._md_alert_cooldown_sec = float(_md.get("alert_red_cooldown_sec", 900))
+        self._block_entries_on_feed_stale = bool(
+            _md.get("block_entries_on_stale", _md.get("block_entries_on_red", True))
+        )
+        self._block_entries_on_ws_unhealthy = bool(
+            _md.get("block_entries_on_ws_unhealthy", True)
+        )
+        self._feed_health_evaluated: bool = False
+        self._feed_health_ready: bool = False
+        self._restore_invocation_count = 0
         self._last_md_alert_ts: float = 0.0
         _hl_testnet = bool(config.get("exchange.hyperliquid.testnet", False))
         self._hl_predicted = HyperliquidPredictedFundingClient(
@@ -387,8 +462,7 @@ class TradingEngine:
             config.get("engine.min_hold_time_ms", 30_000)
         )  # 30s default
 
-        # Per-symbol entry debounce (prevent duplicate entries)
-        self._last_entry_signal_ms: Dict[str, int] = {}
+        # Per-symbol entry debounce state lives in PipelineContext.last_entry_ms
         self._entry_signal_debounce_ms: int = int(
             config.get("engine.entry_signal_debounce_ms", 5_000)
         )  # 5s default
@@ -547,6 +621,34 @@ class TradingEngine:
         task.add_done_callback(self._notify_tasks.discard)
 
     @property
+    def _background_tasks(self) -> BackgroundTasks:
+        """Lazily-created holder for the engine's background loop bodies.
+
+        Lazy so that tests building the engine via
+        ``TradingEngine.__new__(TradingEngine)`` (bypassing ``__init__``)
+        still work — the object is only constructed on first access, and
+        it just wraps ``self``, so it needs no attributes to exist yet.
+        """
+        impl = self.__dict__.get("_background_tasks_impl")
+        if impl is None:
+            impl = BackgroundTasks(self)
+            self.__dict__["_background_tasks_impl"] = impl
+        return impl
+
+    @property
+    def _risk_state(self) -> RiskState:
+        """Lazily-created holder for engine-owned runtime risk state.
+
+        See ``_background_tasks`` for why this is lazy rather than set in
+        ``__init__``.
+        """
+        impl = self.__dict__.get("_risk_state_impl")
+        if impl is None:
+            impl = RiskState(self)
+            self.__dict__["_risk_state_impl"] = impl
+        return impl
+
+    @property
     def positions(self) -> Dict[str, Any]:
         return self._portfolio.get_positions_sync() if hasattr(self._portfolio, "get_positions_sync") else {}
 
@@ -590,21 +692,34 @@ class TradingEngine:
 
         # 1. Open executor session
         await self._executor.open()
+        if hasattr(self._executor, "set_portfolio"):
+            self._executor.set_portfolio(self._portfolio)
+        if self._mode in ("testnet", "mainnet") and self._reconciliation_enabled:
+            self._init_live_reconciliation()
+        if hasattr(self._executor, "set_oms_alert_callback"):
+            self._executor.set_oms_alert_callback(self._on_oms_alert)
+        if hasattr(self._executor, "register_order_callback"):
+            self._executor.register_order_callback(self._on_oms_status_change)
 
-        # 2. Recover DB state
+        # 2. Recover DB state (single restore path)
         await self._recover_state()
         await self._portfolio.reconcile_peaks()
-        self._risk.reset_circuit_breaker()
         dd0 = await self._portfolio.get_max_drawdown()
-        self._risk.check_drawdown(dd0)
+        if not self._risk.is_circuit_breaker_tripped():
+            self._risk.check_drawdown(dd0)
         equity0 = await self._portfolio.current_capital
         logger.info(
-            "Portfolio ready: equity=%.2f drawdown=%.2f%% circuit_breaker=%s",
+            "Portfolio ready: equity=%.2f drawdown=%.2f%% circuit_breaker=%s daily_dd=%s stop_streak=%d",
             equity0,
             dd0 * 100.0,
             self._risk.is_circuit_breaker_tripped(),
+            self._risk.is_daily_drawdown_circuit_tripped(),
+            self._risk.daily_stop_loss_count,
         )
-        self._seed_kelly_from_db()
+        if self._kelly_enabled:
+            self._seed_kelly_from_db()
+        else:
+            logger.info("Kelly sizing disabled by strategy.kelly.enabled=false")
 
         # 3. Subscribe to DataBus topics per symbol
         for symbol in self._symbols:
@@ -676,177 +791,277 @@ class TradingEngine:
             )
             logger.info("WS health monitoring loop started")
 
-    async def _reconcile_loop(self) -> None:
-        """Reconcile in-memory positions with the exchange (testnet/mainnet only).
+        if self._mode in ("testnet", "mainnet") and hasattr(self._executor, "start_oms_loop"):
+            await self._executor.start_oms_loop()
+            logger.info("OMS poller started from TradingEngine")
 
-        v3.1.17 C9: every 60s, fetch the exchange's open positions via
-        the REST client and diff against our in-memory book. Positions
-        that exist on the exchange but not in our book (e.g. an order
-        that filled after our own order was rolled back) are logged as
-        warnings. Positions we track but the exchange doesn't are
-        cancelled locally so we don't keep managing a phantom.
-
-        Failures are logged and never crash the loop.
-        """
-        # Local import to keep the module import-time cost low.
-        try:
-            from src.exchanges.hyperliquid_rest import HyperliquidREST  # noqa: F401
-        except Exception:  # noqa: BLE001
-            HyperliquidREST = None  # type: ignore
-
-        while self._running:
+        if self._reconciler is not None:
             try:
-                await asyncio.sleep(60)
-                if not self._running:
-                    return
-                live_client = getattr(self._executor, "_live_client", None)
-                if live_client is None or not getattr(self._executor, "_live_signing_ready", False):
-                    continue
-                if not hasattr(live_client, "get_positions"):
-                    continue
-                try:
-                    exchange_positions = await live_client.get_positions()
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Reconciliation get_positions failed: %s", exc)
-                    continue
-                if not isinstance(exchange_positions, list):
-                    continue
-
-                ex_by_symbol: Dict[str, Dict[str, Any]] = {}
-                for p in exchange_positions:
-                    if isinstance(p, dict):
-                        sym = str(p.get("symbol", "")).upper()
-                        if sym:
-                            ex_by_symbol[sym] = p
-
-                mem = await self._portfolio.positions
-                # v3.1.21: local ghost (we track, exchange doesn't) is the
-                # dangerous case — log at ERROR and auto-cancel so we
-                # don't keep managing a phantom position.
-                for sym, pos in mem.items():
-                    if sym not in ex_by_symbol:
-                        logger.error(
-                            "RECONCILE: local position %s missing on exchange — "
-                            "auto-cancelling phantom",
-                            sym,
-                        )
-                        try:
-                            await self._portfolio.cancel_position(sym)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning("Reconcile cancel failed for %s: %s", sym, exc)
-                # v3.1.21: untracked exchange position is a warning —
-                # the order may have filled after a rollback. Operator
-                # must reconcile manually via the exchange UI.
-                for sym, ex_p in ex_by_symbol.items():
-                    if sym not in mem:
-                        logger.warning(
-                            "RECONCILE: exchange has %s (size=%s) but we do not — review",
-                            sym, ex_p.get("size"),
-                        )
-            except asyncio.CancelledError:
-                raise
+                report = await self._reconciler.reconcile_once(executor=self._executor)
+                logger.info(
+                    "Startup reconciliation: success=%s exchange_pos=%d local=%d",
+                    report.success,
+                    len(report.exchange_positions),
+                    len(report.local_symbols),
+                )
             except Exception as exc:  # noqa: BLE001
-                logger.exception("Reconcile loop iteration failed: %s", exc)
+                logger.warning("Startup reconciliation failed: %s", exc)
+
+    def _init_live_reconciliation(self) -> None:
+        """Wire Phase 03 reconciler + native protection manager."""
+        from src.core.native_protection import NativeProtectionManager
+        from src.core.reconciliation import ExchangeReconciler
+
+        live_client = getattr(self._executor, "_live_client", None)
+        if live_client is None or not getattr(self._executor, "_live_signing_ready", False):
+            logger.warning("Live reconciliation skipped — signing client not ready")
+            return
+
+        recon_cfg = self._config.get("reconciliation", {}) or {}
+        self._protection_manager = NativeProtectionManager(live_client, self._db)
+        self._reconciler = ExchangeReconciler(
+            live_client=live_client,
+            portfolio=self._portfolio,
+            db=self._db,
+            protection=self._protection_manager,
+            orphan_exchange_policy=str(
+                recon_cfg.get("orphan_exchange_policy", "ADOPT_AND_PROTECT")
+            ),
+            mismatch_policy=str(recon_cfg.get("mismatch_policy", "HALT")),
+            stale_threshold_sec=float(recon_cfg.get("stale_threshold_sec", 120)),
+            alert_callback=self._reconciliation_alert,
+        )
+        if hasattr(self._executor, "set_protection_manager"):
+            self._executor.set_protection_manager(self._protection_manager)
+        if hasattr(self._executor, "set_reconciler"):
+            self._executor.set_reconciler(self._reconciler)
+
+    def _reconciliation_alert(self, message: str, level: str = "warning") -> None:
+        if self._notifier is not None:
+            self._notify(lambda m=message, lv=level: self._notifier.send_alert(m, lv))
+
+    def _on_oms_status_change(self, order_id: str, status: str, record: Dict[str, Any]) -> None:
+        asyncio.create_task(self._handle_oms_status_change(order_id, status, record))
+
+    def _on_oms_alert(self, event: str, order_id: str, record: Dict[str, Any]) -> None:
+        if self._notifier is None:
+            return
+        symbol = str(record.get("symbol", "?"))
+        trade_id = record.get("trade_id", "?")
+        filled = safe_float(record.get("filled_size"))
+        remaining = safe_float(record.get("remaining_size"))
+        if event == "timeout":
+            msg = (
+                f"OMS TIMEOUT: {symbol} order={order_id} trade_id={trade_id} "
+                f"filled={filled:.6f} remaining={remaining:.6f}"
+            )
+            level = "error"
+        elif event == "partial_residual":
+            msg = (
+                f"OMS PARTIAL RESIDUAL: {symbol} order={order_id} "
+                f"kept={filled:.6f} cancelled_remaining={remaining:.6f}"
+            )
+            level = "warning"
+        elif event == "cancel_failed":
+            msg = (
+                f"OMS CANCEL FAILED: {symbol} order={order_id} "
+                f"partial exposure preserved size={filled:.6f}"
+            )
+            level = "error"
+        else:
+            msg = (
+                f"OMS UNKNOWN STATUS: {symbol} order={order_id} event={event}"
+            )
+            level = "warning"
+        self._notify(lambda m=msg, lv=level: self._notifier.send_alert(m, lv))
+
+    async def _handle_oms_status_change(
+        self,
+        order_id: str,
+        status: str,
+        record: Dict[str, Any],
+    ) -> None:
+        """Open or extend portfolio exposure from confirmed live fills."""
+        from src.core.execution import ORDER_STATUS_FILLED, ORDER_STATUS_PARTIAL
+
+        if status not in (ORDER_STATUS_FILLED, ORDER_STATUS_PARTIAL):
+            return
+
+        trade_id = int(record.get("trade_id", 0))
+        if trade_id <= 0:
+            return
+
+        db_row = self._db.get_trade_by_id(trade_id) or {}
+        filled_size = safe_float(record.get("filled_size"))
+        if filled_size <= 0:
+            return
+
+        avg_px = safe_float(record.get("avg_fill_price"), safe_float(record.get("price")))
+        fee = safe_float(record.get("cumulative_fee"))
+        symbol = str(record.get("symbol", ""))
+        side = str(record.get("side", "long"))
+        applied_before = safe_float(record.get("_portfolio_applied_fill", 0.0))
+        delta = filled_size - applied_before
+        if delta <= 0:
+            return
+
+        sl_price, tp_price = resolve_trade_stop_levels(
+            entry_price=avg_px,
+            side=side,
+            signal_metadata=db_row.get("signal_metadata"),
+        )
+        strategy = str(db_row.get("strategy") or "unknown")
+        sub_strategy = str(db_row.get("sub_strategy") or strategy)
+        pos = Position(
+            symbol=symbol,
+            side=side,
+            entry_price=avg_px,
+            size=delta,
+            entry_time_ms=int(record.get("submitted_at_ms") or db_row.get("entry_time") or 0),
+            stop_loss_price=sl_price,
+            take_profit_price=tp_price,
+            unrealized_pnl=0.0,
+            current_price=avg_px,
+            metadata={
+                "strategy": strategy,
+                "sub_strategy": sub_strategy,
+                "trade_id": trade_id,
+                "exchange_order_id": order_id,
+            },
+        )
+        fee_delta = fee * safe_divide(delta, filled_size, 0.0) if filled_size > 0 else 0.0
+        cost_delta = (avg_px * delta) + fee_delta
+        await self._portfolio.apply_entry_fill(
+            symbol,
+            filled_size=delta,
+            avg_fill_price=avg_px,
+            additional_cost=cost_delta,
+            fee_delta=fee_delta,
+            position=pos,
+        )
+        record["_portfolio_applied_fill"] = filled_size
+        trade_id = int(record.get("trade_id", 0))
+        try:
+            self._db.update_trade_native_protection(
+                trade_id,
+                applied_fill_size=filled_size,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("applied_fill_size DB update failed: %s", exc)
+
+        await self._place_native_protection_after_fill(
+            symbol=symbol,
+            trade_id=trade_id,
+            filled_size=filled_size,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            side=side,
+            avg_px=avg_px,
+            record=record,
+        )
+
+        if status == ORDER_STATUS_FILLED and self._notifier is not None:
+            self._notify(
+                lambda: self._notifier.trade_entry(
+                    symbol,
+                    side,
+                    filled_size,
+                    avg_px,
+                    strategy,
+                    stop_loss=sl_price,
+                    take_profit=tp_price,
+                    notional_usd=filled_size * avg_px,
+                )
+            )
+
+    async def _place_native_protection_after_fill(
+        self,
+        *,
+        symbol: str,
+        trade_id: int,
+        filled_size: float,
+        sl_price: Optional[float],
+        tp_price: Optional[float],
+        side: str,
+        avg_px: float,
+        record: Dict[str, Any],
+    ) -> None:
+        """Place or resize native SL/TP triggers for confirmed fill size."""
+        if not self._native_protection_enabled or self._protection_manager is None:
+            return
+        if self._mode not in ("testnet", "mainnet"):
+            return
+
+        positions = await self._portfolio.positions
+        pos = positions.get(symbol)
+        if pos is None:
+            from src.strategies.base import Position
+
+            pos = Position(
+                symbol=symbol,
+                side=side,
+                entry_price=avg_px,
+                size=filled_size,
+                entry_time_ms=int(record.get("submitted_at_ms") or 0),
+                stop_loss_price=sl_price,
+                take_profit_price=tp_price,
+                metadata={"trade_id": trade_id},
+            )
+        else:
+            pos = pos  # use live book position with updated size
+
+        try:
+            if sl_price is not None and sl_price > 0:
+                self._db.enrich_trade_stop_metadata(
+                    trade_id=trade_id,
+                    stop_loss_price=float(sl_price),
+                    take_profit_price=float(tp_price) if tp_price else None,
+                    stop_loss_pct=0.0,
+                    take_profit_pct=None,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("enrich_trade_stop_metadata failed: %s", exc)
+
+        result = await self._protection_manager.ensure_protection(
+            pos,
+            filled_size=filled_size,
+            stop_price=sl_price,
+            take_profit_price=tp_price,
+            trade_id=trade_id,
+        )
+        if result.sl_order_id or result.tp_order_id:
+            meta = pos.metadata or {}
+            meta["native_protection_active"] = True
+            meta["native_sl_oid"] = result.sl_order_id
+            meta["native_tp_oid"] = result.tp_order_id
+            meta["native_protected_size"] = result.protected_size
+            await self._portfolio.update_position_metadata(symbol, meta)
+        if result.errors:
+            logger.error(
+                "Native protection errors for %s trade_id=%s: %s",
+                symbol, trade_id, result.errors,
+            )
+
+    async def _reconcile_loop(self) -> None:
+        """Reconcile local state with Hyperliquid user_state (Phase 03)."""
+        await self._background_tasks.reconcile_loop()
+
+    async def kill_switch(self) -> Any:
+        """Emergency flatten: cancel orders, close positions, confirm exchange flat."""
+        if not hasattr(self._executor, "kill_switch"):
+            raise RuntimeError("Kill switch not available in this execution mode")
+        result = await self._executor.kill_switch()
+        if self._reconciler is not None:
+            await self._reconciler.reconcile_once(executor=self._executor)
+        return result
 
     async def _ws_health_loop(self) -> None:
         """Background task: check WS health every 30s."""
-        while self._running:
-            try:
-                await asyncio.sleep(30)
-                if self._hl_ws_client is None:
-                    continue
-                healthy = getattr(self._hl_ws_client, 'is_healthy', True)
-                now = time.time()
-                if not healthy:
-                    if not self._ws_health_warned:
-                        self._ws_disconnect_start = now
-                        logger.warning("WS health check FAILED — no data for >90s")
-                        self._ws_health_warned = True
-                    if self._notifier is not None and self._ws_disconnect_start is not None:
-                        duration = now - self._ws_disconnect_start
-                        self._notify(
-                            lambda d=duration: self._notifier.ws_disconnect(
-                                exchange="Hyperliquid", duration_sec=d
-                            )
-                        )
-                else:
-                    if self._ws_health_warned:
-                        duration = (
-                            now - self._ws_disconnect_start
-                            if self._ws_disconnect_start is not None
-                            else 0.0
-                        )
-                        logger.info("WS health RESTORED after %.0fs", duration)
-                        self._ws_health_warned = False
-                        self._ws_disconnect_start = None
-                        if self._notifier is not None:
-                            self._notify(
-                                lambda: self._notifier.send_alert("WS reconnected")
-                            )
-                    self._last_ws_healthy_time = now
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("WS health check error")
+        await self._background_tasks.ws_health_loop()
 
     async def _periodic_summary_loop(self) -> None:
         """Log a structured summary every 15 min: exposure, DD, PnL, active strategies."""
-        await asyncio.sleep(60)  # initial settle-in delay
-        while self._running:
-            try:
-                portfolio = self._portfolio
-                positions = await portfolio.positions
-                capital = await portfolio.current_capital
-                daily_pnl = await portfolio.daily_pnl
-                max_dd = portfolio.sync_max_drawdown_pct()
-                active_strategies = []
-                for s in self._strategies:
-                    active_strategies.append(getattr(s, "name", "?"))
-                    subs = getattr(s, "_strategies", None)
-                    if isinstance(subs, dict):
-                        active_strategies.extend(
-                            getattr(sub, "name", n) for n, sub in subs.items()
-                        )
-
-                long_exposure = 0.0
-                short_exposure = 0.0
-                for pos in positions.values():
-                    mid = getattr(pos, "current_price", 0) or 1
-                    notional = getattr(pos, "size", 0) * mid
-                    if getattr(pos, "side", "") == "long":
-                        long_exposure += notional
-                    else:
-                        short_exposure += notional
-                cb_tripped = self._risk.is_circuit_breaker_tripped()
-                daily_trades = await portfolio.daily_trades
-
-                logger.info(
-                    "=== PERIODIC SUMMARY === "
-                    "capital=%.2f | daily_pnl=%.2f | max_dd=%.2f%% | "
-                    "long_exposure=%.2f | short_exposure=%.2f | "
-                    "open_pos=%d | daily_trades=%d | cb=%s | "
-                    "strategies=%s",
-                    capital, daily_pnl, max_dd,
-                    long_exposure, short_exposure,
-                    len(positions), daily_trades,
-                    "TRIPPED" if cb_tripped else "ok",
-                    ",".join(active_strategies),
-                )
-
-                if self._notifier is not None:
-                    pnl_emoji = "+" if daily_pnl >= 0 else ""
-                    summary_msg = (
-                        f"Summary: capital={capital:.0f} | daily_pnl={pnl_emoji}{daily_pnl:.2f} | "
-                        f"DD={max_dd*100:.1f}% | positions={len(positions)} | "
-                        f"cb={'TRIPPED' if cb_tripped else 'ok'}"
-                    )
-                    self._notify(
-                        lambda m=summary_msg: self._notifier.send(m, level="info")
-                    )
-
-            except Exception:
-                logger.exception("Periodic summary error")
-            await asyncio.sleep(900)
+        await self._background_tasks.periodic_summary_loop()
 
     def _refresh_market_data_health(self) -> None:
         """Rebuild per-symbol feed health from latest polls."""
@@ -938,6 +1153,9 @@ class TradingEngine:
             failure_rate_1h=rate_all,
             red_since_sec=red_since,
         )
+        self._feed_health_evaluated = True
+        if overall != "red":
+            self._feed_health_ready = True
 
     async def _check_market_data_alerts(self) -> None:
         """Telegram alert when fleet health stays red beyond threshold."""
@@ -1021,64 +1239,7 @@ class TradingEngine:
 
     async def _poll_funding_loop(self) -> None:
         """Background task: poll CEX funding/OI and HL predictedFundings."""
-        while self._running:
-            try:
-                results = await self._funding_aggregator.poll(self._symbols)
-                for sym, data in results.items():
-                    if data:
-                        self._latest_agg_funding[sym] = data
-                        if data.stale:
-                            logger.warning(
-                                "CEX funding %s is STALE (age=%.0fs, exchanges=%s)",
-                                sym,
-                                data.age_sec,
-                                ",".join(data.by_exchange.keys()),
-                            )
-                stale_count = sum(1 for d in results.values() if d.stale)
-                logger.info(
-                    "FundingAggregator updated for %d symbols (exchanges=%s, stale=%d)",
-                    len(results),
-                    ", ".join(
-                        sorted(
-                            set(
-                                ex
-                                for d in results.values()
-                                for ex in d.by_exchange.keys()
-                            )
-                        )
-                    ) if results else "none",
-                    stale_count,
-                )
-                now = time.time()
-                if now - self._last_hl_predicted_poll >= self._hl_predicted_poll_sec:
-                    hl_results = await self._hl_predicted.poll(self._symbols)
-                    self._last_hl_predicted_poll = now
-                    for sym, snap in hl_results.items():
-                        hl = snap.predicted_funding_hl
-                        hl8 = snap.predicted_funding_hl_8h
-                        level = logger.warning if snap.stale else logger.info
-                        level(
-                            "HL predictedFundings %s%s: hl=%s hl_8h=%s venues=%s",
-                            sym,
-                            " STALE" if snap.stale else "",
-                            f"{hl:.8f}" if hl is not None else "N/A",
-                            f"{hl8:.8f}" if hl8 is not None else "N/A",
-                            ",".join(sorted(snap.venues.keys())),
-                        )
-                self._persist_funding_oi_snapshot()
-                self._refresh_market_data_health()
-                await self._check_market_data_alerts()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("FundingAggregator poll failed: %s", exc)
-            try:
-                await asyncio.wait_for(
-                    self._shutdown_event.wait()
-                    if self._shutdown_event
-                    else asyncio.sleep(self._funding_poll_sec),
-                    timeout=self._funding_poll_sec,
-                )
-            except asyncio.TimeoutError:
-                pass
+        await self._background_tasks.poll_funding_loop()
 
     def _should_close_positions_on_shutdown(self) -> bool:
         """True when graceful stop should flatten all open positions.
@@ -1087,30 +1248,11 @@ class TradingEngine:
         Mainnet override is true until SL/TP are placed as native trigger
         orders on the exchange via the Hyperliquid SDK at entry time.
         """
-        explicit = self._config.get("engine.close_positions_on_shutdown")
-        if explicit is not None:
-            return bool(explicit)
-        return bool(self._config.get("execution.flatten_on_stop", True))
+        return self._risk_state.should_close_positions_on_shutdown()
 
     def _seed_kelly_from_db(self) -> None:
         """Pre-load KellySizer from recent closed trades in SQLite."""
-        kelly_cfg = self._config.get("kelly", {}) or {}
-        lookback = int(kelly_cfg.get("lookback_trades", 50))
-        try:
-            pnl_pcts = self._db.get_recent_closed_trade_pnl_pcts(limit=lookback)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("KellySizer seed skipped — DB read failed: %s", exc)
-            return
-        if not pnl_pcts:
-            logger.info("KellySizer seed: no closed trades in DB yet")
-            return
-        n = self._kelly_sizer.seed_history(pnl_pcts)
-        mult = self._kelly_sizer.get_size_multiplier()
-        logger.info(
-            "KellySizer seeded with %d historical trades (multiplier=%.3f)",
-            n,
-            mult,
-        )
+        self._risk_state.seed_kelly_from_db()
 
     async def stop(self) -> None:
         """Graceful shutdown: close all positions, save state, unsubscribe."""
@@ -1143,10 +1285,13 @@ class TradingEngine:
                 logger.warning("Unsubscribe error on %s: %s", topic, exc)
         self._subscribed_callbacks.clear()
 
+        if self._mode in ("testnet", "mainnet") and hasattr(self._executor, "stop_oms_loop"):
+            await self._executor.stop_oms_loop()
+
         # 2. Close all open positions (market order at last known price)
-        # v3.1.42: gated by engine.close_positions_on_shutdown (fallback:
-        # execution.flatten_on_stop). Paper/testnet preserves positions;
-        # mainnet flattens until SDK native SL/TP trigger orders exist.
+        # v3.1.42: gated by engine.close_positions_on_shutdown; when unset,
+        # flatten_on_stop under the order-routing config applies. Paper/testnet
+        # preserves positions; mainnet flattens until SDK native SL/TP triggers exist.
         flatten_on_stop = self._should_close_positions_on_shutdown()
         positions_snapshot = await self._portfolio.positions
         if not flatten_on_stop and positions_snapshot:
@@ -1173,6 +1318,7 @@ class TradingEngine:
 
         # 3. Save final portfolio snapshot
         await self._save_portfolio_snapshot()
+        self._persist_runtime_state()
 
         # 4. Close executor
         await self._executor.close()
@@ -1318,6 +1464,13 @@ class TradingEngine:
             # Append 15m candles to history for ADX (regime filter)
             if timeframe == 900:
                 self._candles_15m_history[symbol].append(candle)
+                if self._adx_closed_only or self._phase08_enabled:
+                    hist = self._candles_15m_history[symbol]
+                    if len(hist) >= 2 * self._adx_period + 1:
+                        from src.strategies.indicators import calculate_adx
+                        adx = calculate_adx(list(hist), self._adx_period)
+                        if adx is not None:
+                            self._latest_adx[symbol] = adx
             # Append 5m candles to history for OBV / MFI (v3.1.15)
             if timeframe == 300:
                 self._candles_5m_history[symbol].append(candle)
@@ -1338,9 +1491,9 @@ class TradingEngine:
                     low=float(getattr(candle, 'low', getattr(candle, 'low_price', 0))),
                     close=float(getattr(candle, 'close', getattr(candle, 'close_price', 0))),
                     volume=float(getattr(candle, 'volume', 0)),
-                    funding_rate=float(getattr(candle, 'funding', 0)),
-                    oi_total=float(getattr(candle, 'oi_close', 0)),
-                    oi_delta=float(getattr(candle, 'oi_delta', 0)),
+                    funding_rate=optional_float(getattr(candle, 'funding', None)),
+                    oi_total=optional_float(getattr(candle, 'oi_close', None)),
+                    oi_delta=optional_float(getattr(candle, 'oi_delta', None)),
                     buy_volume=float(getattr(candle, 'buy_volume', 0)),
                     sell_volume=float(getattr(candle, 'sell_volume', 0)),
                     trade_count=int(getattr(candle, 'trade_count', 0)),
@@ -1527,12 +1680,13 @@ class TradingEngine:
                     "DRAWDOWN CIRCUIT BREAKER TRIPPED at %.2f%% — halting new entries",
                     max_dd * 100.0,
                 )
-                # v3.1.17 C8: defer flatten until after releasing the per-symbol
-                # lock so we don't deadlock against another symbol's tick that is
-                # currently waiting for this symbol's lock.
                 self._pending_flatten = ("drawdown_circuit_breaker", symbol)
-                # Also reset the circuit breaker notification flag so it can re-trigger
                 self._circuit_breaker_notified = True
+
+            equity = await self._portfolio.current_capital
+            self._risk.evaluate_daily_drawdown(equity)
+            if self._risk.request_daily_dd_flatten():
+                self._pending_flatten = ("daily_drawdown_circuit", symbol)
 
             # --- Update executor price tracking ---
             await self._executor.update_position_prices({symbol: event.price})
@@ -1556,6 +1710,9 @@ class TradingEngine:
             # --- FundingArbitrage pair scan (after all symbols have been seen) ---
             await self._maybe_scan_funding_arbitrage(event)
 
+            # --- Phase08 shadow strategies (observability only, no execution) ---
+            self._evaluate_shadow_strategies(event, symbol)
+
             # --- 1. Strategy entry signals ---
             # Top-level list is typically [StrategyEnsemble]; see _strategy_is_operational.
             signals: List[Signal] = []
@@ -1565,16 +1722,60 @@ class TradingEngine:
                 try:
                     sig = strategy.on_data(event)
                     if sig is not None:
+                        gov_reason = self._governor_blocks_signal(sig)
+                        if gov_reason is not None:
+                            logger.info(
+                                "Signal REJECTED %s %s — %s",
+                                sig.symbol,
+                                sig.side,
+                                gov_reason,
+                            )
+                            self._persist_decision(
+                                decision_type="governor",
+                                symbol=sig.symbol,
+                                side=sig.side,
+                                strategy=self._signal_strategy_name(sig),
+                                signal_confidence=sig.confidence,
+                                ts_ms=event.timestamp_ms,
+                                result="rejected",
+                                reason=gov_reason,
+                            )
+                            continue
                         signals.append(sig)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("Strategy %s error on %s: %s", strategy.name, symbol, exc)
 
             if signals:
-                # Regime-based confidence weighting
-                weighted_signals = self._apply_regime_weights(signals, symbol)
-                # Conflict resolution: pick highest weighted confidence
-                best_signal = max(weighted_signals, key=lambda s: s.confidence)
-                await self._process_entry_signal(best_signal, event)
+                if self._phase08_regime_router:
+                    routed, reject_reason = route_phase08_signals(
+                        signals,
+                        self._latest_adx.get(symbol),
+                        adx_range_threshold=self._phase08_adx_range,
+                        adx_trend_threshold=self._phase08_adx_trend,
+                        symbol=symbol,
+                        seq_guard=self._phase08_seq_guard,
+                        timestamp_ms=event.timestamp_ms,
+                    )
+                    if reject_reason:
+                        self._persist_decision(
+                            decision_type="phase08_regime",
+                            symbol=symbol,
+                            side=signals[0].side if signals else "",
+                            strategy=self._signal_strategy_name(signals[0]) if signals else "",
+                            signal_confidence=signals[0].confidence if signals else 0.0,
+                            ts_ms=event.timestamp_ms,
+                            result="rejected",
+                            reason=reject_reason,
+                        )
+                    if not routed:
+                        pass
+                    else:
+                        best_signal = max(routed, key=lambda s: s.confidence)
+                        await self._process_entry_signal(best_signal, event)
+                else:
+                    weighted_signals = self._apply_regime_weights(signals, symbol)
+                    best_signal = max(weighted_signals, key=lambda s: s.confidence)
+                    await self._process_entry_signal(best_signal, event)
 
             # --- 2. Strategy exit signals (only if position exists) ---
             exit_triggered = False
@@ -1641,6 +1842,48 @@ class TradingEngine:
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Deferred funding pair failed: %s", exc)
 
+    def _evaluate_shadow_strategies(self, event: MarketEvent, symbol: str) -> None:
+        """Run Phase08 shadow strategies and log hypothetical decisions.
+
+        Shadow instances are separate objects — no governor, cooldown, portfolio,
+        or execution side-effects.
+        """
+        if not self._shadow_strategies or self._shadow_recorder is None:
+            return
+        from src.research.shadow_recorder import ShadowDecision
+
+        for strategy in self._shadow_strategies:
+            if getattr(strategy, "_shadow_instance", False) is False:
+                logger.warning("Shadow strategy missing _shadow_instance flag: %s", strategy.name)
+            try:
+                sig = strategy.on_data(event)
+                if sig is None:
+                    continue
+                self._shadow_recorder.record(
+                    ShadowDecision(
+                        symbol=symbol,
+                        strategy=strategy.name,
+                        variant="phase08_shadow",
+                        side=sig.side,
+                        would_enter=True,
+                        reason="entry_signal",
+                        timestamp_ms=event.timestamp_ms,
+                        market_snapshot={
+                            "price": event.price,
+                            "confidence": sig.confidence,
+                        },
+                    )
+                )
+                logger.debug(
+                    "Shadow signal %s %s %s conf=%.2f (not executed)",
+                    strategy.name,
+                    symbol,
+                    sig.side,
+                    sig.confidence,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Shadow strategy %s error on %s: %s", strategy.name, symbol, exc)
+
     def _build_market_event(self, symbol: str) -> Optional[MarketEvent]:
         """Assemble a MarketEvent from the latest cached data for *symbol*."""
         tick = self._latest_price.get(symbol)
@@ -1694,13 +1937,8 @@ class TradingEngine:
         # Orderbook metrics (if available)
         ob = self._latest_orderbook.get(symbol)
 
-        # ── ADX calculation (regime filter) ──
-        adx = None
-        hist_15m = self._candles_15m_history.get(symbol)
-        if hist_15m is not None and len(hist_15m) >= 2 * self._adx_period + 1:
-            adx = calculate_adx(list(hist_15m), self._adx_period)
-            if adx is not None:
-                self._latest_adx[symbol] = adx
+        # ── ADX (frozen 15m closed candles — updated on candle_complete only) ──
+        adx = self._latest_adx.get(symbol)
 
         # ── Liquidation stats (Task 3.3) ──
         liq_notional, liq_side, liq_count = self._get_liquidation_stats(symbol)
@@ -2124,13 +2362,7 @@ class TradingEngine:
 
     @staticmethod
     def _strategy_is_operational(strategy: Any) -> bool:
-        """True when a top-level strategy should run on_data / on_position.
-
-        Live config registers ``[StrategyEnsemble]`` only; sub-strategy gating
-        (governor, ``is_active()`` on auto-enable strategies) happens inside
-        the ensemble. This hook exists for direct top-level strategies that
-        implement ``is_active()`` (e.g. dormant auto-enable modules).
-        """
+        """True when a top-level strategy should run on_data / on_position."""
         if hasattr(strategy, "is_active"):
             return bool(strategy.is_active())
         return True
@@ -2433,14 +2665,9 @@ class TradingEngine:
         event: MarketEvent,
     ) -> None:
         """Record entry time and context for future cooldown checks."""
-        key = self._cooldown_key(strategy, symbol)
-        self._cooldown_state[key] = {
-            "last_trade_ms": event.timestamp_ms,
-            "duration_ms": self._cooldown_base_ms,  # will be updated on exit
-            "consecutive_losses": self._cooldown_state.get(key, {}).get("consecutive_losses", 0),
-            "adx": event.adx_14,
-            "funding": event.funding or event.predicted_funding,
-        }
+        self._signal_pipeline._cooldown.on_entry(
+            strategy, symbol, event, self._pipeline_ctx.cooldown_state,
+        )
 
     def _update_cooldown_on_exit(
         self,
@@ -2448,39 +2675,10 @@ class TradingEngine:
         symbol: str,
         pnl_pct: float,
     ) -> None:
-        """Update cooldown state after a position is closed.
-
-        After loss: double cooldown duration (cap at max).
-        After win: reset consecutive losses and cooldown.
-        """
-        key = self._cooldown_key(strategy, symbol)
-        state = self._cooldown_state.get(key)
-        if state is None:
-            return  # shouldn't happen but be safe
-
-        if pnl_pct > 0:
-            # WIN — reset cooldown
-            state["consecutive_losses"] = 0
-            state["duration_ms"] = self._cooldown_base_ms
-            logger.info(
-                "Cooldown RESET %s — WIN (pnl=%.2f%%). Back to base %.1f min.",
-                key, pnl_pct * 100, self._cooldown_base_ms / 60_000,
-            )
-        else:
-            # LOSS — increase cooldown
-            state["consecutive_losses"] += 1
-            new_duration = min(
-                self._cooldown_base_ms * (self._cooldown_multiplier ** state["consecutive_losses"]),
-                self._cooldown_max_ms,
-            )
-            state["duration_ms"] = int(new_duration)
-            logger.info(
-                "Cooldown INCREASED %s — LOSS #%d (pnl=%.2f%%). "
-                "Next cooldown: %.1f min (max %.1f min)",
-                key, state["consecutive_losses"], pnl_pct * 100,
-                state["duration_ms"] / 60_000,
-                self._cooldown_max_ms / 60_000,
-            )
+        """Update cooldown state after a position is closed."""
+        self._signal_pipeline._cooldown.on_exit(
+            strategy, symbol, pnl_pct, self._pipeline_ctx.cooldown_state,
+        )
 
     # ------------------------------------------------------------------
     # Signal processing
@@ -2488,17 +2686,19 @@ class TradingEngine:
 
     async def _process_entry_signal(self, signal: Signal, event: MarketEvent) -> None:
         """Gate an entry signal through risk management and execute if approved."""
-
-        # --- Engine-level entry debounce (prevent duplicate signals) ---
-        last_sig_ms = self._last_entry_signal_ms.get(signal.symbol, 0)
-        if event.timestamp_ms - last_sig_ms < self._entry_signal_debounce_ms:
+        if self._phase08_enabled and self._phase08_paper_only and self._mode != "paper":
             logger.warning(
-                "Signal DEBOUNCED %s %s — last entry was %dms ago (min %dms)",
-                signal.symbol, signal.side,
-                event.timestamp_ms - last_sig_ms,
-                self._entry_signal_debounce_ms,
+                "Phase08 REJECT %s %s — execution allowed in paper mode only (mode=%s)",
+                signal.symbol,
+                signal.side,
+                self._mode,
             )
             return
+
+        if self._phase08_seq_guard is not None:
+            self._phase08_seq_guard.record(
+                signal.symbol, signal.side, event.timestamp_ms,
+            )
 
         # Save signal to DB for audit trail
         self._db.save_signal(
@@ -2530,71 +2730,77 @@ class TradingEngine:
         self._signal_history.insert(0, sig_record)
         self._signal_history = self._signal_history[:100]
 
-        # --- Cooldown check (Task 2.4) ---
-        in_cooldown, cooldown_reason = self._is_in_cooldown(
-            signal.strategy, signal.symbol, event,
+        self._pipeline_ctx.candles_15m_history = {
+            sym: list(hist) for sym, hist in self._candles_15m_history.items()
+        }
+        preprocessed = self._signal_pipeline.preprocess_signal(signal, event)
+        if preprocessed is None:
+            return
+        signal = preprocessed
+
+        capital = await self._portfolio.current_capital
+        positions = await self._portfolio.positions
+        daily_pnl = await self._portfolio.daily_pnl
+        daily_trades = await self._portfolio.daily_trades
+        portfolio_proxy = _PortfolioProxy(
+            capital=capital,
+            positions=positions,
+            daily_pnl=daily_pnl,
+            daily_trades=daily_trades,
+            max_drawdown=await self._portfolio.get_max_drawdown(),
         )
-        if in_cooldown:
+
+        decision = self._signal_pipeline.evaluate_gates(
+            signal, event, portfolio_proxy, self._pipeline_ctx, skip_tca=True,
+        )
+        if not decision.approved:
+            gate = decision.gate
+            reason = decision.reason
+            if gate == "entry_debounce":
+                logger.warning(
+                    "Signal DEBOUNCED %s %s — %s",
+                    signal.symbol, signal.side, reason,
+                )
+                return
             logger.info(
                 "Signal REJECTED %s %s — %s",
-                signal.symbol, signal.side, cooldown_reason,
+                signal.symbol, signal.side, reason,
             )
             sig_record["status"] = "rejected"
-            sig_record["risk_reason"] = cooldown_reason
+            sig_record["risk_reason"] = reason
+            strat_stats = self._strategy_stats.get(signal.strategy)
+            if strat_stats:
+                strat_stats["rejected_signals"] += 1
+                if strat_stats["signal_history"]:
+                    strat_stats["signal_history"][0]["status"] = "rejected"
+            decision_type_map = {
+                "feed_health": "feed_health",
+                "cooldown": "cooldown",
+                "vol_circuit": "vol_circuit",
+                "funding_blackout": "funding_blackout",
+                "chase_filter": "chase",
+                "correlation": "correlation",
+                "risk": "risk",
+            }
+            metadata: Dict[str, Any] = {}
+            if gate == "correlation" and "r(" in reason:
+                parts = reason.split("r(")[1].split(")")[0].split(",")
+                if len(parts) == 2:
+                    metadata["conflict_symbol"] = parts[1].strip()
             self._persist_decision(
-                decision_type="cooldown",
+                decision_type=decision_type_map.get(gate, gate),
                 symbol=signal.symbol,
                 side=signal.side,
                 strategy=signal.strategy,
                 signal_confidence=signal.confidence,
                 ts_ms=event.timestamp_ms,
                 result="rejected",
-                reason=cooldown_reason,
+                reason=reason,
+                metadata=metadata or None,
             )
             return
 
-        # --- Kelly Criterion sizing (Task 4.4) ---
-        kelly_mult = self._kelly_sizer.get_size_multiplier()
-        if kelly_mult != 1.0:
-            # Create new signal with Kelly-adjusted size
-            signal = Signal(
-                strategy=signal.strategy,
-                symbol=signal.symbol,
-                side=signal.side,
-                confidence=signal.confidence,
-                size_pct=signal.size_pct * kelly_mult,
-                entry_price=signal.entry_price,
-                stop_loss_pct=signal.stop_loss_pct,
-                take_profit_pct=signal.take_profit_pct,
-                reason=f"{signal.reason} (kelly:{kelly_mult:.2f}x)",
-                metadata={**signal.metadata, "kelly_multiplier": kelly_mult},
-            )
-            logger.info(
-                "Kelly sizing applied: %s %s — base=%.4f → adjusted=%.4f (mult=%.3f)",
-                signal.symbol, signal.side,
-                signal.size_pct / kelly_mult, signal.size_pct, kelly_mult,
-            )
-
-        # --- Per-symbol risk multiplier ---
-        sym_mult = safe_float(self._symbol_risk_multipliers.get(signal.symbol, 1.0), 1.0)
-        if sym_mult != 1.0:
-            base_size = signal.size_pct
-            signal = Signal(
-                strategy=signal.strategy,
-                symbol=signal.symbol,
-                side=signal.side,
-                confidence=signal.confidence,
-                size_pct=base_size * sym_mult,
-                entry_price=signal.entry_price,
-                stop_loss_pct=signal.stop_loss_pct,
-                take_profit_pct=signal.take_profit_pct,
-                reason=f"{signal.reason} (sym_risk:{sym_mult:.2f}x)",
-                metadata={**signal.metadata, "symbol_risk_multiplier": sym_mult},
-            )
-            logger.info(
-                "Symbol risk multiplier %s: %.4f → %.4f (×%.2f)",
-                signal.symbol, base_size, signal.size_pct, sym_mult,
-            )
+        signal = decision.signal or signal
 
         # --- Update strategy stats (Task 5.3) ---
         strat_stats = self._strategy_stats.get(signal.strategy)
@@ -2610,141 +2816,29 @@ class TradingEngine:
             })
             strat_stats["signal_history"] = strat_stats["signal_history"][:20]
 
-        # --- Risk check ---
-        capital = await self._portfolio.current_capital
-        positions = await self._portfolio.positions
-        daily_pnl = await self._portfolio.daily_pnl
-        daily_trades = await self._portfolio.daily_trades
-
-        # --- Correlation check (max realized correlation) ---
-        _gov = self._config.get("strategy.portfolio_governance", {})
-        corr_threshold = safe_float(
-            _gov.get("max_correlation", self._config.get("portfolio.max_correlation", 0.70))
-        )
-        if corr_threshold > 0 and positions:
-            existing_syms = list(positions.keys())
-            if signal.symbol not in existing_syms:
-                violated, conflict_sym, corr = self._correlation_monitor.would_violate(
-                    signal.symbol, existing_syms, corr_threshold
-                )
-                if violated:
-                    reason = (
-                        f"Correlation limit: |r({signal.symbol},{conflict_sym})|="
-                        f"{abs(corr):.2f} > {corr_threshold:.2f}"
-                    )
-                    logger.info("Signal REJECTED %s %s — %s", signal.symbol, signal.side, reason)
-                    sig_record["status"] = "rejected"
-                    sig_record["risk_reason"] = reason
-                    strat_stats = self._strategy_stats.get(signal.strategy)
-                    if strat_stats:
-                        strat_stats["rejected_signals"] += 1
-                        if strat_stats["signal_history"]:
-                            strat_stats["signal_history"][0]["status"] = "rejected"
-                    self._persist_decision(
-                        decision_type="correlation",
-                        symbol=signal.symbol,
-                        side=signal.side,
-                        strategy=signal.strategy,
-                        signal_confidence=signal.confidence,
-                        ts_ms=event.timestamp_ms,
-                        result="rejected",
-                        reason=reason,
-                        metadata={
-                            "conflict_symbol": conflict_sym,
-                            "correlation": float(corr),
-                            "threshold": float(corr_threshold),
-                        },
-                    )
-                    return
-
         # --- C1: Intraday volatility circuit breaker (soft gate) ---
-        if self._vol_circuit.is_blocked(signal.symbol, int(time.time() * 1000)):
-            remaining = self._vol_circuit.block_remaining_sec(
-                signal.symbol, int(time.time() * 1000)
-            )
+        if self._mode in ("testnet", "mainnet") and self._executor.is_symbol_blocked(signal.symbol):
+            block_reason = self._executor.get_symbol_block_reason(signal.symbol) or "symbol_blocked"
             logger.info(
-                "Signal REJECTED %s %s — vol circuit active (%.0fs remaining)",
-                signal.symbol, signal.side, remaining,
-            )
-            sig_record["status"] = "rejected"
-            sig_record["risk_reason"] = f"vol_circuit:{remaining}s"
-            strat_stats = self._strategy_stats.get(signal.strategy)
-            if strat_stats:
-                strat_stats["rejected_signals"] += 1
-            return
-
-        # --- C2: Funding-reset blackout (time-of-day) ---
-        if self._funding_blackout.is_blocked(int(time.time() * 1000)):
-            logger.info(
-                "Signal REJECTED %s %s — funding reset blackout active",
-                signal.symbol, signal.side,
-            )
-            sig_record["status"] = "rejected"
-            sig_record["risk_reason"] = "funding_blackout"
-            strat_stats = self._strategy_stats.get(signal.strategy)
-            if strat_stats:
-                strat_stats["rejected_signals"] += 1
-            return
-
-        # --- Anti-chasing filter (before risk gates) ---
-        chase_reason = self._check_chase_filter(signal)
-        if chase_reason is not None:
-            logger.info(
-                "Signal REJECTED %s %s — %s",
-                signal.symbol, signal.side, chase_reason,
-            )
-            sig_record["status"] = "rejected"
-            sig_record["risk_reason"] = chase_reason
-            strat_stats = self._strategy_stats.get(signal.strategy)
-            if strat_stats:
-                strat_stats["rejected_signals"] += 1
-            self._persist_decision(
-                decision_type="chase",
-                symbol=signal.symbol,
-                side=signal.side,
-                strategy=signal.strategy,
-                signal_confidence=signal.confidence,
-                ts_ms=event.timestamp_ms,
-                result="rejected",
-                reason=chase_reason,
-            )
-            return
-
-        # --- Risk check ---
-        portfolio_proxy = _PortfolioProxy(
-            capital=capital,
-            positions=positions,
-            daily_pnl=daily_pnl,
-            daily_trades=daily_trades,
-            max_drawdown=await self._portfolio.get_max_drawdown(),
-        )
-
-        approved, reason = self._risk.can_enter(signal, portfolio_proxy)
-        if not approved:
-            logger.info(
-                "Signal REJECTED %s %s (confidence=%.2f) - %s",
+                "Signal REJECTED %s %s — execution block active (%s)",
                 signal.symbol,
                 signal.side,
-                signal.confidence,
-                reason,
+                block_reason,
             )
             sig_record["status"] = "rejected"
-            sig_record["risk_reason"] = reason
-            # Update strategy stats
+            sig_record["risk_reason"] = f"execution_block:{block_reason}"
             strat_stats = self._strategy_stats.get(signal.strategy)
             if strat_stats:
                 strat_stats["rejected_signals"] += 1
-                if strat_stats["signal_history"]:
-                    strat_stats["signal_history"][0]["status"] = "rejected"
             self._persist_decision(
-                decision_type="risk",
+                decision_type="execution",
                 symbol=signal.symbol,
                 side=signal.side,
                 strategy=signal.strategy,
                 signal_confidence=signal.confidence,
                 ts_ms=event.timestamp_ms,
                 result="rejected",
-                reason=reason,
+                reason=f"execution_block:{block_reason}",
             )
             return
 
@@ -2868,37 +2962,34 @@ class TradingEngine:
             )
 
         # --- TCA: reject if expected edge does not cover fees + slippage ---
-        if self._tca_enabled:
-            tca_ok, tca_reason = passes_tca_check(
-                signal,
-                self._taker_fee_pct,
-                slippage_for_tca,
-                self._tca_min_buffer,
-                entry_fee_pct=order_spec.entry_fee_pct,
-                exit_fee_pct=order_spec.exit_fee_pct,
-                entry_slippage_pct=order_spec.entry_slippage_pct,
-                exit_slippage_pct=order_spec.exit_slippage_pct,
+        tca_decision = self._signal_pipeline.evaluate_tca_gate(
+            signal,
+            order_spec=order_spec,
+            has_orderbook=ob_raw is not None,
+        )
+        if not tca_decision.approved:
+            logger.info(
+                "Signal REJECTED %s %s — %s",
+                signal.symbol, signal.side, tca_decision.reason,
             )
-            if not tca_ok:
-                logger.info(
-                    "Signal REJECTED %s %s — %s",
-                    signal.symbol, signal.side, tca_reason,
-                )
-                sig_record["status"] = "rejected"
-                sig_record["risk_reason"] = tca_reason
-                self._persist_decision(
-                    decision_type="tca",
-                    symbol=signal.symbol,
-                    side=signal.side,
-                    strategy=signal.strategy,
-                    signal_confidence=signal.confidence,
-                    ts_ms=event.timestamp_ms,
-                    result="rejected",
-                    reason=tca_reason,
-                )
-                return
-            if tca_reason != "tca_skipped_no_edge_estimate":
-                logger.info("TCA %s %s — %s", signal.symbol, signal.side, tca_reason)
+            sig_record["status"] = "rejected"
+            sig_record["risk_reason"] = tca_decision.reason
+            self._persist_decision(
+                decision_type="tca",
+                symbol=signal.symbol,
+                side=signal.side,
+                strategy=signal.strategy,
+                signal_confidence=signal.confidence,
+                ts_ms=event.timestamp_ms,
+                result="rejected",
+                reason=tca_decision.reason,
+            )
+            return
+        if (
+            tca_decision.reason
+            and tca_decision.reason != "tca_skipped_no_edge_estimate"
+        ):
+            logger.info("TCA %s %s — %s", signal.symbol, signal.side, tca_decision.reason)
 
         # --- Compute stop distance ---
         # Use strategy's ATR-based stop if provided, else fall back to engine calc
@@ -2974,6 +3065,27 @@ class TradingEngine:
             )
             return
 
+        if result.status == "pending":
+            logger.info(
+                "Signal PENDING %s %s — live order submitted, awaiting fill (id=%d)",
+                signal.symbol,
+                signal.side,
+                result.trade_id,
+            )
+            sig_record["status"] = "pending"
+            self._persist_decision(
+                decision_type="execution",
+                symbol=signal.symbol,
+                side=signal.side,
+                strategy=signal.strategy,
+                signal_confidence=signal.confidence,
+                ts_ms=event.timestamp_ms,
+                result="pending",
+                reason=f"awaiting_fill trade_id={result.trade_id}",
+                metadata={"trade_id": int(result.trade_id)},
+            )
+            return
+
         sig_record["status"] = "executed"
         sig_record["size"] = result.size
         # Update strategy stats
@@ -2996,59 +3108,67 @@ class TradingEngine:
         )
 
         # --- Update portfolio ---
-        notional = result.entry_price * result.size
-        total_cost = notional + result.entry_fee
-        position = Position(
-            symbol=result.symbol,
-            side=result.side,
-            entry_price=result.entry_price,
-            size=result.size,
-            entry_time_ms=result.timestamp_ms,
-            stop_loss_price=stop_loss_price,
-            take_profit_price=take_profit_price,
-            unrealized_pnl=0.0,
-            current_price=result.entry_price,
-            metadata={
-                "strategy": signal.strategy,
-                "sub_strategy": sub_strategy,
-                "trade_id": result.trade_id,
-                "stop_loss_pct": stop_distance_pct,
-                "entry_price": result.entry_price,
-                **signal.metadata,
-            },
-        )
-        await self._portfolio.add_position(position, cost=total_cost)
-
-        # v3.1.42: persist stop/TP levels for position restore after restart
-        try:
-            self._db.enrich_trade_stop_metadata(
-                trade_id=int(result.trade_id),
-                stop_loss_price=float(stop_loss_price),
-                take_profit_price=(
-                    float(take_profit_price) if take_profit_price is not None else None
-                ),
-                stop_loss_pct=float(stop_distance_pct),
-                take_profit_pct=(
-                    float(signal.take_profit_pct)
-                    if signal.take_profit_pct is not None
-                    else None
-                ),
+        # Live fills are credited exclusively via OMS → apply_entry_fill (Phase 03).
+        if self._mode == "paper":
+            notional = result.entry_price * result.size
+            total_cost = notional + result.entry_fee
+            position = Position(
+                symbol=result.symbol,
+                side=result.side,
+                entry_price=result.entry_price,
+                size=result.size,
+                entry_time_ms=result.timestamp_ms,
+                stop_loss_price=stop_loss_price,
+                take_profit_price=take_profit_price,
+                unrealized_pnl=0.0,
+                current_price=result.entry_price,
+                metadata={
+                    "strategy": signal.strategy,
+                    "sub_strategy": sub_strategy,
+                    "trade_id": result.trade_id,
+                    "stop_loss_pct": stop_distance_pct,
+                    "entry_price": result.entry_price,
+                    **signal.metadata,
+                },
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Failed to persist stop metadata for trade %s: %s",
+            await self._portfolio.add_position(position, cost=total_cost)
+
+            # v3.1.42: persist stop/TP levels for position restore after restart
+            try:
+                self._db.enrich_trade_stop_metadata(
+                    trade_id=int(result.trade_id),
+                    stop_loss_price=float(stop_loss_price),
+                    take_profit_price=(
+                        float(take_profit_price) if take_profit_price is not None else None
+                    ),
+                    stop_loss_pct=float(stop_distance_pct),
+                    take_profit_pct=(
+                        float(signal.take_profit_pct)
+                        if signal.take_profit_pct is not None
+                        else None
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to persist stop metadata for trade %s: %s",
+                    result.trade_id,
+                    exc,
+                )
+        else:
+            logger.info(
+                "Live entry submitted — portfolio update deferred to OMS fill callback "
+                "(trade_id=%d symbol=%s)",
                 result.trade_id,
-                exc,
+                result.symbol,
             )
 
         # CRIT-011 FIX: Persist portfolio snapshot after every trade entry
         await self._maybe_save_snapshot(force=True)
 
-        # --- Record entry timestamp for debounce ---
-        self._last_entry_signal_ms[signal.symbol] = result.timestamp_ms
-
-        # --- Update cooldown state on entry (Task 2.4) ---
-        self._update_cooldown_on_entry(signal.strategy, signal.symbol, event)
+        # --- Record entry for debounce + cooldown (shared pipeline) ---
+        self._signal_pipeline.record_trade_opened(
+            signal.strategy, signal.symbol, event, self._pipeline_ctx,
+        )
 
         logger.info(
             "Signal EXECUTED %s %s size=%.6f @ %.4f (id=%d)",
@@ -3091,25 +3211,48 @@ class TradingEngine:
         await self._execute_exit(position, last_price.mid, reason=exit_signal.reason)
 
     async def _check_hard_stops(self, position: Position, current_price: float) -> None:
-        """Check trailing stop, stop-loss and take-profit levels."""
+        """Check trailing stop, stop-loss and take-profit levels.
+
+        In live mode with native protection, software stops are redundancy only —
+        native triggers on the exchange are the primary protection when the bot
+        is offline.
+        """
+        native_active = bool((position.metadata or {}).get("native_protection_active"))
+        live_mode = self._mode in ("testnet", "mainnet")
+
         if self._trailing_enabled and position.entry_price > 0:
             await self._maybe_update_trailing_stop(position, current_price)
             positions = await self._portfolio.positions
             position = positions.get(position.symbol, position)
 
         if position.stop_loss_price is not None:
-            if position.side == "long" and current_price <= position.stop_loss_price:
-                await self._execute_exit(position, current_price, reason="stop_loss")
-                return
-            if position.side == "short" and current_price >= position.stop_loss_price:
+            sl_hit = (
+                position.side == "long" and current_price <= position.stop_loss_price
+            ) or (
+                position.side == "short" and current_price >= position.stop_loss_price
+            )
+            if sl_hit:
+                if live_mode and native_active and self._software_stop_redundancy:
+                    logger.warning(
+                        "Software stop redundancy firing for %s — native trigger should "
+                        "have closed on exchange",
+                        position.symbol,
+                    )
                 await self._execute_exit(position, current_price, reason="stop_loss")
                 return
 
         if position.take_profit_price is not None:
-            if position.side == "long" and current_price >= position.take_profit_price:
-                await self._execute_exit(position, current_price, reason="take_profit")
-                return
-            if position.side == "short" and current_price <= position.take_profit_price:
+            tp_hit = (
+                position.side == "long" and current_price >= position.take_profit_price
+            ) or (
+                position.side == "short" and current_price <= position.take_profit_price
+            )
+            if tp_hit:
+                if live_mode and native_active and self._software_stop_redundancy:
+                    logger.warning(
+                        "Software TP redundancy firing for %s",
+                        position.symbol,
+                    )
                 await self._execute_exit(position, current_price, reason="take_profit")
                 return
 
@@ -3140,11 +3283,32 @@ class TradingEngine:
             trail["peak_price"] = peak
             new_stop = peak * (1.0 - self._trailing_distance_pct)
             await self._portfolio.update_stop_loss(position.symbol, new_stop, "long")
+            await self._sync_native_stop(position.symbol, new_stop)
         else:
             trough = min(trail.get("trough_price", entry), current_price)
             trail["trough_price"] = trough
             new_stop = trough * (1.0 + self._trailing_distance_pct)
             await self._portfolio.update_stop_loss(position.symbol, new_stop, "short")
+            await self._sync_native_stop(position.symbol, new_stop)
+
+    async def _sync_native_stop(self, symbol: str, new_stop: float) -> None:
+        """Resize native SL trigger when trailing stop ratchets (live only)."""
+        if not self._native_protection_enabled or self._protection_manager is None:
+            return
+        if self._mode not in ("testnet", "mainnet"):
+            return
+        positions = await self._portfolio.positions
+        pos = positions.get(symbol)
+        if pos is None or not (pos.metadata or {}).get("native_protection_active"):
+            return
+        trade_id = (pos.metadata or {}).get("trade_id")
+        await self._protection_manager.ensure_protection(
+            pos,
+            filled_size=pos.size,
+            stop_price=new_stop,
+            take_profit_price=pos.take_profit_price,
+            trade_id=int(trade_id) if trade_id else None,
+        )
 
     def _trailing_excluded_for_position(self, position: Position) -> bool:
         """True when sub-strategy manages its own TP/exit (no engine trailing)."""
@@ -3231,6 +3395,7 @@ class TradingEngine:
         # --- Update cooldown state on exit (Task 2.4) ---
         strategy = position.metadata.get("strategy", "unknown")
         self._update_cooldown_on_exit(strategy, position.symbol, result.pnl_pct)
+        self._persist_runtime_state()
 
         # --- Record per-strategy PnL row (for dashboard drill-down) ---
         try:
@@ -3359,11 +3524,15 @@ class TradingEngine:
 
     async def _recover_state(self) -> None:
         """Load open positions and portfolio state from the DB on startup."""
+        self._restore_invocation_count += 1
         # Load open trades from DB → executor
         await self._executor.load_open_trades()
+        if hasattr(self._executor, "load_pending_orders"):
+            await self._executor.load_pending_orders()
 
         # Load latest portfolio snapshot
         history = self._db.get_portfolio_history(limit=1)
+        daily_peak = 0.0
         if history:
             snap = history[0]
             try:
@@ -3372,14 +3541,15 @@ class TradingEngine:
                 meta = positions_data.pop("_meta", {}) if isinstance(positions_data, dict) else {}
                 if not isinstance(meta, dict):
                     meta = {}
+                daily_peak = safe_float(
+                    meta.get("daily_peak_capital", snap.get("daily_peak_capital", snap["capital"])),
+                    snap["capital"],
+                )
                 await self._portfolio.from_dict({
                     "capital": snap["capital"],
                     "current_capital": snap["capital"],
                     "peak_capital": snap.get("peak_capital", snap["capital"]),
-                    "daily_peak_capital": meta.get(
-                        "daily_peak_capital",
-                        snap.get("daily_peak_capital", snap["capital"]),
-                    ),
+                    "daily_peak_capital": daily_peak,
                     "initial_capital": snap.get("initial_capital", snap["capital"]),
                     "daily_pnl": snap["daily_pnl"],
                     "cash": meta.get("cash"),
@@ -3406,7 +3576,18 @@ class TradingEngine:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to reconcile daily PnL from DB: %s", exc)
 
-        # 3. Restore recent candles from DB for faster strategy warm-up
+        equity = await self._portfolio.current_capital
+        self._cooldown_state = restore_runtime_state(
+            self._db,
+            self._risk,
+            base_ms=self._cooldown_base_ms,
+            max_ms=self._cooldown_max_ms,
+            multiplier=self._cooldown_multiplier,
+            portfolio_daily_peak=daily_peak,
+            portfolio_capital=equity,
+        )
+
+        # Restore recent candles from DB for faster strategy warm-up
         await self._restore_candles_from_db()
 
     async def _sync_open_trades_to_portfolio(self) -> None:
@@ -3548,6 +3729,51 @@ class TradingEngine:
                         deq.extend(candles)
             except Exception:
                 pass
+
+    @property
+    def restore_invocation_count(self) -> int:
+        """How many times ``_recover_state`` ran (expect 1 per process)."""
+        return self._restore_invocation_count
+
+    def _persist_runtime_state(self) -> None:
+        self._risk_state.persist_runtime_state()
+
+    def _entry_feed_block_reason(self, symbol: str) -> Optional[str]:
+        """Return a rejection reason when feeds are too stale for new entries."""
+        if self._block_entries_on_ws_unhealthy and self._hl_ws_client is not None:
+            if not getattr(self._hl_ws_client, "is_healthy", True):
+                return "ws_unhealthy"
+        if self._block_entries_on_feed_stale:
+            if not self._feed_health_evaluated:
+                return "feed_health_pending"
+            if not self._feed_health_ready:
+                return "feed_health_not_ready"
+            feed = self._market_data_health.get(symbol)
+            if feed is not None and feed.status == "red":
+                return f"feed_red:{symbol}"
+            if self._market_data_health_summary.overall == "red":
+                return "feed_red:overall"
+        if self._reconciliation_block_when_stale and self._reconciler is not None:
+            if self._reconciler.entries_blocked():
+                reason = self._reconciler.block_reason()
+                if reason:
+                    return reason
+        return None
+
+    def _signal_strategy_name(self, signal: Signal) -> str:
+        meta = signal.metadata or {}
+        original = meta.get("original_strategy")
+        if original:
+            return str(original)
+        if signal.strategy not in ("StrategyEnsemble", "DirectRouter"):
+            return str(signal.strategy)
+        return str(signal.strategy)
+
+    def _governor_blocks_signal(self, signal: Signal) -> Optional[str]:
+        """Return audit reason when strategy governor disables this signal."""
+        if not self._strategy_governor.is_enabled(self._signal_strategy_name(signal)):
+            return f"governor_disabled:{self._signal_strategy_name(signal)}"
+        return None
 
     async def _save_portfolio_snapshot(self) -> None:
         """Persist the current portfolio state to the DB."""

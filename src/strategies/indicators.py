@@ -22,8 +22,8 @@ class Candle:
     volume: float
     timestamp_ms: int
     open_interest: Optional[float] = None
-    buy_volume: float = 0.0
-    sell_volume: float = 0.0
+    buy_volume: Optional[float] = None
+    sell_volume: Optional[float] = None
     trade_count: int = 0
 
 

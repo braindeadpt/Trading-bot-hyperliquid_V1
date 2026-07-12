@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import logging
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.strategies.base import Strategy, MarketEvent, Signal, Position, ExitSignal
 from src.strategies.ensemble import StrategyEnsemble, StrategyWeight
@@ -26,6 +27,16 @@ from src.strategies.vwap_deviation import VWAPDeviation
 from src.strategies.checklist_meta import ChecklistMeta
 
 logger = logging.getLogger(__name__)
+
+PHASE08_DEFAULT_EXECUTION = ("VolatilityBreakout", "VWAPDeviation")
+PHASE08_DEFAULT_SHADOW = (
+    "CVDOrderFlow",
+    "OrderBookScalper",
+    "FundingArbitrage",
+    "FundingMomentum",
+    "SpotPerpCarry",
+    "ChecklistMeta",
+)
 
 _STRATEGY_REGISTRY = (
     ("strategy.trend_follow", TrendFollow),
@@ -102,22 +113,101 @@ def _should_load_strategy(section: dict) -> bool:
     return False
 
 
-def build_sub_strategies(cfg: Any) -> List[Strategy]:
+def _strategy_display_name(cls: type) -> str:
+    try:
+        return cls({}).name  # type: ignore[call-arg]
+    except Exception:
+        return cls.__name__
+
+
+_REGISTRY_BY_NAME: Dict[str, Tuple[str, type]] = {
+    _strategy_display_name(cls): (path, cls) for path, cls in _STRATEGY_REGISTRY
+}
+
+
+def phase08_enabled(cfg: Any) -> bool:
+    """Return True when Phase 08 edge-isolation mode is active."""
+    from src.utils.config import phase08_enabled as _p08
+
+    return _p08(cfg)
+
+
+def _instantiate_from_registry(
+    cfg: Any,
+    path: str,
+    cls: type,
+    *,
+    force: bool = False,
+    shadow: bool = False,
+) -> Optional[Strategy]:
+    section = copy.deepcopy(cfg.get(path, {}) or {})
+    if shadow:
+        section["_shadow_mode"] = True
+    if path in ("strategy.mean_reversion", "strategy.funding_arbitrage"):
+        section = _enrich_funding_strategy_config(cfg, section)
+    if not force and not _should_load_strategy(section):
+        return None
+    inst = cls(section)
+    if shadow:
+        setattr(inst, "_shadow_instance", True)
+    return inst
+
+
+def build_sub_strategies(
+    cfg: Any,
+    *,
+    names: Optional[Set[str]] = None,
+    force: bool = False,
+) -> List[Strategy]:
     """Instantiate enabled (or auto-enable) sub-strategies from config."""
     strategies: List[Strategy] = []
     for path, cls in _STRATEGY_REGISTRY:
-        if hasattr(cfg, "has_path") and not cfg.has_path(path):
+        if names is not None and _strategy_display_name(cls) not in names:
+            continue
+        if hasattr(cfg, "has_path") and not cfg.has_path(path) and not force:
             logger.warning(
                 "Strategy section '%s' missing from config — using built-in defaults "
                 "(add the section explicitly to silence this warning).",
                 path,
             )
-        section = cfg.get(path, {}) or {}
-        if path in ("strategy.mean_reversion", "strategy.funding_arbitrage"):
-            section = _enrich_funding_strategy_config(cfg, section)
-        if _should_load_strategy(section):
-            strategies.append(cls(section))
+        inst = _instantiate_from_registry(cfg, path, cls, force=force)
+        if inst is not None:
+            strategies.append(inst)
     return strategies
+
+
+def build_phase08_strategies(cfg: Any) -> Tuple[List[Strategy], List[Strategy]]:
+    """Phase 08: VB+VWAP execution; microstructure/funding/meta in shadow only.
+
+    Execution and shadow instances are always distinct objects (deep-copied config).
+    """
+    p08 = cfg.get("strategy.phase08", {}) or {}
+    exec_names = set(p08.get("execution_strategies", PHASE08_DEFAULT_EXECUTION))
+    shadow_names = set(p08.get("shadow_strategies", PHASE08_DEFAULT_SHADOW))
+    execution: List[Strategy] = []
+    for name in exec_names:
+        entry = _REGISTRY_BY_NAME.get(name)
+        if entry is None:
+            logger.warning("Phase08 execution strategy unknown: %s", name)
+            continue
+        path, cls = entry
+        inst = _instantiate_from_registry(cfg, path, cls, force=True, shadow=False)
+        if inst is not None:
+            setattr(inst, "_execution_instance", True)
+            execution.append(inst)
+    shadow: List[Strategy] = []
+    for name in shadow_names:
+        if name in exec_names:
+            continue
+        entry = _REGISTRY_BY_NAME.get(name)
+        if entry is None:
+            logger.warning("Phase08 shadow strategy unknown: %s", name)
+            continue
+        path, cls = entry
+        inst = _instantiate_from_registry(cfg, path, cls, force=True, shadow=True)
+        if inst is not None:
+            shadow.append(inst)
+    return execution, shadow
 
 
 class DirectStrategyRouter(Strategy):
@@ -155,9 +245,16 @@ class DirectStrategyRouter(Strategy):
 def build_strategy_list(cfg: Any) -> List[Strategy]:
     """Top-level strategies for live TradingEngine.
 
+    When ``strategy.phase08.enabled`` is true, only execution strategies
+    (default VolatilityBreakout + VWAPDeviation) are returned.
     When ``strategy.ensemble.enabled`` is false, each enabled sub-strategy
     runs directly (no consensus wrapper).
     """
+    if phase08_enabled(cfg):
+        execution, _ = build_phase08_strategies(cfg)
+        if not execution:
+            logger.warning("Phase08 enabled but no execution strategies loaded")
+        return execution
     ens_cfg = cfg.get("strategy.ensemble", {}) or {}
     subs = build_sub_strategies(cfg)
     if ens_cfg.get("enabled", True) is False:
@@ -165,6 +262,13 @@ def build_strategy_list(cfg: Any) -> List[Strategy]:
             logger.warning("ensemble disabled but no sub-strategies are enabled")
         return subs
     return [build_ensemble(cfg)]
+
+
+def build_live_strategies(cfg: Any) -> Tuple[List[Strategy], List[Strategy]]:
+    """Return (execution_strategies, shadow_strategies) for live engine wiring."""
+    if phase08_enabled(cfg):
+        return build_phase08_strategies(cfg)
+    return build_strategy_list(cfg), []
 
 
 def build_backtest_strategy(cfg: Any) -> Strategy:

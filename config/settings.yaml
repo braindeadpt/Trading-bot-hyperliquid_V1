@@ -423,7 +423,7 @@ strategy:
   # — complements VB (which dominates W1/W3 trending regimes)
   # ═══════════════════════════════════════════════════════════
   checklist_meta:
-    enabled: true                   # v3.1.38: ACTIVATED — walk-forward winner
+    enabled: false                  # Phase08: shadow only (see strategy.phase08)
     score_threshold: 4.0            # v3.1.40: was 3.5 — fewer, higher-conviction signals
     min_confidence: 0.60
     # Chop / whipsaw gates (v3.1.x) — block range entries and post-stop reversals
@@ -637,7 +637,7 @@ strategy:
   # Kelly Criterion Sizing (Task 4.4)
   # ═══════════════════════════════════════════════════════════
   kelly:
-    enabled: true
+    enabled: false                 # Phase08: Kelly out of execution until OOS proven
     min_trades: 20                # minimum history before Kelly activates
     half_kelly: true               # use 0.5 * f* for safety
     max_multiplier: 2.0            # cap Kelly boost at 2x
@@ -651,6 +651,9 @@ strategy:
     max_directional_exposure_pct: 50   # v3.1.40: was 40 — cap directional concentration (target 50%)
     max_sector_exposure_pct: 100       # 4.2: disabled (crypto-only bot); set <100 for multi-asset
     daily_drawdown_circuit_pct: 3      # Phase 1: baixar de 5 — cortar perdas cedo
+    daily_drawdown_halt_entries: true
+    daily_drawdown_flatten: true
+    daily_drawdown_alert: true
     max_correlation: 0.85              # v3.1.40: was 0.98 (OFF) — block highly-correlated adds
     max_correlation_lookback: 60       # 60 periods (15m candles = 15h history)
 
@@ -661,6 +664,33 @@ strategy:
     base_minutes: 30                # QW5: 30m base cooldown (was 60m)
     max_minutes: 120                # QW5: 2h max cooldown (was 4h)
     multiplier: 2.0                 # double after each loss (30m → 1h → 2h)
+
+  # ═══════════════════════════════════════════════════════════
+  # Phase 08 — edge isolation (VB + VWAP execution only)
+  # ═══════════════════════════════════════════════════════════
+  phase08:
+    enabled: true
+    paper_only: true               # tier_a_hl_ohlc = data cert only; VB/VWAP paper until Phase06 OOS
+    execution_strategies:
+      - VolatilityBreakout
+      - VWAPDeviation
+    shadow_strategies:
+      - CVDOrderFlow
+      - OrderBookScalper
+      - FundingArbitrage
+      - FundingMomentum
+      - SpotPerpCarry
+      - ChecklistMeta
+    regime_router:
+      enabled: true
+      adx_range_threshold: 20.0    # ADX < 20 → low_vol (VWAP)
+      adx_trend_threshold: 25.0    # ADX > 25 → trend; 20–25 → expansion (VB)
+      sequential_contradiction_block_ms: 3600000  # 1h — block opposite-side flips
+    adx:
+      timeframe: "15m"
+      timeframe_s: 900
+      period: 14
+      closed_candles_only: true
 
   # ═══════════════════════════════════════════════════════════
   # Ensemble Configuration
@@ -685,15 +715,32 @@ strategy:
     eval_interval_ms: 3600000       # re-evaluate hourly
 
 # ═══════════════════════════════════════════════════════════
+# Exchange reconciliation & native protection (Phase 03)
+# ═══════════════════════════════════════════════════════════
+reconciliation:
+  enabled: true
+  interval_sec: 60
+  stale_threshold_sec: 120
+  orphan_exchange_policy: ADOPT_AND_PROTECT   # FLATTEN | HALT
+  mismatch_policy: HALT
+  block_entries_when_stale: true
+
+# ═══════════════════════════════════════════════════════════
 # Execution & transaction cost analysis (Phase 2)
 # ═══════════════════════════════════════════════════════════
 execution:
   tca_enabled: true
+  tca_mode: strict                   # live: reject TCA when L2 book unavailable
   min_edge_buffer_pct: 0.05         # 0.05% buffer above round-trip costs
   entry_debounce_ms: 5000
   # v3.1.42: legacy alias — prefer engine.close_positions_on_shutdown.
   # Paper default false (preserve positions across restarts).
   flatten_on_stop: false
+  native_protection:
+    enabled: true                   # place HL reduce-only SL/TP triggers on fill
+    software_stop_redundancy: true  # bot loop still monitors stops when online
+  oms_poll_interval_s: 5
+  live_order_timeout_s: 60
   trailing_stop:
     enabled: true
     activation_pct: 0.01            # v3.1.41: was 0.02 — trail at +1% (57700 bounce: CL had +1% but trail never fired)
@@ -735,6 +782,8 @@ market_data:
   alert_red_after_sec: 300          # Telegram if overall health red > 5 min
   alert_red_cooldown_sec: 900       # min interval between market-data alerts
   block_funding_strategies_on_red: true  # FundingExtreme / FundingArbitrage skip on red feed
+  block_entries_on_stale: true           # block new entries when feed health is red/stale
+  block_entries_on_ws_unhealthy: true    # block entries when HL WS is unhealthy
   max_venue_spread: 0.001           # max HL Bin/Bybit/HlPerp 8h spread (0.1%) per symbol
 
 # ═══════════════════════════════════════════════════════════
@@ -746,8 +795,19 @@ backtest:
   slippage_bps: 2.0               # 2 bps slippage
   use_regime_weights: true        # Phase 2/3 parity with live
   use_cooldown: true
-  use_kelly: true
-  use_microstructure_proxy: true  # proxy OIR/spread from candle range
+  kelly_override: null            # null = follow strategy.kelly.enabled; true/false = explicit backtest override
+  use_kelly: true                 # deprecated — use kelly_override; kept for backward compatibility
+  use_microstructure_proxy: true  # proxy OIR/spread from candle range (not production-grade)
+  intrabar_conflict_policy: pessimistic  # pessimistic | optimistic when SL+TP same 1m bar
+  sizing_version: phase05-risk-at-equity-v1
+  tca_mode: proxy                    # strict = reject TCA without L2; proxy = Tier B only
+  replay_data_quality:
+    min_coverage_pct: 95.0             # minimum 1m bar coverage over run window
+    max_bar_gap_ms: 120000             # max gap between consecutive 1m bars
+    max_funding_stale_ms: 300000       # funding series must be fresher than this
+    max_oi_stale_ms: 300000
+    require_funding: true
+    require_oi: false
 
 # ═══════════════════════════════════════════════════════════
 # Data & database
@@ -761,6 +821,37 @@ database:
   backfill_perp_days: 30           # Binance USD-M perp mids for LeadLag backtest
   backfill_min_candles_15m: 80    # trigger backfill when 15m count below this
   backfill_timeframes: ["1m", "5m", "15m", "1h"]
+
+# ═══════════════════════════════════════════════════════════
+# Research DB — HL venue data contract (Phase 07/08)
+# ═══════════════════════════════════════════════════════════
+research:
+  database:
+    path: data/research/hyperliquid.db
+  strict_mode: true
+  continuous_sampling_enabled: true
+  ws_microstructure_enabled: true    # DataBus trade + orderbook → research DB
+  rest_sampling_enabled: false       # 60s REST poll — NOT Tier A; do not enable
+  l2_min_interval_ms: 250            # ~4 L2 snapshots/sec per symbol
+  tape_gap_threshold_ms: 5000
+  l2_stale_threshold_ms: 10000
+  health_report_interval_sec: 30
+  tape_queue_max: 10000
+  sampler_symbols: ["BTC", "ETH", "SOL", "HYPE"]
+  backfill_symbols: ["BTC", "ETH", "SOL", "HYPE"]
+  min_coverage_pct: 95.0
+  gap_intervals: 2                   # split when gap > N × bar interval
+  gap_intervals_by_tf:
+    1m: 2
+    5m: 2
+    15m: 2
+    1h: 2
+  # max_gap_ms: optional override (legacy); default = gap_intervals × 1m
+  goldrush:
+    info_url: "https://hypercore.goldrushdata.com/info"
+    backfill_days: 180
+    min_coverage_pct: 99.0
+    page_size_max: 5000
 
 # ═══════════════════════════════════════════════════════════
 # Dashboard
@@ -810,6 +901,8 @@ logging:
 # Use to ship safer defaults for mainnet without duplicating the YAML.
 mode_overrides:
   mainnet:
+    reconciliation:
+      orphan_exchange_policy: HALT
     engine:
       # mainnet flatten até SL/TP serem trigger orders nativas via SDK
       # Flatten until SL/TP are native HL trigger orders (SDK) on entry.
@@ -847,6 +940,8 @@ mode_overrides:
       # Mainnet: flatten on stop while exits are bot-managed (no SDK triggers yet).
       flatten_on_stop: true
   testnet:
+    reconciliation:
+      orphan_exchange_policy: ADOPT_AND_PROTECT
     engine:
       close_positions_on_shutdown: false  # v3.1.42: preserve like paper
     strategy:

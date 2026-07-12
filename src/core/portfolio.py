@@ -237,6 +237,20 @@ class PortfolioState:
             elif pos.stop_loss_price is None or stop_loss_price < pos.stop_loss_price:
                 pos.stop_loss_price = stop_loss_price
 
+    async def update_position_metadata(
+        self,
+        symbol: str,
+        metadata: Dict[str, Any],
+    ) -> None:
+        """Merge *metadata* into an open position's metadata dict."""
+        async with self._lock:
+            pos = self._positions.get(symbol)
+            if pos is None:
+                return
+            merged = dict(pos.metadata or {})
+            merged.update(metadata)
+            pos.metadata = merged
+
     def _calc_unrealized_pnl(self, pos: _PositionSnapshot, price: float) -> float:
         """Compute unrealized PnL in USD for a single position."""
         if pos.side == "long":
@@ -577,6 +591,72 @@ class PortfolioState:
             self._update_peak_and_drawdown()
             self._refresh_dashboard_cache_unlocked()
 
+    async def apply_entry_fill(
+        self,
+        symbol: str,
+        *,
+        filled_size: float,
+        avg_fill_price: float,
+        additional_cost: float,
+        fee_delta: float = 0.0,
+        position: Optional[Position] = None,
+    ) -> None:
+        """Credit a live entry fill (full or partial) into the book.
+
+        When *position* is provided and the symbol is not yet tracked, a new
+        position is opened. When the symbol already exists, size and average
+        entry price are updated to reflect the additional fill.
+        """
+        async with self._lock:
+            await self._check_daily_reset()
+            fill_sz = safe_float(filled_size)
+            if fill_sz <= 0:
+                return
+            avg_px = safe_float(avg_fill_price)
+            cost_delta = safe_float(additional_cost)
+            self._cash -= cost_delta
+
+            existing = self._positions.get(symbol)
+            if existing is None:
+                if position is None:
+                    logger.warning(
+                        "apply_entry_fill: no position template for new symbol %s",
+                        symbol,
+                    )
+                    return
+                snap = _PositionSnapshot(
+                    symbol=position.symbol,
+                    side=position.side,
+                    entry_price=avg_px,
+                    size=fill_sz,
+                    entry_time_ms=position.entry_time_ms,
+                    stop_loss_price=position.stop_loss_price,
+                    take_profit_price=position.take_profit_price,
+                    unrealized_pnl=0.0,
+                    metadata=deepcopy(position.metadata),
+                )
+                snap.current_price = avg_px
+                snap.metadata.setdefault(
+                    "next_funding_settle_ms",
+                    int(position.entry_time_ms) + FUNDING_SETTLE_INTERVAL_MS,
+                )
+                snap.metadata["entry_fee"] = safe_float(fee_delta)
+                self._positions[symbol] = snap
+                self._daily_trades += 1
+            else:
+                old_notional = existing.entry_price * existing.size
+                new_notional = old_notional + (avg_px * fill_sz)
+                new_size = existing.size + fill_sz
+                existing.entry_price = safe_divide(new_notional, new_size, avg_px)
+                existing.size = new_size
+                existing.current_price = avg_px
+                existing.metadata["entry_fee"] = safe_float(
+                    existing.metadata.get("entry_fee", 0.0), 0.0,
+                ) + safe_float(fee_delta)
+
+            self._update_peak_and_drawdown()
+            self._refresh_dashboard_cache_unlocked()
+
     async def cancel_position(self, symbol: str) -> None:
         """Rollback a freshly-opened position (e.g. after a failed live order).
 
@@ -601,6 +681,19 @@ class PortfolioState:
                 symbol, cost, self._cash,
             )
             self._refresh_dashboard_cache_unlocked()
+
+    async def suspend_position(self, symbol: str) -> Optional[Position]:
+        """Remove *symbol* from the active book without cash adjustment.
+
+        Used when the exchange is flat but PnL awaits fill-tape
+        reconciliation (``close_pending_reconciliation``).
+        """
+        async with self._lock:
+            snap = self._positions.pop(symbol, None)
+            if snap is None:
+                return None
+            self._refresh_dashboard_cache_unlocked()
+            return snap.to_position()
 
     # ------------------------------------------------------------------
     # Metrics

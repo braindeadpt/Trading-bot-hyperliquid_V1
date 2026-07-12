@@ -5,6 +5,8 @@ and safe type coercion (no eval / exec).
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import os
@@ -85,6 +87,47 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "initial_capital": 100_000.0,
         "commission_pct": 0.04,
         "slippage_bps": 2.0,
+        "kelly_override": None,
+        "intrabar_conflict_policy": "pessimistic",
+        "sizing_version": "phase05-risk-at-equity-v1",
+        "tca_mode": "proxy",
+        "replay_data_quality": {
+            "min_coverage_pct": 95.0,
+            "max_bar_gap_ms": 120_000,
+            "max_funding_stale_ms": 300_000,
+            "max_oi_stale_ms": 300_000,
+            "require_funding": True,
+            "require_oi": False,
+        },
+    },
+    "research": {
+        "database": {
+            "path": "data/research/hyperliquid.db",
+        },
+        "require_hl_venue": False,
+        "refuse_insufficient_feeds": True,
+        "strict_mode": True,
+        "continuous_sampling_enabled": True,
+        "ws_microstructure_enabled": True,
+        "rest_sampling_enabled": False,
+        "sampler_interval_sec": 60.0,
+        "l2_min_interval_ms": 250.0,
+        "tape_gap_threshold_ms": 5_000,
+        "l2_stale_threshold_ms": 10_000,
+        "health_report_interval_sec": 30.0,
+        "sampler_symbols": ["BTC", "ETH", "SOL", "HYPE"],
+        "backfill_symbols": ["BTC", "ETH", "SOL", "HYPE"],
+        "backfill_days": 7,
+        "backfill_timeframes": ["1m", "5m", "15m", "1h"],
+        "min_coverage_pct": 95.0,
+        "sample_microstructure": True,
+        "gap_intervals": 2,
+        "gap_intervals_by_tf": {
+            "1m": 2,
+            "5m": 2,
+            "15m": 2,
+            "1h": 2,
+        },
     },
     "logging": {
         "level": "INFO",
@@ -118,6 +161,23 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "trend_follow": {"enabled": True},
         "mean_reversion": {"enabled": True},
     },
+    "reconciliation": {
+        "enabled": True,
+        "interval_sec": 60,
+        "stale_threshold_sec": 120,
+        "orphan_exchange_policy": "ADOPT_AND_PROTECT",
+        "mismatch_policy": "HALT",
+        "block_entries_when_stale": True,
+    },
+    "execution": {
+        "native_protection": {
+            "enabled": True,
+            "software_stop_redundancy": True,
+        },
+        "oms_poll_interval_s": 5.0,
+        "live_order_timeout_s": 60.0,
+        "tca_mode": "strict",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -126,6 +186,30 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 # Required top-level keys
 REQUIRED_KEYS: List[str] = ["exchange", "risk", "backtest", "logging", "symbols"]
+
+# Top-level keys accepted in user YAML (unknown keys fail startup validation).
+KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset({
+    "mode",
+    "version",
+    "engine",
+    "assets",
+    "symbols",
+    "timeframes",
+    "exchange",
+    "risk",
+    "strategy",
+    "reconciliation",
+    "execution",
+    "market_data",
+    "backtest",
+    "database",
+    "research",
+    "dashboard",
+    "logging",
+    "alerts",
+    "mode_overrides",
+    "strategies",  # legacy alias kept for older YAML snippets
+})
 
 # Coercion map: dot-path → target Python type
 COERCION_MAP: Dict[str, type] = {
@@ -245,15 +329,130 @@ def load_config(
         # Graceful fallback: use defaults only when file is missing
         user_data = {}
 
+    _validate_unknown_top_level_keys(user_data)
     merged = _deep_merge(dict(DEFAULT_CONFIG), user_data)
     # v3.1.17 C13: mode_overrides runs first, env_overrides second so
     # explicit env vars win over the safer mode defaults.
     _apply_mode_overrides(merged)
     _apply_env_overrides(merged, prefix=env_prefix)
+    _normalize_trading_symbols(merged)
     _validate_required(merged)
     _coerce_types(merged)
 
     return Config(merged)
+
+
+def get_trading_symbols(config: Union[Config, Dict[str, Any]]) -> List[str]:
+    """Return the canonical symbol list used by feeds, engine, and backtest."""
+    if isinstance(config, Config):
+        data = config.raw
+    else:
+        data = config
+    symbols = data.get("symbols")
+    assets = data.get("assets")
+    if isinstance(symbols, list) and symbols:
+        return [str(s) for s in symbols]
+    if isinstance(assets, list) and assets:
+        return [str(s) for s in assets]
+    return ["BTC", "ETH", "SOL"]
+
+
+def get_strategy_section(
+    config: Union[Config, Dict[str, Any]],
+    section: str,
+    default: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Read ``strategy.<section>`` with legacy top-level fallback."""
+    if isinstance(config, Config):
+        cfg = config
+    else:
+        cfg = Config(config)
+    primary = cfg.get(f"strategy.{section}")
+    if isinstance(primary, dict):
+        return dict(primary)
+    legacy = cfg.get(section)
+    if isinstance(legacy, dict):
+        return dict(legacy)
+    return dict(default or {})
+
+
+def phase08_enabled(config: Union[Config, Dict[str, Any]]) -> bool:
+    """Return True when Phase 08 edge-isolation mode is active."""
+    p08 = get_strategy_section(config, "phase08")
+    return bool(p08.get("enabled", False))
+
+
+def resolve_kelly_enabled(
+    config: Union[Config, Dict[str, Any]],
+    *,
+    for_backtest: bool = False,
+) -> bool:
+    """Return effective Kelly flag: ``strategy.kelly.enabled`` with optional backtest override.
+
+  ``backtest.kelly_override`` (``null``/missing → follow live) is the audit-able
+  backtest-only knob. Legacy ``backtest.use_kelly`` is honoured when override is unset.
+    """
+    kelly_cfg = get_strategy_section(config, "kelly")
+    base = bool(kelly_cfg.get("enabled", True))
+    if not for_backtest:
+        return base
+    if isinstance(config, Config):
+        cfg = config
+    else:
+        cfg = Config(config)
+    override = cfg.get("backtest.kelly_override")
+    if override is not None:
+        return bool(override)
+    legacy = cfg.get("backtest.use_kelly")
+    if legacy is not None:
+        return bool(legacy)
+    return base
+
+
+def compute_config_hash(config: Union[Config, Dict[str, Any]]) -> str:
+    """Stable SHA-256 of the merged config (sorted JSON, no secrets)."""
+    if isinstance(config, Config):
+        data = config.raw
+    else:
+        data = config
+    sanitized = _sanitize_config_for_hash(data)
+    payload = json.dumps(sanitized, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def get_sizing_version(config: Union[Config, Dict[str, Any]]) -> str:
+    """Return the declared sizing/parity schema version for run manifests."""
+    if isinstance(config, Config):
+        cfg = config
+    else:
+        cfg = Config(config)
+    return str(cfg.get("backtest.sizing_version", "phase05-risk-at-equity-v1"))
+
+
+def _sanitize_config_for_hash(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop secret-like keys before hashing."""
+    skip_keys = {
+        "password", "token", "secret", "secret_key", "api_key", "api_secret",
+        "telegram_bot_token", "telegram_chat_id", "coinalyze_api_key",
+    }
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, Config):
+            return _walk(node.raw)
+        if isinstance(node, dict):
+            out: Dict[str, Any] = {}
+            for k, v in node.items():
+                if str(k).lower() in skip_keys or str(k).endswith("_key"):
+                    continue
+                out[str(k)] = _walk(v)
+            return out
+        if isinstance(node, (list, tuple)):
+            return [_walk(x) for x in node]
+        if isinstance(node, (str, int, float, bool)) or node is None:
+            return node
+        return str(node)
+
+    return _walk(data)
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +601,44 @@ def _validate_required(config: Dict[str, Any]) -> None:
     missing = [k for k in REQUIRED_KEYS if k not in config]
     if missing:
         raise ConfigError(f"Missing required config keys: {missing}")
+
+
+def _validate_unknown_top_level_keys(user_data: Dict[str, Any]) -> None:
+    """Reject user YAML with unrecognized top-level keys at startup."""
+    if not user_data:
+        return
+    unknown = sorted(k for k in user_data.keys() if k not in KNOWN_TOP_LEVEL_KEYS)
+    if unknown:
+        raise ConfigError(
+            f"Unknown config keys: {unknown}. "
+            f"Allowed top-level keys: {sorted(KNOWN_TOP_LEVEL_KEYS)}"
+        )
+
+
+def _normalize_trading_symbols(config: Dict[str, Any]) -> None:
+    """Unify ``assets`` and ``symbols`` into one canonical list."""
+    logger = logging.getLogger(__name__)
+    assets = config.get("assets")
+    symbols = config.get("symbols")
+    assets_list = [str(s) for s in assets] if isinstance(assets, list) else None
+    symbols_list = [str(s) for s in symbols] if isinstance(symbols, list) else None
+
+    if assets_list and symbols_list and assets_list != symbols_list:
+        logger.warning(
+            "Config assets=%s differs from symbols=%s — using assets as canonical",
+            assets_list,
+            symbols_list,
+        )
+        canonical = assets_list
+    elif assets_list:
+        canonical = assets_list
+    elif symbols_list:
+        canonical = symbols_list
+    else:
+        canonical = ["BTC", "ETH", "SOL"]
+
+    config["symbols"] = list(canonical)
+    config["assets"] = list(canonical)
 
 
 def _coerce_types(config: Dict[str, Any]) -> None:

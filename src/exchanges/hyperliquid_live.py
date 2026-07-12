@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.security.vault import Vault, VaultKeyError, VaultNotInitializedError, get_vault
@@ -290,6 +291,96 @@ class HyperliquidLiveClient:
         logger.info("HL cancel %s oid=%s: %s", symbol, order_id, result)
         return result if isinstance(result, dict) else {"raw": result}
 
+    async def get_order_status(
+        self,
+        order_id: int | str,
+    ) -> Dict[str, Any]:
+        """Query Hyperliquid for the current status of a single order."""
+        if self._info is None or self._wallet_address is None:
+            raise RuntimeError("HyperliquidLiveClient not initialized")
+
+        oid = int(order_id)
+        query = getattr(self._info, "query_order_by_oid", None)
+        if callable(query):
+            result = await asyncio.to_thread(query, self._wallet_address, oid)
+            return result if isinstance(result, dict) else {"status": str(result)}
+
+        # Fallback for SDK variants without query_order_by_oid.
+        open_orders = await self.get_open_orders()
+        for order in open_orders:
+            if int(order.get("oid", -1)) == oid:
+                return {"status": "open", "order": order}
+        return {"status": "unknown"}
+
+    async def get_order_fills(
+        self,
+        order_id: int | str,
+        *,
+        lookback_ms: int = 86_400_000,
+    ) -> List[Dict[str, Any]]:
+        """Return user fills associated with *order_id*."""
+        if self._info is None or self._wallet_address is None:
+            raise RuntimeError("HyperliquidLiveClient not initialized")
+
+        oid = str(order_id)
+        fills_fn = getattr(self._info, "user_fills", None)
+        if not callable(fills_fn):
+            return []
+
+        try:
+            raw = await asyncio.to_thread(fills_fn, self._wallet_address)
+        except TypeError:
+            raw = await asyncio.to_thread(fills_fn)
+
+        if not isinstance(raw, list):
+            return []
+
+        cutoff = int(time.time() * 1000) - int(lookback_ms)
+        matched: List[Dict[str, Any]] = []
+        for fill in raw:
+            if not isinstance(fill, dict):
+                continue
+            fill_oid = fill.get("oid", fill.get("orderId"))
+            if fill_oid is None or str(fill_oid) != oid:
+                continue
+            ts = int(fill.get("time", fill.get("timestamp", 0)) or 0)
+            if ts and ts < cutoff:
+                continue
+            matched.append(fill)
+        return matched
+
+    async def get_user_fills(
+        self,
+        *,
+        lookback_ms: int = 86_400_000,
+    ) -> List[Dict[str, Any]]:
+        """Return recent user fills for the connected wallet."""
+        if self._info is None or self._wallet_address is None:
+            raise RuntimeError("HyperliquidLiveClient not initialized")
+
+        fills_fn = getattr(self._info, "user_fills", None)
+        if not callable(fills_fn):
+            return []
+
+        try:
+            raw = await asyncio.to_thread(fills_fn, self._wallet_address)
+        except TypeError:
+            raw = await asyncio.to_thread(fills_fn)
+
+        if not isinstance(raw, list):
+            return []
+
+        cutoff = int(time.time() * 1000) - int(lookback_ms)
+        out: List[Dict[str, Any]] = []
+        for fill in raw:
+            if not isinstance(fill, dict):
+                continue
+            ts = int(fill.get("time", fill.get("timestamp", 0)) or 0)
+            if ts and ts < cutoff:
+                continue
+            out.append(fill)
+        return out
+
     # ── Read-only queries ───────────────────────────────────────
 
     async def get_open_orders(self) -> List[Dict[str, Any]]:
@@ -319,6 +410,114 @@ class HyperliquidLiveClient:
             self._wallet_address,
         )
         return result if isinstance(result, dict) else {}
+
+    async def get_positions(self) -> List[Dict[str, Any]]:
+        """Return open perp positions parsed from ``user_state``."""
+        from src.exchanges.hl_positions import parse_exchange_positions
+
+        state = await self.get_user_state()
+        positions = parse_exchange_positions(state)
+        return [
+            {
+                "symbol": p.symbol,
+                "side": p.side,
+                "size": p.size,
+                "entry_price": p.entry_price,
+                "unrealized_pnl": p.unrealized_pnl,
+            }
+            for p in positions.values()
+        ]
+
+    async def place_trigger_order(
+        self,
+        symbol: str,
+        position_side: str,
+        size: float,
+        *,
+        trigger_price: float,
+        tpsl: str,
+    ) -> Dict[str, Any]:
+        """Place a reduce-only native SL/TP trigger order."""
+        if self._exchange is None:
+            raise RuntimeError("HyperliquidLiveClient not initialized")
+
+        if tpsl not in ("sl", "tp"):
+            raise ValueError(f"Invalid tpsl={tpsl!r} — expected 'sl' or 'tp'")
+
+        sz = normalize_size(symbol, safe_float(size))
+        if sz <= 0:
+            raise ValueError(f"Invalid trigger size for {symbol}: {sz}")
+
+        px = normalize_price(symbol, safe_float(trigger_price))
+        if px <= 0:
+            raise ValueError(f"Invalid trigger price for {symbol}: {px}")
+
+        # Closing a long = sell (is_buy=False); closing a short = buy.
+        is_buy = position_side == "short"
+        order_type = {"trigger": {"triggerPx": px, "isMarket": True, "tpsl": tpsl}}
+
+        result = await asyncio.to_thread(
+            self._exchange.order,
+            symbol,
+            is_buy,
+            sz,
+            px,
+            order_type,
+            True,  # reduce_only
+        )
+        logger.info(
+            "HL trigger %s %s %s size=%.6f trigger=%.4f: %s",
+            tpsl.upper(),
+            symbol,
+            position_side,
+            sz,
+            px,
+            result,
+        )
+        return result if isinstance(result, dict) else {"raw": result}
+
+    async def cancel_all_orders(self, symbol: Optional[str] = None) -> int:
+        """Cancel all open orders, optionally scoped to *symbol*."""
+        orders = await self.get_open_orders()
+        cancelled = 0
+        for order in orders:
+            if not isinstance(order, dict):
+                continue
+            sym = str(order.get("coin", order.get("symbol", ""))).upper()
+            if symbol and sym != symbol.upper():
+                continue
+            oid = order.get("oid", order.get("orderId"))
+            if oid is None:
+                continue
+            try:
+                await self.cancel_order(sym, int(oid))
+                cancelled += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cancel_all_orders: failed %s oid=%s: %s", sym, oid, exc)
+        return cancelled
+
+    async def flatten_all_positions(self) -> List[Dict[str, Any]]:
+        """Market-close every open perp position."""
+        from src.exchanges.hl_positions import parse_exchange_positions
+
+        state = await self.get_user_state()
+        positions = parse_exchange_positions(state)
+        results: List[Dict[str, Any]] = []
+        for sym, pos in positions.items():
+            try:
+                resp = await self.close_position(sym, pos.size)
+                results.append({"symbol": sym, "response": resp, "ok": True})
+            except Exception as exc:  # noqa: BLE001
+                logger.error("flatten_all_positions failed for %s: %s", sym, exc)
+                results.append({"symbol": sym, "error": str(exc), "ok": False})
+        return results
+
+    async def confirm_flat(self) -> bool:
+        """True when user_state shows zero open perp positions."""
+        from src.exchanges.hl_positions import parse_exchange_positions
+
+        state = await self.get_user_state()
+        return len(parse_exchange_positions(state)) == 0
 
     async def get_exchange_meta(self) -> List[Dict[str, Any]]:
         """Return the exchange metadata (asset names, szDecimals, pxDecimals, …).

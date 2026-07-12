@@ -251,6 +251,19 @@ class HyperliquidWSClient:
         self.connected_at = 0.0
         self.messages_received = 0
         self.last_message_time = 0.0
+        # Raw trade tap — bypasses DataBus rate limiting (research tape / CVD path).
+        self._raw_trade_listeners: List[Callable[[HlTrade], None]] = []
+
+    def add_raw_trade_listener(self, callback: Callable[[HlTrade], None]) -> None:
+        """Register a synchronous listener invoked before DataBus publish."""
+        if callback not in self._raw_trade_listeners:
+            self._raw_trade_listeners.append(callback)
+
+    def remove_raw_trade_listener(self, callback: Callable[[HlTrade], None]) -> None:
+        try:
+            self._raw_trade_listeners.remove(callback)
+        except ValueError:
+            pass
 
     @property
     def is_healthy(self) -> bool:
@@ -476,6 +489,11 @@ class HyperliquidWSClient:
                 side=trade.get("side", ""),
                 tid=trade.get("tid", 0),
             )
+            for listener in self._raw_trade_listeners:
+                try:
+                    listener(t)
+                except Exception:
+                    logger.exception("Raw trade listener error on %s", trade_symbol)
             self.bus.publish(f"trade:{trade_symbol}", t)
 
     def _parse_l2_book(self, data: Any) -> None:

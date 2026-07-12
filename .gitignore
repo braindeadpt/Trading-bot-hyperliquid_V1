@@ -1,13 +1,15 @@
 # Logs (runtime only — never commit)
 logs/
 
-# SQLite runtime DB
-data/live/*.db
-data/live/*.db-shm
-data/live/*.db-wal
-data/live/archive/
+# SQLite runtime DB + runtime artifacts
+data/live/
+data/bot.lock
 data/test_health.db
 data/vault.enc
+
+# Research artifacts (parity DBs, support packages, sweep outputs)
+data/research/
+data/backtests/
 
 # Python cache
 __pycache__/
@@ -57,6 +59,7 @@ backtest_results.json
 tests/data/
 
 # Ad-hoc local debug scripts (keep scripts/backfill_candles.py etc. tracked)
+scripts/_*.py
 scripts/check_candles.py
 scripts/audit_*.py
 scripts/diagnose_*.py

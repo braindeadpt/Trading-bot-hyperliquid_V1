@@ -127,6 +127,10 @@ it is not used directly in the current implementation.
         self._daily_drawdown_circuit_pct = safe_float(
             gov.get("daily_drawdown_circuit_pct", self.DAILY_DRAWDOWN_CIRCUIT_PCT * 100.0)
         ) / 100.0
+        self._daily_dd_halt_entries = bool(gov.get("daily_drawdown_halt_entries", True))
+        self._daily_dd_flatten = bool(gov.get("daily_drawdown_flatten", True))
+        self._daily_dd_alert = bool(gov.get("daily_drawdown_alert", True))
+        self._daily_dd_flatten_consumed: bool = False
 
         # Mutable circuit-breaker state
         self._circuit_breaker_tripped: bool = False
@@ -230,18 +234,27 @@ it is not used directly in the current implementation.
         if self._daily_peak_capital > 0.0:
             daily_dd = (self._daily_peak_capital - capital) / self._daily_peak_capital
             if daily_dd >= self._daily_drawdown_circuit_pct:
+                newly_tripped = not self._daily_drawdown_circuit_tripped
                 self._daily_drawdown_circuit_tripped = True
-                logger.error(
-                    "DAILY DRAWDOWN CIRCUIT: %.2f%% (limit %.2f%%). "
-                    "Closing positions and stopping entries.",
-                    daily_dd * 100,
-                    self._daily_drawdown_circuit_pct * 100,
-                )
-                return (
-                    False,
-                    f"Daily drawdown circuit: {daily_dd * 100:.2f}% >= "
-                    f"{self._daily_drawdown_circuit_pct * 100:.2f}%",
-                )
+                self._daily_drawdown_circuit_date = today
+                if newly_tripped:
+                    logger.error(
+                        "DAILY DRAWDOWN CIRCUIT: %.2f%% (limit %.2f%%). "
+                        "halt=%s flatten=%s alert=%s",
+                        daily_dd * 100,
+                        self._daily_drawdown_circuit_pct * 100,
+                        self._daily_dd_halt_entries,
+                        self._daily_dd_flatten,
+                        self._daily_dd_alert,
+                    )
+                    if self._daily_dd_alert:
+                        self._notify_daily_drawdown_trip(daily_dd)
+                if self._daily_dd_halt_entries:
+                    return (
+                        False,
+                        f"Daily drawdown circuit: {daily_dd * 100:.2f}% >= "
+                        f"{self._daily_drawdown_circuit_pct * 100:.2f}%",
+                    )
 
         # --- 9. Directional exposure limit (FASE 4.1) ---
         atr_pct = self._derive_atr_pct(signal)
@@ -358,6 +371,7 @@ it is not used directly in the current implementation.
             self._daily_drawdown_circuit_tripped = False
             self._daily_drawdown_circuit_date = ""
             self._daily_peak_capital = 0.0
+            self._daily_dd_flatten_consumed = False
             return False
         return True
 
@@ -370,6 +384,130 @@ it is not used directly in the current implementation.
         if self._daily_peak_capital <= 0.0:
             return 0.0
         return (self._daily_peak_capital - capital) / self._daily_peak_capital
+
+    @property
+    def daily_stop_loss_count(self) -> int:
+        return self._daily_stop_loss_count
+
+    @property
+    def should_flatten_on_daily_drawdown(self) -> bool:
+        return (
+            self._daily_dd_flatten
+            and self.is_daily_drawdown_circuit_tripped()
+            and not self._daily_dd_flatten_consumed
+        )
+
+    def request_daily_dd_flatten(self) -> bool:
+        """Return True at most once per daily-DD trip when flatten is enabled."""
+        if not self.should_flatten_on_daily_drawdown:
+            return False
+        self._daily_dd_flatten_consumed = True
+        return True
+
+    def seed_daily_drawdown(
+        self,
+        *,
+        peak_capital: float,
+        current_capital: float,
+    ) -> None:
+        """Initialize daily peak / trip state after portfolio restore."""
+        today = utc_now().strftime("%Y-%m-%d")
+        self._daily_drawdown_circuit_date = today
+        self._daily_peak_capital = max(safe_float(peak_capital), safe_float(current_capital))
+        if self._daily_peak_capital > 0.0:
+            daily_dd = (self._daily_peak_capital - current_capital) / self._daily_peak_capital
+            if daily_dd >= self._daily_drawdown_circuit_pct:
+                self._daily_drawdown_circuit_tripped = True
+
+    def evaluate_daily_drawdown(self, capital: float) -> bool:
+        """Update daily peak and trip circuit; return True if newly tripped."""
+        today = utc_now().strftime("%Y-%m-%d")
+        capital_f = safe_float(capital)
+        if self._daily_drawdown_circuit_date != today:
+            self._daily_drawdown_circuit_tripped = False
+            self._daily_drawdown_circuit_date = today
+            self._daily_peak_capital = capital_f
+            self._daily_dd_flatten_consumed = False
+            return False
+        if capital_f > self._daily_peak_capital:
+            self._daily_peak_capital = capital_f
+        if self._daily_peak_capital <= 0.0:
+            return False
+        daily_dd = (self._daily_peak_capital - capital_f) / self._daily_peak_capital
+        if daily_dd >= self._daily_drawdown_circuit_pct:
+            newly_tripped = not self._daily_drawdown_circuit_tripped
+            self._daily_drawdown_circuit_tripped = True
+            if newly_tripped and self._daily_dd_alert:
+                self._notify_daily_drawdown_trip(daily_dd)
+            return newly_tripped
+        return False
+
+    def restore_daily_stop_streak(self, stop_count: int) -> None:
+        """Rebuild daily stop-loss streak circuit from DB trade history."""
+        today = utc_now().strftime("%Y-%m-%d")
+        self._daily_stop_streak_date = today
+        self._daily_stop_loss_count = max(0, int(stop_count))
+        self._daily_stop_streak_tripped = (
+            self._max_daily_stop_losses > 0
+            and self._daily_stop_loss_count >= self._max_daily_stop_losses
+        )
+
+    def restore_snapshot(self, snapshot: Dict[str, Any], *, since_ms: int) -> None:
+        """Apply persisted risk circuit fields when available."""
+        if not isinstance(snapshot, dict):
+            return
+        today = utc_now().strftime("%Y-%m-%d")
+        saved_date = str(snapshot.get("daily_stop_streak_date") or "")
+        if saved_date == today:
+            self._daily_stop_loss_count = int(snapshot.get("daily_stop_loss_count", 0))
+            self._daily_stop_streak_tripped = bool(snapshot.get("daily_stop_streak_tripped", False))
+            self._daily_stop_streak_date = today
+
+        cb_date = str(snapshot.get("circuit_breaker_date") or "")
+        if cb_date == today and bool(snapshot.get("circuit_breaker_tripped", False)):
+            self._circuit_breaker_tripped = True
+            self._circuit_breaker_reason = str(snapshot.get("circuit_breaker_reason") or "")
+            self._circuit_breaker_date = today
+
+        dd_date = str(snapshot.get("daily_drawdown_circuit_date") or "")
+        if dd_date == today:
+            self._daily_drawdown_circuit_date = today
+            self._daily_peak_capital = safe_float(snapshot.get("daily_peak_capital"), 0.0)
+            self._daily_drawdown_circuit_tripped = bool(
+                snapshot.get("daily_drawdown_circuit_tripped", False)
+            )
+
+    def snapshot_for_persist(self) -> Dict[str, Any]:
+        """Serialize mutable risk-governance fields for runtime_state."""
+        return {
+            "daily_stop_loss_count": self._daily_stop_loss_count,
+            "daily_stop_streak_tripped": self._daily_stop_streak_tripped,
+            "daily_stop_streak_date": self._daily_stop_streak_date,
+            "circuit_breaker_tripped": self._circuit_breaker_tripped,
+            "circuit_breaker_reason": self._circuit_breaker_reason,
+            "circuit_breaker_date": self._circuit_breaker_date,
+            "daily_drawdown_circuit_tripped": self._daily_drawdown_circuit_tripped,
+            "daily_drawdown_circuit_date": self._daily_drawdown_circuit_date,
+            "daily_peak_capital": self._daily_peak_capital,
+        }
+
+    def _notify_daily_drawdown_trip(self, daily_dd: float) -> None:
+        if not self._daily_dd_alert or self._notifier is None:
+            return
+        msg = (
+            f"Daily drawdown circuit: {daily_dd * 100:.2f}% >= "
+            f"{self._daily_drawdown_circuit_pct * 100:.2f}%"
+        )
+        try:
+            import asyncio
+            asyncio.create_task(
+                self._notifier.circuit_breaker(
+                    reason=msg,
+                    action="halt_entries" if self._daily_dd_halt_entries else "monitor",
+                )
+            )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Sizing helpers

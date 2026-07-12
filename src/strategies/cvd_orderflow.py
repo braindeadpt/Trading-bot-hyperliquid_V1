@@ -202,10 +202,12 @@ class CVDOrderFlow(Strategy):
         c = event.candle_1m
         if c is None:
             return None
-        buy = float(getattr(c, "buy_volume", 0.0) or 0.0)
-        sell = float(getattr(c, "sell_volume", 0.0) or 0.0)
-        if buy == 0.0 and sell == 0.0:
+        buy = getattr(c, "buy_volume", None)
+        sell = getattr(c, "sell_volume", None)
+        if buy is None or sell is None:
             return None
+        buy = float(buy)
+        sell = float(sell)
         total_tokens = float(getattr(c, "volume", buy + sell) or (buy + sell))
         close_price = float(c.close)
         if close_price <= 0.0:

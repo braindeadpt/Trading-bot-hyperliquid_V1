@@ -159,9 +159,11 @@ class HyperliquidRESTClient:
         ``assetCtxs`` (per-asset mark price, OI, funding, etc.).
         """
         raw = await self._post(self._info_url, {"type": "metaAndAssetCtxs"})
-        if not isinstance(raw, dict):
-            raise HyperliquidAPIError(f"Unexpected metaAndAssetCtxs response: {raw!r}")
-        return raw
+        if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+            return raw[0]
+        if isinstance(raw, dict):
+            return raw
+        raise HyperliquidAPIError(f"Unexpected metaAndAssetCtxs response: {type(raw)!r}")
 
     async def funding_rates(self) -> List[HlFundingRate]:
         """Return the most recent funding rates for all assets."""
@@ -205,6 +207,40 @@ class HyperliquidRESTClient:
         raw = await self._post(self._info_url, {"type": "l2Book", "coin": symbol})
         if not isinstance(raw, dict):
             raise HyperliquidAPIError(f"Unexpected l2Book response: {raw!r}")
+        return raw
+
+    async def candle_snapshot(
+        self,
+        coin: str,
+        interval: str,
+        start_time: int,
+        end_time: int,
+    ) -> List[Dict[str, Any]]:
+        """Historical OHLCV via ``candleSnapshot`` (max 5000 candles per call)."""
+        raw = await self._post(
+            self._info_url,
+            {
+                "type": "candleSnapshot",
+                "req": {
+                    "coin": coin,
+                    "interval": interval,
+                    "startTime": start_time,
+                    "endTime": end_time,
+                },
+            },
+        )
+        if not isinstance(raw, list):
+            raise HyperliquidAPIError(f"Unexpected candleSnapshot response: {raw!r}")
+        return raw
+
+    async def recent_trades(self, coin: str) -> List[Dict[str, Any]]:
+        """Most recent public trades for *coin* (venue tape sample)."""
+        raw = await self._post(
+            self._info_url,
+            {"type": "recentTrades", "coin": coin},
+        )
+        if not isinstance(raw, list):
+            raise HyperliquidAPIError(f"Unexpected recentTrades response: {raw!r}")
         return raw
 
     # ── Order placement ──

@@ -41,6 +41,7 @@ import argparse
 import asyncio
 import logging
 import os
+import signal
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -48,9 +49,9 @@ from typing import Any, Dict, Optional
 # ---------------------------------------------------------------------------
 # Imports
 # ---------------------------------------------------------------------------
-from utils.config import Config, ConfigError
+from utils.config import Config, ConfigError, get_strategy_section, get_trading_symbols, load_config, phase08_enabled
 from utils.logger import setup_logger
-from utils.helpers import safe_ensure_dir, resolve_trade_stop_levels
+from utils.helpers import safe_ensure_dir
 from utils.instance_lock import acquire_instance_lock, release_instance_lock
 
 from data.database import Database
@@ -60,9 +61,14 @@ from exchanges.binance_api import BinanceRESTClient, BinanceWSClient
 from exchanges.binance_futures_feed import BinanceFuturesFeed
 from data.candle_builder import CandleBuilder
 
-from strategies.factory import build_ensemble, build_sub_strategies, build_strategy_list, build_backtest_strategy
+from strategies.factory import (
+    build_ensemble,
+    build_sub_strategies,
+    build_strategy_list,
+    build_backtest_strategy,
+    build_live_strategies,
+)
 
-from strategies.base import Position
 from core.risk_manager import RiskManager
 from core.execution import ExecutionEngine
 from core.engine import TradingEngine
@@ -82,6 +88,8 @@ _hl_ws: Optional[HyperliquidWSClient] = None
 _binance_ws: Optional[BinanceWSClient] = None
 _candle_builder: Optional[CandleBuilder] = None
 _binance_futures_feed: Optional[BinanceFuturesFeed] = None
+_research_sampler: Optional[Any] = None
+_research_microstructure: Optional[Any] = None
 _logger = None
 
 
@@ -123,10 +131,18 @@ async def _run_backtest(
     logger: Any,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    *,
+    use_research_db: bool = False,
 ) -> Dict[str, Any]:
     """Run a historical backtest using the backtest engine."""
-    from backtest.engine import BacktestEngine, BacktestConfig
+    from backtest.engine import BacktestEngine, build_backtest_config_from_yaml
     from datetime import datetime, timezone
+    from utils.config import resolve_kelly_enabled
+
+    if use_research_db:
+        from data.research_database import ResearchDatabase
+        db = ResearchDatabase(ResearchDatabase.resolve_path(cfg))
+        logger.info("Backtest using research DB: %s", db.db_path)
 
     logger.info("=" * 60)
     logger.info("BACKTEST MODE")
@@ -135,7 +151,7 @@ async def _run_backtest(
     initial_capital = cfg.get("backtest.initial_capital", cfg.get("risk.initial_capital", 10_000.0))
     commission_pct = cfg.get("backtest.commission_pct", cfg.get("risk.taker_fee_pct", 0.035))
     slippage_bps = cfg.get("backtest.slippage_bps", 2.0)
-    symbols = cfg.get("assets", ["BTC", "ETH", "SOL"])
+    symbols = get_trading_symbols(cfg)
 
     start_ms: Optional[int] = None
     end_ms: Optional[int] = None
@@ -153,43 +169,37 @@ async def _run_backtest(
         )
 
     logger.info(
-        "Backtest config: capital=$%.2f, commission=%.3f%%, slippage=%.1fbps, symbols=%s",
+        "Backtest config: capital=$%.2f, commission=%.3f%%, slippage=%.1fbps, symbols=%s, kelly=%s",
         initial_capital, commission_pct, slippage_bps, symbols,
+        resolve_kelly_enabled(cfg, for_backtest=True),
     )
     if from_date or to_date:
         logger.info("Date range: %s → %s", from_date or "start", to_date or "end")
 
     ensemble = build_backtest_strategy(cfg)
-    bt_config = BacktestConfig(
-        initial_capital=float(initial_capital),
-        commission_pct=float(commission_pct),
-        slippage_bps=float(slippage_bps),
-        max_positions=int(cfg.get("risk.max_positions", 5)),
-        tca_enabled=bool(cfg.get("execution.tca_enabled", True)),
-        min_edge_buffer_pct=float(cfg.get("execution.min_edge_buffer_pct", 0.05)),
-        paper_slippage_pct=float(cfg.get("risk.paper_slippage_pct", 0.05)),
-        use_regime_weights=bool(cfg.get("backtest.use_regime_weights", True)),
-        use_cooldown=bool(cfg.get("backtest.use_cooldown", True)),
-        use_kelly=bool(cfg.get("backtest.use_kelly", True)),
-        use_microstructure_proxy=bool(cfg.get("backtest.use_microstructure_proxy", True)),
-        regime_weights=cfg.get("strategy.regime_weights", {}),
-        adx_trend_threshold=float(cfg.get("strategy.adx_trend_threshold", 25.0)),
-        adx_range_threshold=float(cfg.get("strategy.adx_range_threshold", 20.0)),
-        cooldown_base_ms=int(cfg.get("strategy.cooldown.base_minutes", 60) * 60_000),
-        max_daily_trades=int(cfg.get("risk.max_daily_trades", 5)),
-    )
+    bt_config = build_backtest_config_from_yaml(cfg)
 
     bt = BacktestEngine(
         database=db,
         strategy=ensemble,
         config=bt_config,
         symbols=symbols,
+        risk_config=cfg,
     )
 
     result = bt.run(start_ms=start_ms, end_ms=end_ms)
     metrics = result["metrics"]
+    manifest = result.get("manifest", {})
 
     logger.info("Backtest complete — %d trades", metrics.get("n_trades", 0))
+    if manifest:
+        logger.info(
+            "Run manifest: commit=%s config_hash=%s sizing=%s fidelity=%s",
+            manifest.get("git_commit"),
+            manifest.get("config_hash"),
+            manifest.get("sizing_version"),
+            manifest.get("fidelity_tier"),
+        )
     logger.info("Total return: %.2f%%", metrics.get("total_return", 0) * 100)
     logger.info("Sharpe: %.3f", metrics.get("sharpe_ratio", 0))
     logger.info("Max DD: %.2f%%", metrics.get("max_drawdown", 0) * 100)
@@ -198,17 +208,34 @@ async def _run_backtest(
     return metrics
 
 
+def _request_shutdown(signum: int, frame: Any) -> None:
+    """Signal handler for graceful SIGINT/SIGTERM shutdown."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    if _logger:
+        _logger.warning("Shutdown requested via signal %s", signum)
+
+
 async def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(description="Hyperliquid Premium Trading Bot")
     parser.add_argument("--config", default="config/settings.yaml", help="Path to YAML config")
     parser.add_argument("--mode", choices=["paper", "testnet", "mainnet"], default=None, help="Override trading mode")
     parser.add_argument("--backtest", action="store_true", help="Run backtest mode")
+    parser.add_argument(
+        "--research-db",
+        action="store_true",
+        help="Use research hyperliquid.db (separate from live bot.db)",
+    )
     parser.add_argument("--from-date", dest="from_date", help="Backtest start date (YYYY-MM-DD)")
     parser.add_argument("--to-date", dest="to_date", help="Backtest end date (YYYY-MM-DD)")
     parser.add_argument("--audit", action="store_true", help="Run security audit and exit")
     parser.add_argument("--no-dashboard", action="store_true", help="Disable web dashboard")
     args = parser.parse_args()
+
+    signal.signal(signal.SIGINT, _request_shutdown)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _request_shutdown)
 
     # -----------------------------------------------------------------------
     # 1. Load configuration
@@ -224,6 +251,7 @@ async def main() -> None:
     # Override mode from CLI if provided
     mode = args.mode or cfg.get("mode", "paper")
     cfg.set("mode", mode)  # HIGH-010: use setter instead of raw dict mutation
+    symbols = get_trading_symbols(cfg)
 
     # -----------------------------------------------------------------------
     # 2. Setup logging
@@ -258,6 +286,24 @@ async def main() -> None:
     logger.info(f"Config: {config_path}")
     logger.info("=" * 60)
 
+    if not args.backtest and not args.audit and phase08_enabled(cfg):
+        p08 = cfg.get("strategy.phase08", {}) or {}
+        if bool(p08.get("paper_only", True)) and mode != "paper":
+            logger.error(
+                "Phase08 requires paper mode — tier_a_hl_ohlc certifies data only, not edge. "
+                "Refusing %s execution.",
+                mode,
+            )
+            raise SystemExit(1)
+        from src.research.phase08_preregister import (
+            assert_config_matches_preregister,
+            persist_preregister_manifest,
+        )
+
+        persist_preregister_manifest(cfg)
+        assert_config_matches_preregister(cfg)
+        logger.info("Phase08 preregister manifest verified (immutable, OOS pending)")
+
     # -----------------------------------------------------------------------
     # 3. Setup database
     # -----------------------------------------------------------------------
@@ -282,7 +328,10 @@ async def main() -> None:
     # 4. Backtest mode (early exit after run)
     # -----------------------------------------------------------------------
     if args.backtest:
-        metrics = await _run_backtest(cfg, db, logger, args.from_date, args.to_date)
+        metrics = await _run_backtest(
+            cfg, db, logger, args.from_date, args.to_date,
+            use_research_db=args.research_db,
+        )
         # Print summary
         print("\n" + "=" * 60)
         print("BACKTEST RESULTS")
@@ -308,7 +357,7 @@ async def main() -> None:
 
     hl_ws = HyperliquidWSClient(
         bus=data_bus,
-        symbols=cfg.get("assets", ["BTC", "ETH", "SOL"]),
+        symbols=symbols,
         ws_url=cfg.get("exchange.hyperliquid.ws_url", "wss://api.hyperliquid.xyz/ws"),
     )
 
@@ -325,11 +374,11 @@ async def main() -> None:
     binance_ws: Optional[BinanceWSClient] = None
     if cfg.get("exchange.binance.ws_enabled", True):
         binance_ws = BinanceWSClient(
-            symbols=cfg.get("assets", ["BTC", "ETH", "SOL"]),
+            symbols=symbols,
             ws_base=cfg.get("exchange.binance.ws_url", "wss://stream.binance.com:9443/ws"),
         )
 
-    candle_builder = CandleBuilder(bus=data_bus, symbols=cfg.get("assets", ["BTC", "ETH", "SOL"]), timeframes=[60, 300, 900, 3600])
+    candle_builder = CandleBuilder(bus=data_bus, symbols=symbols, timeframes=[60, 300, 900, 3600])
 
     global _hl_ws, _binance_ws, _candle_builder
     _hl_ws = hl_ws
@@ -337,23 +386,32 @@ async def main() -> None:
     _candle_builder = candle_builder
 
     # -----------------------------------------------------------------------
-    # 6. Initialize strategies (same ensemble as backtest)
+    # 6. Initialize strategies (Phase08: VB+VWAP execution, rest shadow)
     # -----------------------------------------------------------------------
-    sub_strategies = build_sub_strategies(cfg)
-    strategies = build_strategy_list(cfg)
-    ens_enabled = bool(cfg.get("strategy.ensemble.enabled", True))
-    if ens_enabled:
+    shadow_strategies: list = []
+    if phase08_enabled(cfg):
+        strategies, shadow_strategies = build_live_strategies(cfg)
         logger.info(
-            "StrategyEnsemble loaded: %d sub-strategies, threshold=%.2f, min_agreeing=%d",
-            len(sub_strategies),
-            cfg.get("strategy.ensemble.threshold", 0.40),
-            cfg.get("strategy.ensemble.min_agreeing", 1),
+            "Phase08 edge isolation — execution=%s shadow=%s",
+            [s.name for s in strategies],
+            [s.name for s in shadow_strategies],
         )
     else:
-        logger.info(
-            "Phase 1 direct mode: %d sub-strategies (ensemble disabled)",
-            len(strategies),
-        )
+        sub_strategies = build_sub_strategies(cfg)
+        strategies = build_strategy_list(cfg)
+        ens_enabled = bool(cfg.get("strategy.ensemble.enabled", True))
+        if ens_enabled:
+            logger.info(
+                "StrategyEnsemble loaded: %d sub-strategies, threshold=%.2f, min_agreeing=%d",
+                len(sub_strategies),
+                cfg.get("strategy.ensemble.threshold", 0.40),
+                cfg.get("strategy.ensemble.min_agreeing", 1),
+            )
+        else:
+            logger.info(
+                "Phase 1 direct mode: %d sub-strategies (ensemble disabled)",
+                len(strategies),
+            )
     logger.info("Active strategies: %s", [s.name for s in strategies])
 
     # -----------------------------------------------------------------------
@@ -391,12 +449,6 @@ async def main() -> None:
         mode=mode,
     )
 
-    # Load open trades from DB into executor (MUST be before engine start)
-    open_trades = db.get_open_trades()
-    if open_trades:
-        await executor.load_open_trades()
-        logger.info(f"Recovered {len(open_trades)} open trades from DB")
-
     # -----------------------------------------------------------------------
     # 8. Start data pipeline (WS + CandleBuilder BEFORE engine)
     # -----------------------------------------------------------------------
@@ -412,7 +464,7 @@ async def main() -> None:
             forward_binance_prices(
                 binance_ws,
                 data_bus,
-                list(cfg.get("assets", ["BTC", "ETH", "SOL"])),
+                symbols,
             ),
             name="binance_price_bridge",
         )
@@ -428,7 +480,7 @@ async def main() -> None:
     if liq_source != "proxy" or ls_enabled:
         _binance_futures_feed = BinanceFuturesFeed(
             bus=data_bus,
-            symbols=cfg.get("assets", ["BTC", "ETH", "SOL"]),
+            symbols=symbols,
             poll_interval_sec=float(cfg.get("market_data.long_short_poll_sec", 300)),
         )
         await _binance_futures_feed.start()
@@ -442,7 +494,7 @@ async def main() -> None:
         asyncio.create_task(
             forward_binance_perp_prices(
                 data_bus,
-                list(cfg.get("assets", ["BTC", "ETH", "SOL"])),
+                symbols,
             ),
             name="binance_perp_price_bridge",
         )
@@ -459,72 +511,42 @@ async def main() -> None:
         risk_manager=risk_mgr,
         executor=executor,
         notifier=notifier,
+        shadow_strategies=shadow_strategies,
     )
+    engine.set_ws_client(hl_ws)
     global _engine
     _engine = engine
 
     await engine.start()
     logger.info("TradingEngine started")
 
-    # --- SYNC: mirror executor open trades into PortfolioState ---
-    # Must happen AFTER engine.start() so the engine's portfolio snapshot
-    # is loaded first, then we inject open trades from the executor.
-    # We use engine._portfolio here because the engine owns the portfolio
-    # (created in __init__ at line 151 of engine.py).
-    if open_trades:
-        portfolio = engine._portfolio
-        db_open_by_id = {int(row["id"]): row for row in open_trades}
-        existing = await portfolio.positions
-        for trade in list(executor._open_trades.values()):
-            if trade.symbol in existing:
+    global _research_sampler, _research_microstructure
+    if not args.backtest and not args.audit:
+        try:
+            from data.research_microstructure import start_microstructure_recorder_from_config
+
+            _research_microstructure = start_microstructure_recorder_from_config(data_bus, cfg)
+            if _research_microstructure is not None:
+                _research_microstructure.attach_ws_client(hl_ws)
+                await _research_microstructure.start()
                 logger.info(
-                    "Position %s already in portfolio — skip duplicate restore",
-                    trade.symbol,
+                    "ResearchMicrostructureRecorder active — raw WS tape + L2 → research DB",
                 )
-                continue
-            notional = trade.entry_price * trade.size
-            total_cost = notional + getattr(trade, 'entry_fee', 0.0)
-            db_row = db_open_by_id.get(int(trade.trade_id), {})
-            restored_strategy = str(
-                db_row.get("strategy")
-                or (trade.reason.split(":", 1)[1] if ":" in trade.reason else "unknown")
-            )
-            sl_price, tp_price = resolve_trade_stop_levels(
-                entry_price=trade.entry_price,
-                side=trade.side,
-                signal_metadata=db_row.get("signal_metadata"),
-            )
-            pos = Position(
-                symbol=trade.symbol,
-                side=trade.side,
-                entry_price=trade.entry_price,
-                size=trade.size,
-                entry_time_ms=int(trade.timestamp_ms),
-                stop_loss_price=sl_price,
-                take_profit_price=tp_price,
-                unrealized_pnl=0.0,
-                metadata={
-                    "strategy": restored_strategy,
-                    "sub_strategy": restored_strategy,
-                    "trade_id": trade.trade_id,
-                    "restored_from_db": True,
-                },
-            )
+        except Exception as exc:
+            logger.warning("ResearchMicrostructureRecorder failed to start: %s", exc)
+        research_cfg = cfg.get("research", {}) or {}
+        if bool(research_cfg.get("rest_sampling_enabled", False)):
             try:
-                await portfolio.add_position(pos, cost=total_cost)
-                logger.info(
-                    "Restored position into portfolio: %s %s size=%.6f @ %.2f "
-                    "(id=%d sl=%s tp=%s)",
-                    trade.symbol, trade.side, trade.size,
-                    trade.entry_price, trade.trade_id,
-                    f"{sl_price:.4f}" if sl_price else "None",
-                    f"{tp_price:.4f}" if tp_price else "None",
-                )
+                from data.research_sampler import start_research_sampler_from_config
+
+                _research_sampler = start_research_sampler_from_config(cfg)
+                if _research_sampler is not None:
+                    await _research_sampler.start()
+                    logger.warning(
+                        "ResearchSampler REST fallback active (60s poll) — not Tier A",
+                    )
             except Exception as exc:
-                logger.warning(
-                    "Failed to restore position %s into portfolio: %s",
-                    trade.symbol, exc,
-                )
+                logger.warning("ResearchSampler failed to start: %s", exc)
 
     # -----------------------------------------------------------------------
     # 9. Start Dashboard (optional)
@@ -612,6 +634,16 @@ async def main() -> None:
                 await candle_builder.stop()
         except Exception:
             logger.exception("CandleBuilder stop failed")
+        try:
+            if _research_microstructure is not None:
+                await _research_microstructure.stop()
+        except Exception:
+            logger.exception("ResearchMicrostructureRecorder stop failed")
+        try:
+            if _research_sampler is not None:
+                await _research_sampler.stop()
+        except Exception:
+            logger.exception("ResearchSampler stop failed")
         try:
             if _binance_futures_feed is not None:
                 await _binance_futures_feed.stop()

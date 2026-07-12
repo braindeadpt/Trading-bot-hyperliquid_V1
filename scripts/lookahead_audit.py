@@ -69,6 +69,9 @@ RULES: List[Rule] = [
         "future index access (data[i + N] with N>=1, or [i + offset])",
         # Matches `[expr + N]` where N>=1 (positive offset = future bar).
         re.compile(r"\[\s*[A-Za-z_][\w\.]*\s*\+\s*[123456789]\d*\s*\]"),
+        # Manual review (Phase 03): adjacent *price-bin* index in VA profile,
+        # not a future time bar — see indicators.py volume-at-price expansion.
+        allow_substrings=("bin_vol[hi + 1]",),
     ),
     Rule(
         "LOOKAHEAD-002b", "HIGH",
@@ -76,6 +79,7 @@ RULES: List[Rule] = [
         # v3.1.19: catch variable offsets too — ``candles[i + offset]`` is
         # still a look-ahead if offset > 0.
         re.compile(r"\[\s*\w+\s*\+\s*\w+\s*\]"),
+        allow_substrings=("bin_vol[hi + 1]",),
     ),
     Rule(
         "LOOKAHEAD-003", "HIGH",
@@ -95,6 +99,9 @@ RULES: List[Rule] = [
             "next_candle_complete",
             "next_funding_ts",
             "next_funding_time_ms",
+            "next_funding_settle_ms",
+            "next_ts",
+            "new_next",
             "next_ms",
             "nextFundingTime",
             "next_reset_remaining_sec",
