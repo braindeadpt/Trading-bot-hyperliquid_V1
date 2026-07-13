@@ -172,6 +172,9 @@ class BacktestEngine:
         self.positions_by_symbol: Dict[str, int] = {}
         self.closed_trades: List[Dict[str, Any]] = []
         self.equity_curve: List[Tuple[int, float]] = []
+        # Fase 10 live-vs-replay: every rejected entry signal, diagnostic-only.
+        # Purely additive — does not affect any trading decision or fill.
+        self.gate_rejections: List[Dict[str, Any]] = []
         self._next_position_id = 1
         self._daily_trade_count: Dict[str, int] = {}
         self._current_day: Optional[str] = None
@@ -370,6 +373,14 @@ class BacktestEngine:
                             "Backtest: %s %s rejected by %s: %s",
                             signal.symbol, signal.side, decision.gate, decision.reason,
                         )
+                        self.gate_rejections.append({
+                            "timestamp_ms": ts,
+                            "symbol": signal.symbol,
+                            "side": signal.side,
+                            "strategy": signal.strategy,
+                            "gate": decision.gate,
+                            "reason": decision.reason,
+                        })
                         continue
                     signal = decision.signal or signal
                 elif self._risk_manager is not None:
@@ -381,6 +392,14 @@ class BacktestEngine:
                             "Backtest: %s %s rejected by risk gate: %s",
                             signal.symbol, signal.side, reason,
                         )
+                        self.gate_rejections.append({
+                            "timestamp_ms": ts,
+                            "symbol": signal.symbol,
+                            "side": signal.side,
+                            "strategy": signal.strategy,
+                            "gate": "risk",
+                            "reason": reason,
+                        })
                         continue
 
                 capital = self._open_position(
