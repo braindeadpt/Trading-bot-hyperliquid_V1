@@ -1,16 +1,22 @@
-"""Rebuild orchestrator: official node_trades -> 1m OHLCV -> ResearchDatabase.
+"""Rebuild orchestrator: official node_fills_by_block -> 1m OHLCV -> ResearchDatabase.
 
 This implements the ``node_trades_reconstruction`` plan embedded in the
 GoldRush support package (see
 ``src/data/candle_providers/parity_secondary.py::NODE_TRADES_RECONSTRUCTION_PROPOSAL``
 and ``src/data/candle_providers/support_package.py``):
 
-    1. Download node_trades archives for the divergent windows.
-    2. Aggregate trades into 1m buckets using HL bucket boundaries (t/T).
-    3. Apply format_hl_price / dynamic quantum when emitting OHLC.
-    4. Upsert research DB with source=hl_node_trades_rebuild; never overwrite
+    1. Download node_fills_by_block archives for the divergent windows
+       (the source-name/module-name ``node_trades`` is kept for minimal
+       churn, but the *default* S3 prefix is now ``node_fills_by_block`` —
+       see ``node_trades_fetcher.py``'s module docstring for why: the
+       original ``node_trades`` prefix is stale, over a year out of date).
+    2. Parse each block-wrapped NDJSON object and dedup fills by ``tid``
+       (:func:`~src.data.candle_providers.node_trades_parser.parse_node_fills_by_block_ndjson`).
+    3. Aggregate trades into 1m buckets using HL bucket boundaries (t/T).
+    4. Apply format_hl_price / dynamic quantum when emitting OHLC.
+    5. Upsert research DB with source=hl_node_trades_rebuild; never overwrite
        protected hl_candleSnapshot rows.
-    5. Re-run secondary validation on rebuilt windows only.
+    6. Re-run secondary validation on rebuilt windows only.
 
 Nothing in this module performs a real network call. Fetching is delegated
 to an injectable :class:`~src.data.candle_providers.node_trades_fetcher.NodeTradesFetcher`
@@ -45,7 +51,10 @@ from src.data.candle_providers.node_trades_fetcher import (
     NodeTradesFetcher,
     archive_keys_for_window,
 )
-from src.data.candle_providers.node_trades_parser import NodeTradeRecord, parse_archive_object
+from src.data.candle_providers.node_trades_parser import (
+    NodeTradeRecord,
+    parse_node_fills_by_block_ndjson,
+)
 from src.data.database import Candle
 from src.data.research_database import ResearchDatabase
 from src.data.series_metadata import PROTECTED_OFFICIAL_SOURCES, SeriesMetadata
@@ -233,7 +242,7 @@ def rebuild_window(
             continue
         result.objects_fetched.append(obj.uri)
         try:
-            parsed = parse_archive_object(payload)
+            parsed = parse_node_fills_by_block_ndjson(payload)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Parse failed for %s: %s", obj.uri, exc)
             result.objects_failed.append({"uri": obj.uri, "error": f"parse: {exc}"})

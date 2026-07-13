@@ -47,6 +47,50 @@ def _tmp_db_path() -> Path:
     return Path(tempfile.gettempdir()) / f"node_trades_rebuild_{uuid.uuid4().hex}.db"
 
 
+_next_tid = [1000]
+
+
+def _fill_event(coin, px, sz, time_ms, side="B", address=None, crossed=None):
+    """Build one [address, fill] event for a node_fills_by_block trade leg."""
+    _next_tid[0] += 1
+    return [
+        address or f"0xaddr{_next_tid[0]}",
+        {
+            "coin": coin,
+            "px": str(px),
+            "sz": str(sz),
+            "side": side,
+            "time": time_ms,
+            "tid": _next_tid[0],
+            "oid": _next_tid[0] * 10,
+            "crossed": True if crossed is None else crossed,
+            "hash": f"0xhash{_next_tid[0]}",
+        },
+    ]
+
+
+def _fills_payload(*trades):
+    """Wrap simple (coin, px, sz, time_ms[, side]) trades into one
+    node_fills_by_block-shaped block dict (as a single-element list, the
+    FakeNodeTradesFetcher payload format parse_node_fills_by_block_ndjson
+    accepts directly). Each trade becomes exactly one leg here (a single
+    event is enough for the parser to keep it — real archives have two legs
+    per trade, but the parser doesn't require exactly two)."""
+    events = []
+    for t in trades:
+        coin, px, sz, time_ms = t[0], t[1], t[2], t[3]
+        side = t[4] if len(t) > 4 else "B"
+        events.append(_fill_event(coin, px, sz, time_ms, side=side))
+    return [
+        {
+            "local_time": "2026-07-10T23:00:00.119184915",
+            "block_time": "2026-07-10T22:59:59.921821211",
+            "block_number": 1068001525,
+            "events": events,
+        }
+    ]
+
+
 def _write_package(tmp_path: Path, entries) -> Path:
     package = {
         "package_type": "goldrush_parity_support",
@@ -59,32 +103,35 @@ def _write_package(tmp_path: Path, entries) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# S3 key layout — matches the real hl-mainnet-node-data/node_trades/ shape
-# confirmed via a real read-only list_objects_v2 (scripts/check_hl_s3_access.py):
-# node_trades/hourly/{YYYYMMDD}/{hour}.lz4, hour unpadded, no {coin} segment.
+# S3 key layout — matches the real hl-mainnet-node-data/node_fills_by_block/
+# shape confirmed via a real read-only list_objects_v2
+# (scripts/check_hl_s3_access.py): node_fills_by_block/hourly/{YYYYMMDD}/{hour}.lz4,
+# hour unpadded, no {coin} segment. node_fills_by_block replaced node_trades
+# as the default prefix because node_trades is stale (2025-03-22..2025-06-21
+# only) while node_fills_by_block reaches all the way to today.
 # ---------------------------------------------------------------------------
 
 
 def test_default_key_template_matches_real_observed_layout():
-    assert DEFAULT_KEY_TEMPLATE == "node_trades/hourly/{date}/{hour}.lz4"
+    assert DEFAULT_KEY_TEMPLATE == "node_fills_by_block/hourly/{date}/{hour}.lz4"
     assert DEFAULT_BUCKET == "hl-mainnet-node-data"
 
 
 def test_archive_keys_for_window_hour_is_not_zero_padded():
     import datetime as dt
 
-    # 2025-03-23 hour 0 and hour 1 (single-digit hours) must render as
+    # 2026-07-10 hour 0 and hour 1 (single-digit hours) must render as
     # ".../0.lz4" and ".../1.lz4", never ".../00.lz4"/".../01.lz4".
-    start = dt.datetime(2025, 3, 23, 0, 30, tzinfo=dt.timezone.utc)
-    end = dt.datetime(2025, 3, 23, 1, 30, tzinfo=dt.timezone.utc)
+    start = dt.datetime(2026, 7, 10, 0, 30, tzinfo=dt.timezone.utc)
+    end = dt.datetime(2026, 7, 10, 1, 30, tzinfo=dt.timezone.utc)
     start_ms = int(start.timestamp() * 1000)
     end_ms = int(end.timestamp() * 1000)
 
     keys = archive_keys_for_window("BTC", start_ms, end_ms)
     uris = sorted(obj.uri for obj in keys)
     assert uris == [
-        "s3://hl-mainnet-node-data/node_trades/hourly/20250323/0.lz4",
-        "s3://hl-mainnet-node-data/node_trades/hourly/20250323/1.lz4",
+        "s3://hl-mainnet-node-data/node_fills_by_block/hourly/20260710/0.lz4",
+        "s3://hl-mainnet-node-data/node_fills_by_block/hourly/20260710/1.lz4",
     ]
 
 
@@ -94,14 +141,14 @@ def test_archive_keys_for_window_no_per_coin_segment():
     # segment in the real archive layout.
     import datetime as dt
 
-    ts = dt.datetime(2025, 3, 22, 10, 15, tzinfo=dt.timezone.utc)
+    ts = dt.datetime(2026, 7, 10, 10, 15, tzinfo=dt.timezone.utc)
     ms = int(ts.timestamp() * 1000)
 
     btc_keys = archive_keys_for_window("BTC", ms, ms)
     eth_keys = archive_keys_for_window("ETH", ms, ms)
     assert len(btc_keys) == 1 and len(eth_keys) == 1
     assert btc_keys[0].uri == eth_keys[0].uri
-    assert btc_keys[0].uri == "s3://hl-mainnet-node-data/node_trades/hourly/20250322/10.lz4"
+    assert btc_keys[0].uri == "s3://hl-mainnet-node-data/node_fills_by_block/hourly/20260710/10.lz4"
 
 
 def test_full_rebuild_pipeline_inserts_with_correct_source(tmp_path):
@@ -124,11 +171,11 @@ def test_full_rebuild_pipeline_inserts_with_correct_source(tmp_path):
 
     fetcher = FakeNodeTradesFetcher()
     for obj in archive_keys_for_window(window.symbol, window.start_ms, window.end_ms):
-        fetcher.put(obj, [
-            {"coin": "BTC", "px": "64361.0", "sz": "0.5", "time": open_ms},
-            {"coin": "BTC", "px": "64370.0", "sz": "0.3", "time": open_ms + 30_000},
-            {"coin": "BTC", "px": "64355.0", "sz": "0.2", "time": open_ms + 59_999},
-        ])
+        fetcher.put(obj, _fills_payload(
+            ("BTC", "64361.0", "0.5", open_ms),
+            ("BTC", "64370.0", "0.3", open_ms + 30_000),
+            ("BTC", "64355.0", "0.2", open_ms + 59_999),
+        ))
 
     db = ResearchDatabase(_tmp_db_path())
 
@@ -179,9 +226,7 @@ def test_rebuild_never_overwrites_protected_hl_candlesnapshot_rows(tmp_path):
 
     fetcher = FakeNodeTradesFetcher()
     for obj in archive_keys_for_window(window.symbol, window.start_ms, window.end_ms):
-        fetcher.put(obj, [
-            {"coin": "BTC", "px": "999.0", "sz": "1.0", "time": open_ms},
-        ])
+        fetcher.put(obj, _fills_payload(("BTC", "999.0", "1.0", open_ms)))
 
     result = rebuild_window(window, fetcher, db)
 
@@ -221,10 +266,10 @@ def test_rebuild_from_support_package_end_to_end(tmp_path):
     for w in windows:
         for obj in archive_keys_for_window(w.symbol, w.start_ms, w.end_ms):
             seen_uris.add(obj.uri)
-            fetcher.put(obj, [
-                {"coin": "BTC", "px": "100.0", "sz": "1.0", "time": open_ms},
-                {"coin": "ETH", "px": "200.0", "sz": "1.0", "time": open_ms},
-            ])
+            fetcher.put(obj, _fills_payload(
+                ("BTC", "100.0", "1.0", open_ms),
+                ("ETH", "200.0", "1.0", open_ms),
+            ))
     assert len(seen_uris) == 1  # BTC and ETH share the same hourly archive object
 
     db = ResearchDatabase(_tmp_db_path())
@@ -262,11 +307,11 @@ def test_rebuild_from_support_package_dedupes_shared_hourly_object_fetch(tmp_pat
 
     fetcher = FakeNodeTradesFetcher()
     obj = keys[0]
-    fetcher.put(obj, [
-        {"coin": "BTC", "px": "100.0", "sz": "1.0", "time": open_ms},
-        {"coin": "ETH", "px": "200.0", "sz": "1.0", "time": open_ms},
-        {"coin": "SOL", "px": "30.0", "sz": "1.0", "time": open_ms},
-    ])
+    fetcher.put(obj, _fills_payload(
+        ("BTC", "100.0", "1.0", open_ms),
+        ("ETH", "200.0", "1.0", open_ms),
+        ("SOL", "30.0", "1.0", open_ms),
+    ))
 
     db = ResearchDatabase(_tmp_db_path())
     summary = rebuild_from_support_package(package_path, fetcher, db)
@@ -290,11 +335,11 @@ def test_multi_coin_archive_object_yields_only_target_coin_candles(tmp_path):
 
     fetcher = FakeNodeTradesFetcher()
     for obj in archive_keys_for_window(window.symbol, window.start_ms, window.end_ms):
-        fetcher.put(obj, [
-            {"coin": "BTC", "px": "64361.0", "sz": "0.5", "time": open_ms},
-            {"coin": "ETH", "px": "3000.0", "sz": "5.0", "time": open_ms},
-            {"coin": "SOL", "px": "150.0", "sz": "10.0", "time": open_ms},
-        ])
+        fetcher.put(obj, _fills_payload(
+            ("BTC", "64361.0", "0.5", open_ms),
+            ("ETH", "3000.0", "5.0", open_ms),
+            ("SOL", "150.0", "10.0", open_ms),
+        ))
 
     db = ResearchDatabase(_tmp_db_path())
     result = rebuild_window(window, fetcher, db)

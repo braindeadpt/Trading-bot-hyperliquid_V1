@@ -3,7 +3,7 @@
 ## What this is
 
 A small pipeline that rebuilds 1m OHLCV candles directly from **official
-Hyperliquid node_trades archives**, for the specific symbol/time windows
+Hyperliquid node-data archives**, for the specific symbol/time windows
 where GoldRush HyperCore candles diverge from the official
 `hl_candleSnapshot` feed by a few price ticks and local reconciliation
 (alignment, timezone, parsing, 1m→Nm rollup) cannot explain the delta.
@@ -17,21 +17,80 @@ tolerance or patching GoldRush data locally, we source a second,
 official-only candle series for the disputed windows and validate against
 that.
 
+**Source correction (July 2026):** the pipeline originally targeted the
+`node_trades` S3 prefix, assuming it held a flat, one-line-per-trade NDJSON
+stream. A real read-only listing of `s3://hl-mainnet-node-data/` then
+established that `node_trades` is **stale** (only 2025-03-22 through
+2025-06-21 — over a year out of date), while `node_fills_by_block` is the
+currently-maintained prefix (352 date folders reaching all the way to
+today). A real sample object also showed `node_fills_by_block`'s schema is
+different from what was assumed — see below. The default S3 prefix and the
+parser have both been updated accordingly; the module/source names
+(`node_trades_*`, `hl_node_trades_rebuild`) are kept as-is to minimize
+churn.
+
 Pipeline steps (see `src/data/candle_providers/node_trades_rebuild.py`):
 
 1. Read the divergent windows out of a GoldRush support package.
-2. Enumerate the S3 archive objects needed to cover those windows.
+2. Enumerate the S3 archive objects needed to cover those windows
+   (`node_fills_by_block/hourly/{date}/{hour}.lz4` by default).
 3. Fetch each object via a pluggable fetcher (real S3, or a fake for tests).
-4. Parse trade records (tolerant of the `node_trades` / `node_fills` JSON
-   shapes; LZ4-decompresses if the optional `lz4` package is installed).
+4. Parse fill records via
+   `node_trades_parser.parse_node_fills_by_block_ndjson` (block-wrapped
+   NDJSON, `tid`-deduplicated — see schema below; LZ4-decompresses if the
+   optional `lz4` package is installed). The original flat-NDJSON parser
+   (`parse_trade_record` / `parse_archive_object`) is kept, unused by
+   default, for the legacy `node_trades` shape.
 5. Aggregate trades into 1m OHLCV bars using HL bucket boundaries
    (`t`/`T` semantics) and the existing dynamic-quantum/`format_hl_price`
-   helpers in `tick_meta.py` — no new rounding logic is introduced.
+   helpers in `tick_meta.py` — no new rounding logic is introduced. This
+   step is unchanged by the schema correction: it already consumed a
+   normalized `NodeTradeRecord` shape (coin/px/sz/time/side), which the new
+   parser still produces.
 6. Upsert into the research DB with `source=hl_node_trades_rebuild`,
    **never** overwriting protected official rows (`hl_candleSnapshot`,
    `hl_trades_ws`, `hl_ws_1m_tape_agg`).
 7. Invoke an optional re-validation hook with the rebuilt rows so a caller
    can immediately re-run secondary validation on just that window.
+
+## node_fills_by_block schema
+
+Each NDJSON line is a **block**, not a trade — most blocks have no fills at
+all (`"events": []`), which is the common case and must be skipped, not
+treated as an error:
+
+```json
+{
+  "local_time": "2026-07-10T23:00:00.119184915",
+  "block_time": "2026-07-10T22:59:59.921821211",
+  "block_number": 1068001525,
+  "events": [
+    ["0xab625f3216f1c209a1c069b29491c3009f258292",
+     {"coin": "xyz:BIRD", "px": "3.1141", "sz": "8.0", "side": "B",
+      "time": 1783724399921, "tid": 804001461971668,
+      "oid": 493281265158, "crossed": false, "hash": "0x0148a4cb..."}],
+    ["0xd6089a9e47d63d3625fcc27bf4a5c506cf9200bb",
+     {"coin": "xyz:BIRD", "px": "3.1141", "sz": "8.0", "side": "A",
+      "time": 1783724399921, "tid": 804001461971668,
+      "oid": 493281294953, "crossed": true, "hash": "0x0148a4cb..."}]
+  ]
+}
+```
+
+Each matched trade appears **twice** in `events` — once per counterparty,
+as an `[address, fill]` pair. Both legs share the same `tid` and identical
+`px`/`sz`/`time`, but different `oid`/address (and typically, not always,
+one leg has `"crossed": true` — the taker — and the other
+`"crossed": false` — the maker). Counting both legs would double the
+trade's volume in the aggregated candle, so `parse_node_fills_by_block_ndjson`
+**deduplicates by `tid`**, keeping the `crossed: true` leg when exactly one
+of the pair has it, otherwise keeping whichever leg is seen first (px/sz
+are identical between legs of the same tid regardless, so the choice only
+affects which `oid`/address/hash metadata is attached — fields the
+aggregator never reads). `coin` values include ordinary perps (`ETH`,
+`AAVE`) alongside exotic spot/pre-launch formats (`xyz:BIRD`, `@156`,
+`#2120`); those are filtered out downstream by the aggregator's per-symbol
+`coin` match, same as before.
 
 ## Prerequisites for a real rebuild
 
@@ -43,25 +102,28 @@ Pipeline steps (see `src/data/candle_providers/node_trades_rebuild.py`):
   IAM role) with S3 read + requester-pays permission.
 - Optionally `pip install lz4` if the fetched archive objects are
   LZ4-compressed and you want the parser to auto-decompress them (otherwise
-  pre-decompress before calling `parse_archive_object`).
+  pre-decompress before calling `parse_node_fills_by_block_ndjson`).
 
 Layout facts (confirmed via a real read-only `list_objects_v2` against
-`s3://hl-mainnet-node-data/node_trades/`, using
-`scripts/check_hl_s3_access.py` — see module docstrings for the raw sample):
+`s3://hl-mainnet-node-data/`, using `scripts/check_hl_s3_access.py` — see
+module docstrings for the raw sample):
 
-- `s3://hl-mainnet-node-data/node_trades/hourly/{YYYYMMDD}/{hour}.lz4`, e.g.
-  `node_trades/hourly/20250322/10.lz4`, `node_trades/hourly/20250323/0.lz4`.
-  The `hour` segment is **unpadded** (`0.lz4`, not `00.lz4`).
-- There is **no per-coin path segment**. Each hourly object (1-7 MB,
-  LZ4-compressed) contains every coin's trades for that hour mixed
-  together — this differs from the separate, documented, per-coin
+- `s3://hl-mainnet-node-data/node_fills_by_block/hourly/{YYYYMMDD}/{hour}.lz4`,
+  e.g. `node_fills_by_block/hourly/20260710/23.lz4`. The `hour` segment is
+  **unpadded** (`0.lz4`, not `00.lz4`). The old `node_trades/hourly/...`
+  prefix shares this same path shape but is stale (2025-03-22..2025-06-21
+  only) and is no longer the default.
+- There is **no per-coin path segment**. Each hourly object contains every
+  coin's fills for that hour mixed together — this differs from the
+  separate, documented, per-coin
   `s3://hyperliquid-archive/market_data/[date]/[hour]/[datatype]/[coin].lz4`
   bucket. Filtering to one symbol happens after download/parse via each
-  trade record's own `coin` field, not via the S3 key.
+  fill record's own `coin` field, not via the S3 key.
 - The key template remains **configurable**
-  (`DEFAULT_KEY_TEMPLATE = "node_trades/hourly/{date}/{hour}.lz4"` in
+  (`DEFAULT_KEY_TEMPLATE = "node_fills_by_block/hourly/{date}/{hour}.lz4"` in
   `node_trades_fetcher.py`) rather than hardcoded, so you can pass your own
-  `key_template`/`bucket` if HL changes the layout again.
+  `key_template`/`bucket` (e.g. back to the legacy `node_trades` prefix) if
+  HL changes the layout again.
 - Because objects are multi-coin, `rebuild_from_support_package` shares a
   parsed-trade cache (keyed by object URI) across every symbol/window in a
   single run, so a shared hourly file (e.g. one needed by both a BTC and an
