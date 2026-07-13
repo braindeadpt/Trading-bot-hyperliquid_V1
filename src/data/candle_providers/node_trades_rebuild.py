@@ -45,7 +45,7 @@ from src.data.candle_providers.node_trades_fetcher import (
     NodeTradesFetcher,
     archive_keys_for_window,
 )
-from src.data.candle_providers.node_trades_parser import parse_archive_object
+from src.data.candle_providers.node_trades_parser import NodeTradeRecord, parse_archive_object
 from src.data.database import Candle
 from src.data.research_database import ResearchDatabase
 from src.data.series_metadata import PROTECTED_OFFICIAL_SOURCES, SeriesMetadata
@@ -200,15 +200,31 @@ def rebuild_window(
     meta_cache: Optional[Dict[str, Dict[str, int]]] = None,
     is_spot: bool = False,
     revalidate_fn: Optional[Callable[[str, List[Dict[str, Any]]], Any]] = None,
+    trade_cache: Optional[Dict[str, List[NodeTradeRecord]]] = None,
 ) -> RebuildResult:
-    """Fetch, parse, aggregate and upsert one symbol's priority window."""
+    """Fetch, parse, aggregate and upsert one symbol's priority window.
+
+    ``trade_cache`` (optional), when shared across multiple ``rebuild_window``
+    calls for different symbols/windows, maps archive object URI -> already
+    parsed :class:`NodeTradeRecord` list. Real ``node_trades`` archive
+    objects are multi-coin (one hourly file holds every coin's trades), so
+    two symbols whose windows fall in the same date/hour resolve to the
+    *same* object URI. Passing a shared cache ensures that object is
+    downloaded and parsed only once and reused for every symbol that needs
+    it, with per-symbol filtering happening in
+    :func:`~src.data.candle_providers.node_trades_aggregator.aggregate_trades_to_ohlcv`
+    (which already ignores trades for other coins).
+    """
     result = RebuildResult(symbol=window.symbol)
     objs = archive_keys_for_window(
         window.symbol, window.start_ms, window.end_ms, bucket=bucket, key_template=key_template,
     )
 
-    all_trades = []
+    all_trades: List[NodeTradeRecord] = []
     for obj in objs:
+        if trade_cache is not None and obj.uri in trade_cache:
+            all_trades.extend(trade_cache[obj.uri])
+            continue
         try:
             payload = fetcher.fetch_object(obj)
         except Exception as exc:  # noqa: BLE001 - surfaced per-object, rebuild continues
@@ -217,10 +233,14 @@ def rebuild_window(
             continue
         result.objects_fetched.append(obj.uri)
         try:
-            all_trades.extend(parse_archive_object(payload))
+            parsed = parse_archive_object(payload)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Parse failed for %s: %s", obj.uri, exc)
             result.objects_failed.append({"uri": obj.uri, "error": f"parse: {exc}"})
+            parsed = []
+        if trade_cache is not None:
+            trade_cache[obj.uri] = parsed
+        all_trades.extend(parsed)
 
     rows = aggregate_trades_to_ohlcv(
         all_trades,
@@ -275,14 +295,23 @@ def rebuild_from_support_package(
     meta_cache: Optional[Dict[str, Dict[str, int]]] = None,
     revalidate_fn: Optional[Callable[[str, List[Dict[str, Any]]], Any]] = None,
 ) -> Dict[str, Any]:
-    """End-to-end rebuild for every priority window in a support package."""
+    """End-to-end rebuild for every priority window in a support package.
+
+    A single ``trade_cache`` (object URI -> parsed trades) is shared across
+    every window's :func:`rebuild_window` call in this run, so a multi-coin
+    hourly archive object needed by more than one symbol (e.g. BTC and ETH
+    windows that fall in the same date/hour) is downloaded and parsed only
+    once instead of once per symbol.
+    """
     package = load_support_package(package_path)
     windows = extract_priority_windows(package, symbols=symbols, interval=interval)
+    trade_cache: Dict[str, List[NodeTradeRecord]] = {}
     results = [
         rebuild_window(
             w, fetcher, db,
             bucket=bucket, key_template=key_template,
             meta_cache=meta_cache, revalidate_fn=revalidate_fn,
+            trade_cache=trade_cache,
         )
         for w in windows
     ]

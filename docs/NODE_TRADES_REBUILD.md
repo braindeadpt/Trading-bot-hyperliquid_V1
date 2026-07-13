@@ -45,18 +45,27 @@ Pipeline steps (see `src/data/candle_providers/node_trades_rebuild.py`):
   LZ4-compressed and you want the parser to auto-decompress them (otherwise
   pre-decompress before calling `parse_archive_object`).
 
-Layout facts (confirmed from official docs, cited in module docstrings):
+Layout facts (confirmed via a real read-only `list_objects_v2` against
+`s3://hl-mainnet-node-data/node_trades/`, using
+`scripts/check_hl_s3_access.py` — see module docstrings for the raw sample):
 
-- `s3://hyperliquid-archive/market_data/[date]/[hour]/[datatype]/[coin].lz4`
-  — documented, requester-pays, roughly monthly uploads, "no guarantee of
-  timely updates."
-- `s3://hl-mainnet-node-data/node_trades` (older/raw trade format) and
-  `node_fills` / `node_fills_by_block` (API-aligned fill format) — the
-  node-level trade archive bucket. Its exact date/hour key partitioning is
-  **not** pinned down in the docs the way `market_data` is, so this module
-  treats the key template as **configurable** (`DEFAULT_KEY_TEMPLATE` in
-  `node_trades_fetcher.py`) rather than hardcoding it — pass your own
-  `key_template`/`bucket` if HL's actual layout differs.
+- `s3://hl-mainnet-node-data/node_trades/hourly/{YYYYMMDD}/{hour}.lz4`, e.g.
+  `node_trades/hourly/20250322/10.lz4`, `node_trades/hourly/20250323/0.lz4`.
+  The `hour` segment is **unpadded** (`0.lz4`, not `00.lz4`).
+- There is **no per-coin path segment**. Each hourly object (1-7 MB,
+  LZ4-compressed) contains every coin's trades for that hour mixed
+  together — this differs from the separate, documented, per-coin
+  `s3://hyperliquid-archive/market_data/[date]/[hour]/[datatype]/[coin].lz4`
+  bucket. Filtering to one symbol happens after download/parse via each
+  trade record's own `coin` field, not via the S3 key.
+- The key template remains **configurable**
+  (`DEFAULT_KEY_TEMPLATE = "node_trades/hourly/{date}/{hour}.lz4"` in
+  `node_trades_fetcher.py`) rather than hardcoded, so you can pass your own
+  `key_template`/`bucket` if HL changes the layout again.
+- Because objects are multi-coin, `rebuild_from_support_package` shares a
+  parsed-trade cache (keyed by object URI) across every symbol/window in a
+  single run, so a shared hourly file (e.g. one needed by both a BTC and an
+  ETH window) is downloaded and parsed only once, not once per symbol.
 
 ## Usage
 

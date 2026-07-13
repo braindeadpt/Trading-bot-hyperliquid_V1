@@ -1,27 +1,33 @@
 """Object-key layout and pluggable fetchers for HL node_trades archives.
 
-Layout facts confirmed from official Hyperliquid docs (July 2026):
+Layout facts confirmed from a real read-only ``list_objects_v2`` against
+``s3://hl-mainnet-node-data/node_trades/`` (via
+``scripts/check_hl_s3_access.py``, July 2026):
 
-* ``historical-data`` page (https://hyperliquid.gitbook.io/hyperliquid-docs/historical-data):
-  historical market data is published to the **requester-pays** bucket
-  ``s3://hyperliquid-archive`` with key layout
-  ``market_data/[date]/[hour]/[datatype]/[coin].lz4`` (date=``YYYYMMDD``,
-  hour=unpadded 0-23, e.g. ``market_data/20230916/9/l2Book/SOL.lz4``),
-  fetched via ``aws s3 cp ... --request-payer requester``. Uploads happen
-  "approximately once a month" with "no guarantee of timely updates."
-* Node-level trade dumps (as opposed to market_data snapshots) live in a
-  second bucket, ``s3://hl-mainnet-node-data``, under ``node_trades`` (older,
-  raw format) or ``node_fills`` / ``node_fills_by_block`` (streamed via
-  ``--write-fills --batch-by-block``, matches the public API fill shape).
-  The docs do not pin an exact key template for this bucket's date/hour
-  partitioning the way they do for ``hyperliquid-archive``.
+* Real observed keys look like ``node_trades/hourly/20250322/10.lz4``,
+  ``node_trades/hourly/20250322/11.lz4``, ..., ``node_trades/hourly/20250323/0.lz4``.
+* There is **no per-coin key**. Each hourly object (1-7 MB, LZ4-compressed)
+  contains the trades for **every coin** traded in that hour, mixed
+  together. Filtering to one symbol happens *after* download/parse, by the
+  trade record's own ``coin`` field — not via the S3 path.
+* The hour path segment is **not zero-padded** (``10.lz4``, ``0.lz4``,
+  ``1.lz4`` — never ``00.lz4``/``01.lz4``).
+* The date segment is ``YYYYMMDD`` with no separators.
 
-Because the ``node_trades`` bucket's partitioning isn't authoritatively
-documented, the key layout here is a **configurable template** (see
-``DEFAULT_KEY_TEMPLATE``) rather than a hardcoded path, mirroring the
-``market_data`` convention (date/hour/coin) as the best-known analogue. If
-HL publishes a different layout, callers can pass their own template/bucket
-without touching this module's logic.
+This supersedes the earlier assumption (mirrored from the separate,
+per-coin ``hyperliquid-archive`` / ``market_data`` bucket's
+``market_data/[date]/[hour]/[datatype]/[coin].lz4`` layout) that
+``node_trades`` also had a ``{coin}`` path segment — it does not.
+
+The key layout here remains a **configurable template** (see
+``DEFAULT_KEY_TEMPLATE``) rather than a hardcoded path, so callers can pass
+their own template/bucket without touching this module's logic if HL ever
+changes the layout again. Because objects are no longer per-coin, callers
+that need multiple symbols for the same date/hour should fetch the object
+**once** and let each symbol's aggregation step filter the shared trade
+list by ``coin`` (see ``node_trades_rebuild.rebuild_from_support_package``,
+which shares a parsed-trade cache keyed by object URI across symbols/windows
+so a single downloaded file serves every symbol that needs it).
 
 No network calls happen at import time or in ``FakeNodeTradesFetcher``. The
 real S3 fetcher requires ``boto3`` (optional dependency) and AWS credentials
@@ -39,12 +45,20 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_BUCKET = "hl-mainnet-node-data"
-DEFAULT_KEY_TEMPLATE = "node_trades/{date}/{hour}/{coin}.lz4"
+DEFAULT_KEY_TEMPLATE = "node_trades/hourly/{date}/{hour}.lz4"
 
 
 @dataclass(frozen=True)
 class ArchiveObjectKey:
-    """One S3 object needed to cover part of a rebuild window."""
+    """One S3 object needed to cover part of a rebuild window.
+
+    ``coin`` records which symbol's rebuild window requested this object —
+    it is metadata about the *caller's intent*, not part of the S3 key
+    itself. Real ``node_trades`` archive objects are multi-coin (one file
+    per hour holds every coin's trades), so the same ``(bucket, key)`` will
+    naturally be produced for multiple symbols that share a date/hour; the
+    ``uri`` property (used for dedup) intentionally ignores ``coin``.
+    """
 
     bucket: str
     key: str
