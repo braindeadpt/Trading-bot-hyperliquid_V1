@@ -268,13 +268,20 @@ def _copy_config_with_strategy_overrides(
     param_overrides: Mapping[str, Any],
 ) -> Any:
     """Deep-copy config and apply overrides to the target strategy section."""
-    from src.utils.config import Config
+    from src.utils.config import Config, coerce_config
 
     if isinstance(cfg, Config):
         raw = copy.deepcopy(cfg.raw)
         out = Config(raw)
     else:
-        out = Config(copy.deepcopy(cfg))
+        raw_or_cfg = getattr(cfg, "raw", None)
+        if isinstance(raw_or_cfg, dict):
+            # Config-like object from a different module identity (duck-typed
+            # via coerce_config) — deep-copy its underlying dict, not the
+            # wrapper object itself.
+            out = Config(copy.deepcopy(coerce_config(cfg).raw))
+        else:
+            out = Config(copy.deepcopy(cfg))
 
     path = resolve_strategy_config_path(strategy_name)
     parts = path.split(".")

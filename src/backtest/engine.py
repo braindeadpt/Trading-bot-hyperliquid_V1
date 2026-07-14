@@ -46,7 +46,7 @@ from src.data.database import Candle as DBCandle
 from src.data.database import Database
 from src.strategies.base import MarketEvent, Position, Signal, Strategy
 from src.strategies.indicators import Candle, calculate_adx
-from src.utils.config import Config, get_strategy_section, resolve_kelly_enabled
+from src.utils.config import Config, coerce_config, get_strategy_section, resolve_kelly_enabled
 from src.utils.helpers import safe_divide, safe_float
 
 logger = logging.getLogger(__name__)
@@ -191,9 +191,7 @@ class BacktestEngine:
         self._price_index: Dict[str, List[Tuple[int, float]]] = {}
         self._research_gap_ms = DEFAULT_RESEARCH_GAP_MS
         if risk_config is not None:
-            self._full_config = (
-                risk_config if isinstance(risk_config, Config) else Config(risk_config)
-            )
+            self._full_config = coerce_config(risk_config)
 
         self._risk_manager: Optional[RiskManager] = None
         self._pipeline: Optional[SignalPipeline] = None
@@ -1243,8 +1241,7 @@ class BacktestEngine:
 
 def build_backtest_config_from_yaml(cfg: Union[Config, Dict[str, Any]]) -> BacktestConfig:
     """Construct BacktestConfig from merged application config."""
-    if not isinstance(cfg, Config):
-        cfg = Config(cfg)
+    cfg = coerce_config(cfg)
     from src.utils.config import get_strategy_section, phase08_enabled
 
     cooldown_cfg = get_strategy_section(cfg, "cooldown")

@@ -6,7 +6,7 @@ import subprocess
 from typing import Any, Dict, List, Optional, Union
 
 from src.core.signal_pipeline import GATE_PARITY_VERSION, GATE_ORDER, LIVE_ONLY_GATES
-from src.utils.config import Config, compute_config_hash, get_sizing_version, get_trading_symbols
+from src.utils.config import Config, coerce_config, compute_config_hash, get_sizing_version, get_trading_symbols
 
 SIZING_VERSION_DEFAULT = "phase05-risk-at-equity-v1"
 PRE_PARITY_SIZING_VERSIONS = frozenset({
@@ -90,10 +90,7 @@ def build_run_manifest(
     extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build manifest attached to every backtest result."""
-    if isinstance(config, Config):
-        cfg = config
-    else:
-        cfg = Config(config)
+    cfg = coerce_config(config)
     sym_list = symbols or get_trading_symbols(cfg)
     sizing_version = get_sizing_version(cfg)
     pre_parity = is_pre_parity_sizing(sizing_version)

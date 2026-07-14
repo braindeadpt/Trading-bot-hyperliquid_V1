@@ -342,12 +342,42 @@ def load_config(
     return Config(merged)
 
 
+def coerce_config(config: Union["Config", Dict[str, Any], Any]) -> "Config":
+    """Duck-typed coercion of a Config-like object (or plain dict) to *this*
+    module's ``Config`` class.
+
+    The process consistently runs with BOTH the repo root and ``src/`` on
+    ``sys.path`` (main.py's long-standing bare-import convention, e.g.
+    ``from utils.config import ...``), while newer modules import via
+    ``from src.utils.config import ...``. Python treats ``utils.config`` and
+    ``src.utils.config`` as two distinct module objects even though they
+    load the identical file, so ``utils.config.Config`` and
+    ``src.utils.config.Config`` are two different classes. A nominal
+    ``isinstance(config, Config)`` check silently fails whenever a
+    ``Config`` built via one import path is handed to a function that
+    imported ``Config`` via the other path — the caller then does
+    ``Config(config)``, wrapping the *Config object itself* as ``_data``
+    instead of its underlying dict, so every subsequent ``.get()`` dot-path
+    lookup returns ``None``/defaults.
+
+    Detect "quacks like a Config" via the ``.raw`` property (present on any
+    structurally-identical ``Config`` regardless of module identity)
+    instead of nominal type, and unwrap through it.
+    """
+    if isinstance(config, Config):
+        return config
+    raw = getattr(config, "raw", None)
+    if isinstance(raw, dict):
+        return Config(raw)
+    if isinstance(config, dict):
+        return Config(config)
+    # Last resort — matches prior behaviour for genuinely unknown types.
+    return Config(config)
+
+
 def get_trading_symbols(config: Union[Config, Dict[str, Any]]) -> List[str]:
     """Return the canonical symbol list used by feeds, engine, and backtest."""
-    if isinstance(config, Config):
-        data = config.raw
-    else:
-        data = config
+    data = coerce_config(config).raw
     symbols = data.get("symbols")
     assets = data.get("assets")
     if isinstance(symbols, list) and symbols:
@@ -363,10 +393,7 @@ def get_strategy_section(
     default: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Read ``strategy.<section>`` with legacy top-level fallback."""
-    if isinstance(config, Config):
-        cfg = config
-    else:
-        cfg = Config(config)
+    cfg = coerce_config(config)
     primary = cfg.get(f"strategy.{section}")
     if isinstance(primary, dict):
         return dict(primary)
@@ -396,10 +423,7 @@ def resolve_kelly_enabled(
     base = bool(kelly_cfg.get("enabled", True))
     if not for_backtest:
         return base
-    if isinstance(config, Config):
-        cfg = config
-    else:
-        cfg = Config(config)
+    cfg = coerce_config(config)
     override = cfg.get("backtest.kelly_override")
     if override is not None:
         return bool(override)
@@ -411,10 +435,7 @@ def resolve_kelly_enabled(
 
 def compute_config_hash(config: Union[Config, Dict[str, Any]]) -> str:
     """Stable SHA-256 of the merged config (sorted JSON, no secrets)."""
-    if isinstance(config, Config):
-        data = config.raw
-    else:
-        data = config
+    data = coerce_config(config).raw
     sanitized = _sanitize_config_for_hash(data)
     payload = json.dumps(sanitized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
@@ -422,10 +443,7 @@ def compute_config_hash(config: Union[Config, Dict[str, Any]]) -> str:
 
 def get_sizing_version(config: Union[Config, Dict[str, Any]]) -> str:
     """Return the declared sizing/parity schema version for run manifests."""
-    if isinstance(config, Config):
-        cfg = config
-    else:
-        cfg = Config(config)
+    cfg = coerce_config(config)
     return str(cfg.get("backtest.sizing_version", "phase05-risk-at-equity-v1"))
 
 
@@ -437,7 +455,7 @@ def _sanitize_config_for_hash(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     def _walk(node: Any) -> Any:
-        if isinstance(node, Config):
+        if isinstance(node, Config) or isinstance(getattr(node, "raw", None), dict):
             return _walk(node.raw)
         if isinstance(node, dict):
             out: Dict[str, Any] = {}
