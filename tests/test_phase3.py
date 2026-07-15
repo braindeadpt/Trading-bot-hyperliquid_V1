@@ -106,9 +106,122 @@ def test_strategy_governor_disables_weak_strategy() -> None:
         db.close()
 
 
+def test_strategy_governor_floor_excludes_pre_floor_trades() -> None:
+    """A floor knob (ignore_trades_before_ms) hides bad trades made before the
+    floor; with no post-floor trades for the strategy, it must end up ENABLED
+    (absent from by_strategy => stuck-disabled fix keeps it enabled)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "gov_floor.db")
+        now = int(time.time() * 1000)
+        floor_ms = now - 5_000  # trades below are "before the window"
+
+        # 12 losing trades entered BEFORE the floor.
+        for i in range(12):
+            entry_ms = floor_ms - 10_000 - i * 1000
+            tid = db.save_trade_entry(
+                TradeEntry("BTC", "long", 100.0, entry_ms, 1.0, "StrategyEnsemble", sub_strategy="VolatilityBreakout")
+            )
+            loss = -0.01 - (i * 0.001)
+            db.update_trade_exit(
+                TradeExit(tid, 99.0, entry_ms + 500, loss * 100, loss, "sl", "closed")
+            )
+
+        cfg = Config({
+            "strategy": {
+                "strategy_governance": {
+                    "enabled": True,
+                    "lookback_days": 30,
+                    "min_trades": 10,
+                    "min_sharpe": 0.0,
+                    "eval_interval_ms": 0,
+                    "ignore_trades_before_ms": floor_ms,
+                }
+            }
+        })
+        gov = StrategyGovernor(cfg, db)
+        gov.evaluate(now)
+        assert gov.is_enabled("VolatilityBreakout")
+        db.close()
+
+
+def test_strategy_governor_floor_default_zero_preserves_behavior() -> None:
+    """ignore_trades_before_ms defaults to 0, i.e. unchanged prior behavior:
+    the pre-existing weak-strategy-disable test still disables as before."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "gov_floor_default.db")
+        now = int(time.time() * 1000)
+        for i in range(12):
+            tid = db.save_trade_entry(
+                TradeEntry("BTC", "long", 100.0, now - i * 1000, 1.0, "StrategyEnsemble", sub_strategy="FundingExtreme")
+            )
+            loss = -0.01 - (i * 0.001)
+            db.update_trade_exit(
+                TradeExit(tid, 99.0, now - i * 500, loss * 100, loss, "sl", "closed")
+            )
+
+        cfg = Config({
+            "strategy": {
+                "strategy_governance": {
+                    "enabled": True,
+                    "lookback_days": 30,
+                    "min_trades": 10,
+                    "min_sharpe": 0.0,
+                    "eval_interval_ms": 0,
+                    # ignore_trades_before_ms omitted -> default 0
+                }
+            }
+        })
+        gov = StrategyGovernor(cfg, db)
+        gov.evaluate(now)
+        assert not gov.is_enabled("FundingExtreme")
+        db.close()
+
+
+def test_strategy_governor_stuck_disabled_reenables_on_zero_trades() -> None:
+    """A strategy already in _disabled whose trade count drops to zero in the
+    lookback window (absent from by_strategy) must be re-enabled on the next
+    evaluate() rather than staying disabled until a process restart."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "gov_stuck.db")
+        now = int(time.time() * 1000)
+        for i in range(12):
+            tid = db.save_trade_entry(
+                TradeEntry("BTC", "long", 100.0, now - i * 1000, 1.0, "StrategyEnsemble", sub_strategy="FundingExtreme")
+            )
+            loss = -0.01 - (i * 0.001)
+            db.update_trade_exit(
+                TradeExit(tid, 99.0, now - i * 500, loss * 100, loss, "sl", "closed")
+            )
+
+        cfg = Config({
+            "strategy": {
+                "strategy_governance": {
+                    "enabled": True,
+                    "lookback_days": 30,
+                    "min_trades": 10,
+                    "min_sharpe": 0.0,
+                    "eval_interval_ms": 0,
+                }
+            }
+        })
+        gov = StrategyGovernor(cfg, db)
+        gov.evaluate(now)
+        assert not gov.is_enabled("FundingExtreme")
+
+        # Simulate the window moving past all those trades (they age out of
+        # the lookback), so by_strategy no longer contains FundingExtreme.
+        later = now + 40 * 86_400_000
+        gov.evaluate(later)
+        assert gov.is_enabled("FundingExtreme")
+        db.close()
+
+
 if __name__ == "__main__":
     test_regime_strategy_name_resolves_ensemble()
     test_apply_regime_weights_boosts_trend_strategy()
     test_database_metrics_by_strategy()
     test_strategy_governor_disables_weak_strategy()
+    test_strategy_governor_floor_excludes_pre_floor_trades()
+    test_strategy_governor_floor_default_zero_preserves_behavior()
+    test_strategy_governor_stuck_disabled_reenables_on_zero_trades()
     print("ALL PHASE 3 TESTS PASSED [OK]")

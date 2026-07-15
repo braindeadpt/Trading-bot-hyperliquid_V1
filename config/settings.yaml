@@ -713,6 +713,10 @@ strategy:
     min_trades: 10                  # need N trades before disable decision
     min_sharpe: 0.0                 # disable sub-strategy if rolling Sharpe below
     eval_interval_ms: 3600000       # re-evaluate hourly
+    # Fase 10 frozen-window floor — governor ignores trades entered before
+    # this; set at window re-registration 2026-07-15. Reset to 0 after the
+    # window closes.
+    ignore_trades_before_ms: 1784084174439
 
 # ═══════════════════════════════════════════════════════════
 # Exchange reconciliation & native protection (Phase 03)

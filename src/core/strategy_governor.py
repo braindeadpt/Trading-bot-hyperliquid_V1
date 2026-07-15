@@ -22,6 +22,13 @@ class StrategyGovernor:
         self._min_trades = int(gov.get("min_trades", 30))
         self._min_sharpe = safe_float(gov.get("min_sharpe", -1.0))
         self._eval_interval_ms = int(gov.get("eval_interval_ms", 3_600_000))
+        # Fase 10 frozen-window floor: trades entered before this epoch-ms are
+        # invisible to the governor. Rationale — during a frozen validation
+        # window, pre-window trades were made under different effective
+        # configs and must not disable strategies inside the window; the
+        # frozen window's own kill-criteria still apply to trades made
+        # within it. Default 0 preserves prior (unfloored) behavior.
+        self._ignore_trades_before_ms = int(gov.get("ignore_trades_before_ms", 0))
         self._db = db
         self._disabled: Set[str] = set()
         self._last_eval_ms: int = 0
@@ -48,7 +55,10 @@ class StrategyGovernor:
             return
         self._last_eval_ms = now_ms
 
-        since_ms = now_ms - self._lookback_days * 86_400_000
+        since_ms = max(
+            now_ms - self._lookback_days * 86_400_000,
+            self._ignore_trades_before_ms,
+        )
         by_strategy = self._db.get_metrics_by_strategy(since_ms)
 
         newly_disabled: Set[str] = set()
@@ -97,7 +107,20 @@ class StrategyGovernor:
                     int(metrics_out.get(name, {}).get("trades", 0)),
                 )
 
-        self._last_metrics = metrics_out
+        # Stuck-disabled fix: a strategy already in self._disabled whose trade
+        # count drops to ZERO in the lookback window is absent from
+        # by_strategy entirely (the query only returns strategies with rows),
+        # so the loop above never sees it and it would stay disabled forever
+        # absent a process restart. No data in window == no evidence to keep
+        # it disabled, same treatment as trades < min_trades.
+        for name in list(self._disabled):
+            if name not in by_strategy:
+                self._disabled.discard(name)
+                logger.info(
+                    "StrategyGovernor RE-ENABLED %s — no trades in window (%dd)",
+                    name,
+                    self._lookback_days,
+                )
 
         self._last_metrics = metrics_out
 
