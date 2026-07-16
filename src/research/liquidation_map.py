@@ -124,13 +124,19 @@ def harvest_addresses(
     min_notional_usd: float = 50_000.0,
     coins: Optional[Sequence[str]] = None,
 ) -> List[str]:
-    """Rank wallet addresses by traded notional; return top-N distinct addresses.
+    """Rank addresses **per coin** by traded notional; return the deduplicated union.
+
+    For each coin independently: keep addresses with per-coin notional
+    ``>= min_notional_usd``, take the top ``top_n``, then union across coins.
+    This preserves coin-specialist whales that a global sum ranking would
+    crowd out on smaller markets.
 
     Pure / offline. Both counterparty legs of each trade are counted (address
     harvest must see every active wallet).
     """
     coin_filter = {c.upper() for c in coins} if coins else None
-    notional_by_addr: Dict[str, float] = {}
+    # coin -> address -> notional
+    by_coin: Dict[str, Dict[str, float]] = {}
 
     for leg in _iter_legs(fills_source):
         if coin_filter is not None and leg.coin not in coin_filter:
@@ -139,14 +145,24 @@ def harvest_addresses(
         if notional <= 0:
             continue
         addr = leg.address.lower()
-        notional_by_addr[addr] = notional_by_addr.get(addr, 0.0) + notional
+        bucket = by_coin.setdefault(leg.coin, {})
+        bucket[addr] = bucket.get(addr, 0.0) + notional
 
-    ranked = sorted(
-        ((a, n) for a, n in notional_by_addr.items() if n >= float(min_notional_usd)),
-        key=lambda x: x[1],
-        reverse=True,
-    )
-    return [a for a, _ in ranked[: max(0, int(top_n))]]
+    selected: List[str] = []
+    seen: set[str] = set()
+    threshold = float(min_notional_usd)
+    n = max(0, int(top_n))
+    for coin in sorted(by_coin):
+        ranked = sorted(
+            ((a, v) for a, v in by_coin[coin].items() if v >= threshold),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        for addr, _ in ranked[:n]:
+            if addr not in seen:
+                seen.add(addr)
+                selected.append(addr)
+    return selected
 
 
 def parse_clearinghouse_positions(
@@ -190,7 +206,14 @@ def parse_clearinghouse_positions(
             leverage = safe_float(lev_obj.get("value", lev_obj.get("leverage")))
         else:
             leverage = safe_float(lev_obj)
-        notional = abs(szi) * entry_px if entry_px > 0 else abs(szi) * liq_px
+        # Prefer mark-based positionValue when the API provides it.
+        position_value = abs(safe_float(pos.get("positionValue")))
+        if position_value > 0:
+            notional = position_value
+        elif entry_px > 0:
+            notional = abs(szi) * entry_px
+        else:
+            notional = abs(szi) * liq_px
         side = "long" if szi > 0 else "short"
         out.append(
             HlOpenPosition(

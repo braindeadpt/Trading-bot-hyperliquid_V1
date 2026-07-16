@@ -86,9 +86,31 @@ def test_harvest_addresses_top_n_and_min_notional() -> None:
     ]
     top = harvest_addresses(blocks, top_n=3, min_notional_usd=50_000.0)
     assert "0xdust" not in top
-    assert top[0] == "0xwhale"
+    assert "0xwhale" in top
     assert "0xmid" in top
-    assert len(top) <= 3
+    # Single-coin: union size equals that coin's top_n (after min filter)
+    assert len(top) == 3
+
+
+def test_harvest_per_coin_keeps_specialist_despite_small_global() -> None:
+    """HYPE specialist survives per-coin top-N even when tiny vs BTC whales."""
+    t = 1_800_000_000_000
+    blocks = [
+        _block(
+            1,
+            [
+                # Two huge BTC whales (each 500k) — would dominate a global top_n=1
+                _fill("BTC", "50000", "10.0", "B", t, 1, 1, True, address="0xbtcwhale"),
+                _fill("BTC", "50000", "10.0", "A", t, 1, 2, False, address="0xbtccounter"),
+                # HYPE specialist: 60k notional — small globally, top on HYPE
+                _fill("HYPE", "20", "3000", "B", t + 1, 2, 3, True, address="0xhypespec"),
+                _fill("HYPE", "20", "3000", "A", t + 1, 2, 4, False, address="0xhypecounter"),
+            ],
+        ),
+    ]
+    top = harvest_addresses(blocks, top_n=1, min_notional_usd=50_000.0)
+    assert "0xhypespec" in top
+    assert "0xbtcwhale" in top
 
 
 def test_parse_clearinghouse_skips_missing_liquidation_px() -> None:
@@ -132,8 +154,44 @@ def test_parse_clearinghouse_skips_missing_liquidation_px() -> None:
     assert p.coin == "BTC"
     assert p.side == "long"
     assert p.liquidation_px == pytest.approx(54000.0)
+    # No positionValue → fallback |szi| * entryPx
     assert p.notional_usd == pytest.approx(30000.0)
     assert p.fetched_at_ms == 123
+
+
+def test_parse_clearinghouse_prefers_position_value() -> None:
+    raw = {
+        "assetPositions": [
+            {
+                "position": {
+                    "coin": "BTC",
+                    "szi": "0.5",
+                    "entryPx": "60000",
+                    "positionValue": "32500.5",
+                    "leverage": {"type": "cross", "value": 5},
+                    "liquidationPx": "54000",
+                    "marginUsed": "6000",
+                },
+            },
+            {
+                "position": {
+                    "coin": "ETH",
+                    "szi": "-1.0",
+                    "entryPx": "3000",
+                    "positionValue": "0",
+                    "leverage": {"type": "cross", "value": 3},
+                    "liquidationPx": "3600",
+                    "marginUsed": "1000",
+                },
+            },
+        ],
+    }
+    positions = parse_clearinghouse_positions(raw, "0xDef", fetched_at_ms=456)
+    by_coin = {p.coin: p for p in positions}
+    assert by_coin["BTC"].notional_usd == pytest.approx(32500.5)
+    # positionValue 0 → fall back to |szi| * entryPx
+    assert by_coin["ETH"].notional_usd == pytest.approx(3000.0)
+    assert by_coin["ETH"].side == "short"
 
 
 def test_build_zones_hand_computed_bands() -> None:
