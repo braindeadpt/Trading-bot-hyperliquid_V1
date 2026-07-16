@@ -16,10 +16,12 @@ from src.data.research_database import ResearchDatabase
 from src.research.liquidation_map import (
     HlOpenPosition,
     build_zones,
+    format_confluence_summary,
     harvest_addresses,
     load_latest_snapshot,
     parse_clearinghouse_positions,
     persist_snapshot,
+    summarize_zone_confluence,
 )
 
 pytestmark = pytest.mark.unit
@@ -235,6 +237,120 @@ def test_build_zones_hand_computed_bands() -> None:
     assert short_zone.price_low == pytest.approx(102.0)
     assert short_zone.price_high == pytest.approx(103.0)
     assert short_zone.total_notional_usd == pytest.approx(200_000.0)
+
+
+def test_build_zones_max_distance_pct_filters_far() -> None:
+    """Near short (~+2%) kept; far short (~+150%) dropped when cap=50."""
+    positions = [
+        HlOpenPosition(
+            address="0xnear", coin="BTC", szi=-1.0, side="short", entry_px=100.0,
+            leverage=5.0, liquidation_px=102.2, margin_used=20.0,
+            notional_usd=200_000.0, fetched_at_ms=1,
+        ),
+        HlOpenPosition(
+            address="0xfar", coin="BTC", szi=-1.0, side="short", entry_px=100.0,
+            leverage=5.0, liquidation_px=250.0, margin_used=20.0,
+            notional_usd=300_000.0, fetched_at_ms=1,
+        ),
+    ]
+    all_zones = build_zones(
+        positions,
+        bucket_pct=1.0,
+        min_zone_notional_usd=100_000.0,
+        mark_prices={"BTC": 100.0},
+        max_distance_pct=None,
+    )
+    assert len(all_zones) == 2
+
+    near_only = build_zones(
+        positions,
+        bucket_pct=1.0,
+        min_zone_notional_usd=100_000.0,
+        mark_prices={"BTC": 100.0},
+        max_distance_pct=50.0,
+    )
+    assert len(near_only) == 1
+    assert abs(near_only[0].distance_pct_from_mark) <= 50.0
+    assert near_only[0].total_notional_usd == pytest.approx(200_000.0)
+
+
+def test_build_zones_min_position_count_filters_singles() -> None:
+    positions = [
+        HlOpenPosition(
+            address="0xa", coin="BTC", szi=1.0, side="long", entry_px=100.0,
+            leverage=5.0, liquidation_px=98.5, margin_used=20.0,
+            notional_usd=120_000.0, fetched_at_ms=1,
+        ),
+        HlOpenPosition(
+            address="0xb", coin="BTC", szi=1.0, side="long", entry_px=100.0,
+            leverage=5.0, liquidation_px=98.7, margin_used=20.0,
+            notional_usd=80_000.0, fetched_at_ms=1,
+        ),
+        HlOpenPosition(
+            address="0xc", coin="BTC", szi=-1.0, side="short", entry_px=100.0,
+            leverage=5.0, liquidation_px=102.2, margin_used=20.0,
+            notional_usd=200_000.0, fetched_at_ms=1,
+        ),
+    ]
+    # Default min_position_count=1 keeps both long cluster and short single
+    default = build_zones(
+        positions, bucket_pct=1.0, min_zone_notional_usd=100_000.0,
+        mark_prices={"BTC": 100.0},
+    )
+    assert len(default) == 2
+
+    multi_only = build_zones(
+        positions, bucket_pct=1.0, min_zone_notional_usd=100_000.0,
+        mark_prices={"BTC": 100.0}, min_position_count=2,
+    )
+    assert len(multi_only) == 1
+    assert multi_only[0].side == "long"
+    assert multi_only[0].position_count == 2
+
+
+def test_confluence_summary_counts() -> None:
+    from src.research.liquidation_map import LiquidationZone
+
+    candidates = [
+        LiquidationZone(
+            coin="BTC", side="short", price_low=101, price_high=102,
+            total_notional_usd=500_000, position_count=1,
+            distance_pct_from_mark=1.5, mark_px=100.0,
+        ),
+        LiquidationZone(
+            coin="BTC", side="long", price_low=98, price_high=99,
+            total_notional_usd=200_000, position_count=3,
+            distance_pct_from_mark=-1.5, mark_px=100.0,
+        ),
+        LiquidationZone(
+            coin="BTC", side="short", price_low=200, price_high=201,
+            total_notional_usd=900_000, position_count=1,
+            distance_pct_from_mark=100.5, mark_px=100.0,
+        ),
+        LiquidationZone(
+            coin="ETH", side="long", price_low=2900, price_high=2910,
+            total_notional_usd=150_000, position_count=2,
+            distance_pct_from_mark=-3.0, mark_px=3000.0,
+        ),
+    ]
+    rows = summarize_zone_confluence(
+        candidates, max_distance_pct=50.0, min_position_count=1,
+    )
+    by = {r["coin"]: r for r in rows}
+    assert by["BTC"]["dropped_far"] == 1
+    assert by["BTC"]["kept"] == 2
+    assert by["BTC"]["confluence_ge2"] == 1
+    # Largest kept notional is the near short single (500k)
+    assert by["BTC"]["top_zone_pos"] == 1
+    assert by["ETH"]["kept"] == 1
+    assert by["ETH"]["confluence_ge2"] == 1
+    assert by["ETH"]["dropped_far"] == 0
+
+    text = format_confluence_summary(rows)
+    assert "--- confluence summary ---" in text
+    assert "BTC: kept=2" in text
+    assert "confluence(>=2)=1" in text
+    assert "dropped_far=1" in text
 
 
 def test_persist_and_reload_snapshot(tmp_path: Path) -> None:

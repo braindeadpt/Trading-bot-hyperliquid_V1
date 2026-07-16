@@ -288,12 +288,20 @@ def build_zones(
     bucket_pct: float = 0.25,
     min_zone_notional_usd: float = 100_000.0,
     mark_prices: Optional[Dict[str, float]] = None,
+    max_distance_pct: Optional[float] = None,
+    min_position_count: int = 1,
 ) -> List[LiquidationZone]:
     """Aggregate liquidation prices into mark-relative percentage bands.
 
     *side* on a zone is the position side that liquidates there (longs below
     mark, shorts above — but we do not force-filter; we bucket whatever liq
     price the venue reports).
+
+    When *max_distance_pct* is set (e.g. ``50.0``), zones whose absolute
+    ``distance_pct_from_mark`` exceeds that value are dropped. Default
+    ``None`` keeps all bands (backward compatible).
+    *min_position_count* drops zones with fewer contributing positions
+    (default ``1`` = no-op).
     """
     marks = {k.upper(): float(v) for k, v in (mark_prices or {}).items()}
     # Infer mark from entry px median-ish fallback: mean of |entry| per coin
@@ -353,9 +361,72 @@ def build_zones(
             ),
         )
 
+    if max_distance_pct is not None:
+        cap = float(max_distance_pct)
+        zones = [z for z in zones if abs(z.distance_pct_from_mark) <= cap]
+
+    min_pos = max(1, int(min_position_count))
+    if min_pos > 1:
+        zones = [z for z in zones if z.position_count >= min_pos]
+
     zones.sort(key=lambda z: (z.coin, -z.total_notional_usd))
     return zones
 
+
+def summarize_zone_confluence(
+    candidates: Sequence[LiquidationZone],
+    *,
+    max_distance_pct: Optional[float] = None,
+    min_position_count: int = 1,
+) -> List[Dict[str, Any]]:
+    """Per-coin quality stats: confluence vs single-whale vs far noise.
+
+    *candidates* should be zones built with ``max_distance_pct=None`` and
+    ``min_position_count=1`` (notional filter already applied).
+    """
+    min_pos = max(1, int(min_position_count))
+    by_coin: Dict[str, List[LiquidationZone]] = {}
+    for z in candidates:
+        by_coin.setdefault(z.coin, []).append(z)
+
+    rows: List[Dict[str, Any]] = []
+    for coin in sorted(by_coin):
+        cand = by_coin[coin]
+        if max_distance_pct is not None:
+            cap = float(max_distance_pct)
+            dropped_far = sum(1 for z in cand if abs(z.distance_pct_from_mark) > cap)
+            near = [z for z in cand if abs(z.distance_pct_from_mark) <= cap]
+        else:
+            dropped_far = 0
+            near = list(cand)
+        kept = [z for z in near if z.position_count >= min_pos]
+        confluence = sum(1 for z in kept if z.position_count >= 2)
+        if kept:
+            top = max(kept, key=lambda z: z.total_notional_usd)
+            top_pos = int(top.position_count)
+        else:
+            top_pos = 0
+        rows.append({
+            "coin": coin,
+            "kept": len(kept),
+            "confluence_ge2": confluence,
+            "dropped_far": dropped_far,
+            "top_zone_pos": top_pos,
+        })
+    return rows
+
+
+def format_confluence_summary(rows: Sequence[Dict[str, Any]]) -> str:
+    """Terse multi-line summary for CLI (one line per coin)."""
+    if not rows:
+        return "confluence: (no zones)"
+    lines = ["--- confluence summary ---"]
+    for r in rows:
+        lines.append(
+            f"{r['coin']}: kept={r['kept']}  confluence(>=2)={r['confluence_ge2']}  "
+            f"dropped_far={r['dropped_far']}  top_zone_pos={r['top_zone_pos']}"
+        )
+    return "\n".join(lines)
 
 def persist_snapshot(
     db: ResearchDatabase,

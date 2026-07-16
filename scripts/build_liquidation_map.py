@@ -22,8 +22,10 @@ from src.exchanges.hyperliquid_rest import HyperliquidRESTClient
 from src.research.liquidation_map import (
     build_zones,
     fetch_positions,
+    format_confluence_summary,
     harvest_addresses_from_files,
     persist_snapshot,
+    summarize_zone_confluence,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
@@ -85,6 +87,8 @@ async def _run_execute(
     max_addresses: int,
     bucket_pct: float,
     min_zone_notional_usd: float,
+    max_distance_pct: Optional[float],
+    min_position_count: int,
     db_path: Path,
 ) -> Dict[str, Any]:
     logger.info(
@@ -102,12 +106,30 @@ async def _run_execute(
             max_addresses=max_addresses,
             coins=coins,
         )
+    # Unfiltered candidates for confluence stats, then filtered for persist/print.
+    candidates = build_zones(
+        fetch_result.positions,
+        bucket_pct=bucket_pct,
+        min_zone_notional_usd=min_zone_notional_usd,
+        mark_prices=mark_prices,
+        max_distance_pct=None,
+        min_position_count=1,
+    )
     zones = build_zones(
         fetch_result.positions,
         bucket_pct=bucket_pct,
         min_zone_notional_usd=min_zone_notional_usd,
         mark_prices=mark_prices,
+        max_distance_pct=max_distance_pct,
+        min_position_count=min_position_count,
     )
+    conf_rows = summarize_zone_confluence(
+        candidates,
+        max_distance_pct=max_distance_pct,
+        min_position_count=min_position_count,
+    )
+    print(format_confluence_summary(conf_rows))
+
     db = ResearchDatabase(db_path)
     try:
         sid = persist_snapshot(
@@ -118,6 +140,8 @@ async def _run_execute(
                 "positions": len(fetch_result.positions),
                 "errors": len(fetch_result.errors),
                 "coins": coins,
+                "max_distance_pct": max_distance_pct,
+                "min_position_count": min_position_count,
             },
         )
     finally:
@@ -129,6 +153,7 @@ async def _run_execute(
         "positions": len(fetch_result.positions),
         "errors": fetch_result.errors,
         "api_calls": fetch_result.addresses_queried,
+        "confluence": conf_rows,
     }
 
 
@@ -148,6 +173,18 @@ def main() -> int:
     parser.add_argument("--min-notional-usd", type=float, default=50_000.0)
     parser.add_argument("--bucket-pct", type=float, default=0.25)
     parser.add_argument("--min-zone-notional-usd", type=float, default=100_000.0)
+    parser.add_argument(
+        "--max-distance-pct",
+        type=float,
+        default=50.0,
+        help="Drop zones farther than this %% from mark (default 50)",
+    )
+    parser.add_argument(
+        "--min-position-count",
+        type=int,
+        default=1,
+        help="Require at least N positions per zone (default 1 = no-op)",
+    )
     parser.add_argument("--delay-ms", type=int, default=150)
     parser.add_argument("--max-addresses", type=int, default=300)
     parser.add_argument(
@@ -183,6 +220,8 @@ def main() -> int:
         "coins": coins,
         "top_n": args.top_n,
         "bucket_pct": args.bucket_pct,
+        "max_distance_pct": args.max_distance_pct,
+        "min_position_count": args.min_position_count,
         "delay_ms": args.delay_ms,
         "max_addresses": args.max_addresses,
         "sample_addresses": addresses[:5],
@@ -205,6 +244,8 @@ def main() -> int:
             max_addresses=args.max_addresses,
             bucket_pct=args.bucket_pct,
             min_zone_notional_usd=args.min_zone_notional_usd,
+            max_distance_pct=args.max_distance_pct,
+            min_position_count=args.min_position_count,
             db_path=Path(args.research_db),
         ),
     )
