@@ -154,7 +154,7 @@ class BackgroundTasks:
                     pnl_emoji = "+" if daily_pnl >= 0 else ""
                     summary_msg = (
                         f"Summary: capital={capital:.0f} | daily_pnl={pnl_emoji}{daily_pnl:.2f} | "
-                        f"DD={max_dd*100:.1f}% | positions={len(positions)} | "
+                        f"DD={max_dd:.1f}% | positions={len(positions)} | "
                         f"cb={'TRIPPED' if cb_tripped else 'ok'}"
                     )
                     engine._notify(

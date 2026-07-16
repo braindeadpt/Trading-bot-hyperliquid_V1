@@ -43,15 +43,39 @@ def _fmt_pct_fraction(value: Optional[float]) -> str:
     return f"{value * 100:.2f}%"
 
 
-async def build_status_message(engine: Any) -> str:
+async def build_status_message(
+    engine: Any,
+    *,
+    db: Any = None,
+    since_ms: Optional[int] = None,
+    window_label: Optional[str] = None,
+) -> str:
+    """Build bot status block.
+
+    When *db* + *since_ms* are provided (scheduled digests), Daily PnL /
+    trade counts come from closed trades in that window so they match the
+    digest PnL / strategy sections. Otherwise they use live portfolio
+    session counters (UTC calendar day).
+    """
     portfolio = engine._portfolio
     risk = engine._risk
     capital = await portfolio.current_capital
-    daily_pnl = await portfolio.daily_pnl
     positions = await portfolio.positions
-    daily_trades = await portfolio.daily_trades
+    # sync_max_drawdown_pct already returns percent points (e.g. 7.15 == 7.15%)
     max_dd = portfolio.sync_max_drawdown_pct()
     cb = risk.is_circuit_breaker_tripped()
+
+    if db is not None and since_ms is not None:
+        stats = db.get_closed_trade_stats_since(since_ms)
+        daily_pnl = float(stats.get("total_pnl_usd") or 0.0)
+        daily_trades = int(stats.get("trades") or 0)
+        pnl_label = f"PnL ({window_label or 'window'})"
+        trades_label = f"Trades ({window_label or 'window'})"
+    else:
+        daily_pnl = await portfolio.daily_pnl
+        daily_trades = await portfolio.daily_trades
+        pnl_label = "Daily PnL"
+        trades_label = "Daily trades"
 
     long_notional = 0.0
     short_notional = 0.0
@@ -71,10 +95,10 @@ async def build_status_message(engine: Any) -> str:
         "<b>Bot Status</b>",
         f"Mode: <code>{_esc(mode.upper())}</code>",
         f"Capital: ${_esc(f'{capital:,.2f}')}",
-        f"Daily PnL: {_esc(_fmt_usd(daily_pnl))}",
-        f"Max DD: {_esc(f'{max_dd * 100:.2f}')}%",
+        f"{pnl_label}: {_esc(_fmt_usd(daily_pnl))}",
+        f"Max DD: {_esc(f'{max_dd:.2f}')}%",
         f"Open positions: {len(positions)}",
-        f"Daily trades: {daily_trades}",
+        f"{trades_label}: {daily_trades}",
         f"Portfolio lev: {_esc(f'{leverage:.2f}')}x",
         f"Long/Short notional: ${_esc(f'{long_notional:,.0f}')} / ${_esc(f'{short_notional:,.0f}')}",
         f"Circuit breaker: {'<b>TRIPPED</b>' if cb else 'ok'}",
@@ -117,6 +141,9 @@ def build_pnl_message(db: Any, *, period: str = "day") -> str:
     if period == "week":
         since_ms = rolling_days_ms(7)
         title = "PnL — Last 7 Days"
+    elif period == "rolling_24h":
+        since_ms = rolling_days_ms(1)
+        title = "PnL — Last 24h"
     else:
         since_ms = utc_midnight_ms()
         title = "PnL — Today (UTC)"
@@ -199,16 +226,28 @@ def build_strategy_message(db: Any, *, since_ms: Optional[int] = None) -> str:
 
 
 async def build_digest_message(engine: Any, db: Any, *, period: str) -> str:
-    """Build scheduled digest (daily or weekly)."""
-    status = await build_status_message(engine)
+    """Build scheduled digest (daily or weekly).
+
+    Daily digests use a **rolling 24h** window for status PnL, the PnL
+    block, and strategy breakdown — previously "Today (UTC)" disagreed
+    with "Strategy PnL (last 24h)" when trades closed yesterday UTC but
+    still inside the rolling window (common for 08:00 UTC digests).
+    """
     if period == "weekly":
+        since_ms = rolling_days_ms(7)
+        window_label = "last 7 days"
         pnl = build_pnl_message(db, period="week")
         header = "<b>📊 Weekly Digest</b>\n"
     else:
-        pnl = build_pnl_message(db, period="day")
+        since_ms = rolling_days_ms(1)
+        window_label = "last 24h"
+        pnl = build_pnl_message(db, period="rolling_24h")
         header = "<b>📊 Daily Digest</b>\n"
 
-    strategy = build_strategy_message(db, since_ms=rolling_days_ms(7 if period == "weekly" else 1))
+    status = await build_status_message(
+        engine, db=db, since_ms=since_ms, window_label=window_label,
+    )
+    strategy = build_strategy_message(db, since_ms=since_ms)
     parts = [header, status, "", pnl, "", strategy]
     text = "\n".join(parts)
     if len(text) > 4000:
