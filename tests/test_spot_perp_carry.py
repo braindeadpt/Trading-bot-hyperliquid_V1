@@ -73,8 +73,9 @@ def test_no_signal_when_funding_below_threshold() -> None:
 
 
 def test_signal_on_extreme_funding() -> None:
-    s = SpotPerpCarry()
-    sig = s.on_data(_event("BTC", 80000.0, predicted=0.0010))  # 0.1% / h
+    # 0.8% / 8h → 0.1%/h × 24h = 2.4% gross vs 2% basis stop → R:R >= 1
+    s = SpotPerpCarry({"basis_stop_pct": 0.02})
+    sig = s.on_data(_event("BTC", 80000.0, predicted=0.0080))
     _pass(
         "signal_on_extreme_funding",
         sig is not None and sig.side == "short",
@@ -83,14 +84,28 @@ def test_signal_on_extreme_funding() -> None:
     if sig is not None:
         _pass(
             "signal_on_extreme_funding_metadata",
-            sig.metadata.get("leg_setup", "").startswith("perp_short"),
+            sig.metadata.get("synthetic_spot_only") is True,
+        )
+        hourly = sig.metadata.get("funding_hourly")
+        _pass(
+            "signal_funding_hourly_is_8h_div_8",
+            hourly is not None and abs(float(hourly) - 0.001) < 1e-12,
+            f"hourly={hourly}",
         )
 
 
+def test_rr_rejects_when_cashflow_understates_stop() -> None:
+    """Pre-fix bug treated 8h rate as hourly (8× overstated gross)."""
+    s = SpotPerpCarry({"basis_stop_pct": 0.02, "max_hold_hours": 24})
+    # 0.1% / 8h → 0.0125%/h × 24h = 0.3% << 2% stop → must reject
+    sig = s.on_data(_event("BTC", 80000.0, predicted=0.0010))
+    assert sig is None
+
+
 def test_throttle_blocks_rapid_signals() -> None:
-    s = SpotPerpCarry()
-    sig1 = s.on_data(_event("BTC", 80000.0, predicted=0.001, timestamp_ms=1000))
-    sig2 = s.on_data(_event("BTC", 80100.0, predicted=0.001, timestamp_ms=2000))
+    s = SpotPerpCarry({"basis_stop_pct": 0.01})
+    sig1 = s.on_data(_event("BTC", 80000.0, predicted=0.008, timestamp_ms=1000))
+    sig2 = s.on_data(_event("BTC", 80100.0, predicted=0.008, timestamp_ms=2000))
     _pass(
         "throttle_blocks_rapid_signals",
         sig1 is not None and sig2 is None,
@@ -164,7 +179,7 @@ def test_max_hold_exit() -> None:
 
 def test_low_rr_blocks_signal() -> None:
     s = SpotPerpCarry({"min_funding_hourly": 0.0001, "basis_stop_pct": 0.05})
-    # funding 0.0002/h over 24h = 0.0048, basis stop 0.05 → R:R 0.096
+    # 0.0002 8h → 0.000025/h × 24h = 0.0006 vs 0.05 stop → R:R << 1
     sig = s.on_data(_event("BTC", 80000.0, predicted=0.0002))
     _pass("low_rr_blocks_signal", sig is None)
 
@@ -179,6 +194,7 @@ def main() -> int:
         test_no_signal_without_funding,
         test_no_signal_when_funding_below_threshold,
         test_signal_on_extreme_funding,
+        test_rr_rejects_when_cashflow_understates_stop,
         test_throttle_blocks_rapid_signals,
         test_basis_stop_exit,
         test_funding_reversion_exit,

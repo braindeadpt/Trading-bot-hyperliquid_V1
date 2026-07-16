@@ -293,7 +293,17 @@ def build_live_strategies(cfg: Any) -> Tuple[List[Strategy], List[Strategy]]:
 
 
 def build_backtest_strategy(cfg: Any) -> Strategy:
-    """Single strategy object for BacktestEngine (router when ensemble is off)."""
+    """Single strategy object for BacktestEngine (router when ensemble is off).
+
+    When Phase08 is enabled, use the same execution strategy set as live
+    (VB + VWAP by default) so walk-forward / replay are not polluted by
+    other YAML-enabled modules.
+    """
+    if phase08_enabled(cfg):
+        execution, _ = build_phase08_strategies(cfg)
+        if not execution:
+            logger.warning("Phase08 backtest: no execution strategies loaded")
+        return DirectStrategyRouter(execution)
     ens_cfg = cfg.get("strategy.ensemble", {}) or {}
     if ens_cfg.get("enabled", True) is False:
         return DirectStrategyRouter(build_sub_strategies(cfg))

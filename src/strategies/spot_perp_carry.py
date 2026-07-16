@@ -1,32 +1,23 @@
-"""Strategy: SpotPerpCarry — true delta-neutral funding-rate carry trade.
+"""Strategy: SpotPerpCarry — funding-rate carry (research / shadow only).
 
-Edge
-----
-Hyperliquid perp funding is the *rate* at which longs pay shorts (when
-funding > 0) or vice versa. When funding is extreme positive (longs
-crowded, paying shorts), the cleanest edge is to *short the perp* and
-simultaneously *go long the same asset on spot* (delta-neutral). The
-position collects the funding rate on every hourly settlement; the
-delta-neutral hedge removes directional price risk.
-
-Unlike :class:`FundingArbitrage` (which pairs two different perp
-symbols and is exposed to basis risk between them), SpotPerpCarry
-hedges the same asset on the same exchange's perp vs Binance spot —
-basis risk is bounded by the spot–perp dislocation of one asset.
-
-Execution model
+Edge (intended)
 ---------------
-The bot only places the **HL perp short** leg directly. The spot leg
-is tracked synthetically in ``position.metadata`` (paper mode) or sent
-to Binance via the live Binance REST client (TODO; current paper
-implementation logs the synthetic leg for the dashboard).
+When HL perp funding is extreme positive (longs crowded), short the perp
+and long the same asset on spot (delta-neutral) to collect funding.
 
-The synthetic spot leg is **not** registered with the portfolio's
-``PortfolioState`` because it is offset by the perp short — net delta
-is zero and the cash impact is captured as the *funding cashflow*
-credited on each hourly settlement. Realised PnL on close is therefore
-just the accumulated funding cashflow minus the basis-stop cost (if
-the hedge was forcibly unwound by a 2% basis blowout).
+IMPORTANT — current limitations (do NOT treat as live-ready arb)
+----------------------------------------------------------------
+1. ``MarketEvent.funding`` / ``predicted_funding`` from the live engine are
+   **8h-equivalent** rates (see ``normalize_funding_to_8h``). Hyperliquid
+   pays ``rate_8h / 8`` each hour. Cashflow math MUST divide by 8.
+2. Config keys ``min_funding_hourly`` / ``exit_funding_hourly`` are
+   historically misnamed: YAML values (e.g. 0.0005 ≈ 55% APR) match the
+   **8h-equivalent** convention used on MarketEvent, not a true hourly rate.
+3. The spot hedge is **synthetic only** (metadata). Live execution of this
+   strategy as a naked perp short is directional risk — not arbitrage.
+
+Unlike :class:`FundingArbitrage` (cross-asset carry), this module targets
+same-asset perp vs spot basis.
 """
 
 from __future__ import annotations
@@ -41,6 +32,9 @@ from src.utils.helpers import safe_divide, safe_float
 
 logger = logging.getLogger(__name__)
 
+# HL settles hourly at 1/8 of the quoted 8h-equivalent rate.
+_HL_FUNDING_QUOTE_HOURS = 8.0
+
 
 @dataclass
 class _SpotPerpCarryState:
@@ -53,13 +47,20 @@ class _SpotPerpCarryState:
 
 
 class SpotPerpCarry(Strategy):
-    """Delta-neutral funding carry: short HL perp, long spot (synthetic)."""
+    """Funding carry: short HL perp (+ synthetic spot long). Shadow/research."""
+
+    # Explicit flag for auditors / factory — spot leg is not live-hedged.
+    SYNTHETIC_SPOT_ONLY = True
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         cfg = config or {}
-        # Entry thresholds (hourly rates)
-        self.MIN_FUNDING_HOURLY = float(cfg.get("min_funding_hourly", 0.0005))
-        self.EXIT_FUNDING_HOURLY = float(cfg.get("exit_funding_hourly", 0.0001))
+        # Thresholds compare against MarketEvent 8h-equivalent rates.
+        # Key names retain ``*_hourly`` for YAML compatibility (frozen Fase 10).
+        self.MIN_FUNDING_8H = float(cfg.get("min_funding_hourly", 0.0005))
+        self.EXIT_FUNDING_8H = float(cfg.get("exit_funding_hourly", 0.0001))
+        # Back-compat aliases (tests / callers)
+        self.MIN_FUNDING_HOURLY = self.MIN_FUNDING_8H
+        self.EXIT_FUNDING_HOURLY = self.EXIT_FUNDING_8H
         # Sizing
         self.BASE_SIZE_PCT = float(cfg.get("base_size_pct", 0.02))
         self.MAX_SIZE_PCT = float(cfg.get("max_size_pct", 0.05))
@@ -67,8 +68,9 @@ class SpotPerpCarry(Strategy):
         self.BASIS_STOP_PCT = float(cfg.get("basis_stop_pct", 0.02))
         self.MAX_HOLD_HOURS = float(cfg.get("max_hold_hours", 24.0))
         self.MAX_HOLD_MS = int(self.MAX_HOLD_HOURS * 3_600_000)
-        # Funding payment interval (Hyperliquid is hourly)
-        self.FUNDING_INTERVAL_HOURS = 1.0
+        self.FUNDING_QUOTE_HOURS = float(
+            cfg.get("funding_quote_hours", _HL_FUNDING_QUOTE_HOURS)
+        )
         # Confidence
         self.MIN_CONFIDENCE = float(cfg.get("min_confidence", 0.60))
         # Throttle: don't re-enter too soon after a flat
@@ -77,6 +79,7 @@ class SpotPerpCarry(Strategy):
         self.MANUAL_ENABLED = bool(cfg.get("enabled", True))
 
         self._state: Dict[str, _SpotPerpCarryState] = {}
+        self._warned_synthetic = False
 
     @property
     def name(self) -> str:
@@ -91,56 +94,54 @@ class SpotPerpCarry(Strategy):
         return self._state[symbol]
 
     @staticmethod
-    def _resolve_funding(event: MarketEvent) -> Optional[float]:
-        """Prefer predicted (next-payment) funding; fall back to current."""
+    def _resolve_funding_8h(event: MarketEvent) -> Optional[float]:
+        """Prefer predicted (next-payment) funding; values are 8h-equivalent."""
         v = event.predicted_funding
         if v is not None:
             return float(v)
         v = event.funding
         if v is not None:
             return float(v)
-        v = event.predicted_funding_avg
-        if v is not None:
-            return float(v)
-        v = event.funding_avg
-        if v is not None:
-            return float(v)
         return None
 
-    def _append_sample(
-        self,
-        state: _SpotPerpCarryState,
-        ts_ms: int,
-        rate: float,
-    ) -> None:
-        if not state.funding_history or state.funding_history[-1][0] != ts_ms:
-            state.funding_history.append((ts_ms, rate))
+    def _hourly_from_8h(self, funding_8h: float) -> float:
+        """Convert 8h-equivalent quote to the per-hour settlement rate."""
+        hours = self.FUNDING_QUOTE_HOURS if self.FUNDING_QUOTE_HOURS > 0 else _HL_FUNDING_QUOTE_HOURS
+        return funding_8h / hours
+
+    def _confidence(self, funding_8h: float) -> float:
+        """Linear map from 8h funding magnitude to confidence 0.5..0.9."""
+        excess = max(funding_8h - self.MIN_FUNDING_8H, 0.0)
+        span = 0.30
+        step = 0.10
+        score = 0.60 + min(excess / self.MIN_FUNDING_8H * step, span)
+        return min(max(score, self.MIN_CONFIDENCE), 0.90)
 
     @staticmethod
     def _basis_pct(hl_perp_mid: float, bn_spot_mid: float) -> float:
         """Spot-vs-perp basis as a fraction of spot."""
         return safe_divide(hl_perp_mid - bn_spot_mid, bn_spot_mid, 0.0)
 
-    def _confidence(self, funding_hourly: float) -> float:
-        """Linear map from funding magnitude to confidence 0.5..0.9."""
-        excess = max(funding_hourly - self.MIN_FUNDING_HOURLY, 0.0)
-        # 1× threshold → 0.6, 4× threshold → 0.9
-        span = 0.30
-        step = 0.10  # per 1× threshold of excess
-        score = 0.60 + min(excess / self.MIN_FUNDING_HOURLY * step, span)
-        return min(max(score, self.MIN_CONFIDENCE), 0.90)
+    def _append_sample(
+        self,
+        state: _SpotPerpCarryState,
+        ts_ms: int,
+        rate_8h: float,
+    ) -> None:
+        if not state.funding_history or state.funding_history[-1][0] != ts_ms:
+            state.funding_history.append((ts_ms, rate_8h))
 
     def on_data(self, event: MarketEvent) -> Optional[Signal]:
         if not self.MANUAL_ENABLED:
             return None
 
-        funding = self._resolve_funding(event)
-        if funding is None:
+        funding_8h = self._resolve_funding_8h(event)
+        if funding_8h is None:
             return None
 
         state = self._get_state(event.symbol)
         now_ms = event.timestamp_ms
-        self._append_sample(state, now_ms, funding)
+        self._append_sample(state, now_ms, funding_8h)
 
         if (
             state.last_signal_ms > 0
@@ -149,16 +150,10 @@ class SpotPerpCarry(Strategy):
             return None
 
         # SpotPerpCarry only enters on positive funding (shorts collect from
-        # longs). Symmetric "short-spot, long-perp" on negative funding is
-        # possible but introduces borrow-cost risk on spot shorts in many
-        # venues; for the HL-only execution path, we only farm the longs-pay
-        # direction. Flip side is left as future work.
-        if funding < self.MIN_FUNDING_HOURLY:
+        # longs). Threshold is 8h-equivalent (YAML key name is historical).
+        if funding_8h < self.MIN_FUNDING_8H:
             return None
 
-        # Optional basis sanity check: only enter if basis is within
-        # half the basis-stop distance (so the synthetic spot leg is
-        # not already stretched).
         if (
             event.binance_mid is not None
             and event.binance_mid > 0
@@ -173,31 +168,44 @@ class SpotPerpCarry(Strategy):
                 )
                 return None
 
-        confidence = self._confidence(funding)
+        confidence = self._confidence(funding_8h)
         if confidence < self.MIN_CONFIDENCE:
             return None
 
         size_pct = min(self.BASE_SIZE_PCT, self.MAX_SIZE_PCT)
 
-        # Stop on the basis-stop distance (1R); funding cashflow over
-        # MAX_HOLD_HOURS at the current rate is the expected gross.
-        # R:R = (hourly_funding * max_hold / basis_stop) - 1 ; require >= 1.0
-        expected_gross = funding * self.MAX_HOLD_HOURS
+        # Cashflow: HL pays funding_8h/8 each hour → over max_hold hours
+        funding_hourly = self._hourly_from_8h(funding_8h)
+        expected_gross = funding_hourly * self.MAX_HOLD_HOURS
         if self.BASIS_STOP_PCT > 0:
             rr = safe_divide(expected_gross, self.BASIS_STOP_PCT, 0.0)
             if rr < 1.0:
                 logger.info(
-                    "SpotPerpCarry %s SKIP — R:R=%.2f < 1.0 (funding=%.5f/h stop=%.4f)",
-                    event.symbol, rr, funding, self.BASIS_STOP_PCT,
+                    "SpotPerpCarry %s SKIP — R:R=%.2f < 1.0 "
+                    "(funding_8h=%.5f → %.5f/h × %.0fh stop=%.4f)",
+                    event.symbol,
+                    rr,
+                    funding_8h,
+                    funding_hourly,
+                    self.MAX_HOLD_HOURS,
+                    self.BASIS_STOP_PCT,
                 )
                 return None
 
         state.last_signal_ms = now_ms
 
+        if not self._warned_synthetic:
+            self._warned_synthetic = True
+            logger.warning(
+                "SpotPerpCarry emitting signals with SYNTHETIC spot hedge only "
+                "— not delta-neutral in live execution; research/shadow use."
+            )
+
         logger.info(
-            "SpotPerpCarry %s signal — funding=%.5f/h rr=%.2f conf=%.2f size=%.2f%%",
+            "SpotPerpCarry %s signal — funding_8h=%.5f (%.5f/h) rr=%.2f conf=%.2f size=%.2f%%",
             event.symbol,
-            funding,
+            funding_8h,
+            funding_hourly,
             rr,
             confidence,
             size_pct * 100.0,
@@ -206,22 +214,22 @@ class SpotPerpCarry(Strategy):
         return Signal(
             strategy=self.name,
             symbol=event.symbol,
-            side="short",  # we short the perp; spot leg is synthetic long
+            side="short",
             confidence=confidence,
             size_pct=size_pct,
             entry_price=event.price,
-            # Stop is denominated on the perp leg as the basis-stop distance
             stop_loss_pct=self.BASIS_STOP_PCT,
-            # TP is on the funding-collection horizon
             take_profit_pct=self.BASIS_STOP_PCT * max(rr, 1.0),
-            reason=f"spot_perp_carry_short_f{funding:.5f}",
+            reason=f"spot_perp_carry_short_f8h{funding_8h:.5f}",
             metadata={
-                "funding_hourly": funding,
+                "funding_8h": funding_8h,
+                "funding_hourly": funding_hourly,
                 "expected_gross_funding": expected_gross,
                 "rr": rr,
                 "basis_stop_pct": self.BASIS_STOP_PCT,
                 "synthetic_spot_leg": "long",
-                "leg_setup": "perp_short + spot_long (delta-neutral)",
+                "synthetic_spot_only": True,
+                "leg_setup": "perp_short + spot_long (SYNTHETIC — not live-hedged)",
             },
         )
 
@@ -239,7 +247,6 @@ class SpotPerpCarry(Strategy):
         now_ms = event.timestamp_ms
         hold_ms = now_ms - position.entry_time_ms
 
-        # 1. Max hold
         if hold_ms >= self.MAX_HOLD_MS:
             return ExitSignal(
                 strategy=self.name,
@@ -250,20 +257,20 @@ class SpotPerpCarry(Strategy):
                 metadata={"hold_ms": hold_ms},
             )
 
-        # 2. Funding reversion
-        funding = self._resolve_funding(event)
-        if funding is not None and abs(funding) < self.EXIT_FUNDING_HOURLY:
+        funding_8h = self._resolve_funding_8h(event)
+        if funding_8h is not None and abs(funding_8h) < self.EXIT_FUNDING_8H:
             return ExitSignal(
                 strategy=self.name,
                 symbol=position.symbol,
                 side="close",
                 confidence=0.9,
-                reason=f"funding_reverted_{funding:.5f}",
-                metadata={"funding_hourly": funding},
+                reason=f"funding_reverted_{funding_8h:.5f}",
+                metadata={
+                    "funding_8h": funding_8h,
+                    "funding_hourly": self._hourly_from_8h(funding_8h),
+                },
             )
 
-        # 3. Basis stop — the synthetic spot leg cannot perfectly hedge
-        # if the spot–perp dislocation exceeds the stop distance.
         if event.binance_mid is not None and event.binance_mid > 0:
             basis = self._basis_pct(event.price, event.binance_mid)
             if abs(basis) > self.BASIS_STOP_PCT:

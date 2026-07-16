@@ -38,6 +38,10 @@ from src.backtest.symbol_rounding import round_position_size
 from src.core.funding_blackout import FundingBlackoutFilter
 from src.core.liquidation_accumulator import LiquidationAccumulator
 from src.core.order_router import OrderSpec
+from src.core.phase08_regime_router import (
+    SequentialContradictionGuard,
+    route_phase08_signals,
+)
 from src.core.regime import regime_strategy_name
 from src.core.risk_manager import RiskManager
 from src.core.signal_pipeline import PipelineContext, SignalPipeline
@@ -84,6 +88,9 @@ class BacktestConfig:
     use_funding_blackout: bool = True
     use_size_aware_slippage: bool = True
     use_external_feeds_replay: bool = True
+    # Phase08 hard ADX router (mutual exclusion VB ↔ VWAP) — live parity
+    use_phase08_regime_router: bool = False
+    phase08_seq_block_ms: int = 3_600_000
 
 
 @dataclass
@@ -197,6 +204,11 @@ class BacktestEngine:
         self._pipeline: Optional[SignalPipeline] = None
         self._vol_circuit: Optional[VolatilityCircuitBreaker] = None
         self._funding_blackout: Optional[FundingBlackoutFilter] = None
+        self._phase08_seq_guard: Optional[SequentialContradictionGuard] = None
+        if self.cfg.use_phase08_regime_router:
+            self._phase08_seq_guard = SequentialContradictionGuard(
+                block_ms=int(self.cfg.phase08_seq_block_ms),
+            )
 
         if self.cfg.use_risk_manager and self._full_config is not None:
             try:
@@ -345,7 +357,7 @@ class BacktestEngine:
                 ):
                     continue
 
-                signal = self.strategy.on_data(event)
+                signal = self._collect_entry_signal(event)
                 if signal is None:
                     continue
 
@@ -404,10 +416,15 @@ class BacktestEngine:
                     signal, event.price, ts, capital, order_spec=order_spec,
                 )
                 self._capital = capital
-                if signal.symbol in self.positions_by_symbol and self._pipeline is not None:
-                    self._pipeline.record_trade_opened(
-                        signal.strategy, signal.symbol, event, self._pipeline_ctx,
-                    )
+                if signal.symbol in self.positions_by_symbol:
+                    if self._phase08_seq_guard is not None:
+                        self._phase08_seq_guard.record(
+                            signal.symbol, signal.side, ts,
+                        )
+                    if self._pipeline is not None:
+                        self._pipeline.record_trade_opened(
+                            signal.strategy, signal.symbol, event, self._pipeline_ctx,
+                        )
                 day = self._current_day or time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
                 self._daily_trade_count[day] = self._daily_trade_count.get(day, 0) + 1
 
@@ -688,6 +705,65 @@ class BacktestEngine:
             sell_volume=c.sell_volume,
             trade_count=getattr(c, "trade_count", 0),
         )
+
+    def _collect_entry_signal(self, event: MarketEvent) -> Optional[Signal]:
+        """Gather strategy signals; apply Phase08 hard router when enabled."""
+        signals: List[Signal] = []
+        subs = getattr(self.strategy, "_strategies", None)
+        if isinstance(subs, list) and subs:
+            for strat in subs:
+                if hasattr(strat, "is_active") and not strat.is_active():
+                    continue
+                try:
+                    sig = strat.on_data(event)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "Backtest strategy %s error on %s: %s",
+                        getattr(strat, "name", "?"),
+                        event.symbol,
+                        exc,
+                    )
+                    continue
+                if sig is not None:
+                    signals.append(sig)
+        else:
+            try:
+                sig = self.strategy.on_data(event)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "Backtest strategy error on %s: %s", event.symbol, exc,
+                )
+                return None
+            if sig is not None:
+                signals.append(sig)
+
+        if not signals:
+            return None
+
+        if self.cfg.use_phase08_regime_router:
+            routed, reject_reason = route_phase08_signals(
+                signals,
+                event.adx_14,
+                adx_range_threshold=self.cfg.adx_range_threshold,
+                adx_trend_threshold=self.cfg.adx_trend_threshold,
+                symbol=event.symbol,
+                seq_guard=self._phase08_seq_guard,
+                timestamp_ms=event.timestamp_ms,
+            )
+            if reject_reason:
+                self.gate_rejections.append({
+                    "timestamp_ms": event.timestamp_ms,
+                    "symbol": event.symbol,
+                    "side": signals[0].side,
+                    "strategy": signals[0].strategy,
+                    "gate": "phase08_regime",
+                    "reason": reject_reason,
+                })
+            if not routed:
+                return None
+            return max(routed, key=lambda s: s.confidence)
+
+        return max(signals, key=lambda s: s.confidence)
 
     def _build_market_event(
         self,
@@ -1246,8 +1322,18 @@ def build_backtest_config_from_yaml(cfg: Union[Config, Dict[str, Any]]) -> Backt
 
     cooldown_cfg = get_strategy_section(cfg, "cooldown")
     use_regime = bool(cfg.get("backtest.use_regime_weights", True))
+    use_phase08_router = False
     if phase08_enabled(cfg):
         use_regime = False
+        use_phase08_router = True
+    p08 = get_strategy_section(cfg, "phase08")
+    router_cfg = (p08.get("regime_router") or {}) if isinstance(p08, dict) else {}
+    adx_range = float(
+        router_cfg.get("adx_range_threshold", cfg.get("strategy.adx_range_threshold", 20.0))
+    )
+    adx_trend = float(
+        router_cfg.get("adx_trend_threshold", cfg.get("strategy.adx_trend_threshold", 25.0))
+    )
     return BacktestConfig(
         initial_capital=float(cfg.get("backtest.initial_capital", 100_000.0)),
         commission_pct=float(cfg.get("backtest.commission_pct", cfg.get("risk.taker_fee_pct", 0.04))),
@@ -1261,10 +1347,11 @@ def build_backtest_config_from_yaml(cfg: Union[Config, Dict[str, Any]]) -> Backt
         use_microstructure_proxy=bool(cfg.get("backtest.use_microstructure_proxy", True)),
         intrabar_conflict_policy=str(cfg.get("backtest.intrabar_conflict_policy", "pessimistic")),
         regime_weights=cfg.get("strategy.regime_weights", {}),
-        adx_trend_threshold=float(cfg.get("strategy.adx_trend_threshold", 25.0)),
-        adx_range_threshold=float(cfg.get("strategy.adx_range_threshold", 20.0)),
+        adx_trend_threshold=adx_trend,
+        adx_range_threshold=adx_range,
         cooldown_base_ms=int(safe_float(cooldown_cfg.get("base_minutes", 60)) * 60_000),
         cooldown_max_ms=int(safe_float(cooldown_cfg.get("max_minutes", 240)) * 60_000),
         cooldown_multiplier=safe_float(cooldown_cfg.get("multiplier", 2.0)),
         max_daily_trades=int(cfg.get("risk.max_daily_trades", 5)),
+        use_phase08_regime_router=use_phase08_router,
     )

@@ -939,6 +939,12 @@ class TradingEngine:
             fee_delta=fee_delta,
             position=pos,
         )
+        # First confirmed live fill: arm sequential contradiction guard
+        if applied_before <= 0 and self._phase08_seq_guard is not None and symbol and side:
+            ts_ms = int(record.get("submitted_at_ms") or db_row.get("entry_time") or 0)
+            if ts_ms <= 0:
+                ts_ms = int(time.time() * 1000)
+            self._phase08_seq_guard.record(symbol, side, ts_ms)
         record["_portfolio_applied_fill"] = filled_size
         trade_id = int(record.get("trade_id", 0))
         try:
@@ -2695,10 +2701,9 @@ class TradingEngine:
             )
             return
 
-        if self._phase08_seq_guard is not None:
-            self._phase08_seq_guard.record(
-                signal.symbol, signal.side, event.timestamp_ms,
-            )
+        # Sequential contradiction guard records ONLY after an accepted fill
+        # (see paper executed path + OMS fill callback). Recording here used to
+        # lock the opposite side for 1h even when risk/TCA later rejected.
 
         # Save signal to DB for audit trail
         self._db.save_signal(
@@ -3094,6 +3099,12 @@ class TradingEngine:
             strat_stats["approved_signals"] += 1
             if strat_stats["signal_history"]:
                 strat_stats["signal_history"][0]["status"] = "executed"
+
+        # Phase08: lock sequential flip only after a real accepted fill
+        if self._phase08_seq_guard is not None:
+            self._phase08_seq_guard.record(
+                signal.symbol, signal.side, event.timestamp_ms,
+            )
 
         self._persist_decision(
             decision_type="execution",
