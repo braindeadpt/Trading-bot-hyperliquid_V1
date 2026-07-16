@@ -243,6 +243,19 @@ class HyperliquidRESTClient:
             raise HyperliquidAPIError(f"Unexpected recentTrades response: {raw!r}")
         return raw
 
+    async def clearinghouse_state(self, address: str) -> Dict[str, Any]:
+        """Fetch public ``clearinghouseState`` for *address* (positions + liq Px).
+
+        Additive research helper — does not affect order placement paths.
+        """
+        raw = await self._post(
+            self._info_url,
+            {"type": "clearinghouseState", "user": address},
+        )
+        if not isinstance(raw, dict):
+            raise HyperliquidAPIError(f"Unexpected clearinghouseState response: {raw!r}")
+        return raw
+
     # ── Order placement ──
 
     async def place_order(

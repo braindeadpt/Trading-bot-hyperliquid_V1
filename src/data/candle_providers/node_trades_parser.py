@@ -359,3 +359,97 @@ def parse_node_fills_by_block_ndjson(
         except NodeTradesParseError as exc:
             logger.warning("Skipping unparsable node_fills_by_block fill: %s", exc)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Address-preserving fill-leg iterator (does NOT change dedup behaviour above).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NodeFillLeg:
+    """One counterparty leg from a ``node_fills_by_block`` events entry.
+
+    Unlike :class:`NodeTradeRecord`, this keeps the wallet ``address`` and
+    does **not** deduplicate by ``tid`` — both legs of a trade are yielded so
+    address harvest can see every active wallet.
+    """
+
+    address: str
+    coin: str
+    size: float
+    side: Optional[str]
+    start_position: Optional[float]
+    time_ms: int
+    price: float
+    tid: Optional[Any] = None
+
+
+def iter_fill_legs_with_address(
+    payload: Union[bytes, str, List[Dict[str, Any]]],
+) -> Iterator[NodeFillLeg]:
+    """Yield every ``[address, fill]`` leg from ``node_fills_by_block`` content.
+
+    Reuses :func:`maybe_decompress_lz4` and :func:`iter_fills_by_block_records`.
+    Does **not** deduplicate by ``tid`` — both counterparties are emitted.
+    Malformed events are skipped with a warning (same tolerance style as
+    :func:`parse_node_fills_by_block_ndjson`).
+    """
+    if isinstance(payload, list):
+        blocks: Iterable[Dict[str, Any]] = payload
+    else:
+        if isinstance(payload, (bytes, bytearray)):
+            data = maybe_decompress_lz4(bytes(payload))
+            text = data.decode("utf-8")
+        else:
+            text = payload
+        blocks = iter_fills_by_block_records(text)
+
+    for block in blocks:
+        if not isinstance(block, dict):
+            logger.warning("Skipping non-dict node_fills_by_block record: %r", block)
+            continue
+        events = block.get("events")
+        if not events:
+            continue
+        for event in events:
+            if not (isinstance(event, (list, tuple)) and len(event) == 2):
+                logger.warning("Skipping malformed events entry: %r", event)
+                continue
+            address, fill = event
+            if not isinstance(fill, dict):
+                logger.warning("Skipping non-dict fill in events entry: %r", fill)
+                continue
+            addr = str(address or "").strip()
+            if not addr:
+                logger.warning("Skipping fill with empty address: %r", event)
+                continue
+            coin = _first_present(fill, _COIN_KEYS)
+            price = _first_present(fill, _PRICE_KEYS)
+            size = _first_present(fill, _SIZE_KEYS)
+            time_val = _first_present(fill, _TIME_KEYS)
+            if coin is None or price is None or size is None or time_val is None:
+                logger.warning("Skipping incomplete fill leg: %r", fill)
+                continue
+            side_key = _first_key(fill, _SIDE_KEYS)
+            start_raw = fill.get("startPosition", fill.get("start_position"))
+            start_pos: Optional[float]
+            if start_raw is None or start_raw == "":
+                start_pos = None
+            else:
+                start_pos = safe_float(start_raw)
+            try:
+                time_ms = _parse_time_to_ms(time_val)
+            except NodeTradesParseError as exc:
+                logger.warning("Skipping fill leg with bad time: %s", exc)
+                continue
+            yield NodeFillLeg(
+                address=addr.lower() if addr.startswith("0x") or addr.startswith("0X") else addr,
+                coin=str(coin).upper(),
+                size=safe_float(size),
+                side=str(fill[side_key]) if side_key else None,
+                start_position=start_pos,
+                time_ms=time_ms,
+                price=safe_float(price),
+                tid=fill.get("tid"),
+            )

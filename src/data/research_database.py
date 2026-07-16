@@ -195,6 +195,30 @@ class ResearchDatabase(Database):
         self._conn().execute(
             "CREATE INDEX IF NOT EXISTS idx_gaps_symbol_ts ON microstructure_gaps(symbol, detected_at_ms);"
         )
+        self._conn().execute("""
+            CREATE TABLE IF NOT EXISTS liquidation_map_snapshots (
+                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id             TEXT    NOT NULL,
+                fetched_at_ms           INTEGER NOT NULL,
+                coin                    TEXT    NOT NULL,
+                side                    TEXT    NOT NULL,
+                price_low               REAL    NOT NULL,
+                price_high              REAL    NOT NULL,
+                total_notional_usd      REAL    NOT NULL,
+                position_count          INTEGER NOT NULL,
+                distance_pct_from_mark  REAL,
+                mark_px                 REAL,
+                meta_json               TEXT
+            );
+        """)
+        self._conn().execute(
+            "CREATE INDEX IF NOT EXISTS idx_liq_map_coin_snap "
+            "ON liquidation_map_snapshots(coin, fetched_at_ms);"
+        )
+        self._conn().execute(
+            "CREATE INDEX IF NOT EXISTS idx_liq_map_snapshot_id "
+            "ON liquidation_map_snapshots(snapshot_id);"
+        )
         self._commit()
 
     def prune_old_data(self, days: int = 30) -> Dict[str, int]:
@@ -457,6 +481,75 @@ class ResearchDatabase(Database):
                 (symbol, feed, window_start_ms, window_end_ms, report_json, created_at_ms),
             )
             conn.commit()
+
+    def save_liquidation_map_zones(
+        self,
+        rows: List[Dict[str, Any]],
+    ) -> int:
+        """Insert zone rows into ``liquidation_map_snapshots``. Returns row count."""
+        if not rows:
+            return 0
+        sql = """
+            INSERT INTO liquidation_map_snapshots (
+                snapshot_id, fetched_at_ms, coin, side, price_low, price_high,
+                total_notional_usd, position_count, distance_pct_from_mark,
+                mark_px, meta_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        params = []
+        for r in rows:
+            params.append((
+                str(r["snapshot_id"]),
+                int(r["fetched_at_ms"]),
+                str(r["coin"]).upper(),
+                str(r["side"]),
+                float(r["price_low"]),
+                float(r["price_high"]),
+                float(r["total_notional_usd"]),
+                int(r["position_count"]),
+                r.get("distance_pct_from_mark"),
+                r.get("mark_px"),
+                r.get("meta_json"),
+            ))
+        with self._write_lock:
+            conn = self._conn()
+            conn.executemany(sql, params)
+            conn.commit()
+        return len(params)
+
+    def load_latest_liquidation_map(
+        self,
+        coin: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Load zones from the most recent snapshot (optionally filtered by coin)."""
+        conn = self._conn()
+        if coin:
+            row = conn.execute(
+                "SELECT MAX(fetched_at_ms) FROM liquidation_map_snapshots WHERE coin = ?",
+                (coin.upper(),),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT MAX(fetched_at_ms) FROM liquidation_map_snapshots"
+            ).fetchone()
+        if not row or row[0] is None:
+            return []
+        latest_ms = int(row[0])
+        if coin:
+            cur = conn.execute(
+                "SELECT * FROM liquidation_map_snapshots "
+                "WHERE fetched_at_ms = ? AND coin = ? "
+                "ORDER BY total_notional_usd DESC",
+                (latest_ms, coin.upper()),
+            )
+        else:
+            cur = conn.execute(
+                "SELECT * FROM liquidation_map_snapshots "
+                "WHERE fetched_at_ms = ? "
+                "ORDER BY coin, total_notional_usd DESC",
+                (latest_ms,),
+            )
+        return [dict(r) for r in cur.fetchall()]
 
     def get_candle_metadata_sample(
         self, symbol: str, timeframe: str = "1m", limit: int = 1,
