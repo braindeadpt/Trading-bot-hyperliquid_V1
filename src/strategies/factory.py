@@ -113,6 +113,26 @@ def _should_load_strategy(section: dict) -> bool:
     return False
 
 
+# Strategies whose on_data / operational gate also consults ``auto_enable``
+# (OrderBookScalper, FundingArbitrage). Others only read ``enabled``.
+_SHADOW_AUTO_ENABLE_PATHS = frozenset({
+    "strategy.orderbook_scalper",
+    "strategy.funding_arbitrage",
+})
+
+
+def _apply_shadow_section_overrides(section: dict, path: str) -> None:
+    """Force in-memory section flags so Phase08 shadow instances evaluate.
+
+    Mutates the deep-copied *section* only — never the live config object or
+    settings.yaml. Without this, strategies killed via ``enabled: false``
+    (pre-Phase08) stay dormant even when force-instantiated into shadow.
+    """
+    section["enabled"] = True
+    if path in _SHADOW_AUTO_ENABLE_PATHS:
+        section["auto_enable"] = True
+
+
 def _strategy_display_name(cls: type) -> str:
     try:
         return cls({}).name  # type: ignore[call-arg]
@@ -143,6 +163,7 @@ def _instantiate_from_registry(
     section = copy.deepcopy(cfg.get(path, {}) or {})
     if shadow:
         section["_shadow_mode"] = True
+        _apply_shadow_section_overrides(section, path)
     if path in ("strategy.mean_reversion", "strategy.funding_arbitrage"):
         section = _enrich_funding_strategy_config(cfg, section)
     if not force and not _should_load_strategy(section):
