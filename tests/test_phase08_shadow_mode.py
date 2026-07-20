@@ -217,6 +217,84 @@ def test_build_live_strategies_returns_shadow_when_phase08() -> None:
     assert len(shadow) >= 4
 
 
+def test_evaluate_shadow_strategies_persists_bracket_fields() -> None:
+    """Observability enrichment: stop/TP/size/metadata land in market_snapshot."""
+    from src.core.engine import TradingEngine
+    from src.core.execution import ExecutionEngine
+    from src.core.risk_manager import RiskManager
+    from src.data.database import Database
+    from src.exchanges.hyperliquid_ws import DataBus
+    from src.research.shadow_recorder import ShadowDecision
+    from src.strategies.base import MarketEvent, Signal
+
+    class _Stub:
+        name = "StubShadow"
+
+        def __init__(self) -> None:
+            self._shadow_instance = True
+
+        def on_data(self, event: MarketEvent) -> Signal:
+            return Signal(
+                strategy=self.name,
+                symbol=event.symbol,
+                side="short",
+                confidence=0.61,
+                size_pct=0.007,
+                stop_loss_pct=0.002,
+                take_profit_pct=0.0025,
+                metadata={"src": "phase08_test"},
+            )
+
+    class _Cap:
+        def __init__(self) -> None:
+            self.last: ShadowDecision | None = None
+
+        def record(self, decision: ShadowDecision) -> None:
+            self.last = decision
+
+    class _Boom(_Cap):
+        def record(self, decision: ShadowDecision) -> None:
+            self.last = decision
+            raise RuntimeError("must not escape engine loop")
+
+    cfg = Config(
+        {
+            "symbols": ["BTC"],
+            "strategy": {"cooldown": {"base_minutes": 30, "max_minutes": 120}},
+            "risk": {"max_position_size_pct": 5.0, "leverage_max": 5.0},
+        }
+    )
+    engine = TradingEngine(
+        cfg,
+        Database(":memory:"),
+        DataBus(),
+        [],
+        RiskManager(cfg, Database(":memory:")),
+        ExecutionEngine(cfg, Database(":memory:"), "paper"),
+        shadow_strategies=[_Stub()],
+    )
+    cap = _Cap()
+    engine._shadow_recorder = cap  # type: ignore[assignment]
+    engine._evaluate_shadow_strategies(
+        MarketEvent(symbol="BTC", price=64000.0, timestamp_ms=1),
+        "BTC",
+    )
+    assert cap.last is not None
+    snap = cap.last.market_snapshot or {}
+    assert snap["stop_loss_pct"] == 0.002
+    assert snap["take_profit_pct"] == 0.0025
+    assert snap["size_pct"] == 0.007
+    assert snap["metadata"]["src"] == "phase08_test"
+
+    boom = _Boom()
+    engine._shadow_recorder = boom  # type: ignore[assignment]
+    engine._evaluate_shadow_strategies(
+        MarketEvent(symbol="BTC", price=64000.0, timestamp_ms=2),
+        "BTC",
+    )
+    assert boom.last is not None  # invoked; exception swallowed
+
+
 if __name__ == "__main__":
     test_phase08_factory_splits_execution_and_shadow()
     print("  factory split OK")
@@ -236,4 +314,6 @@ if __name__ == "__main__":
     print("  raw trade tap OK")
     test_build_live_strategies_returns_shadow_when_phase08()
     print("  build_live_strategies OK")
+    test_evaluate_shadow_strategies_persists_bracket_fields()
+    print("  shadow enrichment OK")
     print("All Phase08 tests passed.")

@@ -1856,7 +1856,10 @@ class TradingEngine:
         """
         if not self._shadow_strategies or self._shadow_recorder is None:
             return
-        from src.research.shadow_recorder import ShadowDecision
+        from src.research.shadow_recorder import (
+            ShadowDecision,
+            build_enriched_market_snapshot,
+        )
 
         for strategy in self._shadow_strategies:
             if getattr(strategy, "_shadow_instance", False) is False:
@@ -1865,6 +1868,9 @@ class TradingEngine:
                 sig = strategy.on_data(event)
                 if sig is None:
                     continue
+                # Observability-only enrichment: bracket params + metadata so
+                # the offline shadow outcome evaluator can simulate SL/TP.
+                # Must never affect trading gates or execution paths.
                 self._shadow_recorder.record(
                     ShadowDecision(
                         symbol=symbol,
@@ -1874,10 +1880,18 @@ class TradingEngine:
                         would_enter=True,
                         reason="entry_signal",
                         timestamp_ms=event.timestamp_ms,
-                        market_snapshot={
-                            "price": event.price,
-                            "confidence": sig.confidence,
-                        },
+                        market_snapshot=build_enriched_market_snapshot(
+                            price=event.price,
+                            confidence=float(sig.confidence),
+                            stop_loss_pct=float(sig.stop_loss_pct or 0.0),
+                            take_profit_pct=(
+                                float(sig.take_profit_pct)
+                                if sig.take_profit_pct is not None
+                                else None
+                            ),
+                            size_pct=float(sig.size_pct or 0.0),
+                            metadata=dict(sig.metadata or {}),
+                        ),
                     )
                 )
                 logger.debug(
