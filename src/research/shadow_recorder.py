@@ -206,6 +206,7 @@ class ShadowRecorder:
         self,
         *,
         strategy: Optional[str] = None,
+        variant: Optional[str] = None,
         since_ms: Optional[int] = None,
         until_ms: Optional[int] = None,
         would_enter_only: bool = True,
@@ -219,6 +220,9 @@ class ShadowRecorder:
         if strategy:
             conditions.append("strategy = ?")
             params.append(strategy)
+        if variant:
+            conditions.append("variant = ?")
+            params.append(variant)
         if since_ms is not None:
             conditions.append("timestamp_ms >= ?")
             params.append(int(since_ms))

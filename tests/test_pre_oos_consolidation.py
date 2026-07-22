@@ -103,13 +103,13 @@ def test_sequential_contradiction_guard_blocks_flip() -> None:
     routed, _ = route_phase08_signals(
         [sig_long], adx=30.0, symbol="BTC",
         seq_guard=guard, timestamp_ms=ts,
-    )
+    )[:2]
     assert len(routed) == 1
     guard.record("BTC", "long", ts)
     blocked, reason = route_phase08_signals(
         [sig_short], adx=30.0, symbol="BTC",
         seq_guard=guard, timestamp_ms=ts + 60_000,
-    )
+    )[:2]
     assert blocked == []
     assert reason == "sequential_contradictory_signal"
 

@@ -55,6 +55,14 @@ def main() -> int:
         help="Filter to one strategy name (e.g. OrderBookScalper)",
     )
     parser.add_argument(
+        "--variant",
+        default=None,
+        help=(
+            "Filter by variant: phase08_shadow | router_blocked "
+            "(default: all, labeled separately)"
+        ),
+    )
+    parser.add_argument(
         "--since-days",
         type=float,
         default=None,
@@ -83,6 +91,7 @@ def main() -> int:
     plan = {
         "mode": "persist" if persist else "dry-run",
         "strategy": args.strategy,
+        "variant": args.variant,
         "since_days": args.since_days,
         "research_db": args.research_db,
         "live_db": args.live_db,
@@ -93,6 +102,7 @@ def main() -> int:
 
     summary = run_evaluation(
         strategy=args.strategy,
+        variant=args.variant,
         since_days=args.since_days,
         research_db_path=Path(args.research_db),
         live_db_path=Path(args.live_db) if args.live_db else None,

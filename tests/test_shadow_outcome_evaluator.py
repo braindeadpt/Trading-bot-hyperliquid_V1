@@ -31,6 +31,7 @@ from src.research.shadow_outcome_evaluator import (
     SKIP_MISSING_BRACKET,
     aggregate_scoreboard,
     evaluate_shadow_decisions,
+    format_scoreboard_table,
     resolve_candle_exit,
     resolve_max_hold_ms,
     simulate_decision,
@@ -486,7 +487,9 @@ def test_evaluate_batch_with_injected_candle_loader() -> None:
         candle_loader=loader,
     )
     # Strategy name is OBS — max_hold falls back to default 6h
-    board = boards["OBS"]
+    from src.research.shadow_outcome_evaluator import scoreboard_key
+
+    board = boards[scoreboard_key("OBS", "phase08_shadow")]
     assert board.n_evaluated == 1
     assert board.n_skipped == 1
     assert board.skip_reasons[SKIP_MISSING_BRACKET] == 1
@@ -572,3 +575,71 @@ def test_engine_shadow_records_enriched_fields_and_swallows_recorder_errors() ->
     engine._shadow_recorder = boom  # type: ignore[assignment]
     engine._evaluate_shadow_strategies(event, "BTC")
     assert boom.calls == 1  # was invoked, error swallowed
+
+
+def test_e_evaluator_separates_router_blocked_from_shadow_hand_computed() -> None:
+    """Same strategy, two variants → two scoreboards; router_blocked R hand-checked."""
+    from src.research.shadow_outcome_evaluator import (
+        VARIANT_PHASE08_SHADOW,
+        VARIANT_ROUTER_BLOCKED,
+        scoreboard_key,
+    )
+
+    entry_ts = 8_000_000
+    shadow = ShadowDecision(
+        symbol="BTC",
+        strategy="VWAPDeviation",
+        variant=VARIANT_PHASE08_SHADOW,
+        side="long",
+        would_enter=True,
+        reason="entry_signal",
+        timestamp_ms=entry_ts,
+        market_snapshot=build_enriched_market_snapshot(
+            price=100.0, confidence=0.7, stop_loss_pct=0.01,
+            take_profit_pct=0.02, size_pct=0.01,
+        ),
+        row_id=1,
+    )
+    blocked = ShadowDecision(
+        symbol="BTC",
+        strategy="VWAPDeviation",
+        variant=VARIANT_ROUTER_BLOCKED,
+        side="long",
+        would_enter=True,
+        reason="router_blocked:expansion",
+        timestamp_ms=entry_ts + 1,
+        market_snapshot=build_enriched_market_snapshot(
+            price=100.0, confidence=0.9, stop_loss_pct=0.01,
+            take_profit_pct=0.02, size_pct=0.01,
+            metadata={"router_regime": "expansion", "router_adx": 22.0},
+        ),
+        row_id=2,
+    )
+
+    def loader(symbol: str, ts: int, max_hold: int):
+        # TP hit at 102 → +2R for both
+        return (
+            [_candle(ts + 60_000, 100.0, 103.0, 100.0, 102.5)],
+            "synthetic",
+        )
+
+    boards = evaluate_shadow_decisions(
+        [shadow, blocked],
+        config=Config({"strategy": {"vwap_deviation": {"max_hold_hours": 4}}}),
+        candle_loader=loader,
+    )
+    k_shadow = scoreboard_key("VWAPDeviation", VARIANT_PHASE08_SHADOW)
+    k_blocked = scoreboard_key("VWAPDeviation", VARIANT_ROUTER_BLOCKED)
+    assert k_shadow in boards and k_blocked in boards
+    assert k_shadow != k_blocked
+    assert boards[k_shadow].n_evaluated == 1
+    assert boards[k_blocked].n_evaluated == 1
+    assert boards[k_blocked].variant == VARIANT_ROUTER_BLOCKED
+    assert boards[k_blocked].wins == 1
+    # Hand-computed: exit 102, entry 100, stop 1% → R = 2.0
+    assert boards[k_blocked].outcomes[0].r_multiple == pytest.approx(2.0)
+    assert boards[k_blocked].expectancy_r == pytest.approx(2.0)
+    assert "counterfactual" in boards[k_blocked].disclaimer.lower()
+    table = format_scoreboard_table(boards)
+    assert "router_blocked" in table
+    assert "counterfactual" in table.lower()

@@ -140,11 +140,20 @@ class SimulatedOutcome:
     skip_reason: Optional[str] = None
 
 
+VARIANT_PHASE08_SHADOW = "phase08_shadow"
+VARIANT_ROUTER_BLOCKED = "router_blocked"
+
+ROUTER_BLOCKED_SECTION_LABEL = (
+    "counterfactual — signals the router blocked; idealized fills"
+)
+
+
 @dataclass
 class StrategyScoreboard:
-    """Aggregated idealized outcomes for one strategy."""
+    """Aggregated idealized outcomes for one (strategy, variant) pair."""
 
     strategy: str
+    variant: str = VARIANT_PHASE08_SHADOW
     n_decisions: int = 0
     n_evaluated: int = 0
     n_skipped: int = 0
@@ -163,9 +172,14 @@ class StrategyScoreboard:
     disclaimer: str = IDEALIZED_FILL_DISCLAIMER
     outcomes: List[SimulatedOutcome] = field(default_factory=list)
 
+    @property
+    def key(self) -> str:
+        return scoreboard_key(self.strategy, self.variant)
+
     def to_dict(self, *, include_outcomes: bool = False) -> Dict[str, Any]:
         d: Dict[str, Any] = {
             "strategy": self.strategy,
+            "variant": self.variant,
             "n_decisions": self.n_decisions,
             "n_evaluated": self.n_evaluated,
             "n_skipped": self.n_skipped,
@@ -183,9 +197,16 @@ class StrategyScoreboard:
             "candle_source": self.candle_source,
             "disclaimer": self.disclaimer,
         }
+        if self.variant == VARIANT_ROUTER_BLOCKED:
+            d["section_label"] = ROUTER_BLOCKED_SECTION_LABEL
         if include_outcomes:
             d["outcomes"] = [asdict(o) for o in self.outcomes]
         return d
+
+
+def scoreboard_key(strategy: str, variant: str) -> str:
+    """Stable dict key separating shadow vs router_blocked scoreboards."""
+    return f"{strategy}::{variant or VARIANT_PHASE08_SHADOW}"
 
 
 def resolve_max_hold_ms(
@@ -584,13 +605,19 @@ def aggregate_scoreboard(
     max_hold_ms: int,
     candle_source: str,
     n_decisions: int,
+    variant: str = VARIANT_PHASE08_SHADOW,
 ) -> StrategyScoreboard:
     """Build scoreboard metrics. PF uses R-multiples as the pnl series."""
+    disclaimer = IDEALIZED_FILL_DISCLAIMER
+    if variant == VARIANT_ROUTER_BLOCKED:
+        disclaimer = f"{ROUTER_BLOCKED_SECTION_LABEL}. {IDEALIZED_FILL_DISCLAIMER}"
     board = StrategyScoreboard(
         strategy=strategy,
+        variant=variant,
         n_decisions=n_decisions,
         max_hold_ms_used=max_hold_ms,
         candle_source=candle_source,
+        disclaimer=disclaimer,
     )
     evaluated = [o for o in outcomes if o.evaluated]
     skipped = [o for o in outcomes if not o.evaluated]
@@ -633,11 +660,10 @@ def evaluate_shadow_decisions(
     live_db_path: Optional[Path] = LIVE_DB_DEFAULT,
     candle_loader: Optional[Any] = None,
 ) -> Dict[str, StrategyScoreboard]:
-    """Evaluate a batch of shadow decisions into per-strategy scoreboards.
+    """Evaluate decisions into scoreboards keyed by ``strategy::variant``.
 
-    ``candle_loader`` optional callable
-    ``(symbol, entry_ts_ms, max_hold_ms) -> (List[Candle], source_label)``
-    for tests.
+    ``phase08_shadow`` and ``router_blocked`` for the same strategy never share
+    a scoreboard entry.
     """
     cfg = config
     if cfg is None:
@@ -646,12 +672,13 @@ def evaluate_shadow_decisions(
         except Exception:  # noqa: BLE001
             cfg = Config({})
 
-    by_strategy: Dict[str, List[ShadowDecision]] = {}
+    by_key: Dict[Tuple[str, str], List[ShadowDecision]] = {}
     for d in decisions:
-        by_strategy.setdefault(d.strategy, []).append(d)
+        variant = d.variant or VARIANT_PHASE08_SHADOW
+        by_key.setdefault((d.strategy, variant), []).append(d)
 
     boards: Dict[str, StrategyScoreboard] = {}
-    for strategy, group in by_strategy.items():
+    for (strategy, variant), group in by_key.items():
         max_hold = resolve_max_hold_ms(strategy, cfg)
         outcomes: List[SimulatedOutcome] = []
         sources_seen: List[str] = []
@@ -668,15 +695,16 @@ def evaluate_shadow_decisions(
                 )
             sources_seen.append(src)
             outcomes.append(simulate_decision(d, candles, max_hold_ms=max_hold))
-        # Most common source label for the batch
         source_label = max(set(sources_seen), key=sources_seen.count) if sources_seen else ""
-        boards[strategy] = aggregate_scoreboard(
+        board = aggregate_scoreboard(
             strategy,
             outcomes,
             max_hold_ms=max_hold,
             candle_source=source_label,
             n_decisions=len(group),
+            variant=variant,
         )
+        boards[board.key] = board
     return boards
 
 
@@ -744,32 +772,52 @@ def persist_scoreboards(
 
 
 def format_scoreboard_table(boards: Dict[str, StrategyScoreboard]) -> str:
-    """Human-readable multi-strategy scoreboard."""
-    lines = [
-        IDEALIZED_FILL_DISCLAIMER,
-        "",
-        f"{'strategy':20} {'n_eval':>6} {'skip':>5} {'wins':>5} {'loss':>5} "
-        f"{'tout':>5} {'WR%':>6} {'PF':>6} {'E[R]':>7} {'PnL%':>8} {'avgHoldm':>8}",
-        "-" * 100,
-    ]
-    for name in sorted(boards):
-        b = boards[name]
+    """Human-readable multi-strategy scoreboard, variant sections separated."""
+    lines = [IDEALIZED_FILL_DISCLAIMER, ""]
+
+    def _emit_section(title: str, section_boards: List[StrategyScoreboard]) -> None:
+        if not section_boards:
+            return
+        lines.append(title)
         lines.append(
-            f"{name:20} {b.n_evaluated:6d} {b.n_skipped:5d} {b.wins:5d} {b.losses:5d} "
-            f"{b.timeouts:5d} {100.0 * b.win_rate:6.1f} {b.profit_factor:6.2f} "
-            f"{b.expectancy_r:7.3f} {100.0 * b.gross_hypothetical_pnl_pct:8.3f} "
-            f"{b.avg_hold_minutes:8.2f}"
+            f"{'strategy':20} {'variant':16} {'n_eval':>6} {'skip':>5} {'wins':>5} "
+            f"{'loss':>5} {'tout':>5} {'WR%':>6} {'PF':>6} {'E[R]':>7} "
+            f"{'PnL%':>8} {'avgHoldm':>8}"
         )
-        if b.skip_reasons:
-            reasons = ", ".join(f"{k}={v}" for k, v in sorted(b.skip_reasons.items()))
-            lines.append(f"  skip_reasons: {reasons}")
-            lines.append(f"  max_hold_ms={b.max_hold_ms_used}  candles={b.candle_source}")
-    return "\n".join(lines)
+        lines.append("-" * 120)
+        for b in section_boards:
+            lines.append(
+                f"{b.strategy:20} {b.variant:16} {b.n_evaluated:6d} {b.n_skipped:5d} "
+                f"{b.wins:5d} {b.losses:5d} {b.timeouts:5d} "
+                f"{100.0 * b.win_rate:6.1f} {b.profit_factor:6.2f} "
+                f"{b.expectancy_r:7.3f} {100.0 * b.gross_hypothetical_pnl_pct:8.3f} "
+                f"{b.avg_hold_minutes:8.2f}"
+            )
+            if b.skip_reasons:
+                reasons = ", ".join(
+                    f"{k}={v}" for k, v in sorted(b.skip_reasons.items())
+                )
+                lines.append(f"  skip_reasons: {reasons}")
+                lines.append(
+                    f"  max_hold_ms={b.max_hold_ms_used}  candles={b.candle_source}"
+                )
+        lines.append("")
+
+    ordered = sorted(boards.values(), key=lambda b: (b.variant, b.strategy))
+    shadow = [b for b in ordered if b.variant != VARIANT_ROUTER_BLOCKED]
+    blocked = [b for b in ordered if b.variant == VARIANT_ROUTER_BLOCKED]
+    _emit_section("=== phase08_shadow (true shadow strategies) ===", shadow)
+    _emit_section(
+        f"=== router_blocked — {ROUTER_BLOCKED_SECTION_LABEL} ===",
+        blocked,
+    )
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def run_evaluation(
     *,
     strategy: Optional[str] = None,
+    variant: Optional[str] = None,
     since_days: Optional[float] = None,
     research_db_path: Path = DEFAULT_RESEARCH_DB_PATH,
     live_db_path: Optional[Path] = LIVE_DB_DEFAULT,
@@ -782,7 +830,11 @@ def run_evaluation(
     since_ms: Optional[int] = None
     if since_days is not None:
         since_ms = int(time.time() * 1000 - float(since_days) * 86_400_000)
-    decisions = recorder.load_decisions(strategy=strategy, since_ms=since_ms)
+    decisions = recorder.load_decisions(
+        strategy=strategy,
+        variant=variant,
+        since_ms=since_ms,
+    )
     boards = evaluate_shadow_decisions(
         decisions,
         config=config,
@@ -795,6 +847,7 @@ def run_evaluation(
     return {
         "disclaimer": IDEALIZED_FILL_DISCLAIMER,
         "n_decisions_loaded": len(decisions),
+        "variant_filter": variant,
         "strategies": {k: v.to_dict() for k, v in boards.items()},
         "persisted": bool(persist),
         "table": format_scoreboard_table(boards),

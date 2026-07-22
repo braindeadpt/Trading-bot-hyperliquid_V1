@@ -86,13 +86,18 @@ def route_phase08_signals(
     symbol: str = "",
     seq_guard: Optional[SequentialContradictionGuard] = None,
     timestamp_ms: int = 0,
-) -> Tuple[List[Signal], Optional[str]]:
+) -> Tuple[List[Signal], Optional[str], List[Signal]]:
     """Filter signals by regime and reject contradictory entries.
 
-    Returns (allowed_signals, reject_reason).
+    Returns ``(allowed_signals, reject_reason, regime_blocked_signals)``.
+
+    ``regime_blocked_signals`` are the signals discarded solely because the
+    current ADX regime does not allow their strategy (the BLOCK log path).
+    Contradictory / sequential rejects are *not* included there — those
+    signals cleared the regime gate.
     """
     if not signals:
-        return [], None
+        return [], None, []
 
     regime = classify_market_regime(
         adx,
@@ -100,6 +105,7 @@ def route_phase08_signals(
         adx_trend_threshold=adx_trend_threshold,
     )
     allowed: List[Signal] = []
+    regime_blocked: List[Signal] = []
     for sig in signals:
         name = regime_strategy_name(sig)
         if regime_allows_strategy(name, regime):
@@ -113,9 +119,10 @@ def route_phase08_signals(
                 regime,
                 f"{adx:.1f}" if adx is not None else "?",
             )
+            regime_blocked.append(sig)
 
     if not allowed:
-        return [], f"regime_{regime}_no_allowed_strategies"
+        return [], f"regime_{regime}_no_allowed_strategies", regime_blocked
 
     sides = {s.side for s in allowed}
     if len(sides) > 1:
@@ -125,7 +132,7 @@ def route_phase08_signals(
             symbol,
             list(zip(names, [s.side for s in allowed])),
         )
-        return [], "contradictory_simultaneous_signals"
+        return [], "contradictory_simultaneous_signals", regime_blocked
 
     if seq_guard is not None and allowed:
         seq_reason = seq_guard.check(symbol, allowed[0].side, timestamp_ms)
@@ -136,6 +143,6 @@ def route_phase08_signals(
                 allowed[0].side,
                 seq_guard._last_side.get(symbol),
             )
-            return [], seq_reason
+            return [], seq_reason, regime_blocked
 
-    return allowed, None
+    return allowed, None, regime_blocked

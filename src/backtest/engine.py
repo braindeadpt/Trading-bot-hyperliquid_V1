@@ -741,7 +741,7 @@ class BacktestEngine:
             return None
 
         if self.cfg.use_phase08_regime_router:
-            routed, reject_reason = route_phase08_signals(
+            routed, reject_reason, _regime_blocked = route_phase08_signals(
                 signals,
                 event.adx_14,
                 adx_range_threshold=self.cfg.adx_range_threshold,

@@ -14,7 +14,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from src.data.database import (
     Candle as DBCandle,
@@ -80,7 +80,11 @@ from .strategy_governor import StrategyGovernor
 from .runtime_state import restore_runtime_state
 from .regime import apply_regime_weights as apply_regime_weights_fn
 from .regime import regime_strategy_name
-from .phase08_regime_router import route_phase08_signals, SequentialContradictionGuard
+from .phase08_regime_router import (
+    classify_market_regime,
+    route_phase08_signals,
+    SequentialContradictionGuard,
+)
 from src.utils.config import phase08_enabled
 from .order_router import resolve_order_routing
 from .signal_pipeline import PipelineContext, SignalPipeline
@@ -156,6 +160,10 @@ class TradingEngine:
                 len(self._shadow_strategies),
                 [s.name for s in self._shadow_strategies],
             )
+        # In-memory throttle for router_blocked counterfactual records.
+        # Key: (strategy, symbol, side) → last recorded timestamp_ms.
+        # Resets on process restart (acceptable — document in method docstring).
+        self._router_block_last_ms: Dict[Tuple[str, str, str], int] = {}
 
         p08 = config.get("strategy.phase08", {}) or {}
         self._phase08_enabled = phase08_enabled(config)
@@ -1753,15 +1761,28 @@ class TradingEngine:
 
             if signals:
                 if self._phase08_regime_router:
-                    routed, reject_reason = route_phase08_signals(
+                    adx_val = self._latest_adx.get(symbol)
+                    routed, reject_reason, regime_blocked = route_phase08_signals(
                         signals,
-                        self._latest_adx.get(symbol),
+                        adx_val,
                         adx_range_threshold=self._phase08_adx_range,
                         adx_trend_threshold=self._phase08_adx_trend,
                         symbol=symbol,
                         seq_guard=self._phase08_seq_guard,
                         timestamp_ms=event.timestamp_ms,
                     )
+                    if regime_blocked:
+                        regime_name = classify_market_regime(
+                            adx_val,
+                            adx_range_threshold=self._phase08_adx_range,
+                            adx_trend_threshold=self._phase08_adx_trend,
+                        )
+                        self._record_router_blocked_signals(
+                            regime_blocked,
+                            event=event,
+                            regime=regime_name,
+                            adx=adx_val,
+                        )
                     if reject_reason:
                         self._persist_decision(
                             decision_type="phase08_regime",
@@ -1847,6 +1868,109 @@ class TradingEngine:
                 await self._process_pending_funding_pair(event)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Deferred funding pair failed: %s", exc)
+
+    def _ensure_shadow_recorder(self) -> Optional[Any]:
+        """Return ShadowRecorder, lazily creating one if needed.
+
+        Router-blocked recording must work even when no shadow strategies are
+        configured. Failures return None — never raise into the signal loop.
+        """
+        if self._shadow_recorder is not None:
+            return self._shadow_recorder
+        try:
+            from src.research.shadow_recorder import ShadowRecorder
+
+            self._shadow_recorder = ShadowRecorder()
+            return self._shadow_recorder
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("ShadowRecorder lazy init failed: %s", exc)
+            return None
+
+    def _router_block_throttle_ms(self, strategy_name: str) -> int:
+        """Throttle window for router_blocked records (ms).
+
+        Prefer the strategy instance's ``SIGNAL_THROTTLE_MS``; default 30 min.
+        """
+        strat = self._find_strategy(strategy_name)
+        if strat is not None:
+            raw = getattr(strat, "SIGNAL_THROTTLE_MS", None)
+            if raw is not None:
+                try:
+                    return max(0, int(raw))
+                except (TypeError, ValueError):
+                    pass
+        return 1_800_000
+
+    def _record_router_blocked_signals(
+        self,
+        blocked: List[Signal],
+        *,
+        event: MarketEvent,
+        regime: str,
+        adx: Optional[float],
+    ) -> None:
+        """Persist counterfactual entries for regime-blocked execution signals.
+
+        Observability only — does not change routing. In-memory throttle keys
+        ``(strategy, symbol, side)`` so re-fires of the same setup within the
+        strategy's ``SIGNAL_THROTTLE_MS`` are not double-counted. Throttle state
+        resets on process restart.
+        """
+        if not blocked:
+            return
+        recorder = self._ensure_shadow_recorder()
+        if recorder is None:
+            return
+        from src.research.shadow_recorder import (
+            ShadowDecision,
+            build_enriched_market_snapshot,
+        )
+
+        for sig in blocked:
+            try:
+                strategy_name = self._signal_strategy_name(sig)
+                side = str(sig.side or "")
+                key = (strategy_name, event.symbol, side)
+                throttle_ms = self._router_block_throttle_ms(strategy_name)
+                last_ms = self._router_block_last_ms.get(key)
+                if last_ms is not None and (event.timestamp_ms - last_ms) < throttle_ms:
+                    continue
+
+                meta = dict(sig.metadata or {})
+                meta["router_regime"] = regime
+                meta["router_adx"] = adx
+                meta["router_block"] = True
+
+                recorder.record(
+                    ShadowDecision(
+                        symbol=event.symbol,
+                        strategy=strategy_name,
+                        variant="router_blocked",
+                        side=side,
+                        would_enter=True,
+                        reason=f"router_blocked:{regime}",
+                        timestamp_ms=event.timestamp_ms,
+                        market_snapshot=build_enriched_market_snapshot(
+                            price=event.price,
+                            confidence=float(sig.confidence),
+                            stop_loss_pct=float(sig.stop_loss_pct or 0.0),
+                            take_profit_pct=(
+                                float(sig.take_profit_pct)
+                                if sig.take_profit_pct is not None
+                                else None
+                            ),
+                            size_pct=float(sig.size_pct or 0.0),
+                            metadata=meta,
+                        ),
+                    )
+                )
+                self._router_block_last_ms[key] = event.timestamp_ms
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Router-blocked record failed for %s: %s",
+                    getattr(sig, "strategy", "?"),
+                    exc,
+                )
 
     def _evaluate_shadow_strategies(self, event: MarketEvent, symbol: str) -> None:
         """Run Phase08 shadow strategies and log hypothetical decisions.

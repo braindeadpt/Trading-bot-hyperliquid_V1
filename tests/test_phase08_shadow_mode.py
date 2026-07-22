@@ -95,18 +95,19 @@ def test_regime_router_vb_trend_vwap_range() -> None:
         strategy="VWAPDeviation", symbol="BTC", side="short",
         confidence=0.8, size_pct=0.01, stop_loss_pct=0.02, take_profit_pct=0.04,
     )
-    trend_only, _ = route_phase08_signals([vb_sig, vwap_sig], adx=30.0, symbol="BTC")
+    trend_only, _, _ = route_phase08_signals([vb_sig, vwap_sig], adx=30.0, symbol="BTC")
     assert len(trend_only) == 1
     assert trend_only[0].strategy == "VolatilityBreakout"
 
-    range_only, _ = route_phase08_signals([vb_sig, vwap_sig], adx=15.0, symbol="BTC")
+    range_only, _, _ = route_phase08_signals([vb_sig, vwap_sig], adx=15.0, symbol="BTC")
     assert len(range_only) == 1
     assert range_only[0].strategy == "VWAPDeviation"
     assert classify_market_regime(15.0) == "low_vol"
 
-    expansion, _ = route_phase08_signals([vb_sig], adx=22.0, symbol="BTC")
+    expansion, _, blocked_exp = route_phase08_signals([vb_sig], adx=22.0, symbol="BTC")
     assert len(expansion) == 1
     assert classify_market_regime(22.0) == "expansion"
+    assert blocked_exp == []
 
 
 def test_regime_router_rejects_contradictory_signals() -> None:
@@ -130,7 +131,7 @@ def test_regime_router_rejects_contradictory_signals() -> None:
         strategy="VolatilityBreakout", symbol="BTC", side="short",
         confidence=0.6, size_pct=0.01, stop_loss_pct=0.02, take_profit_pct=0.04,
     )
-    routed, reason = route_phase08_signals([a, b], adx=30.0, symbol="BTC")
+    routed, reason, _blocked = route_phase08_signals([a, b], adx=30.0, symbol="BTC")
     assert routed == []
     assert reason == "contradictory_simultaneous_signals"
 
@@ -295,6 +296,215 @@ def test_evaluate_shadow_strategies_persists_bracket_fields() -> None:
     assert boom.last is not None  # invoked; exception swallowed
 
 
+def _make_router_engine(*, throttle_ms: int = 300_000):
+    """Minimal engine with Phase08 regime router on and a VWAP-like stub."""
+    from src.core.engine import TradingEngine
+    from src.core.execution import ExecutionEngine
+    from src.core.risk_manager import RiskManager
+    from src.data.database import Database
+    from src.exchanges.hyperliquid_ws import DataBus
+    from src.research.shadow_recorder import ShadowDecision
+    from src.strategies.base import MarketEvent, Signal
+
+    class _VWAPStub:
+        name = "VWAPDeviation"
+
+        def __init__(self) -> None:
+            self.SIGNAL_THROTTLE_MS = throttle_ms
+            self._next: Signal | None = None
+
+        def on_data(self, event: MarketEvent) -> Signal | None:
+            return self._next
+
+    class _Cap:
+        def __init__(self) -> None:
+            self.rows: List[ShadowDecision] = []
+
+        def record(self, decision: ShadowDecision) -> None:
+            self.rows.append(decision)
+
+    class _Boom(_Cap):
+        def record(self, decision: ShadowDecision) -> None:
+            self.rows.append(decision)
+            raise RuntimeError("recorder must not break block path")
+
+    cfg = Config(
+        {
+            "symbols": ["BTC", "ETH"],
+            "mode": "paper",
+            "strategy": {
+                "cooldown": {"base_minutes": 30, "max_minutes": 120},
+                "phase08": {
+                    "enabled": True,
+                    "paper_only": True,
+                    "regime_router": {
+                        "enabled": True,
+                        "adx_range_threshold": 20.0,
+                        "adx_trend_threshold": 25.0,
+                    },
+                },
+            },
+            "risk": {"max_position_size_pct": 5.0, "leverage_max": 5.0},
+        }
+    )
+    stub = _VWAPStub()
+    db = Database(":memory:")
+    engine = TradingEngine(
+        cfg,
+        db,
+        DataBus(),
+        [stub],
+        RiskManager(cfg, db),
+        ExecutionEngine(cfg, db, "paper"),
+    )
+    assert engine._phase08_regime_router is True
+    cap = _Cap()
+    engine._shadow_recorder = cap  # type: ignore[assignment]
+    return engine, stub, cap, _Boom, MarketEvent, Signal
+
+
+def test_a_router_blocked_recorded_with_brackets_and_still_blocked() -> None:
+    """Blocked VWAP in expansion is recorded; routed list stays empty (no exec)."""
+    from src.core.phase08_regime_router import route_phase08_signals
+
+    engine, stub, cap, _Boom, MarketEvent, Signal = _make_router_engine()
+    sig = Signal(
+        strategy="VWAPDeviation",
+        symbol="BTC",
+        side="long",
+        confidence=0.9,
+        size_pct=0.01,
+        stop_loss_pct=0.015,
+        take_profit_pct=0.03,
+        metadata={"sigma": -4.64},
+    )
+    stub._next = sig
+    event = MarketEvent(symbol="BTC", price=100_000.0, timestamp_ms=10_000_000)
+    engine._latest_adx["BTC"] = 22.0  # expansion dead zone
+
+    routed, reason, blocked = route_phase08_signals(
+        [sig], 22.0, symbol="BTC",
+        adx_range_threshold=20.0, adx_trend_threshold=25.0,
+    )
+    assert routed == []
+    assert blocked == [sig]
+    assert reason is not None and "expansion" in reason
+
+    engine._record_router_blocked_signals(
+        blocked, event=event, regime="expansion", adx=22.0
+    )
+    assert len(cap.rows) == 1
+    row = cap.rows[0]
+    assert row.variant == "router_blocked"
+    assert row.would_enter is True
+    assert row.reason == "router_blocked:expansion"
+    assert row.strategy == "VWAPDeviation"
+    snap = row.market_snapshot or {}
+    assert snap["stop_loss_pct"] == pytest.approx(0.015)
+    assert snap["take_profit_pct"] == pytest.approx(0.03)
+    assert snap["size_pct"] == pytest.approx(0.01)
+    assert snap["metadata"]["router_regime"] == "expansion"
+    assert snap["metadata"]["router_adx"] == pytest.approx(22.0)
+    assert snap["metadata"]["sigma"] == pytest.approx(-4.64)
+    # Signal still blocked — we never called _process_entry_signal
+    assert routed == []
+
+
+def test_b_router_block_throttle_same_key() -> None:
+    engine, stub, cap, _Boom, MarketEvent, Signal = _make_router_engine(throttle_ms=300_000)
+    stub.SIGNAL_THROTTLE_MS = 300_000
+    event = MarketEvent(symbol="BTC", price=100.0, timestamp_ms=1_000_000)
+    sig = Signal(
+        strategy="VWAPDeviation", symbol="BTC", side="long",
+        confidence=0.8, size_pct=0.01, stop_loss_pct=0.01, take_profit_pct=0.02,
+    )
+    engine._record_router_blocked_signals([sig], event=event, regime="expansion", adx=22.0)
+    assert len(cap.rows) == 1
+
+    # Within window → not recorded
+    event2 = MarketEvent(symbol="BTC", price=101.0, timestamp_ms=1_000_000 + 299_999)
+    engine._record_router_blocked_signals([sig], event=event2, regime="expansion", adx=22.0)
+    assert len(cap.rows) == 1
+
+    # After window → recorded
+    event3 = MarketEvent(symbol="BTC", price=102.0, timestamp_ms=1_000_000 + 300_000)
+    engine._record_router_blocked_signals([sig], event=event3, regime="expansion", adx=22.0)
+    assert len(cap.rows) == 2
+
+
+def test_c_router_block_throttle_different_symbol_or_side() -> None:
+    engine, stub, cap, _Boom, MarketEvent, Signal = _make_router_engine(throttle_ms=1_800_000)
+    ts = 5_000_000
+    base = dict(confidence=0.8, size_pct=0.01, stop_loss_pct=0.01, take_profit_pct=0.02)
+    sig_btc_long = Signal(strategy="VWAPDeviation", symbol="BTC", side="long", **base)
+    sig_eth_long = Signal(strategy="VWAPDeviation", symbol="ETH", side="long", **base)
+    sig_btc_short = Signal(strategy="VWAPDeviation", symbol="BTC", side="short", **base)
+
+    engine._record_router_blocked_signals(
+        [sig_btc_long],
+        event=MarketEvent(symbol="BTC", price=100.0, timestamp_ms=ts),
+        regime="expansion",
+        adx=22.0,
+    )
+    engine._record_router_blocked_signals(
+        [sig_eth_long],
+        event=MarketEvent(symbol="ETH", price=3000.0, timestamp_ms=ts + 1),
+        regime="expansion",
+        adx=22.0,
+    )
+    engine._record_router_blocked_signals(
+        [sig_btc_short],
+        event=MarketEvent(symbol="BTC", price=100.0, timestamp_ms=ts + 2),
+        regime="expansion",
+        adx=22.0,
+    )
+    assert len(cap.rows) == 3
+    keys = {(r.strategy, r.symbol, r.side) for r in cap.rows}
+    assert keys == {
+        ("VWAPDeviation", "BTC", "long"),
+        ("VWAPDeviation", "ETH", "long"),
+        ("VWAPDeviation", "BTC", "short"),
+    }
+
+
+def test_d_router_block_recorder_exception_does_not_break_loop() -> None:
+    engine, stub, cap, Boom, MarketEvent, Signal = _make_router_engine()
+    boom = Boom()
+    engine._shadow_recorder = boom  # type: ignore[assignment]
+    sig = Signal(
+        strategy="VWAPDeviation", symbol="BTC", side="long",
+        confidence=0.8, size_pct=0.01, stop_loss_pct=0.01, take_profit_pct=0.02,
+    )
+    # Must not raise
+    engine._record_router_blocked_signals(
+        [sig],
+        event=MarketEvent(symbol="BTC", price=100.0, timestamp_ms=1),
+        regime="expansion",
+        adx=22.0,
+    )
+    assert len(boom.rows) == 1
+
+
+def test_f_router_block_no_recorder_no_crash() -> None:
+    engine, stub, cap, _Boom, MarketEvent, Signal = _make_router_engine()
+    engine._shadow_recorder = None
+    # Force lazy init to fail by monkeypatching
+    def _fail() -> None:
+        raise RuntimeError("no db")
+
+    engine._ensure_shadow_recorder = lambda: None  # type: ignore[method-assign]
+    sig = Signal(
+        strategy="VWAPDeviation", symbol="BTC", side="long",
+        confidence=0.8, size_pct=0.01, stop_loss_pct=0.01, take_profit_pct=0.02,
+    )
+    engine._record_router_blocked_signals(
+        [sig],
+        event=MarketEvent(symbol="BTC", price=100.0, timestamp_ms=1),
+        regime="expansion",
+        adx=22.0,
+    )
+
+
 if __name__ == "__main__":
     test_phase08_factory_splits_execution_and_shadow()
     print("  factory split OK")
@@ -316,4 +526,14 @@ if __name__ == "__main__":
     print("  build_live_strategies OK")
     test_evaluate_shadow_strategies_persists_bracket_fields()
     print("  shadow enrichment OK")
+    test_a_router_blocked_recorded_with_brackets_and_still_blocked()
+    print("  router_blocked record OK")
+    test_b_router_block_throttle_same_key()
+    print("  throttle OK")
+    test_c_router_block_throttle_different_symbol_or_side()
+    print("  throttle key OK")
+    test_d_router_block_recorder_exception_does_not_break_loop()
+    print("  recorder exception OK")
+    test_f_router_block_no_recorder_no_crash()
+    print("  no recorder OK")
     print("All Phase08 tests passed.")
