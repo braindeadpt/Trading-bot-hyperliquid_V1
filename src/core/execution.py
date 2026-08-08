@@ -196,6 +196,10 @@ class ExecutionEngine:
         # Phase 01: symbols blocked after ambiguous HL responses
         self._blocked_symbols: Dict[str, str] = {}
 
+        # Kill-switch latch: prevents OMS finalize paths from reinserting
+        # positions after an emergency flatten. Cleared on open().
+        self._kill_switch_active: bool = False
+
         # Phase 01: idempotency — client order ids already submitted
         self._submitted_client_order_ids: Dict[str, int] = {}
 
@@ -274,6 +278,10 @@ class ExecutionEngine:
     def unblock_symbol(self, symbol: str) -> None:
         self._blocked_symbols.pop(symbol.upper(), None)
 
+    def get_blocked_symbols(self) -> List[str]:
+        """Return currently blocked symbols (uppercase)."""
+        return list(self._blocked_symbols.keys())
+
     def _require_live_execution_ready(self) -> None:
         """Fail closed when live prerequisites are missing."""
         if self._rest_client is None:
@@ -325,6 +333,8 @@ class ExecutionEngine:
 
     async def open(self) -> None:
         """Prepare the execution engine (open REST session if needed)."""
+        # Re-arm after kill_switch: a fresh open() is the explicit reset point.
+        self._kill_switch_active = False
         if self._mode in ("testnet", "mainnet"):
             from src.exchanges.hyperliquid_rest import HyperliquidRESTClient
             from src.exchanges.hyperliquid_live import HyperliquidLiveClient, resolve_private_key
@@ -356,14 +366,31 @@ class ExecutionEngine:
                 )
 
     async def close(self) -> None:
-        """Gracefully close any open REST session."""
+        """Gracefully close any open REST / live sessions."""
         await self.stop_oms_loop()
-        self._live_client = None
-        self._live_signing_ready = False
+        if self._live_client is not None:
+            try:
+                close_fn = getattr(self._live_client, "close", None)
+                if close_fn is not None:
+                    maybe = close_fn()
+                    if asyncio.iscoroutine(maybe) or asyncio.isfuture(maybe):
+                        await maybe
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ExecutionEngine live client close failed: %s", exc)
+            finally:
+                self._live_client = None
+                self._live_signing_ready = False
+        else:
+            self._live_signing_ready = False
+
         if self._rest_client is not None:
-            await self._rest_client.close()
-            self._rest_client = None
-            logger.info("ExecutionEngine REST client closed")
+            try:
+                await self._rest_client.close()
+                logger.info("ExecutionEngine REST client closed")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ExecutionEngine REST client close failed: %s", exc)
+            finally:
+                self._rest_client = None
 
     # ------------------------------------------------------------------
     # Entry
@@ -509,7 +536,7 @@ class ExecutionEngine:
         order_type = str(meta.get("order_type", "market"))
         entry_fee_pct = safe_float(meta.get("entry_fee_pct"), self._taker_fee_pct)
 
-        size = safe_float(signal.metadata.get("calculated_size", 0.0))
+        size = safe_float(meta.get("calculated_size", 0.0))
         if size <= 0.0:
             logger.error("enter_position: zero size for %s", signal.symbol)
             raise ValueError(f"Calculated position size is zero for {signal.symbol}")
@@ -553,6 +580,17 @@ class ExecutionEngine:
                 self._max_position_size_pct * 100.0,
                 self._leverage_max,
             )
+
+        # Re-validate after clamp: non-positive capital → max_notional ≤ 0 → size ≤ 0
+        if size <= 0.0:
+            logger.error(
+                "enter_position: non-positive size after notional clamp for %s "
+                "(capital=%.4f, max_notional=%.4f) — capital was non-positive",
+                signal.symbol,
+                capital,
+                max_notional,
+            )
+            raise ValueError(f"Calculated position size is zero for {signal.symbol}")
 
         notional = fill_price * size
         entry_fee = notional * entry_fee_pct
@@ -880,6 +918,7 @@ class ExecutionEngine:
             except (LiveExecutionError, AmbiguousOrderResponse):
                 async with self._lock:
                     self._open_trades[position.symbol] = open_trade
+                await self._restore_protection_after_failed_close(position, open_trade)
                 raise
             except Exception as exc:
                 logger.error(
@@ -891,6 +930,7 @@ class ExecutionEngine:
                 )
                 async with self._lock:
                     self._open_trades[position.symbol] = open_trade
+                await self._restore_protection_after_failed_close(position, open_trade)
                 raise LiveExecutionError(str(exc)) from exc
 
         exit_record = TradeExit(
@@ -943,9 +983,6 @@ class ExecutionEngine:
 
         Called by the engine on every price tick so that the portfolio's
         unrealized PnL stays current.
-
-        CRIT-001 FIX: Validate that the price symbol matches the trade symbol
-        to prevent cross-symbol price corruption.
         """
         async with self._lock:
             for symbol, price in prices.items():
@@ -955,14 +992,6 @@ class ExecutionEngine:
                     continue
                 trade = self._open_trades.get(symbol)
                 if trade is not None:
-                    # CRIT-001: Validate symbol match before updating
-                    if trade.symbol != symbol:
-                        logger.critical(
-                            "CRIT-001: SYMBOL MISMATCH — trade.symbol=%s vs price.symbol=%s. "
-                            "Rejecting price update to prevent cross-contamination.",
-                            trade.symbol, symbol,
-                        )
-                        continue
                     # Mutate in-place — TradeResult is mutable (dataclass, not frozen)
                     trade.exit_price = price_f  # Re-use field as "current mark price"
 
@@ -1105,12 +1134,117 @@ class ExecutionEngine:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("cancel_native_protection %s oid=%s: %s", symbol, oid, exc)
 
+    async def _restore_protection_after_failed_close(
+        self,
+        position: Position,
+        open_trade: TradeResult,
+    ) -> None:
+        """Re-arm native SL/TP after a failed live close left the position open.
+
+        Protection was cancelled before the close submit; on failure the
+        position must not remain naked on the exchange.
+        """
+        order_id = str(open_trade.exchange_order_id or "")
+        record = {
+            "symbol": position.symbol,
+            "trade_id": open_trade.trade_id,
+            "side": position.side,
+            "size": position.size,
+        }
+        if not self._native_protection_enabled or self._protection_manager is None:
+            logger.critical(
+                "CLOSE FAILED — protection NOT restored for %s trade_id=%s "
+                "(no protection manager / native protection disabled). "
+                "LIVE CAPITAL MAY BE UNPROTECTED.",
+                position.symbol,
+                open_trade.trade_id,
+            )
+            self._emit_oms_alert("close_failed_protection_not_restored", order_id, record)
+            return
+        try:
+            result = await self._protection_manager.ensure_protection(
+                position,
+                filled_size=position.size,
+                stop_price=position.stop_loss_price,
+                take_profit_price=position.take_profit_price,
+                trade_id=open_trade.trade_id,
+            )
+            needs_sl = bool(position.stop_loss_price and position.stop_loss_price > 0)
+            restored_ok = not result.errors and (not needs_sl or bool(result.sl_order_id))
+            if restored_ok:
+                logger.error(
+                    "CLOSE FAILED — protection restored for %s trade_id=%s "
+                    "(sl=%s tp=%s)",
+                    position.symbol,
+                    open_trade.trade_id,
+                    result.sl_order_id,
+                    result.tp_order_id,
+                )
+                self._emit_oms_alert(
+                    "close_failed_protection_restored", order_id, record,
+                )
+            else:
+                logger.critical(
+                    "CLOSE FAILED — protection could NOT be restored for %s "
+                    "trade_id=%s errors=%s. LIVE CAPITAL MAY BE UNPROTECTED.",
+                    position.symbol,
+                    open_trade.trade_id,
+                    result.errors,
+                )
+                self._emit_oms_alert(
+                    "close_failed_protection_not_restored", order_id, record,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.critical(
+                "CLOSE FAILED — protection restore raised for %s trade_id=%s: %s. "
+                "LIVE CAPITAL MAY BE UNPROTECTED.",
+                position.symbol,
+                open_trade.trade_id,
+                exc,
+                exc_info=True,
+            )
+            self._emit_oms_alert(
+                "close_failed_protection_not_restored", order_id, record,
+            )
+
     async def kill_switch(self) -> KillSwitchResult:
-        """Cancel all orders, flatten positions, confirm exchange is flat."""
+        """Cancel all orders, flatten positions, confirm exchange is flat.
+
+        Always latches ``_kill_switch_active``, stops the OMS poller, and
+        clears ``_live_orders`` so finalize paths cannot resurrect positions.
+        Paper mode clears local state only (``exchange_flat=True``).
+        Re-arm via :meth:`open` (or process restart).
+        """
         result = KillSwitchResult()
+        self._kill_switch_active = True
+        try:
+            await self.stop_oms_loop()
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"oms_stop:{exc}")
+        self._live_orders.clear()
+
         if self._mode not in ("testnet", "mainnet"):
+            if self._portfolio is not None:
+                try:
+                    mem = await self._portfolio.positions
+                    for sym in list(mem.keys()):
+                        try:
+                            await self._portfolio.cancel_position(sym)
+                            result.positions_closed.append(sym)
+                        except Exception as exc:  # noqa: BLE001
+                            result.errors.append(f"local_cancel_{sym}:{exc}")
+                except Exception as exc:  # noqa: BLE001
+                    result.errors.append(f"portfolio_positions:{exc}")
+            async with self._lock:
+                self._open_trades.clear()
             result.exchange_flat = True
+            logger.warning(
+                "KILL SWITCH (paper): local positions cleared, OMS stopped, "
+                "errors=%d — re-arm via open() or restart",
+                len(result.errors),
+            )
             return result
+
         self._require_live_execution_ready()
         try:
             result.orders_cancelled = await self._live_client.cancel_all_orders()
@@ -1156,7 +1290,8 @@ class ExecutionEngine:
             self._open_trades.clear()
 
         logger.warning(
-            "KILL SWITCH complete: cancelled=%d closed=%s flat=%s errors=%d",
+            "KILL SWITCH complete: cancelled=%d closed=%s flat=%s errors=%d "
+            "(OMS stopped; re-arm via open() or restart)",
             result.orders_cancelled,
             result.positions_closed,
             result.exchange_flat,
@@ -1389,7 +1524,11 @@ class ExecutionEngine:
 
         snapshot = await self.fetch_order_snapshot(order_id, record)
         now_ts = time.time()
-        age_s = now_ts - safe_float(record.get("timestamp", now_ts), now_ts)
+        submitted_ms = int(record.get("submitted_at_ms") or 0)
+        if submitted_ms > 0:
+            age_s = now_ts - (submitted_ms / 1000.0)
+        else:
+            age_s = now_ts - safe_float(record.get("timestamp", now_ts), now_ts)
 
         event_key = (
             f"{snapshot.status}:{snapshot.filled_size:.8f}:"
@@ -1490,6 +1629,15 @@ class ExecutionEngine:
     ) -> None:
         if record.get("terminal_handled"):
             return
+        if self._kill_switch_active:
+            logger.critical(
+                "OMS: kill_switch active — refusing to reinsert filled order %s "
+                "symbol=%s trade_id=%s",
+                order_id, record.get("symbol"), record.get("trade_id"),
+            )
+            self._live_orders.pop(order_id, None)
+            record["terminal_handled"] = True
+            return
         record["terminal_handled"] = True
         self._fire_order_callbacks(order_id, ORDER_STATUS_FILLED, record)
         trade_id = int(record.get("trade_id", 0))
@@ -1574,6 +1722,14 @@ class ExecutionEngine:
         reason: str,
     ) -> None:
         """Keep confirmed partial fill; drop residual tracking only."""
+        if self._kill_switch_active:
+            logger.critical(
+                "OMS: kill_switch active — refusing to reinsert partial order %s "
+                "symbol=%s trade_id=%s",
+                order_id, record.get("symbol"), record.get("trade_id"),
+            )
+            self._live_orders.pop(order_id, None)
+            return
         trade_id = int(record.get("trade_id", 0))
         symbol = str(record.get("symbol", ""))
         avg_px = safe_float(snapshot.avg_fill_price, safe_float(record.get("price")))

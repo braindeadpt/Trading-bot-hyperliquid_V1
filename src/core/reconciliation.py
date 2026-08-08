@@ -172,6 +172,38 @@ class ExchangeReconciler:
                 if not positions_match(loc.side, loc.size, ex):
                     report.mismatches.append(sym)
                     await self._handle_mismatch(sym, loc, ex, report)
+                elif executor is not None and hasattr(executor, "is_symbol_blocked"):
+                    # Confirmed local↔exchange agreement — clear ambiguous-response blocks
+                    if executor.is_symbol_blocked(sym):
+                        executor.unblock_symbol(sym)
+                        report.actions.append(f"unblocked_consistent:{sym}")
+                        logger.info(
+                            "RECONCILE unblocked %s — local and exchange positions agree",
+                            sym,
+                        )
+
+            # Both-flat agreement: blocked symbol with no local and no exchange position
+            if executor is not None and hasattr(executor, "get_blocked_symbols"):
+                ex_upper = {s.upper() for s in ex_syms}
+                loc_upper = {s.upper() for s in loc_syms}
+                mismatch_upper = {s.upper() for s in report.mismatches}
+                orphan_ex_upper = {s.upper() for s in report.orphan_exchange}
+                orphan_loc_upper = {s.upper() for s in report.orphan_local}
+                for sym in list(executor.get_blocked_symbols()):
+                    key = sym.upper()
+                    if (
+                        key not in ex_upper
+                        and key not in loc_upper
+                        and key not in mismatch_upper
+                        and key not in orphan_ex_upper
+                        and key not in orphan_loc_upper
+                    ):
+                        executor.unblock_symbol(sym)
+                        report.actions.append(f"unblocked_both_flat:{sym}")
+                        logger.info(
+                            "RECONCILE unblocked %s — both local and exchange flat",
+                            sym,
+                        )
 
             # Detect trigger closes: local open but exchange flat handled above;
             # also check fills for recently closed trades when we had triggers.
