@@ -29,6 +29,7 @@ STRATEGY_FEED_MAP: Dict[str, RequiredFeeds] = {
     # OHLC-only — Tier A with HL candles
     "VolatilityBreakout": RequiredFeeds.HL_CANDLES,
     "VWAPDeviation": RequiredFeeds.HL_CANDLES,
+    "VWAPTrend": RequiredFeeds.HL_CANDLES,  # research-only; not in live ensemble
     "TrendFollow": RequiredFeeds.HL_CANDLES,
     "SmartMoneyFlow": RequiredFeeds.HL_CANDLES,
     "MeanReversion": RequiredFeeds.HL_CANDLES,
@@ -251,21 +252,15 @@ def probe_feed_availability(
         trade_tape = False
 
     funding_pts = 0
-    for r in db.get_funding_history(symbol, limit=500_000):
-        ts = int(r["timestamp"])
-        if start_ms is not None and ts < start_ms:
-            continue
-        if end_ms is not None and ts > end_ms:
-            continue
+    for r in db.get_funding_history(
+        symbol, limit=500_000, start_ms=start_ms, end_ms=end_ms,
+    ):
         if r.get("current") is not None:
             funding_pts += 1
     oi_pts = 0
-    for r in db.get_oi_history(symbol, limit=500_000):
-        ts = int(r["timestamp"])
-        if start_ms is not None and ts < start_ms:
-            continue
-        if end_ms is not None and ts > end_ms:
-            continue
+    for r in db.get_oi_history(
+        symbol, limit=500_000, start_ms=start_ms, end_ms=end_ms,
+    ):
         if r.get("oi_total") is not None:
             oi_pts += 1
 

@@ -137,17 +137,14 @@ def evaluate_data_contract(
         lo = start_ms or (candles[0].timestamp_ms if candles else 0)
         hi = end_ms or (candles[-1].timestamp_ms if candles else 0)
 
-        funding_rows = db.get_funding_history(sym, limit=500_000)
+        funding_rows = db.get_funding_history(
+            sym, limit=500_000, start_ms=start_ms, end_ms=end_ms,
+        )
         funding_pts: List[tuple] = []
         for r in funding_rows:
-            ts = int(r["timestamp"])
-            if start_ms is not None and ts < start_ms:
-                continue
-            if end_ms is not None and ts > end_ms:
-                continue
             if r.get("current") is None:
                 continue
-            funding_pts.append((ts, float(r["current"])))
+            funding_pts.append((int(r["timestamp"]), float(r["current"])))
         fund_report = audit_auxiliary_feed(
             sym,
             "funding",
@@ -160,17 +157,14 @@ def evaluate_data_contract(
         )
         reports.append(fund_report)
 
-        oi_rows = db.get_oi_history(sym, limit=500_000)
+        oi_rows = db.get_oi_history(
+            sym, limit=500_000, start_ms=start_ms, end_ms=end_ms,
+        )
         oi_pts: List[tuple] = []
         for r in oi_rows:
-            ts = int(r["timestamp"])
-            if start_ms is not None and ts < start_ms:
-                continue
-            if end_ms is not None and ts > end_ms:
-                continue
             if r.get("oi_total") is None:
                 continue
-            oi_pts.append((ts, float(r["oi_total"])))
+            oi_pts.append((int(r["timestamp"]), float(r["oi_total"])))
         oi_report = audit_auxiliary_feed(
             sym,
             "oi",

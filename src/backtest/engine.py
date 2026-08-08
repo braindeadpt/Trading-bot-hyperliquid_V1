@@ -80,6 +80,9 @@ class BacktestConfig:
     cooldown_max_ms: int = 120 * 60_000   # v3.1.19: 2h max
     cooldown_multiplier: float = 2.0      # v3.1.19: double per consecutive loss
     max_daily_trades: int = 5
+    # Auto warm-up lookback before start_ms so indicator state matches live
+    # restore (~200×15m). ChecklistMeta needs ≥103×15m (SFP_LOOKBACK+3).
+    warmup_15m_bars: int = 110
     # v3.1.19: live parity toggles — the new gates can be disabled per
     # backtest run (e.g. when sweeping parameters and you want to see
     # the unfiltered signal set).
@@ -92,6 +95,27 @@ class BacktestConfig:
     use_phase08_regime_router: bool = False
     phase08_seq_block_ms: int = 3_600_000
 
+
+# Candle-range OIR proxy vs live entry_oir (n=265, scripts/_calibrate_oir_proxy.py):
+# corr≈0.24, gate_agree≈56%, linear cal does not recover L2 — ChecklistMeta is
+# Tier B in candle replay. Keep proxy on (None ≠ live real OIR); w_oir=0.5 on
+# score_threshold≈4.0 ≈ 12.5% of score may bias fills vs live.
+OIR_PROXY_CALIBRATION: Dict[str, Any] = {
+    "verdict": "unusable",
+    "n_paired": 265,
+    "corr": 0.2429,
+    "median_abs_err": 0.5602,
+    "same_sign_pct": 58.5,
+    "oir_gate_agree_pct": 55.8,
+    "w_oir": 0.5,
+    "score_threshold_ref": 4.0,
+    "w_oir_score_share_pct": 12.5,
+    "tier": "B",
+    "note": (
+        "Candle-range OIR proxy cannot reconstruct live L2; keep proxy active "
+        "for directional bias closer than None, but label ChecklistMeta Tier B."
+    ),
+}
 
 @dataclass
 class _OpenPosition:
@@ -255,8 +279,25 @@ class BacktestEngine:
         """Execute backtest over all configured symbols.
 
         Returns dict with keys: equity_curve, trades, metrics, capital, total_return.
+
+        When ``start_ms`` is set, candle/funding/OI series are loaded with an
+        automatic warm-up lookback (``warmup_15m_bars`` × 15m) before that
+        timestamp so strategy state matches live candle restore. Entries are
+        only opened at/after ``start_ms``.
         """
-        timeline = self._build_timeline(start_ms, end_ms)
+        trade_start_ms = start_ms
+        warmup_ms = max(0, int(self.cfg.warmup_15m_bars)) * 15 * 60_000
+        data_start_ms = (
+            int(start_ms) - warmup_ms if start_ms is not None else None
+        )
+        if warmup_ms > 0 and start_ms is not None:
+            logger.info(
+                "Backtest warm-up: load from %s (%d×15m bars before trade start)",
+                data_start_ms,
+                int(self.cfg.warmup_15m_bars),
+            )
+
+        timeline = self._build_timeline(data_start_ms, end_ms)
         if not timeline:
             raise ValueError(
                 f"No 1m candles found for {self.symbols} in the requested range"
@@ -287,7 +328,7 @@ class BacktestEngine:
         self._price_index = build_price_index(timeline)
 
         symbol_data = {
-            sym: self._load_symbol_data(sym, start_ms, end_ms)
+            sym: self._load_symbol_data(sym, data_start_ms, end_ms)
             for sym in self.symbols
         }
 
@@ -317,6 +358,9 @@ class BacktestEngine:
         last_snapshot_ts = 0
 
         for idx, (ts, symbol, c1m) in enumerate(timeline):
+            if self._risk_manager is not None:
+                self._risk_manager.set_sim_time(ts)
+
             data = symbol_data[symbol]
             prev_bar = self._pipeline_ctx.last_bar_ts.get(symbol)
             if is_cross_gap(prev_bar, ts, max_gap_ms=self._research_gap_ms):
@@ -339,8 +383,11 @@ class BacktestEngine:
             self._update_excursions(symbol, c1m, ts)
             capital = self._process_exits(event, capital, c1m)
 
+            in_warmup = trade_start_ms is not None and ts < trade_start_ms
+
             if (
-                symbol not in self.positions_by_symbol
+                not in_warmup
+                and symbol not in self.positions_by_symbol
                 and len(self.positions) < self.cfg.max_positions
             ):
                 if self._vol_circuit is not None and event.candle_1h is not None:
@@ -427,6 +474,14 @@ class BacktestEngine:
                         )
                 day = self._current_day or time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
                 self._daily_trade_count[day] = self._daily_trade_count.get(day, 0) + 1
+            elif in_warmup:
+                # Advance strategy / indicator state without opening entries.
+                if self._vol_circuit is not None and event.candle_1h is not None:
+                    atr = self._atr_pct(event.candle_1h)
+                    if atr is not None:
+                        self._vol_circuit.update(symbol, atr, ts)
+                self._roll_day(ts)
+                self._collect_entry_signal(event)
 
             self._pipeline_ctx.last_bar_ts[symbol] = ts
 
@@ -472,11 +527,24 @@ class BacktestEngine:
             data_source = (
                 self._data_contract.data_source if self._data_contract else "sqlite_candles"
             )
+            strat_names = self._active_strategy_names()
+            oir_gated = any(
+                n in {"ChecklistMeta", "OrderBookScalper", "CVDOrderFlow"}
+                for n in strat_names
+            )
+            manifest_extra: Dict[str, Any] = {
+                "warmup_15m_bars": int(self.cfg.warmup_15m_bars),
+                "trade_start_ms": trade_start_ms,
+                "data_start_ms": data_start_ms,
+            }
+            if self.cfg.use_microstructure_proxy:
+                manifest_extra["oir_proxy_calibration"] = dict(OIR_PROXY_CALIBRATION)
             manifest = build_run_manifest(
                 self._full_config,
                 symbols=self.symbols,
                 data_source=data_source,
                 use_microstructure_proxy=self.cfg.use_microstructure_proxy,
+                oir_gated_strategies_active=oir_gated,
                 kelly_effective=resolve_kelly_enabled(self._full_config, for_backtest=True),
                 tca_mode=tca_mode,
                 data_contract_tier=dc_tier,
@@ -484,6 +552,7 @@ class BacktestEngine:
                 gate_manifest=(
                     self._pipeline.gate_manifest() if self._pipeline is not None else None
                 ),
+                extra=manifest_extra,
             )
 
         return {
@@ -565,7 +634,9 @@ class BacktestEngine:
     ) -> List[Tuple[int, float, float]]:
         if not self.cfg.use_funding:
             return []
-        rows = self.db.get_funding_history(symbol, limit=500_000)
+        rows = self.db.get_funding_history(
+            symbol, limit=500_000, start_ms=start_ms, end_ms=end_ms,
+        )
         out: List[Tuple[int, float, float]] = []
         for r in rows:
             ts = int(r["timestamp"])
@@ -592,7 +663,9 @@ class BacktestEngine:
     ) -> List[Tuple[int, float, float]]:
         if not self.cfg.use_oi:
             return []
-        rows = self.db.get_oi_history(symbol, limit=500_000)
+        rows = self.db.get_oi_history(
+            symbol, limit=500_000, start_ms=start_ms, end_ms=end_ms,
+        )
         out: List[Tuple[int, float, float]] = []
         for r in rows:
             ts = int(r["timestamp"])
@@ -1353,5 +1426,6 @@ def build_backtest_config_from_yaml(cfg: Union[Config, Dict[str, Any]]) -> Backt
         cooldown_max_ms=int(safe_float(cooldown_cfg.get("max_minutes", 240)) * 60_000),
         cooldown_multiplier=safe_float(cooldown_cfg.get("multiplier", 2.0)),
         max_daily_trades=int(cfg.get("risk.max_daily_trades", 5)),
+        warmup_15m_bars=int(cfg.get("backtest.warmup_15m_bars", 110)),
         use_phase08_regime_router=use_phase08_router,
     )

@@ -1315,15 +1315,29 @@ class Database:
             conn.executemany(sql, params)
             conn.commit()
 
-    def get_funding_history(self, symbol: str, limit: int = 500) -> List[Dict[str, Any]]:
-        sql = """
-            SELECT * FROM funding_history
-            WHERE symbol = ?
-            ORDER BY timestamp DESC
-            LIMIT ?
-        """
+    def get_funding_history(
+        self,
+        symbol: str,
+        limit: int = 500,
+        start_ms: Optional[int] = None,
+        end_ms: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses = ["symbol = ?"]
+        params: List[Any] = [symbol]
+        if start_ms is not None:
+            clauses.append("timestamp >= ?")
+            params.append(int(start_ms))
+        if end_ms is not None:
+            clauses.append("timestamp <= ?")
+            params.append(int(end_ms))
+        sql = (
+            "SELECT * FROM funding_history WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY timestamp DESC LIMIT ?"
+        )
+        params.append(int(limit))
         with self._conn():
-            cur = self._conn().execute(sql, (symbol, limit))
+            cur = self._conn().execute(sql, params)
             rows = cur.fetchall()
         return [dict(row) for row in rows]
 
@@ -1357,15 +1371,29 @@ class Database:
             conn.executemany(sql, params)
             conn.commit()
 
-    def get_oi_history(self, symbol: str, limit: int = 500) -> List[Dict[str, Any]]:
-        sql = """
-            SELECT * FROM oi_history
-            WHERE symbol = ?
-            ORDER BY timestamp DESC
-            LIMIT ?
-        """
+    def get_oi_history(
+        self,
+        symbol: str,
+        limit: int = 500,
+        start_ms: Optional[int] = None,
+        end_ms: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses = ["symbol = ?"]
+        params: List[Any] = [symbol]
+        if start_ms is not None:
+            clauses.append("timestamp >= ?")
+            params.append(int(start_ms))
+        if end_ms is not None:
+            clauses.append("timestamp <= ?")
+            params.append(int(end_ms))
+        sql = (
+            "SELECT * FROM oi_history WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY timestamp DESC LIMIT ?"
+        )
+        params.append(int(limit))
         with self._conn():
-            cur = self._conn().execute(sql, (symbol, limit))
+            cur = self._conn().execute(sql, params)
             rows = cur.fetchall()
         return [dict(row) for row in rows]
 

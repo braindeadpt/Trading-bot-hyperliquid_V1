@@ -9,13 +9,17 @@ exactly.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from src.strategies.base import Position, Signal
 from src.utils.config import Config
 from src.utils.helpers import safe_float, safe_divide, clamp, utc_now
 
 logger = logging.getLogger(__name__)
+
+# Clock returning a timezone-aware UTC datetime (live: wall clock; backtest: sim).
+NowFn = Callable[[], datetime]
 
 
 class RiskManager:
@@ -31,6 +35,12 @@ class RiskManager:
       - Max position size = 20% of capital
       - Stop distance = 2×ATR (minimum 0.5% of price)
       - Overcrowded penalty: confidence reduced by 20% if overcrowded_score > 0.7
+
+    Day-boundary circuits (stop streak, daily DD, CB auto-reset) use
+    ``_utc_day()``, which follows wall-clock via ``utc_now`` in live, or the
+    simulation clock when ``set_sim_time`` / ``now_fn`` is injected by the
+    backtest engine. Using wall-clock inside a multi-day backtest leaves
+    daily circuits permanently tripped after the first simulated day.
     """
 
     # Hard-coded safety constants
@@ -58,6 +68,12 @@ it is not used directly in the current implementation.
         self._config = config
         self._db = db
         self._notifier = notifier
+        # Simulation clock (None → wall-clock utc_now). BacktestEngine calls
+        # set_sim_time(ts) every bar so daily circuits reset on sim midnight.
+        # ``_now_fn`` is None by default so ``utc_now`` is resolved at call
+        # time (keeps unittest patches of ``risk_manager.utc_now`` working).
+        self._sim_time_ms: Optional[int] = None
+        self._now_fn: Optional[NowFn] = None
 
         # Allow config overrides (e.g. backtest tuning)
         self._max_total_positions = int(
@@ -153,6 +169,38 @@ it is not used directly in the current implementation.
         self._max_drawdown_observed: float = 0.0
 
     # ------------------------------------------------------------------
+    # Simulation clock (live defaults to wall-clock utc_now)
+    # ------------------------------------------------------------------
+
+    def set_sim_time(self, timestamp_ms: Optional[int]) -> None:
+        """Advance the risk day-boundary clock to *timestamp_ms* (UTC ms).
+
+        Pass ``None`` to revert to wall-clock. BacktestEngine must call this
+        once per bar before any risk gate / PnL / circuit update.
+        """
+        self._sim_time_ms = int(timestamp_ms) if timestamp_ms is not None else None
+
+    def set_now_fn(self, now_fn: Optional[NowFn]) -> None:
+        """Inject a custom clock callable (returns timezone-aware UTC datetime).
+
+        Pass ``None`` to revert to module ``utc_now`` (resolved at call time).
+        """
+        self._now_fn = now_fn
+
+    def _clock_now(self) -> datetime:
+        if self._sim_time_ms is not None:
+            return datetime.fromtimestamp(
+                self._sim_time_ms / 1000.0, tz=timezone.utc,
+            )
+        if self._now_fn is not None:
+            return self._now_fn()
+        return utc_now()
+
+    def _utc_day(self) -> str:
+        """UTC calendar day string used by all daily circuit / counter resets."""
+        return self._clock_now().strftime("%Y-%m-%d")
+
+    # ------------------------------------------------------------------
     # Entry gate
     # ------------------------------------------------------------------
 
@@ -220,7 +268,7 @@ it is not used directly in the current implementation.
 
         # --- 8. Daily drawdown circuit (FASE 4.3) ---
         # Check daily drawdown from today's peak capital
-        today = utc_now().strftime("%Y-%m-%d")
+        today = self._utc_day()
         if self._daily_drawdown_circuit_date != today:
             # New day — reset daily tracker
             self._daily_drawdown_circuit_tripped = False
@@ -365,7 +413,7 @@ it is not used directly in the current implementation.
         """
         if not self._daily_drawdown_circuit_tripped:
             return False
-        today = utc_now().strftime("%Y-%m-%d")
+        today = self._utc_day()
         if today != self._daily_drawdown_circuit_date:
             logger.info("Daily drawdown circuit auto-reset — new UTC day: %s", today)
             self._daily_drawdown_circuit_tripped = False
@@ -377,7 +425,7 @@ it is not used directly in the current implementation.
 
     def get_daily_drawdown(self, portfolio: Any) -> float:
         """Return current daily drawdown as fraction of today's peak."""
-        today = utc_now().strftime("%Y-%m-%d")
+        today = self._utc_day()
         capital = portfolio.current_capital  # type: ignore
         if self._daily_drawdown_circuit_date != today:
             return 0.0
@@ -411,7 +459,7 @@ it is not used directly in the current implementation.
         current_capital: float,
     ) -> None:
         """Initialize daily peak / trip state after portfolio restore."""
-        today = utc_now().strftime("%Y-%m-%d")
+        today = self._utc_day()
         self._daily_drawdown_circuit_date = today
         self._daily_peak_capital = max(safe_float(peak_capital), safe_float(current_capital))
         if self._daily_peak_capital > 0.0:
@@ -421,7 +469,7 @@ it is not used directly in the current implementation.
 
     def evaluate_daily_drawdown(self, capital: float) -> bool:
         """Update daily peak and trip circuit; return True if newly tripped."""
-        today = utc_now().strftime("%Y-%m-%d")
+        today = self._utc_day()
         capital_f = safe_float(capital)
         if self._daily_drawdown_circuit_date != today:
             self._daily_drawdown_circuit_tripped = False
@@ -444,7 +492,7 @@ it is not used directly in the current implementation.
 
     def restore_daily_stop_streak(self, stop_count: int) -> None:
         """Rebuild daily stop-loss streak circuit from DB trade history."""
-        today = utc_now().strftime("%Y-%m-%d")
+        today = self._utc_day()
         self._daily_stop_streak_date = today
         self._daily_stop_loss_count = max(0, int(stop_count))
         self._daily_stop_streak_tripped = (
@@ -456,7 +504,7 @@ it is not used directly in the current implementation.
         """Apply persisted risk circuit fields when available."""
         if not isinstance(snapshot, dict):
             return
-        today = utc_now().strftime("%Y-%m-%d")
+        today = self._utc_day()
         saved_date = str(snapshot.get("daily_stop_streak_date") or "")
         if saved_date == today:
             self._daily_stop_loss_count = int(snapshot.get("daily_stop_loss_count", 0))
@@ -751,7 +799,7 @@ it is not used directly in the current implementation.
             self._record_daily_stop_loss()
 
     def _reset_daily_stop_streak_if_new_day(self) -> None:
-        today = utc_now().strftime("%Y-%m-%d")
+        today = self._utc_day()
         if self._daily_stop_streak_date != today:
             self._daily_stop_streak_date = today
             self._daily_stop_loss_count = 0
@@ -793,7 +841,7 @@ it is not used directly in the current implementation.
         """Trip the circuit breaker and record the reason."""
         self._circuit_breaker_tripped = True
         self._circuit_breaker_reason = reason
-        self._circuit_breaker_date = utc_now().strftime("%Y-%m-%d")
+        self._circuit_breaker_date = self._utc_day()
         logger.error("CIRCUIT BREAKER TRIPPED: %s", reason)
         # Notify via alert system (best-effort)
         if self._notifier is not None:
@@ -812,7 +860,7 @@ it is not used directly in the current implementation.
         """
         if not self._circuit_breaker_tripped:
             return False
-        today = utc_now().strftime("%Y-%m-%d")
+        today = self._utc_day()
         if today != self._circuit_breaker_date:
             logger.info("Circuit breaker auto-reset — new UTC day: %s", today)
             self.reset_circuit_breaker()

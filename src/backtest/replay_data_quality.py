@@ -39,6 +39,7 @@ class ReplayDataQualityGate:
         max_oi_stale_ms: int = 300_000,
         require_funding: bool = True,
         require_oi: bool = False,
+        parity_mode: bool = False,
     ) -> None:
         self._min_coverage = min_coverage_pct
         self._max_gap_ms = max_bar_gap_ms
@@ -46,6 +47,10 @@ class ReplayDataQualityGate:
         self._max_oi_stale = max_oi_stale_ms
         self._require_funding = require_funding
         self._require_oi = require_oi
+        # Live has no window-coverage / multi-day-gap entry gate. In parity
+        # mode those replay-only kills are disabled; missing bars are simply
+        # absent from the timeline. Funding/OI freshness still apply.
+        self._parity_mode = parity_mode
 
     @classmethod
     def from_config(cls, config: Config) -> "ReplayDataQualityGate":
@@ -57,6 +62,8 @@ class ReplayDataQualityGate:
             max_oi_stale_ms=int(qc.get("max_oi_stale_ms", 300_000)),
             require_funding=bool(qc.get("require_funding", True)),
             require_oi=bool(qc.get("require_oi", False)),
+            # Default True: live/replay parity is the primary backtest goal.
+            parity_mode=bool(qc.get("parity_mode", True)),
         )
 
     @staticmethod
@@ -116,16 +123,17 @@ class ReplayDataQualityGate:
         if audit is None:
             return "replay_quality_no_audit"
 
-        if audit.coverage_pct < self._min_coverage:
-            return (
-                f"replay_coverage_low:{audit.coverage_pct * 100:.1f}%"
-                f"<{self._min_coverage * 100:.1f}%"
-            )
+        if not self._parity_mode:
+            if audit.coverage_pct < self._min_coverage:
+                return (
+                    f"replay_coverage_low:{audit.coverage_pct * 100:.1f}%"
+                    f"<{self._min_coverage * 100:.1f}%"
+                )
 
-        if last_bar_ts is not None:
-            gap = event.timestamp_ms - last_bar_ts
-            if gap > self._max_gap_ms:
-                return f"replay_bar_gap:{gap}ms>{self._max_gap_ms}ms"
+            if last_bar_ts is not None:
+                gap = event.timestamp_ms - last_bar_ts
+                if gap > self._max_gap_ms:
+                    return f"replay_bar_gap:{gap}ms>{self._max_gap_ms}ms"
 
         if self._require_funding:
             if not audit.funding_available:

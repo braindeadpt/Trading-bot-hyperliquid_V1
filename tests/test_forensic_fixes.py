@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -245,29 +246,32 @@ def test_daily_stop_streak_resets_next_day() -> None:
     })
     risk = RiskManager(config, Database(":memory:"))
 
-    with patch("src.core.risk_manager.utc_now") as mock_utc:
-        mock_utc.return_value = SimpleNamespace(strftime=lambda fmt: "2026-07-09")
-        for _ in range(4):
-            risk.on_trade_closed(SimpleNamespace(pnl_usd=-5.0, reason="stop_loss"))
+    # Sim day 1: trip streak
+    day1_ms = int(datetime(2026, 7, 9, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    risk.set_sim_time(day1_ms)
+    for _ in range(4):
+        risk.on_trade_closed(SimpleNamespace(pnl_usd=-5.0, reason="stop_loss"))
 
-        mock_utc.return_value = SimpleNamespace(strftime=lambda fmt: "2026-07-10")
-        portfolio = SimpleNamespace(
-            daily_trades=0,
-            positions={},
-            daily_pnl=0.0,
-            current_capital=20_000.0,
-            get_max_drawdown=lambda: 0.0,
-        )
-        sig = Signal(
-            strategy="ChecklistMeta",
-            symbol="ETH",
-            side="long",
-            confidence=0.7,
-            size_pct=0.001,
-            stop_loss_pct=0.02,
-        )
-        approved, reason = risk.can_enter(sig, portfolio)
-        assert approved, f"expected approved, got: {reason}"
+    # Sim day 2: circuit must clear
+    day2_ms = int(datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    risk.set_sim_time(day2_ms)
+    portfolio = SimpleNamespace(
+        daily_trades=0,
+        positions={},
+        daily_pnl=0.0,
+        current_capital=20_000.0,
+        get_max_drawdown=lambda: 0.0,
+    )
+    sig = Signal(
+        strategy="ChecklistMeta",
+        symbol="ETH",
+        side="long",
+        confidence=0.7,
+        size_pct=0.001,
+        stop_loss_pct=0.02,
+    )
+    approved, reason = risk.can_enter(sig, portfolio)
+    assert approved, f"expected approved, got: {reason}"
 
 
 # (vii) Cooldown regression (v3.1.46)
