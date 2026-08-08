@@ -13,6 +13,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -178,6 +179,9 @@ class TradingEngine:
             router_cfg.get("adx_trend_threshold", config.get("strategy.adx_trend_threshold", 25.0))
         )
         self._phase08_paper_only = bool(p08.get("paper_only", True))
+        self._phase08_fallback_strategy = str(
+            router_cfg.get("fallback_strategy", "ChecklistMeta")
+        )
         seq_ms = int(router_cfg.get("sequential_contradiction_block_ms", 3_600_000))
         self._phase08_seq_guard: Optional[SequentialContradictionGuard] = (
             SequentialContradictionGuard(seq_ms) if self._phase08_regime_router else None
@@ -1755,6 +1759,24 @@ class TradingEngine:
                                 reason=gov_reason,
                             )
                             continue
+                        # Size haircut when governor protects the last exec strategy
+                        strat_name = self._signal_strategy_name(sig)
+                        size_mult = self._strategy_governor.size_multiplier(strat_name)
+                        if size_mult < 1.0:
+                            sig = replace(
+                                sig,
+                                size_pct=float(sig.size_pct) * size_mult,
+                                metadata={
+                                    **dict(sig.metadata or {}),
+                                    "governor_size_mult": size_mult,
+                                },
+                            )
+                            logger.warning(
+                                "Governor size×%.2f applied to %s %s (last-exec protection)",
+                                size_mult,
+                                strat_name,
+                                symbol,
+                            )
                         signals.append(sig)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("Strategy %s error on %s: %s", strategy.name, symbol, exc)
@@ -1770,6 +1792,7 @@ class TradingEngine:
                         symbol=symbol,
                         seq_guard=self._phase08_seq_guard,
                         timestamp_ms=event.timestamp_ms,
+                        fallback_strategy=self._phase08_fallback_strategy,
                     )
                     if regime_blocked:
                         regime_name = classify_market_regime(

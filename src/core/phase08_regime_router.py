@@ -1,4 +1,4 @@
-"""Phase 08 hard regime router — VB vs VWAP mutual exclusion by ADX regime."""
+"""Phase 08 hard regime router — mutual exclusion by ADX regime + ChecklistMeta fallback."""
 
 from __future__ import annotations
 
@@ -14,9 +14,14 @@ MarketRegime = Literal["unknown", "range", "low_vol", "expansion", "trend"]
 
 VB_STRATEGY = "VolatilityBreakout"
 VWAP_STRATEGY = "VWAPDeviation"
+CHECKLIST_STRATEGY = "ChecklistMeta"
 
 VB_REGIMES = frozenset({"trend", "expansion"})
 VWAP_REGIMES = frozenset({"range", "low_vol"})
+# ChecklistMeta is eligible in every classified regime (fills expansion dead-zone).
+CHECKLIST_REGIMES = frozenset({"trend", "expansion", "range", "low_vol"})
+
+DEFAULT_FALLBACK_STRATEGY = CHECKLIST_STRATEGY
 
 
 def classify_market_regime(
@@ -36,13 +41,15 @@ def classify_market_regime(
 
 
 def regime_allows_strategy(strategy_name: str, regime: MarketRegime) -> bool:
-    """Hard gate: VB in trend/expansion; VWAP in range/low_vol."""
+    """Hard gate: VB in trend/expansion; VWAP in range/low_vol; ChecklistMeta all."""
     if regime == "unknown":
         return False
     if strategy_name == VB_STRATEGY:
         return regime in VB_REGIMES
     if strategy_name == VWAP_STRATEGY:
         return regime in VWAP_REGIMES
+    if strategy_name == CHECKLIST_STRATEGY:
+        return regime in CHECKLIST_REGIMES
     return True
 
 
@@ -86,15 +93,15 @@ def route_phase08_signals(
     symbol: str = "",
     seq_guard: Optional[SequentialContradictionGuard] = None,
     timestamp_ms: int = 0,
+    fallback_strategy: str = DEFAULT_FALLBACK_STRATEGY,
 ) -> Tuple[List[Signal], Optional[str], List[Signal]]:
     """Filter signals by regime and reject contradictory entries.
 
     Returns ``(allowed_signals, reject_reason, regime_blocked_signals)``.
 
-    ``regime_blocked_signals`` are the signals discarded solely because the
-    current ADX regime does not allow their strategy (the BLOCK log path).
-    Contradictory / sequential rejects are *not* included there — those
-    signals cleared the regime gate.
+    When no strategy is regime-eligible but a ``fallback_strategy`` signal is
+    present in the input batch, that signal is promoted so regimes never
+    resolve to an empty candidate set (structural deadlock fix, v3.1.48).
     """
     if not signals:
         return [], None, []
@@ -120,6 +127,24 @@ def route_phase08_signals(
                 f"{adx:.1f}" if adx is not None else "?",
             )
             regime_blocked.append(sig)
+
+    if not allowed and fallback_strategy:
+        fallback_sigs = [
+            s for s in signals if regime_strategy_name(s) == fallback_strategy
+        ]
+        if fallback_sigs:
+            allowed = list(fallback_sigs)
+            # Remove promoted signals from the blocked list if present
+            promoted_ids = {id(s) for s in fallback_sigs}
+            regime_blocked = [s for s in regime_blocked if id(s) not in promoted_ids]
+            logger.warning(
+                "Phase08 regime FALLBACK %s — using %s in %s (ADX=%s); "
+                "no primary strategies were eligible",
+                symbol,
+                fallback_strategy,
+                regime,
+                f"{adx:.1f}" if adx is not None else "?",
+            )
 
     if not allowed:
         return [], f"regime_{regime}_no_allowed_strategies", regime_blocked

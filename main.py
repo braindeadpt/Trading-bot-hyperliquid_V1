@@ -296,13 +296,18 @@ async def main() -> None:
             )
             raise SystemExit(1)
         from src.research.phase08_preregister import (
-            assert_config_matches_preregister,
-            persist_preregister_manifest,
+            assert_config_matches_preregister as assert_phase08_preregister,
+            persist_preregister_manifest as persist_phase08_preregister,
+        )
+        from src.research.phase10_preregister import (
+            assert_config_matches_preregister as assert_phase10_preregister,
         )
 
-        persist_preregister_manifest(cfg)
-        assert_config_matches_preregister(cfg)
+        persist_phase08_preregister(cfg)
+        assert_phase08_preregister(cfg)
         logger.info("Phase08 preregister manifest verified (immutable, OOS pending)")
+        assert_phase10_preregister(cfg)
+        logger.info("Phase10 frozen-window preregister verified (assert active)")
 
     # -----------------------------------------------------------------------
     # 3. Setup database

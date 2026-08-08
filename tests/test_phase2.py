@@ -61,10 +61,10 @@ def test_factory_respects_enabled_flags() -> None:
         subs, shadow = build_phase08_strategies(cfg)
         names = {s.name for s in subs}
         shadow_names = {s.name for s in shadow}
-        assert "VolatilityBreakout" in names
+        assert "ChecklistMeta" in names
         assert "VWAPDeviation" in names
-        assert "ChecklistMeta" in shadow_names
-        assert "ChecklistMeta" not in names
+        assert "VolatilityBreakout" in shadow_names
+        assert "ChecklistMeta" not in shadow_names
     else:
         subs = build_sub_strategies(cfg)
         names = {s.name for s in subs}

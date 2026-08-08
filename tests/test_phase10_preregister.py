@@ -122,10 +122,24 @@ def test_persist_overwrite_flag_replaces_manifest(tmp_path):
     config_b = _make_config(execution_strategies=["B"])
 
     persist_preregister_manifest(config_a, path=path)
-    persist_preregister_manifest(config_b, path=path, overwrite=True)
+    first = load_preregister_manifest(path)
+    first_id = first["experiment_id"]
+
+    persist_preregister_manifest(
+        config_b,
+        path=path,
+        overwrite=True,
+        reregistration_reason="deadlock estrutural — test",
+        in_sample_selection_note="in-sample selection documented",
+    )
 
     manifest = load_preregister_manifest(path)
     assert manifest["execution_strategies"] == ["B"]
+    assert manifest["reregistration_reason"] == "deadlock estrutural — test"
+    assert manifest["in_sample_selection_note"] == "in-sample selection documented"
+    assert manifest["supersedes_experiment_id"] == first_id
+    archive = path.with_name(f"{path.stem}.superseded.{first_id}{path.suffix}")
+    assert archive.exists()
 
 
 @pytest.mark.unit

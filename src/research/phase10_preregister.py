@@ -71,6 +71,9 @@ def build_preregister_manifest(
     *,
     experiment_id: Optional[str] = None,
     now_ms: Optional[int] = None,
+    reregistration_reason: Optional[str] = None,
+    in_sample_selection_note: Optional[str] = None,
+    supersedes_experiment_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the Fase 10 pre-registration document from the live config.
 
@@ -109,6 +112,12 @@ def build_preregister_manifest(
             "invalidates the window — see assert_config_matches_preregister()."
         ),
     }
+    if reregistration_reason:
+        manifest["reregistration_reason"] = reregistration_reason
+    if in_sample_selection_note:
+        manifest["in_sample_selection_note"] = in_sample_selection_note
+    if supersedes_experiment_id:
+        manifest["supersedes_experiment_id"] = supersedes_experiment_id
     manifest["manifest_hash"] = _hash_manifest_body(manifest)
     return manifest
 
@@ -144,16 +153,44 @@ def persist_preregister_manifest(
     path: Optional[Path] = None,
     *,
     overwrite: bool = False,
+    reregistration_reason: Optional[str] = None,
+    in_sample_selection_note: Optional[str] = None,
+    now_ms: Optional[int] = None,
 ) -> Path:
-    """Write the immutable Fase 10 pre-registration manifest (first write wins)."""
+    """Write the immutable Fase 10 pre-registration manifest (first write wins).
+
+    When ``overwrite=True``, the previous manifest is archived beside the new
+    file (``.superseded.<experiment_id>.json``) before replacement — the assert
+    is never disabled; a new window is opened deliberately.
+    """
     out = path or DEFAULT_PATH
+    supersedes: Optional[str] = None
     if out.exists() and not overwrite:
         existing = load_preregister_manifest(out)
         if existing is not None:
             verify_preregister_integrity(existing)
             logger.info("Phase10 preregister manifest exists — immutable: %s", out)
         return out
-    manifest = build_preregister_manifest(config)
+    if out.exists() and overwrite:
+        existing = load_preregister_manifest(out)
+        if existing is not None:
+            verify_preregister_integrity(existing)
+            supersedes = str(existing.get("experiment_id") or "")
+            archive = out.with_name(
+                f"{out.stem}.superseded.{supersedes or 'unknown'}{out.suffix}"
+            )
+            shutil.copy2(out, archive)
+            logger.warning(
+                "Phase10 preregister OVERWRITE — archived prior window to %s",
+                archive,
+            )
+    manifest = build_preregister_manifest(
+        config,
+        now_ms=now_ms,
+        reregistration_reason=reregistration_reason,
+        in_sample_selection_note=in_sample_selection_note,
+        supersedes_experiment_id=supersedes or None,
+    )
     _atomic_write_json(out, manifest)
     logger.info(
         "Phase10 preregister manifest written: %s experiment_id=%s hash=%s",

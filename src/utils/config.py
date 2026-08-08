@@ -71,7 +71,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_daily_stop_losses": 4,
         "max_daily_loss_pct": 3.0,
         "per_trade_risk_pct": 1.0,
-        "max_position_size_pct": 5.0,
+        "max_position_size_pct": 2.0,
         "leverage_max": 10.0,
         "circuit_breaker_drawdown_pct": 10.0,
         "circuit_breaker_recovery_pct": 50.0,
@@ -91,6 +91,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "intrabar_conflict_policy": "pessimistic",
         "sizing_version": "phase05-risk-at-equity-v1",
         "tca_mode": "proxy",
+        # NOTE: "warmup_15m_bars" (110) and replay_data_quality "parity_mode"
+        # (True) are deliberately NOT declared here. They are backtest-only and
+        # their consumers already default to the same values
+        # (src/backtest/engine.py: cfg.get("backtest.warmup_15m_bars", 110);
+        # src/backtest/replay_data_quality.py: qc.get("parity_mode", True)).
+        # Declaring them changes the effective config_hash, which the Fase 10
+        # frozen-window assert in main.py treats as mid-window drift and
+        # refuses to start on. Re-add only when re-registering the window.
         "replay_data_quality": {
             "min_coverage_pct": 95.0,
             "max_bar_gap_ms": 120_000,

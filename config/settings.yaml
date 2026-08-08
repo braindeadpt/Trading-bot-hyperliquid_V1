@@ -67,7 +67,7 @@ risk:
   circuit_breaker_drawdown_pct: 10.0 # from peak (real equity, not cash-only)
   circuit_breaker_recovery_pct: 50.0  # auto-reset when DD < 50% of trip level
   per_trade_risk_pct: 1.0           # % of capital at risk per trade
-  max_position_size_pct: 5.0        # % of capital in one position (was 20 — tripped phantom DD)
+  max_position_size_pct: 2.0        # v3.1.48: was 5.0 — ~20% notional @10x; allows 2 same-side under 50% directional cap
   leverage_max: 10.0
   max_slippage_pct: 0.2             # reject signal if L2 slippage > 0.2%
   min_fill_ratio: 0.8              # reject signal if book covers <80% of size
@@ -354,6 +354,40 @@ strategy:
     exit_z_threshold: 0.3           # 0.3 = exit when |Z| < 0.3 (current default)
 
   # ═══════════════════════════════════════════════════════════
+  # Strategy: VWAPTrend (research-only) — Zarattini & Aziz 2023 adapted to crypto
+  # Anchored UTC-day VWAP trend-follow (long above / short below), opposite of
+  # VWAPDeviation fade. NOT in ensemble / factory registry — instantiate only
+  # from scripts/backtest_vwap_trend_vs_fade.py.
+  #
+  # VERDICT 2026-08-08 (light 15m/5m replay, 2026-05-18→2026-08-07,
+  # BTC/ETH/SOL/HYPE, commission 0.04%/side ≈ 8 bps RT):
+  #   (a) Fade VWAPDeviation:  n=224  WR=50%  PF=1.07  net=+$84   fees=$216
+  #   (b) Trend VWAPTrend:     n=1498 WR=26%  PF=0.67  net=−$2224 fees=$1228
+  #   (c) Hour filters (US paper/RTH, Asia, EU): cut fee bleed but expectancy
+  #       stayed NEGATIVE — no usable crypto analogue of equity RTH seasonality.
+  # CONCLUSION: trend does NOT beat fade after fees. Flip-every-cross is
+  # unviable at crypto RT cost; do NOT enable without a new OOS window that
+  # overturns this. Report: data/backtests/vwap_trend_vs_fade_20260808_000535.*
+  # ═══════════════════════════════════════════════════════════
+  vwap_trend:
+    enabled: false                  # KILLED research 2026-08-08 — see verdict above
+    vwap_confirm_tf: "15m"          # 5m|15m candle-close confirmation
+    min_flip_interval_minutes: 30   # anti-flip (mandatory; RT fees kill micro-crosses)
+    vwap_cross_buffer_pct: 0.001    # 0.1% dead-band around anchored VWAP
+    max_hold_hours: 12              # no equity "flat at the bell"; crypto 24/7
+    close_on_utc_rollover: true     # optional flat at 00:00 UTC day boundary
+    use_session_filter: false       # hour filters reduced losses only, no +E[x]
+    session_start_utc_h: 0
+    session_end_utc_h: 24
+    # session_hours_utc: [13, 14, 15, 19]  # US paper-hours probe (still −E[x])
+    base_size_pct: 0.01
+    max_size_pct: 0.03
+    stop_loss_atr_multiplier: 2.0
+    min_confidence: 0.55
+    signal_throttle_ms: 60000
+    min_session_bars: 3
+
+  # ═══════════════════════════════════════════════════════════
   # Strategy: SFP Reversion (v3.1.33) — Swing Failure Pattern + 75% magnet
   # Liquidity sweep at pivot low/high, close back inside, target 75% retracement.
   # ═══════════════════════════════════════════════════════════
@@ -423,7 +457,7 @@ strategy:
   # — complements VB (which dominates W1/W3 trending regimes)
   # ═══════════════════════════════════════════════════════════
   checklist_meta:
-    enabled: false                  # Phase08: shadow only (see strategy.phase08)
+    enabled: true                   # v3.1.48: promoted to Phase08 execution (was shadow)
     score_threshold: 4.0            # v3.1.40: was 3.5 — fewer, higher-conviction signals
     min_confidence: 0.60
     # Chop / whipsaw gates (v3.1.x) — block range entries and post-stop reversals
@@ -666,26 +700,31 @@ strategy:
     multiplier: 2.0                 # double after each loss (30m → 1h → 2h)
 
   # ═══════════════════════════════════════════════════════════
-  # Phase 08 — edge isolation (VB + VWAP execution only)
+  # Phase 08 — edge isolation (ChecklistMeta + VWAP execution)
+  # v3.1.48: re-registered after structural deadlock (VB+VWAP both
+  # governor-disabled → 138× regime_expansion_no_allowed_strategies).
+  # ChecklistMeta promotion is PARTLY in-sample (59% WR vs VB 42% in
+  # 10/07–08/08 audit) — OOS walk-forward REQUIRED before treating as validated.
   # ═══════════════════════════════════════════════════════════
   phase08:
     enabled: true
-    paper_only: true               # tier_a_hl_ohlc = data cert only; VB/VWAP paper until Phase06 OOS
+    paper_only: true               # tier_a_hl_ohlc = data cert only; paper until Phase06 OOS
     execution_strategies:
-      - VolatilityBreakout
+      - ChecklistMeta
       - VWAPDeviation
     shadow_strategies:
+      - VolatilityBreakout
       - CVDOrderFlow
       - OrderBookScalper
       - FundingArbitrage
       - FundingMomentum
       - SpotPerpCarry
-      - ChecklistMeta
     regime_router:
       enabled: true
-      adx_range_threshold: 20.0    # ADX < 20 → low_vol (VWAP)
-      adx_trend_threshold: 25.0    # ADX > 25 → trend; 20–25 → expansion (VB)
+      adx_range_threshold: 20.0    # ADX < 20 → low_vol (VWAP + ChecklistMeta)
+      adx_trend_threshold: 25.0    # ADX > 25 → trend; 20–25 → expansion (ChecklistMeta fallback)
       sequential_contradiction_block_ms: 3600000  # 1h — block opposite-side flips
+      fallback_strategy: ChecklistMeta  # never leave a regime with zero eligible strategies
     adx:
       timeframe: "15m"
       timeframe_s: 900
@@ -713,10 +752,11 @@ strategy:
     min_trades: 10                  # need N trades before disable decision
     min_sharpe: 0.0                 # disable sub-strategy if rolling Sharpe below
     eval_interval_ms: 3600000       # re-evaluate hourly
+    min_active_strategies: 1        # v3.1.48: never disable the last execution strategy
+    last_strategy_size_multiplier: 0.5  # when protecting last exec, cut size instead of disable
     # Fase 10 frozen-window floor — governor ignores trades entered before
-    # this; set at window re-registration 2026-07-15. Reset to 0 after the
-    # window closes.
-    ignore_trades_before_ms: 1784084174439
+    # this; updated at window re-registration 2026-08-08 (deadlock fix).
+    ignore_trades_before_ms: 1786150412581  # Fase 10 window_start_ms (re-registered 2026-08-08 deadlock fix)
 
 # ═══════════════════════════════════════════════════════════
 # Exchange reconciliation & native protection (Phase 03)
@@ -801,13 +841,19 @@ backtest:
   use_cooldown: true
   kelly_override: null            # null = follow strategy.kelly.enabled; true/false = explicit backtest override
   use_kelly: true                 # deprecated — use kelly_override; kept for backward compatibility
-  use_microstructure_proxy: true  # proxy OIR/spread from candle range (not production-grade)
+  use_microstructure_proxy: true  # proxy OIR/spread from candle range — Tier B (see oir_proxy_calibration)
+  # warmup_15m_bars: backtest-only; consumer defaults to 110
+  # (src/backtest/engine.py). Declaring it here or in DEFAULT_CONFIG changes the
+  # effective config_hash, which the Fase 10 frozen-window assert in main.py
+  # treats as mid-window drift and refuses to start on.
   intrabar_conflict_policy: pessimistic  # pessimistic | optimistic when SL+TP same 1m bar
   sizing_version: phase05-risk-at-equity-v1
   tca_mode: proxy                    # strict = reject TCA without L2; proxy = Tier B only
   replay_data_quality:
-    min_coverage_pct: 95.0             # minimum 1m bar coverage over run window
-    max_bar_gap_ms: 120000             # max gap between consecutive 1m bars
+    # parity_mode: backtest-only; consumer defaults to True
+    # (src/backtest/replay_data_quality.py). Same frozen-hash reason as above.
+    min_coverage_pct: 95.0             # used when parity_mode=false
+    max_bar_gap_ms: 120000             # used when parity_mode=false
     max_funding_stale_ms: 300000       # funding series must be fresher than this
     max_oi_stale_ms: 300000
     require_funding: true

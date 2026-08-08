@@ -28,14 +28,14 @@ from src.strategies.checklist_meta import ChecklistMeta
 
 logger = logging.getLogger(__name__)
 
-PHASE08_DEFAULT_EXECUTION = ("VolatilityBreakout", "VWAPDeviation")
+PHASE08_DEFAULT_EXECUTION = ("ChecklistMeta", "VWAPDeviation")
 PHASE08_DEFAULT_SHADOW = (
+    "VolatilityBreakout",
     "CVDOrderFlow",
     "OrderBookScalper",
     "FundingArbitrage",
     "FundingMomentum",
     "SpotPerpCarry",
-    "ChecklistMeta",
 )
 
 _STRATEGY_REGISTRY = (
@@ -198,7 +198,7 @@ def build_sub_strategies(
 
 
 def build_phase08_strategies(cfg: Any) -> Tuple[List[Strategy], List[Strategy]]:
-    """Phase 08: VB+VWAP execution; microstructure/funding/meta in shadow only.
+    """Phase 08: ChecklistMeta+VWAP execution; VB/microstructure/funding in shadow.
 
     Execution and shadow instances are always distinct objects (deep-copied config).
     """
@@ -267,7 +267,7 @@ def build_strategy_list(cfg: Any) -> List[Strategy]:
     """Top-level strategies for live TradingEngine.
 
     When ``strategy.phase08.enabled`` is true, only execution strategies
-    (default VolatilityBreakout + VWAPDeviation) are returned.
+    (default ChecklistMeta + VWAPDeviation) are returned.
     When ``strategy.ensemble.enabled`` is false, each enabled sub-strategy
     runs directly (no consensus wrapper).
     """
