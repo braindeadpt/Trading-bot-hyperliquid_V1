@@ -10,6 +10,8 @@ data/vault.enc
 # Research artifacts (parity DBs, support packages, sweep outputs)
 data/research/
 data/backtests/
+# scratch config overrides for parity runs
+data/tmp_*
 
 # Python cache
 __pycache__/

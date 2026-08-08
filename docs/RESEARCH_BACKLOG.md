@@ -4,13 +4,31 @@ Ideas parked deliberately, with the evidence bar each must clear before it
 touches the bot. Nothing here is approved work — this file exists so good
 ideas are not lost *and* not acted on prematurely.
 
-**Standing rule:** the Fase 10 frozen validation window is running
-(`data/research/phase10/phase10_preregister.json`). Any change to
-`config/settings.yaml` invalidates it. Research-only code (new modules, new
-tests) is fine; wiring anything into the live bot is not, until the window
-closes and the gate is evaluated.
+**Standing rule:** the Fase 10 frozen validation window was **re-registered
+2026-08-08** after a structural deadlock fix (ChecklistMeta promoted to
+execution; sizing 2.0%; governor last-exec protection). Prior window archived
+beside `data/research/phase10/phase10_preregister.json`. Any *further* change
+to `config/settings.yaml` invalidates the new window — re-register via
+`scripts/reregister_phase10_deadlock_fix.py` (or equivalent) with justification;
+never disable `assert_config_matches_preregister`. ChecklistMeta promotion is
+partly in-sample — OOS walk-forward is mandatory before treating the ruleset
+as validated.
 
-Last updated: 2026-07-22
+Last updated: 2026-08-08
+
+### Live/replay parity notes (2026-08-08)
+
+- **RiskManager sim clock:** all day-boundary circuits use `set_sim_time` /
+  `_utc_day()` in backtests (wall-clock `utc_now` left permanent stop-streak
+  trips across multi-day folds).
+- **Replay coverage/gap:** disabled when `backtest.replay_data_quality.parity_mode`
+  is true (default) — no live equivalent.
+- **Warm-up:** `backtest.warmup_15m_bars` (default 110) loads bars before
+  `start_ms`; entries only after trade start.
+- **OIR proxy (ChecklistMeta):** calibrated vs 265 live `entry_oir` values —
+  corr≈0.24, gate agree≈56% → **Tier B** in candle replay. Proxy stays ON
+  (live has real L2 OIR; `None` is not closer). `w_oir=0.5` on threshold≈4.0
+  ≈12.5% of score may bias fills. Do not disable production `oir_gate`/`w_oir`.
 
 ---
 
