@@ -48,6 +48,93 @@ def calculate_vwap(candles: List[Candle]) -> Optional[float]:
     return total_pv / total_vol
 
 
+def _utc_day_key(timestamp_ms: int) -> int:
+    """UTC calendar day as YYYYMMDD integer (for cheap equality checks)."""
+    # Floor to UTC midnight without importing datetime in the hot path.
+    # 86_400_000 ms = 1 day; epoch day 0 = 1970-01-01.
+    return int(timestamp_ms // 86_400_000)
+
+
+def calculate_anchored_vwap_series(
+    candles: List[Candle],
+    anchor: str = "utc_day",
+) -> List[Optional[float]]:
+    """Per-bar anchored VWAP series that resets at each anchor boundary.
+
+    For ``anchor='utc_day'``, accumulation (Σ typical_price·volume / Σ volume)
+    restarts at 00:00 UTC every day. Typical price = (H+L+C)/3.
+
+    Returns a list aligned with ``candles``; entries are None when the
+    session volume so far is zero. Unsupported ``anchor`` values yield
+    all-None.
+    """
+    if not candles:
+        return []
+    if anchor != "utc_day":
+        return [None] * len(candles)
+
+    out: List[Optional[float]] = []
+    total_pv = 0.0
+    total_vol = 0.0
+    current_day: Optional[int] = None
+
+    for c in candles:
+        day = _utc_day_key(c.timestamp_ms)
+        if current_day is None or day != current_day:
+            current_day = day
+            total_pv = 0.0
+            total_vol = 0.0
+
+        typical_price = (c.high + c.low + c.close) / 3.0
+        total_pv += typical_price * c.volume
+        total_vol += c.volume
+
+        if total_vol == 0.0:
+            out.append(None)
+        else:
+            out.append(total_pv / total_vol)
+
+    return out
+
+
+def calculate_anchored_vwap(
+    candles: List[Candle],
+    anchor: str = "utc_day",
+) -> Optional[float]:
+    """Anchored VWAP for the session containing the last candle.
+
+    Resets accumulation at each UTC day boundary (00:00 UTC) when
+    ``anchor='utc_day'``. Only candles belonging to the last candle's
+    UTC day contribute — earlier days are ignored.
+
+    Args:
+        candles: OHLCV candles sorted ascending by ``timestamp_ms``.
+        anchor: Session reset mode. Currently only ``'utc_day'``.
+
+    Returns:
+        Anchored VWAP (float), or None if empty / zero volume /
+        unsupported anchor.
+    """
+    if not candles:
+        return None
+    if anchor != "utc_day":
+        return None
+
+    last_day = _utc_day_key(candles[-1].timestamp_ms)
+    total_pv = 0.0
+    total_vol = 0.0
+    for c in candles:
+        if _utc_day_key(c.timestamp_ms) != last_day:
+            continue
+        typical_price = (c.high + c.low + c.close) / 3.0
+        total_pv += typical_price * c.volume
+        total_vol += c.volume
+
+    if total_vol == 0.0:
+        return None
+    return total_pv / total_vol
+
+
 def calculate_ema(prices: List[float], period: int) -> Optional[float]:
     """Exponential Moving Average.
     
