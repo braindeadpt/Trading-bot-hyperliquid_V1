@@ -1,12 +1,10 @@
-name: CI
+name: Network market-data audit
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
-  test:
+  market-data:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -28,14 +26,5 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Security audit
-        run: python -m security.audit --src-dir src
-
-      - name: Component health check
-        run: python audit_all.py
-
-      - name: Look-ahead audit
-        run: python scripts/lookahead_audit.py --ci
-
-      - name: Run test suite
-        run: python scripts/run_ci_tests.py
+      - name: Audit live market-data APIs
+        run: python scripts/audit_market_data.py

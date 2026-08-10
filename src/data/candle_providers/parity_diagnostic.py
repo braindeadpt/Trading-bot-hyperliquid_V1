@@ -144,13 +144,15 @@ def _build_pairs(
         official_only = len(set(off_open) - set(gr_open))
         goldrush_only = len(set(gr_open) - set(off_open))
     elif match_key == "shift_plus_1":
-        keys = sorted(set(off_close) & {k - gap for k in gr_close})
-        pairs = [(off_close[k], gr_close[k + gap]) for k in keys if (k + gap) in gr_close]
+        shifted_goldrush = {close_ms - gap: row for close_ms, row in gr_close.items()}
+        keys = sorted(set(off_close) & set(shifted_goldrush))
+        pairs = [(off_close[k], shifted_goldrush[k]) for k in keys]
         official_only = len(off_close) - len(pairs)
         goldrush_only = len(gr_close) - len(pairs)
     else:  # shift_minus_1
-        keys = sorted(set(off_close) & {k + gap for k in gr_close})
-        pairs = [(off_close[k], gr_close[k - gap]) for k in keys if (k - gap) in gr_close]
+        shifted_goldrush = {close_ms + gap: row for close_ms, row in gr_close.items()}
+        keys = sorted(set(off_close) & set(shifted_goldrush))
+        pairs = [(off_close[k], shifted_goldrush[k]) for k in keys]
         official_only = len(off_close) - len(pairs)
         goldrush_only = len(gr_close) - len(pairs)
 

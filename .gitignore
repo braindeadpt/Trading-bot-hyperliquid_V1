@@ -10,6 +10,7 @@ data/vault.enc
 # Research artifacts (parity DBs, support packages, sweep outputs)
 data/research/
 data/backtests/
+data/backups/
 # scratch config overrides for parity runs
 data/tmp_*
 
@@ -36,6 +37,7 @@ env/
 # IDE
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 
@@ -69,3 +71,6 @@ scripts/market_vs_*.py
 scripts/weekend_*.py
 scripts/query_recent_*.py
 scripts/vb_pnl_*.py
+
+# Machine-specific inventory (local operations journal)
+docs/DISK_AND_CODE_INVENTORY.md
