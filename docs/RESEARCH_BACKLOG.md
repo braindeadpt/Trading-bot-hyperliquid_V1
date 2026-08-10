@@ -22,16 +22,15 @@ See `docs/BASELINE_SIGNAL_GATE.md`. Portfolio board:
 **First demotion:** ChecklistMeta powered FAIL → move to shadow.
 VWAPDeviation sole execution while underpowered.
 
-Last updated: 2026-08-10 (XS slow momentum → C; candle+TA+MM+OI+tape closed)
+Last updated: 2026-08-10 (paper OOS 90d protocol + tier-0 fees; XS momentum C)
 
-### Fee note — maker_fee_pct underestimated in config (do not rebuild history)
+### Fee note — maker/taker aligned to HL tier-0 (2026-08-10)
 
-`execution.maker_orders.maker_fee_pct` in `settings.yaml` is **0.01** (1.0 bps)
-but Hyperliquid perps tier-0 maker is **0.015% (1.5 bps)** per
-https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees.
-Prior maker cost tests used the underestimated fee (~33% too low on the fee
-leg). **Verdicts still stand** (they failed even with the optimistic fee).
-Awaiting explicit confirmation before changing production YAML to `0.015`.
+`risk.taker_fee_pct` is now **0.045** and
+`execution.maker_orders.maker_fee_pct` is **0.015** (official Hyperliquid
+perps tier-0). `backtest.commission_pct` matches taker. Prior maker tests
+that used 0.01 remain valid as optimistic lower bounds. Re-register via
+`scripts/reregister_phase10_tier0_fees.py` before counting a new OOS window.
 
 ### Archived — cross-sectional slow momentum (verdict C)
 

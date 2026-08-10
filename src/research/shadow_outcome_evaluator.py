@@ -4,10 +4,12 @@ Research / observability only. Numbers here may later influence shadow→live
 promotion decisions, so fill rules are intentionally **pessimistic** and
 never invent missing bracket parameters.
 
-Idealized fills
----------------
-All simulated PnL is **idealized**: no fees, no slippage, no queue position.
-Label every user-facing scoreboard with that disclaimer.
+Gross vs net
+------------
+``pnl_pct`` / ``r_multiple`` remain **gross** (price move only). Net metrics
+subtract tier-0 fees + paper slippage and add funding PnL when candle
+``funding_rate`` stamps are available. Queue position / adverse selection is
+still not modelled — net is a lower bound on friction, not a full executable edge.
 
 Candle source
 -------------
@@ -69,8 +71,8 @@ from src.utils.helpers import safe_float
 logger = logging.getLogger(__name__)
 
 IDEALIZED_FILL_DISCLAIMER = (
-    "IDEALIZED FILLS: no fees, no slippage, no queue position — "
-    "hypothetical gross only; not executable edge."
+    "GROSS FILLS shown alongside NET (tier-0 fees + paper slippage + funding). "
+    "Queue position not modelled — net still excludes adverse selection."
 )
 
 # Prefer HL-native research candles; GoldRush excluded (data readiness).
@@ -133,11 +135,109 @@ class SimulatedOutcome:
     stop_loss_pct: float
     take_profit_pct: float
     size_pct: float
-    pnl_pct: float
-    r_multiple: float
+    pnl_pct: float  # GROSS (price move only)
+    r_multiple: float  # GROSS R
     hold_minutes: float
     evaluated: bool = True
     skip_reason: Optional[str] = None
+    fee_cost_pct: float = 0.0
+    slip_cost_pct: float = 0.0
+    funding_pnl_pct: float = 0.0
+    net_pnl_pct: float = 0.0
+    net_r_multiple: float = 0.0
+    funding_coverage: float = 1.0
+    cost_model_label: str = ""
+
+
+@dataclass(frozen=True)
+class ShadowCostModel:
+    """Per-side fee/slip fractions (not percent points)."""
+
+    entry_fee_frac: float
+    exit_fee_frac: float
+    entry_slip_frac: float
+    exit_slip_frac: float
+    label: str
+    min_funding_coverage: float = 0.90
+
+    @property
+    def round_trip_fee_frac(self) -> float:
+        return self.entry_fee_frac + self.exit_fee_frac
+
+    @property
+    def round_trip_slip_frac(self) -> float:
+        return self.entry_slip_frac + self.exit_slip_frac
+
+
+def resolve_shadow_cost_model(
+    strategy_name: str,
+    config: Optional[Config] = None,
+) -> ShadowCostModel:
+    """Resolve tier-0-aware entry/exit fees for a strategy."""
+    cfg = config
+    if cfg is None:
+        try:
+            cfg = load_config(Path("config/settings.yaml"))
+        except Exception:  # noqa: BLE001
+            cfg = Config({})
+
+    taker = safe_float(cfg.get("risk.taker_fee_pct", 0.045), 0.045) / 100.0
+    slip = safe_float(cfg.get("risk.paper_slippage_pct", 0.02), 0.02) / 100.0
+    maker_cfg = cfg.get("execution.maker_orders", {}) or {}
+    maker_enabled = bool(maker_cfg.get("enabled", False))
+    maker = safe_float(maker_cfg.get("maker_fee_pct", 0.015), 0.015) / 100.0
+    maker_strats = {str(s) for s in (maker_cfg.get("strategies") or [])}
+    exit_as_maker = bool(maker_cfg.get("exit_as_maker", False))
+    use_maker_entry = maker_enabled and strategy_name in maker_strats
+    use_maker_exit = use_maker_entry and exit_as_maker
+    entry_fee = maker if use_maker_entry else taker
+    exit_fee = maker if use_maker_exit else taker
+    label = (
+        f"entry={'maker' if use_maker_entry else 'taker'} "
+        f"exit={'maker' if use_maker_exit else 'taker'} "
+        f"fee_rt_bps={(entry_fee + exit_fee) * 1e4:.2f} "
+        f"slip_rt_bps={(2 * slip) * 1e4:.2f}"
+    )
+    return ShadowCostModel(
+        entry_fee_frac=entry_fee,
+        exit_fee_frac=exit_fee,
+        entry_slip_frac=slip,
+        exit_slip_frac=slip,
+        label=label,
+    )
+
+
+def _funding_during_hold(
+    side: str,
+    candles: Sequence[Candle],
+    entry_ts_ms: int,
+    exit_ts_ms: int,
+) -> Tuple[float, float]:
+    """Return (funding_pnl_pct, coverage).
+
+    Positive HL funding => longs pay shorts. Coverage is observed hourly
+    stamps / expected hours in the hold. Holds <30m report coverage 1.0.
+    """
+    hold_ms = max(0, exit_ts_ms - entry_ts_ms)
+    if hold_ms < 30 * 60_000:
+        return 0.0, 1.0
+    rates: List[float] = []
+    for c in candles:
+        if not (entry_ts_ms < int(c.timestamp_ms) <= exit_ts_ms):
+            continue
+        if c.funding_rate is None:
+            continue
+        fr = safe_float(c.funding_rate, default=float("nan"))
+        if fr == fr:  # finite
+            rates.append(float(fr))
+    expected = max(1, int(round(hold_ms / 3_600_000.0)))
+    if not rates:
+        return 0.0, 0.0
+    coverage = min(1.0, len(rates) / float(expected))
+    total = sum(rates)
+    # long pays positive funding
+    sign = -1.0 if side.lower() == "long" else 1.0
+    return sign * total, coverage
 
 
 VARIANT_PHASE08_SHADOW = "phase08_shadow"
@@ -150,7 +250,7 @@ ROUTER_BLOCKED_SECTION_LABEL = (
 
 @dataclass
 class StrategyScoreboard:
-    """Aggregated idealized outcomes for one (strategy, variant) pair."""
+    """Aggregated outcomes for one (strategy, variant) pair (gross + net)."""
 
     strategy: str
     variant: str = VARIANT_PHASE08_SHADOW
@@ -162,11 +262,20 @@ class StrategyScoreboard:
     losses: int = 0
     timeouts: int = 0
     win_rate: float = 0.0
-    profit_factor: float = 0.0
-    expectancy_r: float = 0.0
+    profit_factor: float = 0.0  # GROSS R
+    expectancy_r: float = 0.0  # GROSS R
     avg_hold_minutes: float = 0.0
     median_hold_minutes: float = 0.0
     gross_hypothetical_pnl_pct: float = 0.0
+    net_profit_factor: float = 0.0
+    net_expectancy_r: float = 0.0
+    net_hypothetical_pnl_pct: float = 0.0
+    mean_fee_cost_pct: float = 0.0
+    mean_slip_cost_pct: float = 0.0
+    mean_funding_pnl_pct: float = 0.0
+    mean_funding_coverage: float = 1.0
+    funding_coverage_ok: bool = True
+    cost_model_label: str = ""
     max_hold_ms_used: int = 0
     candle_source: str = ""
     disclaimer: str = IDEALIZED_FILL_DISCLAIMER
@@ -193,6 +302,15 @@ class StrategyScoreboard:
             "avg_hold_minutes": self.avg_hold_minutes,
             "median_hold_minutes": self.median_hold_minutes,
             "gross_hypothetical_pnl_pct": self.gross_hypothetical_pnl_pct,
+            "net_profit_factor": self.net_profit_factor,
+            "net_expectancy_r": self.net_expectancy_r,
+            "net_hypothetical_pnl_pct": self.net_hypothetical_pnl_pct,
+            "mean_fee_cost_pct": self.mean_fee_cost_pct,
+            "mean_slip_cost_pct": self.mean_slip_cost_pct,
+            "mean_funding_pnl_pct": self.mean_funding_pnl_pct,
+            "mean_funding_coverage": self.mean_funding_coverage,
+            "funding_coverage_ok": self.funding_coverage_ok,
+            "cost_model_label": self.cost_model_label,
             "max_hold_ms_used": self.max_hold_ms_used,
             "candle_source": self.candle_source,
             "disclaimer": self.disclaimer,
@@ -456,6 +574,7 @@ def simulate_decision(
     candles: Sequence[Candle],
     *,
     max_hold_ms: int,
+    cost_model: Optional[ShadowCostModel] = None,
 ) -> SimulatedOutcome:
     """Simulate one shadow entry against forward 1m candles."""
     base = SimulatedOutcome(
@@ -493,6 +612,7 @@ def simulate_decision(
     take = float(bracket["take_profit_pct"])
     size = float(bracket["size_pct"])
     deadline = decision.timestamp_ms + max_hold_ms
+    model = cost_model or resolve_shadow_cost_model(decision.strategy)
 
     if not candles:
         return dataclasses_replace(
@@ -519,7 +639,17 @@ def simulate_decision(
         if hit is not None:
             exit_px, reason = hit
             return _finish_outcome(
-                decision, entry, stop, take, size, side, exit_px, candle.timestamp_ms, reason
+                decision,
+                entry,
+                stop,
+                take,
+                size,
+                side,
+                exit_px,
+                candle.timestamp_ms,
+                reason,
+                candles=candles,
+                cost_model=model,
             )
         if candle.timestamp_ms >= deadline:
             return _finish_outcome(
@@ -532,6 +662,8 @@ def simulate_decision(
                 float(candle.close),
                 candle.timestamp_ms,
                 EXIT_TIMEOUT,
+                candles=candles,
+                cost_model=model,
             )
 
     # Exhausted available candles before SL/TP/timeout → incomplete data
@@ -554,6 +686,8 @@ def simulate_decision(
         float(last_candle.close),
         last_candle.timestamp_ms,
         EXIT_TIMEOUT,
+        candles=candles,
+        cost_model=model,
     )
 
 
@@ -573,10 +707,19 @@ def _finish_outcome(
     exit_px: float,
     exit_ts: int,
     reason: str,
+    *,
+    candles: Sequence[Candle] = (),
+    cost_model: Optional[ShadowCostModel] = None,
 ) -> SimulatedOutcome:
-    pnl = _pnl_pct(side, entry, exit_px)
-    r = _r_multiple(pnl, stop)
+    gross = _pnl_pct(side, entry, exit_px)
+    r_gross = _r_multiple(gross, stop)
     hold_min = max(0.0, (exit_ts - decision.timestamp_ms) / 60_000.0)
+    model = cost_model or resolve_shadow_cost_model(decision.strategy)
+    fee = model.round_trip_fee_frac
+    slip = model.round_trip_slip_frac
+    funding, fund_cov = _funding_during_hold(side, candles, decision.timestamp_ms, exit_ts)
+    net = gross - fee - slip + funding
+    r_net = _r_multiple(net, stop)
     return SimulatedOutcome(
         decision_id=decision.row_id,
         symbol=decision.symbol,
@@ -590,11 +733,18 @@ def _finish_outcome(
         stop_loss_pct=stop,
         take_profit_pct=take,
         size_pct=size,
-        pnl_pct=pnl,
-        r_multiple=r,
+        pnl_pct=gross,
+        r_multiple=r_gross,
         hold_minutes=hold_min,
         evaluated=True,
         skip_reason=None,
+        fee_cost_pct=fee,
+        slip_cost_pct=slip,
+        funding_pnl_pct=funding,
+        net_pnl_pct=net,
+        net_r_multiple=r_net,
+        funding_coverage=fund_cov,
+        cost_model_label=model.label,
     )
 
 
@@ -606,8 +756,9 @@ def aggregate_scoreboard(
     candle_source: str,
     n_decisions: int,
     variant: str = VARIANT_PHASE08_SHADOW,
+    min_funding_coverage: float = 0.90,
 ) -> StrategyScoreboard:
-    """Build scoreboard metrics. PF uses R-multiples as the pnl series."""
+    """Build scoreboard metrics. Gross PF uses R; net PF uses net R."""
     disclaimer = IDEALIZED_FILL_DISCLAIMER
     if variant == VARIANT_ROUTER_BLOCKED:
         disclaimer = f"{ROUTER_BLOCKED_SECTION_LABEL}. {IDEALIZED_FILL_DISCLAIMER}"
@@ -631,6 +782,8 @@ def aggregate_scoreboard(
     if not evaluated:
         return board
 
+    net_wins = 0
+    net_losses = 0
     for o in evaluated:
         if o.exit_reason == EXIT_TIMEOUT:
             board.timeouts += 1
@@ -638,10 +791,12 @@ def aggregate_scoreboard(
             board.wins += 1
         elif o.r_multiple < 0:
             board.losses += 1
-        # r_multiple == 0: flat — neither win nor loss
+        if o.net_r_multiple > 0:
+            net_wins += 1
+        elif o.net_r_multiple < 0:
+            net_losses += 1
 
     board.win_rate = board.wins / len(evaluated) if evaluated else 0.0
-    # Profit factor on R-multiples (same sentinel as phase10 / monte_carlo)
     pf_trades = [{"pnl_usd": o.r_multiple} for o in evaluated]
     board.profit_factor = compute_profit_factor(pf_trades)
     board.expectancy_r = sum(o.r_multiple for o in evaluated) / len(evaluated)
@@ -649,6 +804,18 @@ def aggregate_scoreboard(
     board.avg_hold_minutes = sum(holds) / len(holds)
     board.median_hold_minutes = float(statistics.median(holds))
     board.gross_hypothetical_pnl_pct = sum(o.pnl_pct for o in evaluated)
+
+    net_pf_trades = [{"pnl_usd": o.net_r_multiple} for o in evaluated]
+    board.net_profit_factor = compute_profit_factor(net_pf_trades)
+    board.net_expectancy_r = sum(o.net_r_multiple for o in evaluated) / len(evaluated)
+    board.net_hypothetical_pnl_pct = sum(o.net_pnl_pct for o in evaluated)
+    board.mean_fee_cost_pct = sum(o.fee_cost_pct for o in evaluated) / len(evaluated)
+    board.mean_slip_cost_pct = sum(o.slip_cost_pct for o in evaluated) / len(evaluated)
+    board.mean_funding_pnl_pct = sum(o.funding_pnl_pct for o in evaluated) / len(evaluated)
+    board.mean_funding_coverage = sum(o.funding_coverage for o in evaluated) / len(evaluated)
+    board.funding_coverage_ok = board.mean_funding_coverage >= min_funding_coverage
+    board.cost_model_label = evaluated[0].cost_model_label
+    _ = (net_wins, net_losses)  # reserved for future net WR column
     return board
 
 
@@ -680,6 +847,7 @@ def evaluate_shadow_decisions(
     boards: Dict[str, StrategyScoreboard] = {}
     for (strategy, variant), group in by_key.items():
         max_hold = resolve_max_hold_ms(strategy, cfg)
+        cost_model = resolve_shadow_cost_model(strategy, cfg)
         outcomes: List[SimulatedOutcome] = []
         sources_seen: List[str] = []
         for d in group:
@@ -694,7 +862,14 @@ def evaluate_shadow_decisions(
                     live_db_path=Path(live_db_path) if live_db_path else None,
                 )
             sources_seen.append(src)
-            outcomes.append(simulate_decision(d, candles, max_hold_ms=max_hold))
+            outcomes.append(
+                simulate_decision(
+                    d,
+                    candles,
+                    max_hold_ms=max_hold,
+                    cost_model=cost_model,
+                )
+            )
         source_label = max(set(sources_seen), key=sources_seen.count) if sources_seen else ""
         board = aggregate_scoreboard(
             strategy,
@@ -703,6 +878,7 @@ def evaluate_shadow_decisions(
             candle_source=source_label,
             n_decisions=len(group),
             variant=variant,
+            min_funding_coverage=cost_model.min_funding_coverage,
         )
         boards[board.key] = board
     return boards
@@ -780,19 +956,26 @@ def format_scoreboard_table(boards: Dict[str, StrategyScoreboard]) -> str:
             return
         lines.append(title)
         lines.append(
-            f"{'strategy':20} {'variant':16} {'n_eval':>6} {'skip':>5} {'wins':>5} "
-            f"{'loss':>5} {'tout':>5} {'WR%':>6} {'PF':>6} {'E[R]':>7} "
-            f"{'PnL%':>8} {'avgHoldm':>8}"
+            f"{'strategy':20} {'variant':16} {'n_eval':>6} {'WR%':>6} "
+            f"{'PF_g':>6} {'PF_n':>6} {'E[R]_n':>7} {'PnL%_n':>8} "
+            f"{'fee_bps':>7} {'fund_cov':>8}"
         )
         lines.append("-" * 120)
         for b in section_boards:
             lines.append(
-                f"{b.strategy:20} {b.variant:16} {b.n_evaluated:6d} {b.n_skipped:5d} "
-                f"{b.wins:5d} {b.losses:5d} {b.timeouts:5d} "
+                f"{b.strategy:20} {b.variant:16} {b.n_evaluated:6d} "
                 f"{100.0 * b.win_rate:6.1f} {b.profit_factor:6.2f} "
-                f"{b.expectancy_r:7.3f} {100.0 * b.gross_hypothetical_pnl_pct:8.3f} "
-                f"{b.avg_hold_minutes:8.2f}"
+                f"{b.net_profit_factor:6.2f} {b.net_expectancy_r:7.3f} "
+                f"{100.0 * b.net_hypothetical_pnl_pct:8.3f} "
+                f"{b.mean_fee_cost_pct * 1e4:7.2f} "
+                f"{b.mean_funding_coverage:8.2f}"
             )
+            if not b.funding_coverage_ok:
+                lines.append(
+                    "  funding_coverage_ok=False — net metrics INCONCLUSIVE for PASS gates"
+                )
+            if b.cost_model_label:
+                lines.append(f"  cost: {b.cost_model_label}")
             if b.skip_reasons:
                 reasons = ", ".join(
                     f"{k}={v}" for k, v in sorted(b.skip_reasons.items())

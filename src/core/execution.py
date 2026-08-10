@@ -124,7 +124,7 @@ class ExecutionEngine:
 
         # Fee model — Hyperliquid taker fee (paper & live)
         self._taker_fee_pct: float = safe_float(
-            config.get("risk.taker_fee_pct", 0.035)
+            config.get("risk.taker_fee_pct", 0.045)
         ) / 100.0
 
         # Slippage model for paper trading
@@ -135,7 +135,7 @@ class ExecutionEngine:
         maker_cfg = config.get("execution.maker_orders", {}) or {}
         self._maker_orders_enabled = bool(maker_cfg.get("enabled", False))
         self._maker_fee_pct: float = safe_float(
-            maker_cfg.get("maker_fee_pct", 0.01)
+            maker_cfg.get("maker_fee_pct", 0.015)
         ) / 100.0
         self._maker_timeout_ms: int = int(maker_cfg.get("timeout_ms", 30_000))
 

@@ -185,6 +185,13 @@ def build_shadow_panel_payload(
                     "gross_hypothetical_pnl_pct"
                 ),
                 "hypothetical_profit_factor": (board or {}).get("profit_factor"),
+                "net_expectancy_r": (board or {}).get("net_expectancy_r"),
+                "net_pnl_pct": (board or {}).get("net_hypothetical_pnl_pct"),
+                "net_profit_factor": (board or {}).get("net_profit_factor"),
+                "mean_fee_cost_pct": (board or {}).get("mean_fee_cost_pct"),
+                "mean_funding_coverage": (board or {}).get("mean_funding_coverage"),
+                "funding_coverage_ok": (board or {}).get("funding_coverage_ok"),
+                "cost_model_label": (board or {}).get("cost_model_label"),
                 "gate_progress_n": progress_n,
                 "gate_progress_target": MIN_TRADES_FOR_GATE,
                 "gate_progress_pct": min(

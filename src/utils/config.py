@@ -76,6 +76,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "circuit_breaker_drawdown_pct": 10.0,
         "circuit_breaker_recovery_pct": 50.0,
         "symbol_risk_multiplier": {"SOL": 0.5},
+        "taker_fee_pct": 0.045,  # HL perps tier-0 taker % per side
+        "paper_slippage_pct": 0.02,
         "chase_filter": {
             "enabled": True,
             "lookback_hours": 3.0,
@@ -85,7 +87,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "backtest": {
         "initial_capital": 100_000.0,
-        "commission_pct": 0.04,
+        "commission_pct": 0.045,  # HL perps tier-0 taker % per side
         "slippage_bps": 2.0,
         "kelly_override": None,
         "intrabar_conflict_policy": "pessimistic",
@@ -203,6 +205,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "oms_poll_interval_s": 5.0,
         "live_order_timeout_s": 60.0,
         "tca_mode": "strict",
+        "maker_orders": {
+            "enabled": True,
+            "maker_fee_pct": 0.015,  # HL perps tier-0 maker % per side
+        },
     },
 }
 

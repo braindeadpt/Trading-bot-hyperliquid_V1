@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 class BacktestConfig:
     """Hyperparameters that govern simulation fidelity."""
     initial_capital: float = 100_000.0
-    commission_pct: float = 0.035       # taker fee per side (%)
+    commission_pct: float = 0.045       # taker fee per side (%)
     slippage_bps: float = 2.0           # slippage in basis points per fill
     max_positions: int = 5
     per_trade_risk_pct: float = 1.0
@@ -1612,7 +1612,7 @@ def build_backtest_config_from_yaml(cfg: Union[Config, Dict[str, Any]]) -> Backt
     cm_cfg = get_strategy_section(cfg, "checklist_meta")
     return BacktestConfig(
         initial_capital=float(cfg.get("backtest.initial_capital", 100_000.0)),
-        commission_pct=float(cfg.get("backtest.commission_pct", cfg.get("risk.taker_fee_pct", 0.04))),
+        commission_pct=float(cfg.get("backtest.commission_pct", cfg.get("risk.taker_fee_pct", 0.045))),
         slippage_bps=float(cfg.get("backtest.slippage_bps", 2.0)),
         max_positions=int(cfg.get("risk.max_positions", 5)),
         tca_enabled=bool(cfg.get("execution.tca_enabled", True)),

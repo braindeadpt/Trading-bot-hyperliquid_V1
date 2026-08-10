@@ -25,6 +25,10 @@ The bot is built around a **WebSocket-first event architecture**: real-time mark
 - Shadow-mode strategies (`strategy.phase08.shadow_strategies`, signal-tracked
   but never executed): ChecklistMeta, VolatilityBreakout, CVDOrderFlow, OrderBookScalper,
   FundingArbitrage, FundingMomentum, SpotPerpCarry (plus others listed in YAML).
+- **Fees (2026-08-10):** paper/backtest aligned to HL perps **tier-0** —
+  taker **0.045%**/side, maker **0.015%**/side. Phase10 window re-registered
+  via `scripts/reregister_phase10_tier0_fees.py`. Protocol:
+  `docs/PAPER_OOS_90D_PROTOCOL.md`.
 - **GoldRush candle-data readiness is not yet validated.** Do not run OOS,
   parameter tuning, holdout, or performance backtests against GoldRush-sourced
   data until this is resolved.

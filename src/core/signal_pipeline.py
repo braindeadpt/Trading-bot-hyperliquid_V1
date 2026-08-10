@@ -377,7 +377,7 @@ class SignalPipeline:
         self._adx_trend = safe_float(config.get("strategy.adx_trend_threshold", 25.0))
         self._adx_range = safe_float(config.get("strategy.adx_range_threshold", 20.0))
         self._tca_enabled = tca_enabled
-        self._taker_fee = safe_float(config.get("risk.taker_fee_pct", 0.035)) / 100.0
+        self._taker_fee = safe_float(config.get("risk.taker_fee_pct", 0.045)) / 100.0
         self._paper_slip = safe_float(config.get("risk.paper_slippage_pct", 0.05)) / 100.0
         self._tca_buffer = safe_float(config.get("execution.min_edge_buffer_pct", 0.05)) / 100.0
         if for_backtest:

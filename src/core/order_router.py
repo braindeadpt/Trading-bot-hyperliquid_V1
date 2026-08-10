@@ -64,16 +64,16 @@ def resolve_order_routing(
     maker_cfg = config.get("execution.maker_orders", {}) or {}
     if isinstance(maker_cfg, dict):
         maker_enabled = bool(maker_cfg.get("enabled", False))
-        maker_fee = safe_float(maker_cfg.get("maker_fee_pct", 0.01)) / 100.0
+        maker_fee = safe_float(maker_cfg.get("maker_fee_pct", 0.015)) / 100.0
         offset_pct = safe_float(maker_cfg.get("limit_offset_pct", 0.0))
         exit_as_maker = bool(maker_cfg.get("exit_as_maker", False))
     else:
         maker_enabled = _maker_cfg_enabled(config)
-        maker_fee = safe_float(config.get("execution.maker_orders.maker_fee_pct", 0.01)) / 100.0
+        maker_fee = safe_float(config.get("execution.maker_orders.maker_fee_pct", 0.015)) / 100.0
         offset_pct = safe_float(config.get("execution.maker_orders.limit_offset_pct", 0.0))
         exit_as_maker = bool(config.get("execution.maker_orders.exit_as_maker", False))
 
-    taker_fee = safe_float(config.get("risk.taker_fee_pct", 0.035)) / 100.0
+    taker_fee = safe_float(config.get("risk.taker_fee_pct", 0.045)) / 100.0
     paper_slip = safe_float(config.get("risk.paper_slippage_pct", 0.05)) / 100.0
 
     sub = regime_strategy_name(signal)

@@ -71,7 +71,7 @@ risk:
   leverage_max: 10.0
   max_slippage_pct: 0.2             # reject signal if L2 slippage > 0.2%
   min_fill_ratio: 0.8              # reject signal if book covers <80% of size
-  taker_fee_pct: 0.035              # Hyperliquid taker fee per side (0.035%)
+  taker_fee_pct: 0.045              # HL perps tier-0 taker per side (0.045%)
   paper_slippage_pct: 0.02         # paper slippage per side (0.02%; was 0.05 — less pessimistic)
   # ── C1: Intraday volatility circuit breaker (soft gate, per-symbol) ──
   # Blocks new entries when ATR(1h) > multiplier * 7d baseline ATR.
@@ -235,7 +235,7 @@ strategy:
     impulse_min_pct: 0.0005         # 0.05% min Binance impulse to trigger
     gap_min_pct: 0.0003             # 0.03% min HL lag beyond fees
     min_edge_buffer_pct: 0.0002     # extra buffer above HL spread + RT fees
-    taker_fee_pct: 0.00035          # per-side fee estimate for gap math
+    taker_fee_pct: 0.00045          # tier-0 taker fraction per side (0.045%) for gap math
     max_hl_spread_pct: 0.0012       # 0.12% — paper: HL book often wider than 0.08%
     require_oir_confirm: false      # paper: validate entries before re-tightening
     oir_threshold: 0.10             # used when require_oir_confirm is true
@@ -528,7 +528,7 @@ strategy:
     # tautological with bid_ask_ratio (ask-heavy entry ⇒ depth_q≤0.35) and blocked
     # 100% of live signals. Code still accepts spoof_depth_skew_min but ignores it.
     spoof_wall_fraction_min: 0.21
-    auto_enable_taker_fee_pct: 0.0001   # maker fee when execution.maker_orders enabled
+    auto_enable_taker_fee_pct: 0.00015  # maker fee fraction when maker_orders enabled (0.015%)
     auto_enable_slippage_pct: 0.0005     # fallback slippage per side when book unknown
     auto_enable_min_edge_buffer_pct: 0.0005
     auto_enable_use_book_spread: true    # use half observed spread when tighter than fallback
@@ -773,7 +773,7 @@ strategy:
     last_strategy_size_multiplier: 0.5  # when protecting last exec, cut size instead of disable
     # Fase 10 frozen-window floor — governor ignores trades entered before
     # this; updated at window re-registration 2026-08-08 (deadlock fix).
-    ignore_trades_before_ms: 1786317361232  # Fase 10 window_start_ms (re-registered 2026-08-10 L2 resolution bump)
+    ignore_trades_before_ms: 1786372085694  # Fase 10 window_start_ms (re-registered 2026-08-10 tier-0 fees)
 
 # ═══════════════════════════════════════════════════════════
 # Exchange reconciliation & native protection (Phase 03)
@@ -814,7 +814,7 @@ execution:
       - TrendPyramid
   maker_orders:
     enabled: true
-    maker_fee_pct: 0.01             # 0.01% per side (Hyperliquid maker tier)
+    maker_fee_pct: 0.015            # 0.015% per side (HL perps tier-0 maker)
     limit_offset_pct: 0.0           # 0 = join best bid/ask
     timeout_ms: 30000               # cancel unfilled limits after 30s (live)
     exit_as_maker: false            # exits stay taker for speed
@@ -880,7 +880,7 @@ market_data:
 # ═══════════════════════════════════════════════════════════
 backtest:
   initial_capital: 100_000.0
-  commission_pct: 0.04            # 4 bps (Hyperliquid taker)
+  commission_pct: 0.045           # 4.5 bps (HL perps tier-0 taker)
   slippage_bps: 2.0               # 2 bps slippage
   use_regime_weights: true        # Phase 2/3 parity with live
   use_cooldown: true
@@ -1027,7 +1027,7 @@ mode_overrides:
       max_position_size_pct: 3.0  # down from 5.0
     execution:
       # v3.1.22: prefer maker orders on mainnet to capture the
-      # rebate. Taker fees (0.035%/side) compound quickly on
+      # rebate. Taker fees (0.045%/side tier-0) compound quickly on
       # short-duration strategies.
       maker_orders:
         enabled: true

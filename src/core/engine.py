@@ -414,7 +414,7 @@ class TradingEngine:
         self._tca_min_buffer = safe_float(
             config.get("execution.min_edge_buffer_pct", 0.05)
         ) / 100.0
-        self._taker_fee_pct = safe_float(config.get("risk.taker_fee_pct", 0.035)) / 100.0
+        self._taker_fee_pct = safe_float(config.get("risk.taker_fee_pct", 0.045)) / 100.0
         self._paper_slippage_pct = safe_float(
             config.get("risk.paper_slippage_pct", 0.05)
         ) / 100.0
