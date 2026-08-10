@@ -1,27 +1,28 @@
-# Hyperliquid Premium Trading Bot v3.1.47
+# Hyperliquid Premium Trading Bot v3.1.48
 
-Professional automated trading bot for Hyperliquid perpetuals exchange.
-Modular async architecture, real-time WebSocket data, pluggable
-strategies, deterministic risk management, paper / testnet / mainnet
-execution, and a Flask + Socket.IO dashboard with real-time panels.
+Professional automated trading bot for Hyperliquid perpetuals.
+Modular async architecture, real-time WebSocket data, pluggable strategies,
+deterministic risk management, paper / testnet / mainnet execution modes,
+and a Flask + Socket.IO dashboard.
 
 ## Project Status
 
-- **Live execution is currently limited to VWAPDeviation**
-  (`strategy.phase08.execution_strategies`) and runs
-  **paper-only** — mainnet execution is gated pending out-of-sample (OOS)
-  validation (walk-forward, Phase06). See `strategy.phase08.paper_only` in
-  `config/settings.yaml`.
-- **Shadow-mode strategies** (signal-tracked, never executed): CVDOrderFlow,
-  OrderBookScalper, FundingArbitrage, FundingMomentum, SpotPerpCarry,
-  ChecklistMeta (`strategy.phase08.shadow_strategies`).
+- **Execution roster:** `VWAPDeviation` only
+  (`strategy.phase08.execution_strategies`), **paper-only**
+  (`strategy.phase08.paper_only: true`). Mainnet stays gated pending OOS
+  (walk-forward / Phase06) validation.
+- **Shadow roster** (signals tracked, never executed): VolatilityBreakout,
+  CVDOrderFlow, OrderBookScalper, FundingArbitrage, FundingMomentum,
+  SpotPerpCarry, LeadLag, LiquidationCatcher, ChecklistMeta.
 - **GoldRush candle-data readiness is not yet validated.** Do not run OOS,
-  parameter tuning, holdout, or performance backtests against GoldRush-sourced
-  data until this is resolved. Parity/validation tooling lives in
-  `scripts/goldrush_parity_diagnostic.py` and
+  parameter tuning, holdout, or performance backtests on GoldRush-sourced
+  candles until parity is closed. Tooling:
+  `scripts/goldrush_parity_diagnostic.py`,
   `scripts/goldrush_secondary_validation.py`.
-- **Mainnet execution is blocked** until the above OOS validation and data
-  readiness items are closed.
+- **Mainnet execution is blocked** until OOS validation and data readiness
+  above are closed.
+- **Baseline-signal gate** is required to promote any new name into
+  `execution_strategies` — see `docs/BASELINE_SIGNAL_GATE.md`.
 
 ---
 
@@ -54,55 +55,57 @@ start.bat
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Paper Trading (default)             | [OK]  | No real money |
-| Testnet + Mainnet execution         | [OK]  | Mainnet requires explicit confirmation |
-| Real-time WebSocket dashboard       | [OK]  | Flask + Socket.IO |
-| HL WS feeds (mids, OI, trades, L2)  | [OK]  | 4 channels |
-| Binance WS (trades, liquidations)   | [OK]  | forceOrder + aggTrade |
-| Cross-venue funding (4 venues)      | [OK]  | HL predicted + Bin/Bybit/OKX REST + Coinalyze (optional) |
-| 12 trading strategies               | [OK]  | 10 active in current regime, 2 disabled by governor |
-| Strategy governor (auto-disable)    | [OK]  | Negative Sharpe over 30d => off |
-| Drawdown circuit breaker (10%)      | [OK]  | Hard gate, auto-reset at 00:00 UTC |
-| Intraday volatility circuit         | [OK]  | Soft gate, blocks entries when ATR>3x baseline |
-| Funding-reset time blackout         | [OK]  | +/-5min around 00:00/08:00/16:00 UTC |
-| Kelly Criterion sizing              | [OK]  | Per-strategy, bounded |
-| Correlation monitor                 | [OK]  | Rejects correlated adds |
-| Look-ahead / future-data audit      | [OK]  | Static scanner (Phase B) |
-| Static security audit               | [OK]  | 9 rules (eval/subprocess/secret/etc.) |
-| Encrypted credential vault          | [OK]  | Fernet + PBKDF2 480k iterations |
-| Crash-recovery wrapper              | [OK]  | 3 restarts, 30s cooldown |
+| Paper trading (default)             | OK | No real money |
+| Testnet execution                   | OK | Real matching, fake funds |
+| Mainnet execution                   | Gated | Blocked until OOS + data readiness |
+| Real-time WebSocket dashboard       | OK | Flask + Socket.IO |
+| HL WS feeds (mids, OI, trades, L2)  | OK | Plus optional L2 book recorder |
+| Multi-venue liquidations            | OK | Aggregator + feed-silence monitors |
+| Cross-venue funding                 | OK | HL + Binance/Bybit/OKX (+ Coinalyze optional) |
+| Phase08 execution / shadow split    | OK | VWAPDeviation paper-only; others shadow |
+| Baseline-signal gate                | OK | Required for new execution promotions |
+| Strategy governor                   | OK | Negative Sharpe over 30d => off |
+| Drawdown circuit breaker (10%)      | OK | Hard gate; auto-reset 00:00 UTC |
+| Intraday volatility circuit         | OK | Soft gate when ATR > 3× baseline |
+| Funding-reset time blackout         | OK | ±5 min around 00:00/08:00/16:00 UTC |
+| Kelly Criterion sizing              | OK | Per-strategy, bounded |
+| Correlation monitor                 | OK | Rejects correlated adds |
+| Look-ahead / future-data audit      | OK | Static scanner (Phase B) |
+| Static security audit               | OK | 9 rules (eval / subprocess / secrets / …) |
+| Encrypted credential vault          | OK | Fernet + PBKDF2 480k iterations |
+| Crash-recovery wrapper              | OK | 3 restarts, 30s cooldown |
+| Research / feature-screening tooling| OK | Scripts + docs under `scripts/` / `docs/` |
 
 ---
 
 ## Strategies
 
-The strategy modules are governed by `StrategyGovernor` which auto-disables
-any strategy with negative Sharpe over the last 30 days. The ensemble
-requires cross-class agreement (trend/revert/carry/micro) to avoid
-false confluence from correlated signal generators.
+Authoritative Phase08 roster lives in `config/settings.yaml`
+(`execution_strategies` / `shadow_strategies`). The table below is an
+inventory of modules and their **current operating role**, not a claim that
+every “available” module is trading live.
 
-The table below inventories available modules; it is not the active execution
-roster. The authoritative execution/shadow lists are in `config/settings.yaml`.
+`StrategyGovernor` can still auto-disable strategies with negative Sharpe over
+the last 30 days. Ensemble consensus remains available but is **disabled** in
+the current paper config (direct Phase08 routing).
 
-| Strategy             | Type           | Status (typical) | Notes |
-|----------------------|----------------|------------------|-------|
-| TrendPyramid         | trend          | Active (v3.1.20) | EMA20 pullback entries, Chandelier exit, 4R TP |
-| SmartMoneyFlow       | trend          | Active (legacy)  | Trend follower (v3.1.18 EMA50 exit) |
-| DonchianBreakout     | trend          | Active (v3.1.18) | 15m breakout + vol filter (v3.1.18 dim fix) |
-| VolatilityBreakout   | trend          | Active           | Bollinger-squeeze breakout, regime-weighted |
-| SpotPerpCarry        | carry (v3.1.20)| Active           | Short perp + synthetic long spot, true delta-neutral |
-| FundingMomentum      | carry (v3.1.20)| Active           | Follow funding flips with OI divergence |
-| RangeGrid            | revert (v3.1.20)| Active          | Ping-pong maker limit orders in ADX<18 ranges |
-| LiquidationCatcher   | event-driven   | Active           | $50M+ Binance liquidations + OI confirm |
-| VWAPDeviation        | mean-reversion | Active (low-vol) | Z-score vs VWAP(1h); v3.1.18 thresholds restored |
-| CVDOrderFlow         | order-flow     | Active           | Multi-TF CVD divergence (5m/15m/1h); v3.1.16 USD fix |
-| LeadLag              | microstructure | Active          | Perp-vs-perp lag (default) OR BasisTrade mode |
-| FundingArbitrage     | market-neutral | Disabled (v3.1.18)| Killed — cross-asset basis risk |
-| FundingExtreme       | mean-reversion | Disabled         | Sharpe -37, kept off permanently |
-
-Ensemble logic combines signals via weighted consensus with cross-class
-de-correlation (v3.1.18). High-conviction bypass requires confidence
->= 0.70 and excludes VWAPDeviation, FundingExtreme, LeadLag.
+| Strategy           | Type            | Role now | Notes |
+|--------------------|-----------------|----------|-------|
+| VWAPDeviation      | mean-reversion  | Execution (paper) | Only name allowed to place paper orders |
+| VolatilityBreakout | trend           | Shadow   | Signal-tracked; not executed |
+| CVDOrderFlow       | order-flow      | Shadow   | Multi-TF CVD divergence |
+| OrderBookScalper   | microstructure  | Shadow   | L2 imbalance scalper |
+| FundingArbitrage   | market-neutral  | Shadow   | Previously killed as live arb; shadow only |
+| FundingMomentum    | carry           | Shadow   | Funding-flip follower |
+| SpotPerpCarry      | carry           | Shadow   | Delta-neutral carry |
+| LeadLag            | microstructure  | Shadow   | Perp-vs-perp lag / basis mode |
+| LiquidationCatcher | event-driven    | Shadow   | Liquidation + OI confirm |
+| ChecklistMeta      | meta checklist  | Shadow   | Demoted after baseline-signal FAIL |
+| TrendPyramid       | trend           | Available | Not in Phase08 execution/shadow lists |
+| SmartMoneyFlow     | trend           | Available | Research / legacy |
+| DonchianBreakout   | trend           | Available | Research / legacy |
+| RangeGrid          | revert          | Available | Maker grid in low-ADX ranges |
+| FundingExtreme     | mean-reversion  | Disabled | Governor Sharpe failure — kept off |
 
 ---
 

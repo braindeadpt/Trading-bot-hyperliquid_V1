@@ -2,7 +2,7 @@
 # 
 # All paths are relative to the project root unless absolute.
 
-version: "1.0.0"
+version: "3.1.48"
 
 # ═══════════════════════════════════════════════════════════
 # Trading mode
@@ -457,7 +457,7 @@ strategy:
   # — complements VB (which dominates W1/W3 trending regimes)
   # ═══════════════════════════════════════════════════════════
   checklist_meta:
-    enabled: true                   # v3.1.48: promoted to Phase08 execution (was shadow)
+    enabled: true                   # module on; Phase08 role = shadow (baseline FAIL demotion)
     score_threshold: 4.0            # v3.1.40: was 3.5 — fewer, higher-conviction signals
     min_confidence: 0.60
     # Chop / whipsaw gates (v3.1.x) — block range entries and post-stop reversals
@@ -715,11 +715,10 @@ strategy:
     multiplier: 2.0                 # double after each loss (30m → 1h → 2h)
 
   # ═══════════════════════════════════════════════════════════
-  # Phase 08 — edge isolation (ChecklistMeta + VWAP execution)
-  # v3.1.48: re-registered after structural deadlock (VB+VWAP both
-  # governor-disabled → 138× regime_expansion_no_allowed_strategies).
-  # ChecklistMeta promotion is PARTLY in-sample (59% WR vs VB 42% in
-  # 10/07–08/08 audit) — OOS walk-forward REQUIRED before treating as validated.
+  # Phase 08 — edge isolation (VWAPDeviation paper execution)
+  # v3.1.48: structural deadlock fix + governor floor for last execution name.
+  # ChecklistMeta was temporarily in execution, then demoted to shadow after
+  # baseline-signal FAIL (W2/W3). Do not re-promote without a fresh PASS.
   # ═══════════════════════════════════════════════════════════
   phase08:
     enabled: true

@@ -1,4 +1,4 @@
-# AGENTS.md — Hyperliquid Premium Trading Bot v3.1.47
+# AGENTS.md — Hyperliquid Premium Trading Bot v3.1.48
 
 > This file is intended for AI coding agents. It assumes zero prior knowledge of the project.
 
@@ -561,4 +561,4 @@ Hooks: `src/research/phase08_preregister.py`, `phase10_preregister.py`.
 
 ---
 
-*Last updated: 2026-08-09 (feature-screening-first rule + baseline-signal gate).*
+*Last updated: 2026-08-10 (v3.1.48 public alignment — version, README roster, GitHub release).*
