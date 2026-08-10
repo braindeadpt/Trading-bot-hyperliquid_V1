@@ -174,6 +174,14 @@ class BackgroundTasks:
                 for sym, data in results.items():
                     if data:
                         engine._latest_agg_funding[sym] = data
+                        if (
+                            getattr(engine, "_feed_silence_enabled", False)
+                            and not data.stale
+                        ):
+                            engine._feed_silence.beat(
+                                "funding_cex",
+                                int(getattr(data, "timestamp_ms", 0) or time.time() * 1000),
+                            )
                         if data.stale:
                             logger.warning(
                                 "CEX funding %s is STALE (age=%.0fs, exchanges=%s)",
@@ -212,6 +220,14 @@ class BackgroundTasks:
                             f"{hl8:.8f}" if hl8 is not None else "N/A",
                             ",".join(sorted(snap.venues.keys())),
                         )
+                        if (
+                            getattr(engine, "_feed_silence_enabled", False)
+                            and not snap.stale
+                        ):
+                            engine._feed_silence.beat(
+                                "funding_hl",
+                                int(getattr(snap, "timestamp_ms", 0) or time.time() * 1000),
+                            )
                 engine._persist_funding_oi_snapshot()
                 engine._refresh_market_data_health()
                 await engine._check_market_data_alerts()

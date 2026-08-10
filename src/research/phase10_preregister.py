@@ -262,4 +262,21 @@ def assert_config_matches_preregister(
             f"(frozen={frozen_hash}, live={live_hash}). No parameter changes "
             "are allowed during the frozen validation window."
         )
+    # Soft for legacy (ChecklistMeta, VWAPDeviation): hard for any other name
+    # in execution_strategies. Asymmetry is intentional — see AGENTS.md.
+    try:
+        from src.research.phase08_preregister import assert_baseline_signal_gate
+
+        bridged = dict(manifest)
+        if "execution_scope" not in bridged:
+            bridged["execution_scope"] = {
+                "strategies": list(manifest.get("execution_strategies") or [])
+            }
+        assert_baseline_signal_gate(bridged, require=False, hard_for_new=True)
+    except Exception as exc:
+        from src.research.phase08_preregister import PreregisterManifestError
+
+        if isinstance(exc, PreregisterManifestError):
+            raise Phase10PreregisterError(str(exc)) from exc
+        raise
     return manifest

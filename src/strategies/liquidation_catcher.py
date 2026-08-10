@@ -31,6 +31,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 import collections
 import logging
 
+from src.exchanges.liquidation_event import is_real_liquidation_source
 from src.strategies.base import MarketEvent, Signal, ExitSignal, Position, Strategy
 from src.strategies.indicators import Candle, calculate_atr, calculate_vwap_zscore
 
@@ -92,7 +93,7 @@ class LiquidationCatcher(Strategy):
         return self._auto_active
 
     def _update_auto_activation(self, event: MarketEvent) -> None:
-        """Turn on automatically when the engine reports a validated Binance feed."""
+        """Turn on automatically when the engine reports a validated real feed."""
         if self._auto_active:
             return
         if self.MANUAL_ENABLED:
@@ -106,7 +107,7 @@ class LiquidationCatcher(Strategy):
         if not self._auto_activate_logged:
             self._auto_activate_logged = True
             logger.info(
-                "LiquidationCatcher AUTO-ENABLED — Binance liquidation feed validated "
+                "LiquidationCatcher AUTO-ENABLED — real liquidation feed validated "
                 "(require_real=%s)",
                 self.REQUIRE_REAL_LIQUIDATION,
             )
@@ -139,9 +140,12 @@ class LiquidationCatcher(Strategy):
             )
             return None
 
-        if self.REQUIRE_REAL_LIQUIDATION and event.liquidation_data_source != "binance":
+        if self.REQUIRE_REAL_LIQUIDATION and not is_real_liquidation_source(
+            event.liquidation_data_source
+        ):
             logger.info(
-                "LiquidationCatcher SKIP %s — require binance liquidations (source=%s)",
+                "LiquidationCatcher SKIP %s — require real liquidations "
+                "(source=%s; reject proxy/None)",
                 event.symbol,
                 event.liquidation_data_source,
             )

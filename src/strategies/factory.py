@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from src.strategies.base import Strategy, MarketEvent, Signal, Position, ExitSignal
 from src.strategies.ensemble import StrategyEnsemble, StrategyWeight
 from src.strategies.cvd_orderflow import CVDOrderFlow
+from src.strategies.cvd_orderflow_p90 import CVDOrderFlowP90
 from src.strategies.donchian_breakout import DonchianBreakout
 from src.strategies.funding_arbitrage import FundingArbitrage
 from src.strategies.funding_momentum import FundingMomentum
@@ -48,6 +49,7 @@ _STRATEGY_REGISTRY = (
     ("strategy.liquidation_catcher", LiquidationCatcher),
     ("strategy.orderbook_scalper", OrderBookScalper),
     ("strategy.cvd_orderflow", CVDOrderFlow),
+    ("strategy.cvd_orderflow_p90", CVDOrderFlowP90),
     ("strategy.lead_lag", LeadLag),
     # v3.1.20: 4 new strategies
     ("strategy.spot_perp_carry", SpotPerpCarry),

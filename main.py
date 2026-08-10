@@ -59,6 +59,7 @@ from exchanges.hyperliquid_ws import HyperliquidWSClient, DataBus
 from exchanges.hyperliquid_rest import HyperliquidRESTClient
 from exchanges.binance_api import BinanceRESTClient, BinanceWSClient
 from exchanges.binance_futures_feed import BinanceFuturesFeed
+from exchanges.liquidation_aggregator import MultiVenueLiquidationAggregator
 from data.candle_builder import CandleBuilder
 
 from strategies.factory import (
@@ -88,8 +89,10 @@ _hl_ws: Optional[HyperliquidWSClient] = None
 _binance_ws: Optional[BinanceWSClient] = None
 _candle_builder: Optional[CandleBuilder] = None
 _binance_futures_feed: Optional[BinanceFuturesFeed] = None
+_liquidation_aggregator: Optional[MultiVenueLiquidationAggregator] = None
 _research_sampler: Optional[Any] = None
 _research_microstructure: Optional[Any] = None
+_l2_book_recorder: Optional[Any] = None
 _logger = None
 
 
@@ -478,8 +481,9 @@ async def main() -> None:
     await candle_builder.start()
     logger.info("CandleBuilder started")
 
-    # Binance USD-M futures feed (liquidations + long/short ratio)
-    global _binance_futures_feed
+    # Binance USD-M futures feed (legacy @forceOrder + long/short ratio).
+    # fstream liquidations are blocked on this network; LS ratio still polls REST.
+    global _binance_futures_feed, _liquidation_aggregator
     liq_source = str(cfg.get("market_data.liquidation_source", "auto")).lower()
     ls_enabled = bool(cfg.get("market_data.long_short_ratio_enabled", True))
     if liq_source != "proxy" or ls_enabled:
@@ -490,6 +494,21 @@ async def main() -> None:
         )
         await _binance_futures_feed.start()
         logger.info("BinanceFuturesFeed started (liquidation_source=%s)", liq_source)
+
+    # Multi-venue REAL liquidations (OKX + Bybit WS; Coinalyze verify-only).
+    # Start after we have symbols; silence beats wired once engine exists (below).
+    if liq_source in ("real", "auto", "binance"):
+        _md = cfg.get("market_data", {}) or {}
+        _liquidation_aggregator = MultiVenueLiquidationAggregator(
+            bus=data_bus,
+            symbols=symbols,
+            enable_okx=bool(_md.get("liquidation_okx_enabled", True)),
+            enable_bybit=bool(_md.get("liquidation_bybit_enabled", True)),
+            enable_coinalyze_check=bool(_md.get("liquidation_coinalyze_check", True)),
+            coinalyze_api_key=str(_md.get("coinalyze_api_key") or "") or None,
+            coinalyze_poll_sec=float(_md.get("liquidation_coinalyze_poll_sec", 900)),
+        )
+        logger.info("LiquidationAggregator constructed (mode=%s)", liq_source)
 
     # Binance USD-M perp mark prices for LeadLag (basis-corrected vs HL perp)
     lead_lag_cfg = cfg.get("strategy.lead_lag", {}) or {}
@@ -525,7 +544,19 @@ async def main() -> None:
     await engine.start()
     logger.info("TradingEngine started")
 
-    global _research_sampler, _research_microstructure
+    if _liquidation_aggregator is not None:
+        def _cz_silence_beat(ts_ms: int) -> None:
+            if getattr(engine, "_feed_silence_enabled", False):
+                engine._feed_silence.beat("liquidation_coinalyze_check", ts_ms)
+
+        _liquidation_aggregator._on_coinalyze_check = _cz_silence_beat
+        await _liquidation_aggregator.start()
+        logger.info(
+            "MultiVenueLiquidationAggregator started — %s",
+            _liquidation_aggregator.stats().get("coinalyze_budget_note"),
+        )
+
+    global _research_sampler, _research_microstructure, _l2_book_recorder
     if not args.backtest and not args.audit:
         try:
             from data.research_microstructure import start_microstructure_recorder_from_config
@@ -539,6 +570,42 @@ async def main() -> None:
                 )
         except Exception as exc:
             logger.warning("ResearchMicrostructureRecorder failed to start: %s", exc)
+        try:
+            from data.l2_book_recorder import start_l2_book_recorder_from_config
+
+            def _l2_silence_beat(ts_ms: int) -> None:
+                if getattr(engine, "_feed_silence_enabled", False):
+                    engine._feed_silence.beat("l2_book_recording", ts_ms)
+
+            _l2_book_recorder = start_l2_book_recorder_from_config(
+                data_bus,
+                cfg,
+                project_root=PROJECT_ROOT,
+                on_persist=_l2_silence_beat,
+            )
+            if _l2_book_recorder is not None:
+                started = await _l2_book_recorder.start()
+                if started:
+                    logger.info(
+                        "L2BookRecorder active - top-K levels -> %s (stats=%s)",
+                        _l2_book_recorder.stats.get("path"),
+                        _l2_book_recorder.stats,
+                    )
+                else:
+                    logger.error(
+                        "L2BookRecorder failed to start (disk?) — trading continues; "
+                        "disabling l2_book_recording silence contract"
+                    )
+                    _l2_book_recorder = None
+                    if getattr(engine, "_feed_silence_enabled", False):
+                        engine._feed_silence.disable_feed("l2_book_recording")
+            elif getattr(engine, "_feed_silence_enabled", False):
+                # Recorder off — do not contract silence for this feed
+                engine._feed_silence.disable_feed("l2_book_recording")
+        except Exception as exc:
+            logger.warning("L2BookRecorder failed to start: %s", exc)
+            if getattr(engine, "_feed_silence_enabled", False):
+                engine._feed_silence.disable_feed("l2_book_recording")
         research_cfg = cfg.get("research", {}) or {}
         if bool(research_cfg.get("rest_sampling_enabled", False)):
             try:
@@ -645,6 +712,11 @@ async def main() -> None:
         except Exception:
             logger.exception("ResearchMicrostructureRecorder stop failed")
         try:
+            if _l2_book_recorder is not None:
+                await _l2_book_recorder.stop()
+        except Exception:
+            logger.exception("L2BookRecorder stop failed")
+        try:
             if _research_sampler is not None:
                 await _research_sampler.stop()
         except Exception:
@@ -654,6 +726,11 @@ async def main() -> None:
                 await _binance_futures_feed.stop()
         except Exception:
             logger.exception("BinanceFuturesFeed stop failed")
+        try:
+            if _liquidation_aggregator is not None:
+                await _liquidation_aggregator.stop()
+        except Exception:
+            logger.exception("LiquidationAggregator stop failed")
         try:
             if hl_ws is not None:
                 hl_ws._shutdown = True

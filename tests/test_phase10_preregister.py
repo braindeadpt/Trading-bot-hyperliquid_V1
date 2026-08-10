@@ -36,7 +36,7 @@ def _make_config(execution_strategies=None, extra=None):
             "phase08": {
                 "execution_strategies": execution_strategies
                 if execution_strategies is not None
-                else ["VolatilityBreakout", "VWAPDeviation"],
+                else ["VWAPDeviation"],
             },
         },
     }
@@ -78,7 +78,7 @@ def test_build_manifest_captures_window_and_thresholds():
     assert manifest["window"]["max_end_ms"] == now_ms + 12 * week_ms
 
     # Canonical form is sorted, regardless of config list order.
-    assert manifest["execution_strategies"] == sorted(["VolatilityBreakout", "VWAPDeviation"])
+    assert manifest["execution_strategies"] == ["VWAPDeviation"]
 
     thresholds = manifest["gate_thresholds"]
     assert thresholds["min_trades"] == GATE_MIN_TRADES == 100
@@ -101,17 +101,17 @@ def test_manifest_reads_execution_strategies_live_not_hardcoded():
 @pytest.mark.unit
 def test_persist_is_immutable_first_write_wins(tmp_path):
     path = tmp_path / "phase10_preregister.json"
-    config_a = _make_config(execution_strategies=["VolatilityBreakout", "VWAPDeviation"])
+    config_a = _make_config(execution_strategies=["ChecklistMeta", "VWAPDeviation"])
     config_b = _make_config(execution_strategies=["SomethingElseEntirely"])
 
     out1 = persist_preregister_manifest(config_a, path=path)
     manifest1 = load_preregister_manifest(out1)
-    assert manifest1["execution_strategies"] == sorted(["VolatilityBreakout", "VWAPDeviation"])
+    assert manifest1["execution_strategies"] == sorted(["ChecklistMeta", "VWAPDeviation"])
 
     # Second call with a *different* config must NOT overwrite (first write wins).
     out2 = persist_preregister_manifest(config_b, path=path)
     manifest2 = load_preregister_manifest(out2)
-    assert manifest2["execution_strategies"] == sorted(["VolatilityBreakout", "VWAPDeviation"])
+    assert manifest2["execution_strategies"] == sorted(["ChecklistMeta", "VWAPDeviation"])
     assert manifest2["experiment_id"] == manifest1["experiment_id"]
 
 
@@ -164,17 +164,17 @@ def test_assert_config_matches_preregister_passes_when_unchanged(tmp_path):
     persist_preregister_manifest(config, path=path)
 
     manifest = assert_config_matches_preregister(config, path=path)
-    assert manifest["execution_strategies"] == sorted(["VolatilityBreakout", "VWAPDeviation"])
+    assert manifest["execution_strategies"] == ["VWAPDeviation"]
 
 
 @pytest.mark.unit
 def test_assert_config_matches_preregister_detects_strategy_drift(tmp_path):
     path = tmp_path / "phase10_preregister.json"
-    frozen_config = _make_config(execution_strategies=["VolatilityBreakout", "VWAPDeviation"])
+    frozen_config = _make_config(execution_strategies=["VWAPDeviation"])
     persist_preregister_manifest(frozen_config, path=path)
 
     drifted_config = _make_config(
-        execution_strategies=["VolatilityBreakout", "VWAPDeviation", "CVDOrderFlow"]
+        execution_strategies=["VWAPDeviation", "CVDOrderFlow"]
     )
     with pytest.raises(Phase10PreregisterError, match="execution_strategies"):
         assert_config_matches_preregister(drifted_config, path=path)

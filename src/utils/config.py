@@ -137,6 +137,24 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "1h": 2,
         },
     },
+    # Research L2 levels (not operational DB). See docs/L2_BOOK_RECORDING.md
+    "market_data": {
+        "l2_recording": {
+            "enabled": True,
+            "interval_sec": 1.0,
+            "depth_levels": 25,
+            "min_mid_change_bps": 1.0,
+            # Relative default for CI/VPS; production YAML points at HDD volume.
+            "path": "data/research/l2_books",
+            "retention_days": 365,
+            "prune_interval_sec": 3600.0,
+            "queue_max": 5000,
+            "flush_interval_sec": 1.0,
+        },
+        "feed_silence": {
+            "l2_book_recording_max_sec": 120.0,
+        },
+    },
     "logging": {
         "level": "INFO",
         "json": False,

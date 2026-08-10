@@ -521,7 +521,13 @@ strategy:
     mode: momentum                  # momentum = follow heavy book side; fade = mean-revert imbalance
     mode: momentum                  # momentum = follow heavy book side; fade = mean-revert imbalance
     spoof_wall_proximity_pct: 0.001 # reject if supporting wall within 0.1% of mid
-    spoof_depth_skew_min: 0.65      # bid wall spoof when depth_quality >= this; ask when <= 1-this
+    # Anti-spoof (2026-08-09): wall_frac = largest_wall_size / same_side_depth_1pct.
+    # Calibrated from live HL L2 (scripts/calibrate_obs_spoof_filter.py): 104 entry
+    # candidates, p85 → spoof_wall_fraction_min=0.21 ≈ ~15% block rate.
+    # DO NOT reintroduce depth_quality / spoof_depth_skew_min — that filter was
+    # tautological with bid_ask_ratio (ask-heavy entry ⇒ depth_q≤0.35) and blocked
+    # 100% of live signals. Code still accepts spoof_depth_skew_min but ignores it.
+    spoof_wall_fraction_min: 0.21
     auto_enable_taker_fee_pct: 0.0001   # maker fee when execution.maker_orders enabled
     auto_enable_slippage_pct: 0.0005     # fallback slippage per side when book unknown
     auto_enable_min_edge_buffer_pct: 0.0005
@@ -544,12 +550,21 @@ strategy:
   # Strategy: Liquidation Catcher (Task 3.3)
   # ═══════════════════════════════════════════════════════════
   liquidation_catcher:
-    enabled: false                  # Phase 1: 0 backtest trades — validar antes de ligar
-    auto_enable: false              # Phase 1: não auto-ativar (auto_enable=true carrega mesmo com enabled=false)
-    feed_warmup_events: 1           # Binance liquidation events before auto-enable
+    enabled: false                  # shadow panel only until real-liq sample accumulates
+    auto_enable: false              # do not auto-activate from feed_ready alone
+    feed_warmup_events: 1           # real-venue events before feed_ready
     require_real_liquidation_data: true
-    min_notional_usd: 5_000_000     # paper/test: $5M in 5min (mainnet override: $50M)
-    min_liquidation_count: 3        # avoid single large liquidation
+    # PROVISIONAL thresholds (2026-08-09) — OKX-REST-only bootstrap calibration.
+    # Artifact: data/backtests/parity_diag/liq_threshold_calibration_okx.json
+    # Chosen: OKX 5m-window p90 (not p95) so shadow fires more often and n≥30
+    # arrives sooner; extra shadow signals cost nothing.
+    # CAVEAT: aggregator sums OKX+Bybit → multi-venue notional is systematically
+    # larger, so $5.7M / count 18 will behave more like ~p75–p80 of the *aggregated*
+    # distribution, not a true multi-venue p90. Recalibrate from DB (source!=proxy)
+    # after weeks of real accumulation. Thresholds filter strategy signals only —
+    # the aggregator persists every real event regardless.
+    min_notional_usd: 5_700_000     # PROVISIONAL — OKX-only p90 ≈ $5.71M (see caveat above)
+    min_liquidation_count: 18       # PROVISIONAL — OKX-only p90 count
     require_oi_decreasing: false    # paper: OI feed not always reliable on first hours
     oi_delta_max: 0.0              # used when require_oi_decreasing is true
     max_adx: 45.0                  # avoid fading very strong trends
@@ -710,7 +725,6 @@ strategy:
     enabled: true
     paper_only: true               # tier_a_hl_ohlc = data cert only; paper until Phase06 OOS
     execution_strategies:
-      - ChecklistMeta
       - VWAPDeviation
     shadow_strategies:
       - VolatilityBreakout
@@ -719,12 +733,15 @@ strategy:
       - FundingArbitrage
       - FundingMomentum
       - SpotPerpCarry
+      - LeadLag
+      - LiquidationCatcher
+      - ChecklistMeta
     regime_router:
       enabled: true
       adx_range_threshold: 20.0    # ADX < 20 → low_vol (VWAP + ChecklistMeta)
       adx_trend_threshold: 25.0    # ADX > 25 → trend; 20–25 → expansion (ChecklistMeta fallback)
       sequential_contradiction_block_ms: 3600000  # 1h — block opposite-side flips
-      fallback_strategy: ChecklistMeta  # never leave a regime with zero eligible strategies
+      fallback_strategy: VWAPDeviation  # never leave a regime with zero eligible strategies
     adx:
       timeframe: "15m"
       timeframe_s: 900
@@ -756,7 +773,7 @@ strategy:
     last_strategy_size_multiplier: 0.5  # when protecting last exec, cut size instead of disable
     # Fase 10 frozen-window floor — governor ignores trades entered before
     # this; updated at window re-registration 2026-08-08 (deadlock fix).
-    ignore_trades_before_ms: 1786150412581  # Fase 10 window_start_ms (re-registered 2026-08-08 deadlock fix)
+    ignore_trades_before_ms: 1786317361232  # Fase 10 window_start_ms (re-registered 2026-08-10 L2 resolution bump)
 
 # ═══════════════════════════════════════════════════════════
 # Exchange reconciliation & native protection (Phase 03)
@@ -812,7 +829,13 @@ execution:
 # External market data feeds (Phase 2)
 # ═══════════════════════════════════════════════════════════
 market_data:
-  liquidation_source: auto          # binance | proxy | auto
+  # real = hl|okx|bybit|binance (never proxy). Was: binance (fstream dead here).
+  # Restart paper to load MultiVenueLiquidationAggregator + this mode.
+  liquidation_source: real          # real | binance | proxy | auto
+  liquidation_okx_enabled: true
+  liquidation_bybit_enabled: true
+  liquidation_coinalyze_check: true # verify-only; never summed into strategy window
+  liquidation_coinalyze_poll_sec: 900  # ≥600; ~0.27 req/min with 4 symbols
   long_short_ratio_enabled: true
   long_short_poll_sec: 300
   hl_predicted_funding_poll_sec: 90 # Hyperliquid INFO predictedFundings
@@ -829,6 +852,28 @@ market_data:
   block_entries_on_stale: true           # block new entries when feed health is red/stale
   block_entries_on_ws_unhealthy: true    # block entries when HL WS is unhealthy
   max_venue_spread: 0.001           # max HL Bin/Bybit/HlPerp 8h spread (0.1%) per symbol
+  # Research L2 levels (NOT operational bot.db). See docs/L2_BOOK_RECORDING.md
+  # Path is on HDD E: — sequential gzip appends; keeps SSD for bot.db random I/O.
+  l2_recording:
+    enabled: true
+    # 2026-08-10: raised resolution — past cannot be re-sampled denser.
+    # Measured ~23 MB/day at 2s/10; expected ~48–101 MB/day at 1s/25. See docs/DATA_ARCHITECTURE.md
+    interval_sec: 1.0
+    depth_levels: 25
+    min_mid_change_bps: 1.0
+    # Keep writes under the repository; mount external storage here if needed.
+    path: "data/research/l2_books"
+    retention_days: 365
+    prune_interval_sec: 3600        # retention actually runs (start + hourly + stop)
+    queue_max: 5000                 # adequate at 1s/25; watch recorder dropped after restart
+    flush_interval_sec: 1.0
+  feed_silence:
+    enabled: true
+    liquidation_okx_max_sec: 21600          # 6h
+    liquidation_bybit_max_sec: 21600        # 6h
+    liquidation_binance_max_sec: 21600      # 6h (expected degraded — fstream blocked)
+    liquidation_coinalyze_check_max_sec: 43200  # 12h (low-freq verify)
+    l2_book_recording_max_sec: 120          # research L2 level writer
 
 # ═══════════════════════════════════════════════════════════
 # Backtest

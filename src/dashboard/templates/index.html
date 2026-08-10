@@ -405,6 +405,41 @@ tr:hover td { background: var(--panel-hover); }
     </div>
 </div>
 
+<!-- Shadow observability (Phase08) -->
+<div class="section-label section-intel">
+    <span class="bar"></span><span class="text">Shadow / Gate progress</span><span class="line"></span>
+</div>
+<div class="grid">
+    <div class="g-12">
+        <div class="panel" style="max-height:280px;">
+            <div class="panel-header">
+                Shadow strategies
+                <span class="dim" id="shadow-disclaimer">Idealized fills — not executable edge</span>
+            </div>
+            <div class="panel-body" style="padding:6px 8px; max-height:240px; overflow-y:auto;">
+                <table style="width:100%; font-size:11px; border-collapse:collapse;">
+                    <thead>
+                        <tr style="color:var(--muted); text-align:left;">
+                            <th>Strategy</th>
+                            <th>Sig today</th>
+                            <th>7d</th>
+                            <th>Hyp. n</th>
+                            <th>WR</th>
+                            <th>E[R]</th>
+                            <th>Gate n/30</th>
+                            <th>Last gate</th>
+                            <th>Tier</th>
+                        </tr>
+                    </thead>
+                    <tbody id="shadow-panel-tbody">
+                        <tr><td colspan="9" class="muted">Waiting...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <!-- SECTION: LOGS                                                    -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -920,6 +955,46 @@ function renderStrategies(data) {
     }).join('');
 }
 
+// ── Shadow / gate progress ──
+function renderShadowPanel(payload) {
+    const tbody = document.getElementById("shadow-panel-tbody");
+    const disc = document.getElementById("shadow-disclaimer");
+    if (!tbody) return;
+    if (disc && payload && payload.disclaimer) {
+        disc.textContent = payload.disclaimer.slice(0, 80) + "…";
+        disc.title = payload.disclaimer;
+    }
+    const rows = (payload && payload.rows) || [];
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="muted">No shadow strategies</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(r => {
+        const g = r.last_gate || {};
+        const verdict = g.verdict || "—";
+        const vColor = verdict === "PASS" ? "var(--up)" : verdict === "FAIL" ? "var(--down)" : "var(--yellow)";
+        const pct = Math.min(100, Number(r.gate_progress_pct) || 0);
+        const bar = `<div style="background:var(--border);height:6px;border-radius:3px;width:72px;display:inline-block;vertical-align:middle;">
+            <div style="height:6px;border-radius:3px;width:${pct}%;background:var(--accent);"></div>
+        </div> <span style="font-size:9px;">${r.gate_progress_n || 0}/${r.gate_progress_target || 30}</span>`;
+        const wr = r.hypothetical_win_rate != null ? (100 * r.hypothetical_win_rate).toFixed(0) + "%" : "—";
+        const er = r.hypothetical_expectancy_r != null ? Number(r.hypothetical_expectancy_r).toFixed(2) : "—";
+        const fail = (g.failed_conditions || []).join("; ") || g.reason || "";
+        const freq = r.frequency_insufficient_90d ? " <span style='color:var(--yellow)' title='n&lt;30 in 90d'>freq</span>" : "";
+        return `<tr style="border-top:1px solid var(--border);">
+            <td title="${r.fidelity_note || ""}">${r.strategy}${freq}</td>
+            <td>${r.signals_today || 0}</td>
+            <td>${r.signals_7d || 0}</td>
+            <td>${r.hypothetical_trades_closed || 0}</td>
+            <td>${wr}</td>
+            <td>${er}</td>
+            <td>${bar}</td>
+            <td style="color:${vColor};" title="${fail}">${verdict}</td>
+            <td style="font-size:9px;color:var(--dim);">${(r.fidelity_tier || "").replace("tier_", "")}</td>
+        </tr>`;
+    }).join("");
+}
+
 // ── Signals ──
 function renderSignals(data) {
     const div = document.getElementById("signals-list");
@@ -1114,8 +1189,13 @@ function pollAll() {
         authFetch("/api/trades").then(r => r.json()).then(d => renderTrades(d)).catch(() => {});
         authFetch("/api/positions").then(r => r.json()).then(d => renderPositions(d)).catch(() => {});
     }
+    authFetch("/api/shadow_panel?evaluate=0").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
 }
 setInterval(pollAll, 5000);
+// Full hypothetical evaluation is heavier — refresh every 2 minutes
+setInterval(() => {
+    authFetch("/api/shadow_panel?evaluate=1").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
+}, 120000);
 
 // Uptime ticker
 setInterval(() => {

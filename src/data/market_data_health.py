@@ -184,3 +184,140 @@ def compute_feed_status(
     if cex_ok or hl_ok:
         return "green"
     return "red"
+
+
+@dataclass
+class FeedSilenceState:
+    """Last-seen + degraded flag for one contracted feed."""
+
+    feed: str
+    last_event_ms: Optional[int] = None
+    max_silence_sec: float = 3600.0
+    degraded: bool = False
+    last_alert_mono: float = 0.0
+
+    def age_sec(self, now_ms: Optional[int] = None) -> Optional[float]:
+        if self.last_event_ms is None:
+            return None
+        now = now_ms if now_ms is not None else int(time.time() * 1000)
+        return max(0.0, (now - self.last_event_ms) / 1000.0)
+
+
+class FeedSilenceMonitor:
+    """Alert when a contracted feed produces no events for N hours.
+
+    This is the structural fix for the 2026-06-29 Binance fstream outage that
+    went unnoticed for six weeks and contaminated screening + ChecklistMeta.
+    """
+
+    def __init__(
+        self,
+        *,
+        alert_cooldown_sec: float = 3600.0,
+        feeds: Optional[Dict[str, float]] = None,
+    ) -> None:
+        # feed_name -> max silence seconds
+        defaults = {
+            "liquidation_binance": 6 * 3600.0,
+            "liquidation_okx": 6 * 3600.0,
+            "liquidation_bybit": 6 * 3600.0,
+            "liquidation_coinalyze_check": 12 * 3600.0,
+            "binance_perp": 1 * 3600.0,
+            "funding_cex": 1 * 3600.0,
+            "funding_hl": 1 * 3600.0,
+            "taker_split": 1 * 3600.0,
+        }
+        cfg = dict(defaults)
+        if feeds:
+            cfg.update({k: float(v) for k, v in feeds.items()})
+        self._states: Dict[str, FeedSilenceState] = {
+            name: FeedSilenceState(feed=name, max_silence_sec=max_sec)
+            for name, max_sec in cfg.items()
+        }
+        self._alert_cooldown_sec = float(alert_cooldown_sec)
+        self._enabled_feeds: set[str] = set(cfg.keys())
+        # time.monotonic() is since an arbitrary epoch (often system boot on
+        # Windows), NOT process start. Never-seen silence must use age since
+        # monitor construction or every restart fires "never produced" instantly.
+        self._started_mono: float = time.monotonic()
+
+    def enable_feed(self, feed: str, max_silence_sec: Optional[float] = None) -> None:
+        self._enabled_feeds.add(feed)
+        if feed not in self._states:
+            self._states[feed] = FeedSilenceState(
+                feed=feed,
+                max_silence_sec=float(max_silence_sec or 3600.0),
+            )
+        elif max_silence_sec is not None:
+            self._states[feed].max_silence_sec = float(max_silence_sec)
+
+    def disable_feed(self, feed: str) -> None:
+        self._enabled_feeds.discard(feed)
+
+    def beat(self, feed: str, timestamp_ms: Optional[int] = None) -> None:
+        if feed not in self._states:
+            self._states[feed] = FeedSilenceState(feed=feed)
+        st = self._states[feed]
+        st.last_event_ms = (
+            int(timestamp_ms) if timestamp_ms is not None else int(time.time() * 1000)
+        )
+        st.degraded = False
+
+    def check(self, now_ms: Optional[int] = None) -> List[str]:
+        """Return alert messages for newly-degraded (or re-alertable) feeds."""
+        now = now_ms if now_ms is not None else int(time.time() * 1000)
+        mono = time.monotonic()
+        uptime_sec = mono - self._started_mono
+        alerts: List[str] = []
+        for name in sorted(self._enabled_feeds):
+            st = self._states.get(name)
+            if st is None:
+                continue
+            if st.last_event_ms is None:
+                # Never seen — degrade only after max_silence from *monitor start*
+                # (not raw monotonic, which can be days since boot on Windows).
+                if not st.degraded and uptime_sec > st.max_silence_sec:
+                    st.degraded = True
+                    if mono - st.last_alert_mono >= self._alert_cooldown_sec:
+                        st.last_alert_mono = mono
+                        alerts.append(
+                            f"FEED SILENT: `{name}` never produced an event "
+                            f"(threshold {st.max_silence_sec/3600:.1f}h) — "
+                            f"marking degraded"
+                        )
+                continue
+            age = (now - st.last_event_ms) / 1000.0
+            if age >= st.max_silence_sec:
+                st.degraded = True
+                if mono - st.last_alert_mono >= self._alert_cooldown_sec:
+                    st.last_alert_mono = mono
+                    alerts.append(
+                        f"FEED SILENT: `{name}` quiet for {age/3600:.1f}h "
+                        f"(threshold {st.max_silence_sec/3600:.1f}h) — "
+                        f"data may be stale or path blocked"
+                    )
+            else:
+                st.degraded = False
+        return alerts
+
+    def snapshot(self) -> Dict[str, Dict[str, object]]:
+        now = int(time.time() * 1000)
+        out: Dict[str, Dict[str, object]] = {}
+        for name in sorted(self._enabled_feeds):
+            st = self._states[name]
+            age = st.age_sec(now)
+            out[name] = {
+                "last_event_ms": st.last_event_ms,
+                "age_sec": None if age is None else round(age, 1),
+                "max_silence_sec": st.max_silence_sec,
+                "degraded": st.degraded,
+            }
+        return out
+
+    @property
+    def any_degraded(self) -> bool:
+        return any(
+            self._states[n].degraded
+            for n in self._enabled_feeds
+            if n in self._states
+        )

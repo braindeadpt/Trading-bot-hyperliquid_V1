@@ -495,6 +495,22 @@ class HyperliquidWSClient:
                 except Exception:
                     logger.exception("Raw trade listener error on %s", trade_symbol)
             self.bus.publish(f"trade:{trade_symbol}", t)
+            # Defensive: official public WsTrade has no liquidation field
+            # (confirmed 2026-08-09). If HL ever adds it (fill-like trades),
+            # publish onto the same topic the engine already consumes.
+            if isinstance(trade.get("liquidation"), dict):
+                try:
+                    from src.exchanges.liquidation_aggregator import (
+                        parse_hl_trade_liquidation,
+                    )
+
+                    liq_ev = parse_hl_trade_liquidation(trade)
+                    if liq_ev is not None:
+                        self.bus.publish(f"liquidation:{liq_ev.symbol}", liq_ev)
+                except Exception:
+                    logger.exception(
+                        "HL liquidation publish failed for %s", trade_symbol
+                    )
 
     def _parse_l2_book(self, data: Any) -> None:
         """Parse L2 order book for a symbol."""
