@@ -1,0 +1,30 @@
+name: Network market-data audit
+
+on:
+  workflow_dispatch:
+
+jobs:
+  market-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Audit live market-data APIs
+        run: python scripts/audit_market_data.py

@@ -41,6 +41,7 @@ blinker==1.9.0            # Required by flask
 # ═════════════════════════════════════════════════════════════════════════════
 pandas==2.2.3             # DataFrames (backtest, analysis)
 numpy==2.2.5              # Numerical computing
+scipy==1.15.3             # Research screening (Spearman / FDR helpers)
 python-dateutil==2.9.0    # Required by pandas
 pytz==2025.2              # Required by pandas
 tzdata==2025.2            # Required by pandas (timezone data)

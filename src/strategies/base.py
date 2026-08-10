@@ -47,6 +47,11 @@ class MarketEvent:
     orderbook_bid_ask_ratio: Optional[float] = None  # bid_depth / ask_depth
     orderbook_largest_bid_wall: Optional[float] = None  # Price of largest bid wall
     orderbook_largest_ask_wall: Optional[float] = None  # Price of largest ask wall
+    # Wall sizes + same-side 1% depths — used by anti-spoof (orthogonal to depth_q)
+    orderbook_largest_bid_wall_size: Optional[float] = None
+    orderbook_largest_ask_wall_size: Optional[float] = None
+    orderbook_bid_depth_1pct: Optional[float] = None
+    orderbook_ask_depth_1pct: Optional[float] = None
 
     # Optional pre-computed indicator values from upstream
     ema_20: Optional[float] = None
@@ -58,7 +63,8 @@ class MarketEvent:
     liquidation_notional_5m: Optional[float] = None  # USD notional liquidated in last 5min
     liquidation_side_5m: Optional[str] = None  # "long" (longs liquidated = price down) or "short"
     liquidation_count_5m: Optional[int] = None  # number of liquidation events
-    liquidation_data_source: Optional[str] = None  # "binance" | "proxy" | None
+    # Provenance: "real" (rollup of genuine venues) | hl|okx|bybit|binance | "proxy" | None
+    liquidation_data_source: Optional[str] = None
 
     # Feed health (engine sets when Binance liquidation WS is validated)
     liquidation_feed_ready: bool = False

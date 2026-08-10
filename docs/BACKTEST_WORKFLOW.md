@@ -7,7 +7,10 @@
 1. Todas as estratégias são testadas **uma a uma** (forced `enabled: true`).
 2. Resultados em múltiplas janelas (volátil, 2 semanas, histórico completo).
 3. Veredicto automático: **KEEP / WATCH / KILL / NO_DATA**.
-4. Só depois atualizar `config/settings.yaml` e paper trading.
+4. Só depois — e **só com baseline-signal gate PASS** (B1≥p95 + n≥30 + PF>1) —
+   actualizar `config/settings.yaml` `execution_strategies` e paper trading.
+   Ver `docs/BASELINE_SIGNAL_GATE.md` / `AGENTS.md` §12.
+   INCONCLUSIVO (poucos trades) **não** autoriza kill nem promoção.
 
 ## Comandos
 

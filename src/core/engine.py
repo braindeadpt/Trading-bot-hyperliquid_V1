@@ -27,11 +27,14 @@ from src.data.database import (
     SignalRecord,
 )
 from src.data.market_data_health import (
+    FeedSilenceMonitor,
     MarketDataHealthSummary,
     MarketDataHealthTracker,
     SymbolFeedHealth,
     compute_feed_status,
 )
+from src.exchanges.liquidation_event import REAL_LIQUIDATION_SOURCES
+
 from src.data.orderbook_metrics import (
     OrderbookMetrics,
     PriceLevel,
@@ -385,8 +388,10 @@ class TradingEngine:
         self._liquidation_acc: Dict[str, Any] = {
             sym: {
                 "window_ms": 5 * 60_000,  # 5 min window
-                "events": collections.deque(),  # (timestamp_ms, notional, side)
-                "source": None,
+                # (timestamp_ms, notional, side, source)
+                "events": collections.deque(),
+                "source": None,  # provenance label for MarketEvent
+                "sources": set(),  # wire sources seen in window
             }
             for sym in self._symbols
         }
@@ -396,6 +401,8 @@ class TradingEngine:
         self._liquidation_feed_warmup = int(
             config.get("strategy.liquidation_catcher.feed_warmup_events", 1)
         )
+        self._real_liquidation_events = 0
+        # Legacy alias kept for any external readers / tests
         self._binance_liquidation_events = 0
         self._liquidation_feed_ready = False
         self._liquidation_feed_ready_logged = False
@@ -439,6 +446,46 @@ class TradingEngine:
         self._md_red_since: Optional[float] = None
         self._md_alert_after_sec = float(_md.get("alert_red_after_sec", 300))
         self._md_alert_cooldown_sec = float(_md.get("alert_red_cooldown_sec", 900))
+        # Silent-feed watchdog (fstream outage lesson, 2026-06-29)
+        _silence_cfg = _md.get("feed_silence") or {}
+        _silence_enabled = bool(_silence_cfg.get("enabled", True))
+        _silence_feeds = {
+            "liquidation_binance": float(
+                _silence_cfg.get("liquidation_binance_max_sec", 6 * 3600)
+            ),
+            "liquidation_okx": float(
+                _silence_cfg.get("liquidation_okx_max_sec", 6 * 3600)
+            ),
+            "liquidation_bybit": float(
+                _silence_cfg.get("liquidation_bybit_max_sec", 6 * 3600)
+            ),
+            # Coinalyze is verify-only / low-freq — longer threshold
+            "liquidation_coinalyze_check": float(
+                _silence_cfg.get("liquidation_coinalyze_check_max_sec", 12 * 3600)
+            ),
+            # HL has no public market-wide liq channel — do NOT contract silence
+            "binance_perp": float(_silence_cfg.get("binance_perp_max_sec", 3600)),
+            "funding_cex": float(_silence_cfg.get("funding_cex_max_sec", 3600)),
+            "funding_hl": float(_silence_cfg.get("funding_hl_max_sec", 3600)),
+            "taker_split": float(_silence_cfg.get("taker_split_max_sec", 3600)),
+        }
+        # Contract L2 level recording only when the research recorder is enabled
+        # (avoid false silence alerts when deliberately off).
+        _l2_rec = _md.get("l2_recording") or {}
+        if bool(_l2_rec.get("enabled", True)):
+            _silence_feeds["l2_book_recording"] = float(
+                _silence_cfg.get("l2_book_recording_max_sec", 120)
+            )
+        self._feed_silence = FeedSilenceMonitor(
+            alert_cooldown_sec=float(
+                _silence_cfg.get("alert_cooldown_sec", 3600)
+            ),
+            feeds=_silence_feeds if _silence_enabled else {},
+        )
+        self._feed_silence_enabled = _silence_enabled
+        if not _silence_enabled:
+            for fname in list(_silence_feeds):
+                self._feed_silence.disable_feed(fname)
         self._block_entries_on_feed_stale = bool(
             _md.get("block_entries_on_stale", _md.get("block_entries_on_red", True))
         )
@@ -1174,6 +1221,12 @@ class TradingEngine:
         self._feed_health_evaluated = True
         if overall != "red":
             self._feed_health_ready = True
+        if self._feed_silence_enabled:
+            for msg in self._feed_silence.check():
+                logger.error("%s", msg)
+                self._notify(
+                    lambda m=msg: self._notifier.send_alert(m, "error")
+                )
 
     async def _check_market_data_alerts(self) -> None:
         """Telegram alert when fleet health stays red beyond threshold."""
@@ -1381,6 +1434,8 @@ class TradingEngine:
         """Factory: returns an async callback for binance_perp_price:* topics."""
         async def _on_binance_perp_price(tick: BinancePerpMidTick) -> None:
             self._latest_binance_perp_mid[symbol] = tick
+            if self._feed_silence_enabled:
+                self._feed_silence.beat("binance_perp", tick.timestamp_ms)
         return _on_binance_perp_price
 
     def _make_ctx_callback(self, symbol: str):
@@ -1517,6 +1572,12 @@ class TradingEngine:
                     trade_count=int(getattr(candle, 'trade_count', 0)),
                 )
                 self._db.save_candle(db_candle, tf_name)
+                if self._feed_silence_enabled and (
+                    db_candle.buy_volume > 0 or db_candle.sell_volume > 0
+                ):
+                    self._feed_silence.beat(
+                        "taker_split", db_candle.timestamp_ms
+                    )
             except Exception as exc:
                 logger.warning("Failed to persist candle for %s %s: %s", symbol, tf_name, exc)
 
@@ -1535,14 +1596,20 @@ class TradingEngine:
         return _on_candle
 
     def _make_liquidation_callback(self, symbol: str):
-        """Factory: Binance force-order liquidation events."""
+        """Factory: multi-venue liquidation events on ``liquidation:{symbol}``."""
 
         async def _on_liquidation(event: Any) -> None:
             notional = safe_float(getattr(event, "notional_usd", 0.0))
             side = getattr(event, "side", None)
             ts = int(getattr(event, "timestamp_ms", utc_timestamp_ms()))
+            source = str(getattr(event, "source", "") or "").lower() or "unknown"
             if notional > 0 and side:
-                self._record_liquidation(symbol, ts, notional, side, "binance")
+                self._record_liquidation(symbol, ts, notional, side, source)
+                if self._feed_silence_enabled:
+                    silence_key = f"liquidation_{source}"
+                    # Coinalyze must never publish here; map known venues only
+                    if source in ("hl", "okx", "bybit", "binance"):
+                        self._feed_silence.beat(silence_key, ts)
 
         return _on_liquidation
 
@@ -1717,6 +1784,11 @@ class TradingEngine:
             self._latest_oi_delta[symbol] = event.oi_delta
 
             # --- Liquidation stats (Task 3.3) ---
+            # Modes:
+            #   proxy  → candle+OI heuristic only
+            #   real   → genuine venues only (hl/okx/bybit/binance); never proxy
+            #   binance→ legacy single-venue gate (still real provenance)
+            #   auto   → real if present else proxy fallback
             if self._liquidation_source_mode == "proxy":
                 self._accumulate_liquidation_proxy(symbol, event)
             elif self._liquidation_source_mode == "auto":
@@ -2155,6 +2227,10 @@ class TradingEngine:
             orderbook_bid_ask_ratio=ob.bid_ask_ratio if ob else None,
             orderbook_largest_bid_wall=ob.largest_bid_wall_price if ob else None,
             orderbook_largest_ask_wall=ob.largest_ask_wall_price if ob else None,
+            orderbook_largest_bid_wall_size=ob.largest_bid_wall_size if ob else None,
+            orderbook_largest_ask_wall_size=ob.largest_ask_wall_size if ob else None,
+            orderbook_bid_depth_1pct=ob.bid_depth_1pct if ob else None,
+            orderbook_ask_depth_1pct=ob.ask_depth_1pct if ob else None,
             # Regime filter
             adx_14=adx,
             # Liquidation data (Task 3.3)
@@ -2372,7 +2448,11 @@ class TradingEngine:
                         else:
                             liq_side = "short"  # shorts liquidated, price pumps
 
-                        acc["events"].append((now, est_notional, liq_side))
+                        acc["events"].append((now, est_notional, liq_side, "proxy"))
+                        # Provenance must be explicit — ChecklistMeta and other
+                        # consumers must be able to ignore proxy vs real venues.
+                        acc["source"] = "proxy"
+                        acc.setdefault("sources", set()).add("proxy")
                         logger.debug(
                             "Liquidation proxy %s: %.1fM %s "
                             "(price_change=%.2f%%, OI_delta=%.0f)",
@@ -2387,6 +2467,20 @@ class TradingEngine:
         self._last_prices[symbol] = event.price
         self._last_price_ts[symbol] = now
 
+    def _accepts_liquidation_source(self, source: str) -> bool:
+        """Gate wire-format sources by ``market_data.liquidation_source`` mode."""
+        mode = self._liquidation_source_mode
+        src = (source or "").lower()
+        if src == "coinalyze":
+            return False
+        if mode == "proxy":
+            return False
+        if mode == "binance":
+            return src == "binance"
+        if mode == "real":
+            return src in REAL_LIQUIDATION_SOURCES
+        return src in REAL_LIQUIDATION_SOURCES
+
     def _record_liquidation(
         self,
         symbol: str,
@@ -2399,12 +2493,14 @@ class TradingEngine:
         acc = self._liquidation_acc.get(symbol)
         if acc is None:
             return
-        while acc["events"] and acc["events"][0][0] < timestamp_ms - acc["window_ms"]:
-            acc["events"].popleft()
-        acc["events"].append((timestamp_ms, notional, side))
-        acc["source"] = source
-        if source == "binance":
-            self._binance_liquidation_events += 1
+        src = (source or "").lower() or "unknown"
+        if src == "coinalyze":
+            return
+        is_real = src in REAL_LIQUIDATION_SOURCES
+        if is_real:
+            self._real_liquidation_events += 1
+            if src == "binance":
+                self._binance_liquidation_events += 1
             try:
                 self._db.save_liquidation(
                     LiquidationRecord(
@@ -2412,29 +2508,59 @@ class TradingEngine:
                         timestamp_ms=timestamp_ms,
                         notional_usd=notional,
                         side=side,
-                        source=source,
+                        source=src,
                     )
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.debug("save_liquidation %s failed: %s", symbol, exc)
             if (
                 not self._liquidation_feed_ready
-                and self._binance_liquidation_events >= self._liquidation_feed_warmup
+                and self._real_liquidation_events >= self._liquidation_feed_warmup
             ):
                 self._liquidation_feed_ready = True
                 if not self._liquidation_feed_ready_logged:
                     self._liquidation_feed_ready_logged = True
                     logger.info(
-                        "Liquidation feed READY — %d Binance event(s) received "
-                        "(warmup=%d). Auto-enable strategies may activate.",
-                        self._binance_liquidation_events,
+                        "Liquidation feed READY — %d real event(s) received "
+                        "(warmup=%d, last_source=%s). Auto-enable strategies may activate.",
+                        self._real_liquidation_events,
                         self._liquidation_feed_warmup,
+                        src,
                     )
+        if not self._accepts_liquidation_source(src):
+            return
+        while acc["events"] and acc["events"][0][0] < timestamp_ms - acc["window_ms"]:
+            acc["events"].popleft()
+        acc["events"].append((timestamp_ms, notional, side, src))
+        acc.setdefault("sources", set()).add(src)
+        self._refresh_liquidation_provenance(symbol)
+
+    def _refresh_liquidation_provenance(self, symbol: str) -> None:
+        acc = self._liquidation_acc.get(symbol)
+        if acc is None:
+            return
+        sources: Set[str] = set()
+        for row in acc["events"]:
+            if len(row) >= 4:
+                sources.add(str(row[3]))
+        acc["sources"] = sources
+        real = sources & REAL_LIQUIDATION_SOURCES
+        if real:
+            if self._liquidation_source_mode == "binance" and "binance" in real:
+                acc["source"] = "binance"
+            else:
+                # Multi-venue (or single non-binance) → rollup label for strategies
+                acc["source"] = "real"
+        elif "proxy" in sources:
+            acc["source"] = "proxy"
+        else:
+            acc["source"] = None
 
     def _get_liquidation_source(self, symbol: str) -> Optional[str]:
         acc = self._liquidation_acc.get(symbol)
         if acc is None or not acc["events"]:
             return None
+        self._refresh_liquidation_provenance(symbol)
         return acc.get("source")
 
     def _get_liquidation_stats(
@@ -2444,6 +2570,7 @@ class TradingEngine:
         """Return (notional_5m, side_5m, count_5m) from accumulator.
 
         Returns the dominant side by notional.
+        Sum across venues = cross-venue market pressure (see docs/LIQUIDATION_AGGREGATOR.md).
         """
         acc = self._liquidation_acc[symbol]
         if not acc["events"]:
@@ -2454,7 +2581,8 @@ class TradingEngine:
         count_long = 0
         count_short = 0
 
-        for _, notional, side in acc["events"]:
+        for row in acc["events"]:
+            _, notional, side = row[0], row[1], row[2]
             if side == "long":
                 total_long += notional
                 count_long += 1
@@ -2462,10 +2590,9 @@ class TradingEngine:
                 total_short += notional
                 count_short += 1
 
-        # Return dominant side
         if total_long >= total_short and total_long > 0:
             return total_long, "long", count_long
-        elif total_short > 0:
+        if total_short > 0:
             return total_short, "short", count_short
         return None, None, None
 

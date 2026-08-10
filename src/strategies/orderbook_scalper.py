@@ -9,8 +9,12 @@ Modes (config ``mode``):
   * **fade**: mean-revert the imbalance (opposite sides)
 
 Anti-spoof: entries are rejected when the wall driving the signal sits
-within ``spoof_wall_proximity_pct`` of mid and depth is heavily skewed
-(see ``spoof_depth_skew_min``).
+within ``spoof_wall_proximity_pct`` of mid **and** that wall is a large
+fraction of the **same-side** 1% depth (``spoof_wall_fraction_min``).
+
+Do **not** use ``depth_quality`` / bid-vs-ask skew here — that quantity is
+tautological with ``bid_ask_ratio`` (an ask-heavy book that triggers a short
+always has low depth_q), so the old filter blocked ~100% of live signals.
 
 Timeframe: tick-level (orderbook updates).
 Max hold: 5 minutes.
@@ -54,6 +58,11 @@ class OrderBookScalper(Strategy):
         self.BID_ASK_LONG = cfg.get("bid_ask_ratio_long", 1.5)
         self.BID_ASK_SHORT = cfg.get("bid_ask_ratio_short", 0.67)
         self.SPOOF_WALL_PROXIMITY_PCT = float(cfg.get("spoof_wall_proximity_pct", 0.001))
+        # Calibrated 2026-08-09 from live HL L2 (scripts/calibrate_obs_spoof_filter.py):
+        # wall_frac among entry candidates p50≈0.20 p85≈0.21 p90≈0.22 — use p85
+        # so the filter blocks ~15% (minority), never the tautological 100%.
+        self.SPOOF_WALL_FRACTION_MIN = float(cfg.get("spoof_wall_fraction_min", 0.21))
+        # Legacy key kept for YAML compat; ignored by the filter (see docstring).
         self.SPOOF_DEPTH_SKEW_MIN = float(cfg.get("spoof_depth_skew_min", 0.65))
         self.TAKE_PROFIT_PCT = cfg.get("take_profit_pct", 0.0015)
         self.STOP_LOSS_PCT = cfg.get("stop_loss_pct", 0.003)
@@ -214,28 +223,44 @@ class OrderBookScalper(Strategy):
             return target_side, imbalance_side, deviation
         return None
 
+    def _wall_fraction(self, event: MarketEvent, imbalance_side: str) -> Optional[float]:
+        """Largest wall size / same-side 1% depth (orthogonal to bid/ask ratio)."""
+        if imbalance_side == "bid":
+            wall_sz = event.orderbook_largest_bid_wall_size
+            side_depth = event.orderbook_bid_depth_1pct
+        else:
+            wall_sz = event.orderbook_largest_ask_wall_size
+            side_depth = event.orderbook_ask_depth_1pct
+        if wall_sz is None or side_depth is None or side_depth <= 0:
+            return None
+        return float(wall_sz) / float(side_depth)
+
     def _is_spoof_wall(self, event: MarketEvent, imbalance_side: str) -> bool:
-        """True when a near-price wall + skewed depth looks like spoof."""
+        """True when a near-mid wall dominates that side's depth (spoof-like).
+
+        Uses wall fraction of the **same side**, not depth_quality. depth_q is
+        bid/(bid+ask) and is redundant with the entry ratio condition.
+        """
         price = event.price
         if price <= 0.0:
             return False
 
-        depth_q = event.orderbook_depth_quality
-        if depth_q is None:
-            return False
-
         if imbalance_side == "bid":
             wall = event.orderbook_largest_bid_wall
-            depth_skewed = depth_q >= self.SPOOF_DEPTH_SKEW_MIN
         else:
             wall = event.orderbook_largest_ask_wall
-            depth_skewed = depth_q <= (1.0 - self.SPOOF_DEPTH_SKEW_MIN)
-
-        if wall is None or not depth_skewed:
+        if wall is None:
             return False
 
         dist_pct = abs(price - wall) / price
-        return dist_pct <= self.SPOOF_WALL_PROXIMITY_PCT
+        if dist_pct > self.SPOOF_WALL_PROXIMITY_PCT:
+            return False
+
+        wall_frac = self._wall_fraction(event, imbalance_side)
+        if wall_frac is None:
+            # Missing size/depth → do not block (fail open); avoids silent 100% kill.
+            return False
+        return wall_frac >= self.SPOOF_WALL_FRACTION_MIN
 
     # ------------------------------------------------------------------
     # Entry logic
@@ -275,16 +300,16 @@ class OrderBookScalper(Strategy):
         target_side, imbalance_side, deviation = resolved
 
         if self._is_spoof_wall(event, imbalance_side):
+            wall_frac = self._wall_fraction(event, imbalance_side)
             logger.info(
                 "OrderBookScalper SKIP %s — spoof wall (%s side, mode=%s, "
-                "depth_q=%s, wall_dist<=%.3f%%)",
+                "wall_frac=%s, wall_dist<=%.3f%%, thr_frac=%.2f)",
                 event.symbol,
                 imbalance_side,
                 self.MODE,
-                f"{event.orderbook_depth_quality:.2f}"
-                if event.orderbook_depth_quality is not None
-                else "N/A",
+                f"{wall_frac:.2f}" if wall_frac is not None else "N/A",
                 self.SPOOF_WALL_PROXIMITY_PCT * 100.0,
+                self.SPOOF_WALL_FRACTION_MIN,
             )
             return None
 

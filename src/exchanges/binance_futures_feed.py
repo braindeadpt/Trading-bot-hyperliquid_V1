@@ -20,6 +20,7 @@ from websockets.exceptions import ConnectionClosed
 
 from src.exchanges.binance_api import to_binance_symbol
 from src.exchanges.hyperliquid_ws import DataBus
+from src.exchanges.liquidation_event import LiquidationEvent
 
 logger = logging.getLogger(__name__)
 
@@ -28,15 +29,7 @@ FUTURES_WS = "wss://fstream.binance.com/stream"
 INITIAL_BACKOFF = 1.0
 MAX_BACKOFF = 30.0
 
-
-@dataclass(frozen=True, slots=True)
-class LiquidationEvent:
-    """Single forced liquidation from Binance USD-M futures."""
-    symbol: str          # base asset, e.g. BTC
-    timestamp_ms: int
-    notional_usd: float
-    side: str            # "long" = longs liquidated, "short" = shorts liquidated
-    source: str = "binance"
+__all__ = ["BinanceFuturesFeed", "LiquidationEvent", "LongShortRatio"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +161,7 @@ class BinanceFuturesFeed:
             timestamp_ms=ts,
             notional_usd=notional,
             side=liq_side,
+            source="binance",
         )
         self._bus.publish(f"liquidation:{base}", event)
         logger.debug(

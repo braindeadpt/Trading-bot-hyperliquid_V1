@@ -883,6 +883,10 @@ def create_app(config: Dict[str, Any]) -> tuple:
         if summary is not None and hasattr(summary, "to_dict"):
             body = summary.to_dict()
             body["feeds"] = list(body.get("symbols", {}).values())
+            silence = getattr(_engine, "_feed_silence", None)
+            if silence is not None:
+                body["feed_silence"] = silence.snapshot()
+                body["feed_silence_degraded"] = bool(silence.any_degraded)
             return jsonify(body)
         health = getattr(_engine, "_market_data_health", {}) or {}
         rows = [h.to_dict() for h in health.values()]
@@ -891,7 +895,12 @@ def create_app(config: Dict[str, Any]) -> tuple:
             overall = "red"
         elif any(r.get("status") == "yellow" for r in rows):
             overall = "yellow"
-        return jsonify({"feeds": rows, "overall": overall, "symbols": {r["symbol"]: r for r in rows}})
+        body = {"feeds": rows, "overall": overall, "symbols": {r["symbol"]: r for r in rows}}
+        silence = getattr(_engine, "_feed_silence", None)
+        if silence is not None:
+            body["feed_silence"] = silence.snapshot()
+            body["feed_silence_degraded"] = bool(silence.any_degraded)
+        return jsonify(body)
 
     @app.route("/api/live_data")
     def api_live_data():
@@ -988,6 +997,49 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 for sub_s in sub.values():
                     result.append(_info(sub_s))
         return jsonify(result)
+
+    @app.route("/api/shadow_panel")
+    def api_shadow_panel():
+        """Phase08 shadow scoreboard + baseline-gate progress (read-only).
+
+        Idealized fills disclaimer included. Does not affect trading.
+        Query: evaluate=0 to skip expensive outcome simulation (signals only).
+        """
+        from src.research.shadow_panel import build_shadow_panel_payload
+        from src.utils.config import get_strategy_section, load_config
+
+        evaluate = str(request.args.get("evaluate", "1")).strip() not in (
+            "0",
+            "false",
+            "False",
+            "no",
+        )
+        cfg = None
+        shadow_names: list = []
+        try:
+            if _engine is not None and getattr(_engine, "_config", None) is not None:
+                cfg = _engine._config
+            else:
+                from pathlib import Path
+                cfg = load_config(Path("config/settings.yaml"))
+            p08 = get_strategy_section(cfg, "phase08")
+            shadow_names = [str(s) for s in (p08.get("shadow_strategies") or [])]
+            # Also surface live shadow instances if wired on the engine
+            live_shadow = getattr(_engine, "_shadow_strategies", None) if _engine else None
+            if live_shadow:
+                for s in live_shadow:
+                    n = getattr(s, "name", None)
+                    if n and n not in shadow_names:
+                        shadow_names.append(n)
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"error": str(exc), "rows": []}), 500
+
+        payload = build_shadow_panel_payload(
+            shadow_names=shadow_names,
+            config=cfg,
+            evaluate=evaluate,
+        )
+        return jsonify(payload)
 
     @app.route("/api/strategy/<name>")
     def api_strategy_detail(name):

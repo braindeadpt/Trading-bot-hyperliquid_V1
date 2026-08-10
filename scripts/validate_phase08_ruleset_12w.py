@@ -53,21 +53,61 @@ def ms_from_date(s: str, end: bool = False) -> int:
     return int(dt.timestamp() * 1000)
 
 
+def _trade_pnl(t: Dict[str, Any]) -> float:
+    return float(t.get("pnl_usd") or t.get("net_pnl") or t.get("pnl") or 0.0)
+
+
+def _trade_fees(t: Dict[str, Any]) -> float:
+    return float(t.get("fees") or t.get("fee_usd") or t.get("total_fees") or 0.0)
+
+
 def _summarize(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Build fold summary from trades + metrics (canonical key mapping).
+
+    ``calculate_metrics`` exposes ``avg_trade`` / ``avg_win`` / ``avg_loss`` /
+    ``expectancy_r`` but not ``total_pnl`` / dollar ``expectancy``. Derive
+    dollar aggregates from the trade list so JSON never silently reports 0.
+    """
     metrics = result.get("metrics") or {}
     trades = result.get("trades") or []
     by_strat: Dict[str, int] = {}
+    pnls: List[float] = []
+    fees: List[float] = []
     for t in trades:
         name = str(t.get("strategy") or t.get("sub_strategy") or "?")
         by_strat[name] = by_strat.get(name, 0) + 1
+        pnls.append(_trade_pnl(t))
+        fees.append(_trade_fees(t))
+
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    net_pnl = float(sum(pnls))
+    fees_total = float(sum(fees))
+    n = len(pnls)
+    # Dollar expectancy = mean trade PnL (matches metrics.avg_trade when present).
+    expectancy = (
+        float(metrics.get("avg_trade"))
+        if metrics.get("avg_trade") is not None and n
+        else (net_pnl / n if n else 0.0)
+    )
+    avg_win = float(metrics.get("avg_win") or (sum(wins) / len(wins) if wins else 0.0))
+    avg_loss = float(
+        metrics.get("avg_loss") or (sum(losses) / len(losses) if losses else 0.0)
+    )
+
     out = {
-        "n_trades": int(metrics.get("total_trades") or metrics.get("n_trades") or len(trades)),
+        "n_trades": int(metrics.get("n_trades") or metrics.get("total_trades") or n),
         "win_rate": float(metrics.get("win_rate") or 0.0),
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "expectancy": expectancy,
         "profit_factor": float(metrics.get("profit_factor") or 0.0),
         "sharpe": float(metrics.get("sharpe_ratio") or metrics.get("sharpe") or 0.0),
         "max_dd_pct": float(metrics.get("max_drawdown_pct") or metrics.get("max_drawdown") or 0.0),
-        "total_pnl": float(metrics.get("total_pnl") or metrics.get("net_pnl") or 0.0),
-        "expectancy": float(metrics.get("expectancy") or 0.0),
+        "fees_total": round(fees_total, 4),
+        "gross_pnl": round(net_pnl + fees_total, 4),
+        "total_pnl": round(net_pnl, 4),
+        "net_pnl": round(net_pnl, 4),
         "by_strategy": by_strat,
     }
     if trades:
@@ -152,6 +192,12 @@ def main() -> int:
         "n_trades": all_trades_n,
         "trade_weighted_mean_pf": (
             round(weighted_pf_num / weighted_pf_den, 4) if weighted_pf_den else 0.0
+        ),
+        "total_pnl": round(
+            sum(float(v.get("total_pnl") or 0.0) for v in rows["folds"].values()), 4
+        ),
+        "elapsed_s_total": round(
+            sum(float(v.get("elapsed_s") or 0.0) for v in rows["folds"].values()), 1
         ),
         "window": "2026-05-16 .. 2026-08-07 (3x4w folds)",
     }

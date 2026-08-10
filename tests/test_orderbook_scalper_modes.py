@@ -21,7 +21,7 @@ def _scalper(**overrides: object) -> OrderBookScalper:
         "bid_ask_ratio_long": 1.5,
         "bid_ask_ratio_short": 0.67,
         "spoof_wall_proximity_pct": 0.001,
-        "spoof_depth_skew_min": 0.65,
+        "spoof_wall_fraction_min": 0.21,
     }
     cfg.update(overrides)
     return OrderBookScalper(cfg)
@@ -34,6 +34,10 @@ def _event(
     depth_q: float = 0.5,
     bid_wall: float | None = None,
     ask_wall: float | None = None,
+    bid_wall_size: float | None = 10.0,
+    ask_wall_size: float | None = 10.0,
+    bid_depth: float | None = 100.0,
+    ask_depth: float | None = 100.0,
     ts: int = 1,
 ) -> MarketEvent:
     return MarketEvent(
@@ -45,6 +49,10 @@ def _event(
         orderbook_depth_quality=depth_q,
         orderbook_largest_bid_wall=bid_wall,
         orderbook_largest_ask_wall=ask_wall,
+        orderbook_largest_bid_wall_size=bid_wall_size,
+        orderbook_largest_ask_wall_size=ask_wall_size,
+        orderbook_bid_depth_1pct=bid_depth,
+        orderbook_ask_depth_1pct=ask_depth,
     )
 
 
@@ -72,20 +80,59 @@ def test_fade_mode_long_on_ask_heavy() -> None:
     assert sig.metadata["imbalance_side"] == "ask"
 
 
-def test_spoof_filter_rejects_near_bid_wall_with_skewed_depth() -> None:
-    """Momentum long blocked when bid wall is tight to mid and book is bid-heavy."""
+def test_spoof_filter_rejects_near_dominant_bid_wall() -> None:
+    """Momentum long blocked when near-mid bid wall is a large fraction of bid depth."""
     strat = _scalper(mode="momentum")
-    # Wall 0.05% below mid, depth_quality 0.72 (bid-heavy)
     sig = strat.on_data(
         _event(
             1.6,
             price=100_000.0,
-            depth_q=0.72,
+            depth_q=0.72,  # old filter would use this; new filter ignores it
             bid_wall=99_950.0,
+            bid_wall_size=50.0,
+            bid_depth=100.0,  # wall_frac=0.50 >= 0.21
             ts=30,
         )
     )
     assert sig is None
+
+
+def test_spoof_filter_allows_near_wall_small_fraction() -> None:
+    """Near wall that is only 10% of side depth is NOT spoof — must allow signal.
+
+    This is the critical regression: old depth_q filter blocked 100% of ask/bid
+    imbalance signals; wall_frac must be orthogonal.
+    """
+    strat = _scalper(mode="momentum")
+    sig = strat.on_data(
+        _event(
+            1.6,
+            depth_q=0.72,
+            bid_wall=99_950.0,
+            bid_wall_size=10.0,
+            bid_depth=100.0,  # wall_frac=0.10 < 0.21
+            ts=35,
+        )
+    )
+    assert sig is not None
+    assert sig.side == "long"
+
+
+def test_spoof_filter_allows_ask_heavy_with_small_wall_frac() -> None:
+    """Ask-heavy short must NOT be auto-blocked by low depth_q alone."""
+    strat = _scalper(mode="momentum")
+    sig = strat.on_data(
+        _event(
+            0.5,
+            depth_q=0.25,  # old filter: always spoof on ask side
+            ask_wall=100_050.0,
+            ask_wall_size=12.0,
+            ask_depth=100.0,  # frac=0.12
+            ts=36,
+        )
+    )
+    assert sig is not None
+    assert sig.side == "short"
 
 
 def test_spoof_filter_allows_distant_wall() -> None:
@@ -95,6 +142,8 @@ def test_spoof_filter_allows_distant_wall() -> None:
             1.6,
             depth_q=0.72,
             bid_wall=99_000.0,  # 1% away
+            bid_wall_size=80.0,
+            bid_depth=100.0,
             ts=40,
         )
     )
@@ -102,42 +151,32 @@ def test_spoof_filter_allows_distant_wall() -> None:
     assert sig.side == "long"
 
 
-def test_spoof_filter_allows_balanced_depth_near_wall() -> None:
+def test_spoof_filter_fail_open_without_sizes() -> None:
+    """Missing wall sizes must not recreate the 100% block."""
     strat = _scalper(mode="momentum")
     sig = strat.on_data(
         _event(
             1.6,
-            depth_q=0.55,
+            depth_q=0.72,
             bid_wall=99_950.0,
+            bid_wall_size=None,
+            bid_depth=None,
             ts=50,
         )
     )
     assert sig is not None
 
 
-def test_spoof_filter_rejects_fade_long_near_ask_wall() -> None:
+def test_spoof_filter_rejects_fade_long_near_dominant_ask_wall() -> None:
     strat = _scalper(mode="fade")
     sig = strat.on_data(
         _event(
             0.6,
             depth_q=0.30,
             ask_wall=100_050.0,
+            ask_wall_size=60.0,
+            ask_depth=100.0,
             ts=60,
         )
     )
     assert sig is None
-
-
-def main() -> None:
-    test_momentum_mode_long_on_bid_heavy()
-    test_fade_mode_short_on_bid_heavy()
-    test_fade_mode_long_on_ask_heavy()
-    test_spoof_filter_rejects_near_bid_wall_with_skewed_depth()
-    test_spoof_filter_allows_distant_wall()
-    test_spoof_filter_allows_balanced_depth_near_wall()
-    test_spoof_filter_rejects_fade_long_near_ask_wall()
-    print("test_orderbook_scalper_modes: all passed")
-
-
-if __name__ == "__main__":
-    main()

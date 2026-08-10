@@ -36,6 +36,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional
 
+from src.exchanges.liquidation_event import is_real_liquidation_source
 from src.strategies.base import ExitSignal, MarketEvent, Position, Signal, Strategy
 from src.strategies.indicators import (
     Candle,
@@ -231,13 +232,18 @@ class ChecklistMeta(Strategy):
             elif oir < -self.OIR_THRESHOLD:
                 components["oir_ask"] = self.W_OIR
 
-        # 8. Liquidations (short squeeze fuel for longs, long squeeze fuel for shorts)
-        liq_side = event.liquidation_side_5m
-        if liq_side == "long":
-            # Longs liquidated → fuel for further DOWN move
-            components["liq_long_squeeze"] = self.W_LIQUIDATION
-        elif liq_side == "short":
-            components["liq_short_squeeze"] = self.W_LIQUIDATION
+        # 8. Liquidations — genuine venues ONLY (hl/okx/bybit/binance or rollup "real").
+        # Proxy / unknown provenance is treated as component absent (do not
+        # score). Live auto-mode silently fed proxy after fstream died 2026-06-29;
+        # LiquidationCatcher refuses non-real — ChecklistMeta must too.
+        liq_side = None
+        if is_real_liquidation_source(event.liquidation_data_source):
+            liq_side = event.liquidation_side_5m
+            if liq_side == "long":
+                # Longs liquidated → fuel for further DOWN move
+                components["liq_long_squeeze"] = self.W_LIQUIDATION
+            elif liq_side == "short":
+                components["liq_short_squeeze"] = self.W_LIQUIDATION
 
         # --- Aggregate bull vs bear ---
         bull_keys = {"sfp_long", "vwap_above", "trend_up", "mom_up", "rsi_oversold", "oi_rising", "adx_trend", "oir_bid", "liq_short_squeeze"}

@@ -15,7 +15,7 @@ from __future__ import annotations
 import bisect
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from src.backtest.metrics import calculate_metrics
@@ -73,6 +73,11 @@ class BacktestConfig:
     use_cooldown: bool = True
     use_microstructure_proxy: bool = True
     intrabar_conflict_policy: str = "pessimistic"  # pessimistic | optimistic
+    # Strategy-exit OHLC path (BE/trailing): favorable_first (P1) | adverse_first (P2).
+    # True 1m tick order is unknown — run both to bracket results.
+    exit_path_policy: str = "adverse_first"
+    # Matches ChecklistMeta.sl_to_be_buffer_pct for BE fill price (replay only).
+    sl_to_be_buffer_pct: float = 0.001
     regime_weights: Dict[str, Dict[str, float]] = field(default_factory=dict)
     adx_trend_threshold: float = 25.0
     adx_range_threshold: float = 20.0
@@ -369,10 +374,18 @@ class BacktestEngine:
                 self._advance_liquidation_replay(data, ts)
             event = self._build_market_event(symbol, ts, c1m, data)
             if self._pipeline is not None:
-                funding_row = self._lookup_at_or_before(data.get("funding_ts", []), ts)
+                funding_row = self._lookup_at_or_before(
+                    data.get("funding_ts", []),
+                    ts,
+                    keys=data.get("funding_keys"),
+                )
                 if funding_row is not None:
                     self._pipeline_ctx.funding_ts_at[symbol] = int(funding_row[0])
-                oi_row = self._lookup_at_or_before(data.get("oi_ts", []), ts)
+                oi_row = self._lookup_at_or_before(
+                    data.get("oi_ts", []),
+                    ts,
+                    keys=data.get("oi_keys"),
+                )
                 if oi_row is not None:
                     self._pipeline_ctx.oi_ts_at[symbol] = int(oi_row[0])
 
@@ -497,10 +510,22 @@ class BacktestEngine:
                 if dd > self._max_drawdown_pct:
                     self._max_drawdown_pct = dd
 
-        if timeline:
-            last_ts, last_sym, last_c1m = timeline[-1]
-            last_price = last_c1m.close
+        # Flatten leftovers at each symbol's OWN last close — never reuse the
+        # timeline's final bar (that bar's symbol) for every open position.
+        if self.positions:
             for pos_id in list(self.positions.keys()):
+                pos = self.positions.get(pos_id)
+                if pos is None:
+                    continue
+                px_ts = self._last_close_for_symbol(pos.symbol)
+                if px_ts is None:
+                    logger.error(
+                        "force_close_eod: no price series for %s — falling back to entry",
+                        pos.symbol,
+                    )
+                    last_ts, last_price = int(end_ms), float(pos.entry_price)
+                else:
+                    last_ts, last_price = px_ts
                 capital = self._close_position(
                     pos_id, last_price, last_ts, "force_close_eod", capital
                 )
@@ -603,25 +628,38 @@ class BacktestEngine:
         start_ms: Optional[int],
         end_ms: Optional[int],
     ) -> Dict[str, Any]:
+        candles_1m = self.db.get_candles(
+            symbol, "1m", limit=500_000, start_ms=start_ms, end_ms=end_ms
+        )
+        candles_5m = self.db.get_candles(
+            symbol, "5m", limit=500_000, start_ms=start_ms, end_ms=end_ms
+        )
+        candles_15m = self.db.get_candles(
+            symbol, "15m", limit=500_000, start_ms=start_ms, end_ms=end_ms
+        )
+        candles_1h = self.db.get_candles(
+            symbol, "1h", limit=500_000, start_ms=start_ms, end_ms=end_ms
+        )
+        funding_ts = self._load_funding_series(symbol, start_ms, end_ms)
+        oi_ts = self._load_oi_series(symbol, start_ms, end_ms)
+        binance_perp_ts = self._load_binance_perp_series(symbol, start_ms, end_ms)
         return {
-            "candles_1m": self.db.get_candles(
-                symbol, "1m", limit=500_000, start_ms=start_ms, end_ms=end_ms
-            ),
-            "candles_5m": self.db.get_candles(
-                symbol, "5m", limit=500_000, start_ms=start_ms, end_ms=end_ms
-            ),
-            "candles_15m": self.db.get_candles(
-                symbol, "15m", limit=500_000, start_ms=start_ms, end_ms=end_ms
-            ),
-            "candles_1h": self.db.get_candles(
-                symbol, "1h", limit=500_000, start_ms=start_ms, end_ms=end_ms
-            ),
-            "funding_ts": self._load_funding_series(symbol, start_ms, end_ms),
-            "oi_ts": self._load_oi_series(symbol, start_ms, end_ms),
+            "candles_1m": candles_1m,
+            "candles_5m": candles_5m,
+            "candles_15m": candles_15m,
+            "candles_1h": candles_1h,
+            "candles_5m_keys": [c.timestamp_ms for c in candles_5m],
+            "candles_15m_keys": [c.timestamp_ms for c in candles_15m],
+            "candles_1h_keys": [c.timestamp_ms for c in candles_1h],
+            "funding_ts": funding_ts,
+            "funding_keys": [row[0] for row in funding_ts],
+            "oi_ts": oi_ts,
+            "oi_keys": [row[0] for row in oi_ts],
             "liquidations": self._load_liquidation_series(symbol, start_ms, end_ms),
             "liq_idx": 0,
             "liq_acc": LiquidationAccumulator(),
-            "binance_perp_ts": self._load_binance_perp_series(symbol, start_ms, end_ms),
+            "binance_perp_ts": binance_perp_ts,
+            "binance_perp_keys": [row[0] for row in binance_perp_ts],
             "candles_15m_ind": [],
             "hist_15m": [],
         }
@@ -739,12 +777,19 @@ class BacktestEngine:
     def _lookup_at_or_before(
         series: List[Tuple[int, Any, ...]],
         ts: int,
+        *,
+        keys: Optional[List[int]] = None,
     ) -> Optional[Tuple[int, Any, ...]]:
-        """Return the last series entry with timestamp <= ts."""
+        """Return the last series entry with timestamp <= ts.
+
+        Pass a precomputed ``keys`` list (built once at load) to avoid
+        O(n) key rebuilds on every bar — critical when funding/OI series
+        have tens of thousands of rows (live-sampled ~30s).
+        """
         if not series:
             return None
-        keys = [row[0] for row in series]
-        idx = bisect.bisect_right(keys, ts) - 1
+        key_list = keys if keys is not None else [row[0] for row in series]
+        idx = bisect.bisect_right(key_list, ts) - 1
         if idx < 0:
             return None
         return series[idx]
@@ -753,11 +798,13 @@ class BacktestEngine:
     def _lookup_candle_at_or_before(
         candles: List[DBCandle],
         ts: int,
+        *,
+        keys: Optional[List[int]] = None,
     ) -> Optional[DBCandle]:
         if not candles:
             return None
-        keys = [c.timestamp_ms for c in candles]
-        idx = bisect.bisect_right(keys, ts) - 1
+        key_list = keys if keys is not None else [c.timestamp_ms for c in candles]
+        idx = bisect.bisect_right(key_list, ts) - 1
         if idx < 0:
             return None
         return candles[idx]
@@ -845,9 +892,15 @@ class BacktestEngine:
         c1m: DBCandle,
         data: Dict[str, Any],
     ) -> MarketEvent:
-        c5 = self._lookup_candle_at_or_before(data["candles_5m"], ts)
-        c15 = self._lookup_candle_at_or_before(data["candles_15m"], ts)
-        c1h = self._lookup_candle_at_or_before(data["candles_1h"], ts)
+        c5 = self._lookup_candle_at_or_before(
+            data["candles_5m"], ts, keys=data.get("candles_5m_keys"),
+        )
+        c15 = self._lookup_candle_at_or_before(
+            data["candles_15m"], ts, keys=data.get("candles_15m_keys"),
+        )
+        c1h = self._lookup_candle_at_or_before(
+            data["candles_1h"], ts, keys=data.get("candles_1h_keys"),
+        )
 
         if c15 is not None:
             ind15 = self._to_indicator_candle(c15)
@@ -868,8 +921,12 @@ class BacktestEngine:
                     )
                 self._last_candle_close[symbol] = curr
 
-        funding_row = self._lookup_at_or_before(data["funding_ts"], ts)
-        oi_row = self._lookup_at_or_before(data["oi_ts"], ts)
+        funding_row = self._lookup_at_or_before(
+            data["funding_ts"], ts, keys=data.get("funding_keys"),
+        )
+        oi_row = self._lookup_at_or_before(
+            data["oi_ts"], ts, keys=data.get("oi_keys"),
+        )
 
         adx = None
         hist_15m = data.get("hist_15m", [])
@@ -901,7 +958,11 @@ class BacktestEngine:
             liq_source = acc.source
             liq_feed_ready = bool(data.get("liquidations"))
 
-        bn_perp_row = self._lookup_at_or_before(data.get("binance_perp_ts", []), ts)
+        bn_perp_row = self._lookup_at_or_before(
+            data.get("binance_perp_ts", []),
+            ts,
+            keys=data.get("binance_perp_keys"),
+        )
         bn_perp_mid = bn_perp_row[1] if bn_perp_row else None
         bn_perp_ts = bn_perp_row[0] if bn_perp_row else None
 
@@ -1161,7 +1222,12 @@ class BacktestEngine:
         price: float,
         capital: float,
     ) -> float:
-        """Force-close open positions when replay crosses a research data gap."""
+        """Force-close open positions when replay crosses a research data gap.
+
+        Price must be the gap bar's close for *this* symbol (caller passes
+        ``c1m.close`` from the symbol currently advancing) — never a global
+        last timeline price.
+        """
         pos_id = self.positions_by_symbol.get(symbol)
         if pos_id is None:
             return capital
@@ -1172,6 +1238,71 @@ class BacktestEngine:
             self._research_gap_ms,
         )
         return self._close_position(pos_id, price, ts, "research_gap_flatten", capital)
+
+    def _last_close_for_symbol(
+        self,
+        symbol: str,
+        at_or_before_ms: Optional[int] = None,
+    ) -> Optional[Tuple[int, float]]:
+        """Return (ts, close) for symbol from the replay price index."""
+        series = self._price_index.get(symbol) or []
+        if not series:
+            return None
+        if at_or_before_ms is None:
+            return series[-1]
+        for ts, px in reversed(series):
+            if int(ts) <= int(at_or_before_ms):
+                return (int(ts), float(px))
+        return series[0]
+
+    def _sanitize_exit_price(
+        self,
+        pos: _OpenPosition,
+        price: float,
+        reason: str,
+        max_deviation: float = 0.50,
+    ) -> float:
+        """Reject absurd exit prices (e.g. HYPE close used for ETH flatten).
+
+        If ``|exit/entry - 1| > max_deviation``, log ERROR and substitute the
+        symbol's last known close when plausible, else entry (flat flatten).
+        """
+        entry = float(pos.entry_price)
+        px = float(price)
+        if entry <= 0.0 or px <= 0.0:
+            logger.error(
+                "EXIT PRICE INVALID %s %s reason=%s entry=%.6f exit=%.6f — using entry",
+                pos.symbol,
+                pos.side,
+                reason,
+                entry,
+                px,
+            )
+            return entry if entry > 0.0 else px
+        deviation = abs(px - entry) / entry
+        if deviation <= max_deviation:
+            return px
+        fallback_ts = self._last_close_for_symbol(pos.symbol)
+        fallback = float(fallback_ts[1]) if fallback_ts is not None else entry
+        if fallback > 0.0 and abs(fallback - entry) / entry <= max_deviation:
+            safe = fallback
+            src = "symbol_last_close"
+        else:
+            safe = entry
+            src = "entry"
+        logger.error(
+            "EXIT PRICE REJECTED %s %s reason=%s entry=%.6f bad_exit=%.6f "
+            "deviation=%.1f%% — substituting %s=%.6f",
+            pos.symbol,
+            pos.side,
+            reason,
+            entry,
+            px,
+            deviation * 100.0,
+            src,
+            safe,
+        )
+        return safe
 
     def _close_position(
         self,
@@ -1186,11 +1317,29 @@ class BacktestEngine:
             return capital
         self.positions_by_symbol.pop(pos.symbol, None)
 
+        price = self._sanitize_exit_price(pos, price, reason)
+
         entry_notional = pos.entry_price * pos.size
-        exit_notional_now = price * pos.size  # raw notional for size-aware slippage
-        exit_price = self._apply_slippage(
-            price, pos.side, "exit", order_size_usd=exit_notional_now,
-        )
+        # SL-to-BE: production triggers at entry±buffer and paper-fills with
+        # fixed paper_slippage_pct (not size-aware bps). Applying size-aware
+        # slippage on top of the BE level was the −$12 vs live −$0.14 gap.
+        is_be = str(reason or "").startswith("sl_to_be")
+        if is_be:
+            slip_pct = safe_float(
+                (pos.metadata or {}).get("exit_slippage_pct"),
+                self.cfg.paper_slippage_pct / 100.0,
+            )
+            exit_price = float(price)
+            if slip_pct > 0.0:
+                if pos.side == "long":
+                    exit_price *= (1.0 - slip_pct)
+                else:
+                    exit_price *= (1.0 + slip_pct)
+        else:
+            exit_notional_now = price * pos.size
+            exit_price = self._apply_slippage(
+                price, pos.side, "exit", order_size_usd=exit_notional_now,
+            )
         exit_notional = exit_price * pos.size
 
         # Fees from order routing metadata (maker/taker parity with live)
@@ -1244,6 +1393,7 @@ class BacktestEngine:
             "exit_reason": reason,
             "funding_paid": round(pos.funding_paid, 4),
             "fees_paid": round(total_fees, 4),
+            "fees": round(total_fees, 4),
         }
         tracker = self._excursion_trackers.pop(pos.excursion_id, None)
         if tracker is not None:
@@ -1288,8 +1438,6 @@ class BacktestEngine:
         if pos is None:
             return capital
 
-        price = event.price
-
         bt_position = Position(
             symbol=pos.symbol,
             side=pos.side,
@@ -1303,9 +1451,18 @@ class BacktestEngine:
                 "strategy": pos.strategy,
             },
         )
-        exit_sig = self.strategy.on_position(bt_position, event)
-        if exit_sig is not None:
-            return self._close_position(pos_id, price, event.timestamp_ms, exit_sig.reason, capital)
+
+        # Walk 1m OHLC so ChecklistMeta BE/trailing see wicks (live is tick-level).
+        # Hard SL/TP still resolved after via high/low + pessimistic policy.
+        for px in self._exit_path_prices(pos.side, c1m):
+            path_event = replace(event, price=float(px))
+            exit_sig = self.strategy.on_position(bt_position, path_event)
+            if exit_sig is None:
+                continue
+            fill_price = self._strategy_exit_fill_price(pos, exit_sig.reason, float(px))
+            return self._close_position(
+                pos_id, fill_price, event.timestamp_ms, exit_sig.reason, capital,
+            )
 
         intrabar = self._intrabar_stop_tp(pos, c1m)
         if intrabar is not None:
@@ -1313,6 +1470,51 @@ class BacktestEngine:
             return self._close_position(pos_id, fill_price, event.timestamp_ms, reason, capital)
 
         return capital
+
+    def _exit_path_prices(self, side: str, c1m: DBCandle) -> List[float]:
+        """Ordered prices for strategy on_position within one 1m bar."""
+        o = safe_float(c1m.open, 0.0)
+        h = safe_float(c1m.high, 0.0)
+        l = safe_float(c1m.low, 0.0)
+        c = safe_float(c1m.close, 0.0)
+        if min(o, h, l, c) <= 0.0:
+            return [c] if c > 0 else []
+
+        policy = str(self.cfg.exit_path_policy or "adverse_first").lower()
+        adverse_first = policy in {"adverse_first", "pessimistic", "p2"}
+        if side == "long":
+            seq = [o, l, h, c] if adverse_first else [o, h, l, c]
+        else:
+            seq = [o, h, l, c] if adverse_first else [o, l, h, c]
+
+        out: List[float] = []
+        for px in seq:
+            if not out or abs(out[-1] - px) > 1e-12:
+                out.append(float(px))
+        return out
+
+    def _strategy_exit_fill_price(
+        self,
+        pos: _OpenPosition,
+        reason: str,
+        path_price: float,
+    ) -> float:
+        """Fill BE exits at production trigger level (entry ± buffer).
+
+        ChecklistMeta arms BE then exits when price touches
+        ``entry * (1 ± sl_to_be_buffer_pct)``. Live paper then applies fixed
+        ``paper_slippage_pct`` in execution — not size-aware bps (see
+        ``_close_position``). TP fills at configured TP when known.
+        """
+        r = str(reason or "")
+        if r.startswith("sl_to_be"):
+            buf = max(0.0, float(self.cfg.sl_to_be_buffer_pct))
+            if pos.side == "long":
+                return float(pos.entry_price) * (1.0 + buf)
+            return float(pos.entry_price) * (1.0 - buf)
+        if r in {"checklist_tp_hit", "take_profit"} and pos.take_profit_price is not None:
+            return float(pos.take_profit_price)
+        return float(path_price)
 
     def _intrabar_stop_tp(
         self,
@@ -1407,6 +1609,7 @@ def build_backtest_config_from_yaml(cfg: Union[Config, Dict[str, Any]]) -> Backt
     adx_trend = float(
         router_cfg.get("adx_trend_threshold", cfg.get("strategy.adx_trend_threshold", 25.0))
     )
+    cm_cfg = get_strategy_section(cfg, "checklist_meta")
     return BacktestConfig(
         initial_capital=float(cfg.get("backtest.initial_capital", 100_000.0)),
         commission_pct=float(cfg.get("backtest.commission_pct", cfg.get("risk.taker_fee_pct", 0.04))),
@@ -1419,6 +1622,12 @@ def build_backtest_config_from_yaml(cfg: Union[Config, Dict[str, Any]]) -> Backt
         use_cooldown=bool(cfg.get("backtest.use_cooldown", True)),
         use_microstructure_proxy=bool(cfg.get("backtest.use_microstructure_proxy", True)),
         intrabar_conflict_policy=str(cfg.get("backtest.intrabar_conflict_policy", "pessimistic")),
+        exit_path_policy=str(
+            cfg.get("backtest.exit_path_policy", "adverse_first")
+        ),
+        sl_to_be_buffer_pct=float(
+            cm_cfg.get("sl_to_be_buffer_pct", 0.001) if isinstance(cm_cfg, dict) else 0.001
+        ),
         regime_weights=cfg.get("strategy.regime_weights", {}),
         adx_trend_threshold=adx_trend,
         adx_range_threshold=adx_range,

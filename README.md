@@ -7,8 +7,8 @@ execution, and a Flask + Socket.IO dashboard with real-time panels.
 
 ## Project Status
 
-- **Live execution is currently limited to VolatilityBreakout and
-  VWAPDeviation** (`strategy.phase08.execution_strategies`), and both run
+- **Live execution is currently limited to VWAPDeviation**
+  (`strategy.phase08.execution_strategies`) and runs
   **paper-only** — mainnet execution is gated pending out-of-sample (OOS)
   validation (walk-forward, Phase06). See `strategy.phase08.paper_only` in
   `config/settings.yaml`.
@@ -76,10 +76,13 @@ start.bat
 
 ## Strategies
 
-The 12 strategies are governed by `StrategyGovernor` which auto-disables
+The strategy modules are governed by `StrategyGovernor` which auto-disables
 any strategy with negative Sharpe over the last 30 days. The ensemble
 requires cross-class agreement (trend/revert/carry/micro) to avoid
 false confluence from correlated signal generators.
+
+The table below inventories available modules; it is not the active execution
+roster. The authoritative execution/shadow lists are in `config/settings.yaml`.
 
 | Strategy             | Type           | Status (typical) | Notes |
 |----------------------|----------------|------------------|-------|
