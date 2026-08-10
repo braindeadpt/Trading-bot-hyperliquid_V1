@@ -168,6 +168,10 @@ def test_replay_trade_count_tier_b_tolerance_vs_live_0630() -> None:
     snap = ROOT / "data" / "live" / "bot_ruleset_validate.db"
     db_path = snap if snap.exists() else ROOT / "data" / "live" / "bot.db"
     cfg = load_config(ROOT / "config" / "settings.yaml")
+    # ChecklistMeta is shadow-only now; this archived parity fixture opts in
+    # explicitly instead of depending on the active execution roster.
+    cfg.set("strategy.phase08.execution_strategies", ["ChecklistMeta"])
+    cfg.set("strategy.phase08.shadow_strategies", [])
     db = Database(str(db_path))
     symbols = list(cfg.get("assets") or ["BTC", "ETH", "SOL", "HYPE"])
     bt = build_backtest_config_from_yaml(cfg)
