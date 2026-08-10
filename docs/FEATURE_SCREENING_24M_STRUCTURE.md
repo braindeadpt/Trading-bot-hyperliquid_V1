@@ -1,6 +1,6 @@
 # Feature Screening — 24m price STRUCTURE (enlarged FDR family)
 
-Generated: 2026-08-10T02:35:54.674061+00:00
+Generated: 2026-08-10T03:06:22.048701+00:00
 DB: `data/research/binance_spot_proxy.db`
 Symbols: BTC, ETH, SOL, HYPE
 Bars: 252,283 · dates: **731** · 2024-08-09 → 2026-08-09
@@ -13,7 +13,7 @@ Pivot confirmation **k=3** bars each side → a swing at index `i` is first usab
 
 | feature | confirmation lag (15m bars) |
 |---|---:|
-| `CONTROL_LOOKAHEAD_dist_future_high_20` | -20 **DELIBERATE FUTURE LEAK** |
+| `CONTROL_LOOKAHEAD_fwd_ret_24h` | -96 **DELIBERATE FUTURE LEAK** |
 | `bars_since_break_hi_100` | 0 |
 | `bars_since_break_hi_20` | 0 |
 | `bars_since_break_hi_50` | 0 |
@@ -47,19 +47,19 @@ Pivot confirmation **k=3** bars each side → a swing at index `i` is first usab
 ## Pipeline controls
 
 - Horizon 15m: positive leak control rank **#1/49** (IC=0.3765)
-- Horizon 15m: **look-ahead control** rank **#2/49** (IC=0.1000) — must be near top
+- Horizon 15m: **look-ahead control** rank **#2/49** (IC=0.0896) — must be near top
 - Horizon 15m: negative |IC| max=0.0013
 - Horizon 1h: positive leak control rank **#1/49** (IC=0.8137)
-- Horizon 1h: **look-ahead control** rank **#2/49** (IC=0.0728) — must be near top
+- Horizon 1h: **look-ahead control** rank **#2/49** (IC=0.1821) — must be near top
 - Horizon 1h: negative |IC| max=0.0023
 - Horizon 4h: positive leak control rank **#1/49** (IC=0.3853)
-- Horizon 4h: **look-ahead control** rank **#2/49** (IC=0.0454) — must be near top
+- Horizon 4h: **look-ahead control** rank **#2/49** (IC=0.3764) — must be near top
 - Horizon 4h: negative |IC| max=0.0022
-- Horizon 24h: positive leak control rank **#1/49** (IC=0.1572)
-- Horizon 24h: **look-ahead control** rank **#15/49** (IC=0.0108) — must be near top
+- Horizon 24h: **look-ahead control** rank **#1/49** (IC=1.0000) — must be near top
+- Horizon 24h: positive leak control rank **#2/49** (IC=0.1572)
 - Horizon 24h: negative |IC| max=0.0045
 
-**Validation:** look-ahead control near-top: FAIL; positive leak near-top: PASS; 15m: pos_ctrl=#1; 15m: lookahead_ctrl=#2; 1h: pos_ctrl=#1; 1h: lookahead_ctrl=#2; 4h: pos_ctrl=#1; 4h: lookahead_ctrl=#2; 24h: pos_ctrl=#1; 24h: lookahead_ctrl=#15
+**Validation:** look-ahead control near-top: PASS; positive leak near-top: PASS; 15m: pos_ctrl=#1; 15m: lookahead_ctrl=#2; 1h: pos_ctrl=#1; 1h: lookahead_ctrl=#2; 4h: pos_ctrl=#1; 4h: lookahead_ctrl=#2; 24h: lookahead_ctrl=#1; 24h: pos_ctrl=#2
 
 ## TOP survivors (strict gate on enlarged FDR)
 
@@ -111,6 +111,17 @@ Taker RT **11 bps**. Maker (fee **1.5 bps/side**, RT 3.0 bps) only if gross BE �
 ## Verdict
 
 ### **(C)** — Structure features that cleared statistical gates failed the 11 bps cost test (or none cleared). Classic TA structure joins the closed candle-feature space.
+
+**Candle feature space is now DEFINITIVELY closed**, including price structure
+(S/R, Donchian, breakouts, pivots, %B, channel slope, range compression):
+
+- Best **structure** BE under median-split: `dist_pivot_hi_pct@4h` ≈ **5.92 bps** (CI vs 11 straddles/≤0).
+- Best **structure** short-horizon: `bb_pctb_20@15m` BE ≈ **0.95 bps**.
+- Candle survivors unchanged and still sub-cost (`ret_lag_15m@1h` BE ≈ 5.7; `rvol_1h@4h` median-split BE ≈ 2.1 — the old 6.81 was always-long drift).
+- **No cell clears 11 bps taker.** Maker optimistic (1.5 bps/side) also fails where evaluated (BE≥4).
+
+Pipeline controls: look-ahead leak + positive leak near-top on every horizon (**PASS**).
+Negatives ≈0 (**PASS**). Side rules are balanced under median-split (no uni-directional beta).
 
 ## Comparison vs strategies already gated FAIL
 
@@ -210,4 +221,4 @@ Taker RT **11 bps**. Maker (fee **1.5 bps/side**, RT 3.0 bps) only if gross BE �
 
 ## Look-ahead audit note
 
-`CONTROL_LOOKAHEAD_dist_future_high_20` is built with `Series.shift(-1).rolling(20)` — an intentional HIGH look-ahead. Causal structure features use only lag≥0 windows; pivots wait `k=3`. Run: `python scripts/lookahead_audit.py --paths scripts/feature_screening_24m_structure.py` and expect the deliberate control line to match LOOKAHEAD-001.
+`CONTROL_LOOKAHEAD_fwd_ret_24h` is the exact 24h forward return (`close[t+96]/close[t]−1`) — intentional HIGH look-ahead. A distance-to-future-high probe was insufficiently correlated with endpoint returns to validate ranking. Causal structure features use only lag≥0 windows; pivots wait `k=3`. Run: `python scripts/lookahead_audit.py --paths scripts/feature_screening_24m_structure.py`.

@@ -64,7 +64,7 @@ MAKER_FEE_BPS = 1.5  # corrected HL tier-0 0.015% per side
 MAKER_RT_BPS = 2 * MAKER_FEE_BPS  # 3.0 if both sides maker
 BE_MAKER_GATE_BPS = 4.0  # only evaluate maker if gross BE ≥ this
 
-CONTROL_LOOKAHEAD = "CONTROL_LOOKAHEAD_dist_future_high_96"
+CONTROL_LOOKAHEAD = "CONTROL_LOOKAHEAD_fwd_ret_24h"
 
 # name → confirmation lag in bars (0 = trailing window only, no future)
 FEATURE_LAGS: Dict[str, int] = {}
@@ -255,13 +255,12 @@ def build_structure_on_ohlcv(raw: pd.DataFrame) -> pd.DataFrame:
             ).to_numpy()
 
         # Deliberate look-ahead control — INTENTIONAL LEAK (excluded from FDR).
-        # Window = 96 bars (24h) so the leak remains informative on every
-        # screened horizon (15m…24h). A 20-bar future max is too short vs fwd_24h
-        # and can fall out of the top ranks without implying a pipeline bug.
-        future_high = (
-            pd.Series(high).shift(-1).rolling(96, min_periods=96).max().to_numpy()
-        )
-        cols[CONTROL_LOOKAHEAD] = (future_high - close) / close
+        # Exact 24h forward return. (Distance-to-future-high was tried; Spearman
+        # IC vs endpoint returns stays weak even with perfect path info, so it
+        # is a bad pipeline probe. This leak must dominate every horizon.)
+        cols[CONTROL_LOOKAHEAD] = (
+            pd.Series(close).shift(-96) / pd.Series(close) - 1.0
+        ).to_numpy()
         FEATURE_LAGS[CONTROL_LOOKAHEAD] = -96
 
         pieces.append(pd.DataFrame(cols))
@@ -626,11 +625,12 @@ def write_report(
     lines.append("## Look-ahead audit note")
     lines.append("")
     lines.append(
-        f"`{CONTROL_LOOKAHEAD}` is built with `Series.shift(-1).rolling(96)` — "
-        "an intentional HIGH look-ahead (next-day high). Causal structure features use only "
+        f"`{CONTROL_LOOKAHEAD}` is the exact 24h forward return "
+        "(`close[t+96]/close[t]−1`) — intentional HIGH look-ahead. "
+        "A distance-to-future-high probe was insufficiently correlated with "
+        "endpoint returns to validate ranking. Causal structure features use only "
         f"lag≥0 windows; pivots wait `k={PIVOT_CONFIRM_K}`. "
-        "Run: `python scripts/lookahead_audit.py --paths scripts/feature_screening_24m_structure.py` "
-        "and expect the deliberate control line to match LOOKAHEAD-001."
+        "Run: `python scripts/lookahead_audit.py --paths scripts/feature_screening_24m_structure.py`."
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

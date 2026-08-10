@@ -22,7 +22,7 @@ See `docs/BASELINE_SIGNAL_GATE.md`. Portfolio board:
 **First demotion:** ChecklistMeta powered FAIL → move to shadow.
 VWAPDeviation sole execution while underpowered.
 
-Last updated: 2026-08-10 (OI backfill + OI/tape screens → both C)
+Last updated: 2026-08-10 (structure screen → C; candle+TA space closed)
 
 ### Fee note — maker_fee_pct underestimated in config (do not rebuild history)
 
@@ -69,7 +69,25 @@ Awaiting explicit confirmation before changing production YAML to `0.015`.
 - `ret_lag` still real but cost-closed (BE ~2–6 bps).
 
 **Do not build** candle directional strategies. Prefer inverted-cost families
-(MM / spread) once L2 history accumulates on `E:`.
+(MM / spread) once L2 history accumulates in `data/research/l2_books`.
+
+### Archived — 24m price STRUCTURE features (verdict C) — candle space CLOSED
+
+`scripts/feature_screening_24m_structure.py` /
+`docs/FEATURE_SCREENING_24M_STRUCTURE.md` (2026-08-10):
+
+- Gap closed: continuous S/R, Donchian position, %B, breakout age/magnitude,
+  confirmed pivots (k=3 lag), channel slope, range compression — N∈{20,50,100}.
+- FDR on **enlarged** family (15 candle + 29 structure × 4 horizons = 176 cells).
+- Look-ahead contract documented per feature; deliberate leak control near-top
+  on every horizon (PASS). `lookahead_audit` flags the intentional leak (expected).
+- 5 structure cells survived strict gate (`bb_pctb_20`, `dist_pivot_hi_*`) —
+  **all fail 11 bps** (best structure BE ≈5.92). Median-split sides ~50/50.
+- Confirms strategy FAILs (SFP, VARejection, Donchian, VB, VWAPTrend): same
+  information fails as features and as strategies.
+
+**Candle + classical TA structure space is DEFINITIVELY closed.** Do not reopen
+without a new non-candle information source (L2 depth / queue / maker AS).
 
 ### Archived — maker fill + adverse selection on 24m survivors (verdict C)
 
