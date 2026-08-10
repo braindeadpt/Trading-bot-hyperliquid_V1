@@ -181,7 +181,7 @@ avoids it and the findings match what `main.py --audit` logs to
 ========================================================================
   SECURITY AUDIT REPORT
   Generated : 2026-07-13 15:32:33 UTC
-  Source    : C:\Users\Braindead\Documents\trading-bot-hyperliquid\src
+  Source    : <repository>\src
   Files     : 132
   Lines     : 44868
   Findings  : 2

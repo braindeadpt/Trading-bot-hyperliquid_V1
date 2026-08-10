@@ -19,17 +19,20 @@ The bot is built around a **WebSocket-first event architecture**: real-time mark
 
 **Current operational status (check before suggesting live/OOS work):**
 - Live-executing strategies (`strategy.phase08.execution_strategies` in
-  `config/settings.yaml`): VolatilityBreakout, VWAPDeviation — both currently
+  `config/settings.yaml`): VWAPDeviation only — currently
   **paper-only** (`strategy.phase08.paper_only: true`) pending OOS
   (out-of-sample / walk-forward) validation.
 - Shadow-mode strategies (`strategy.phase08.shadow_strategies`, signal-tracked
-  but never executed): CVDOrderFlow, OrderBookScalper, FundingArbitrage,
-  FundingMomentum, SpotPerpCarry, ChecklistMeta.
+  but never executed): ChecklistMeta, VolatilityBreakout, CVDOrderFlow, OrderBookScalper,
+  FundingArbitrage, FundingMomentum, SpotPerpCarry (plus others listed in YAML).
 - **GoldRush candle-data readiness is not yet validated.** Do not run OOS,
   parameter tuning, holdout, or performance backtests against GoldRush-sourced
   data until this is resolved.
 - **Mainnet execution is blocked** pending the OOS validation and data
   readiness items above.
+- **Baseline-signal gate (required for new execution promotions):** no strategy
+  may be *added* to `strategy.phase08.execution_strategies` without a
+  `baseline_signal_gate: PASS` on the preregister manifest. See §12.
 
 ---
 
@@ -428,7 +431,130 @@ Before submitting any code change:
 7. **Do not add** `eval`, `exec`, `pickle.loads`, `subprocess`, or hardcoded secrets.
 8. **Update `DEFAULT_CONFIG`** in `src/utils/config.py` if you introduce new required config keys.
 9. **Update this `AGENTS.md`** if you change build steps, testing procedures, or security rules.
+10. **Do not add a strategy to `execution_strategies`** without a baseline-signal
+    gate PASS (three conditions) — see §12. Legacy paper names
+    (ChecklistMeta, VWAPDeviation) are soft-exempt until deliberately re-gated.
 
 ---
 
-*Last updated: 2026-07-12 (Fase 09 — CI reorganized onto pytest with `unit` / `integration_offline` / `network` / `testnet_live` markers; `scripts/run_ci_tests.py` rewritten to drive suites by marker instead of a hardcoded file list; added `tests/test_engine_boot_integration.py` characterizing engine start/stop with feeds+OMS+reconciliation mocked; split mixed-category test files; removed subjective scoring language.)*
+## 12. Baseline-signal gate (research → execution)
+
+### Feature screening first (required before new strategies)
+
+Do **not** invent strategy #N from a pattern that “worked elsewhere.” Measure
+whether raw features predict forward returns **before** building entries,
+stops, or sizing.
+
+```
+feature with predictive power
+  → simple strategy around it
+  → baseline-signal gate (this section)
+  → shadow
+  → execution (PASS required)
+```
+
+Never the inverse. Screening CLI: `python scripts/feature_screening.py`.
+Report: `docs/FEATURE_SCREENING_REPORT.md`. Only TOP survivors (FDR +
+monotonicity + temporal stability + cross-symbol consistency) justify a
+strategy attempt. Pre-FDR hits alone do **not**.
+
+No strategy may be **added** to `strategy.phase08.execution_strategies` without
+passing the baseline-signal gate on at least one validation fold (W2/W3).
+
+### Three cumulative conditions
+
+```
+PASS  ⇔  B1 ≥ p95   AND   n_trades ≥ 30   AND   expectancy > 0 (PF > 1)
+```
+
+| Condition | Meaning |
+|-----------|---------|
+| **B1 ≥ p95** | At real signal times, randomizing only direction: the strategy’s profit factor must beat ≥95% of random-direction seeds. Isolates *directional* information while holding market conditions fixed. |
+| **n_trades ≥ 30** | Statistical power floor. Below this → **INCONCLUSIVE** (not tested), never “no edge”. |
+| **expectancy > 0 (PF > 1)** | Must be profitable in absolute terms. Beating noise while losing money is not edge. |
+
+Any miss other than underpowered sample → **FAIL**, and the CLI must report
+**which** condition failed.
+
+**B2** (random timing, real direction) and **B3** (both random) are complementary
+diagnostics; **B1 is the primary gate**.
+
+### Why percentile alone is insufficient (SmartMoneyFlow W3)
+
+SmartMoneyFlow on W3 reached **B1 PF percentile 96** with engine **PF ≈ 0.27**
+(large absolute loss). Under a percentile-only rule it would have “passed” while
+reliably losing money — it only lost *less* than chance in an adverse regime.
+That case is why profitability is a hard third condition: **FAIL
+(`not_profitable`)**, not PASS.
+
+### INCONCLUSIVE vs FAIL vs frequency
+
+- **INCONCLUSIVE** (`n_trades < 30`, or no runnable replay): strategy was **not
+  tested**. Do **not** kill or demote solely on INCONCLUSIVE.
+- **FAIL**: powered sample and at least one of (B1 / profitability) missed.
+- **INCONCLUSIVE (frequency insufficient):** if a strategy cannot produce
+  `n_trades ≥ 30` in a **90-day / quarter** observation window (live shadow or
+  replay), it is **not validatable and not usable** in practice. This is a
+  legitimate standing verdict beside PASS/FAIL — never call it FAIL.
+
+### First real demotion (precedent, 2026-08-09)
+
+**ChecklistMeta** failed the three-condition gate with power on both W2
+(B1=48, n=146) and W3 (B1=43, n=215). Keeping it in `execution_strategies`
+would make the gate decorative. Precedent: **demote FAIL → shadow**; do not
+re-promote without a fresh PASS. Script:
+`scripts/demote_checklist_meta_for_baseline_fail.py`.
+
+**VWAPDeviation** stays in execution only because it is **INCONCLUSIVE**
+(n&lt;30) — grandfathered while sample accumulates — not because it passed.
+
+### Fidelity / Tier B
+
+When missing feeds (L2, tape, funding, binance_perp, liquidations) hurt the
+strategy but not the random baselines, the test is **conservative against the
+strategy**. Declare that on the result. Zero-trade Tier-B names are **not
+validatable** in candle-only replay and therefore **not promotable** until a
+powered run exists.
+
+### CLI
+
+```bash
+python scripts/baseline_signal_gate.py --strategy NAME --folds W2,W3 --seeds 200 --gate
+# exit 0=PASS, 1=FAIL, 2=INCONCLUSIVE
+python scripts/baseline_signal_gate.py --portfolio --seeds 200
+python scripts/baseline_signal_gate.py --validate-harness --seeds 40
+```
+
+Artifact board: `data/backtests/parity_diag/BASELINE_PORTFOLIO_GATE_REPORT.md`.
+Longer write-up: `docs/BASELINE_SIGNAL_GATE.md`.
+
+**Feed silence (2026-08-09):** contracted feeds
+(`liquidation_okx`, `liquidation_bybit`, `liquidation_binance`,
+`liquidation_coinalyze_check`, `binance_perp`, funding venues, `taker_split`)
+must alert if quiet beyond configured thresholds — see
+`FeedSilenceMonitor` / `docs/FEED_CONTAMINATION_AUDIT.md` /
+`docs/LIQUIDATION_AGGREGATOR.md`. A dead venue must never again go unnoticed
+for weeks. Hyperliquid has **no** public market-wide liquidation channel;
+do not contract `liquidation_hl`.
+
+`market_data.liquidation_source`: `real` | `binance` | `proxy` | `auto`
+(see § liquidation aggregator).
+
+### Preregister asymmetry (hard at entry, soft for legacy)
+
+| Path | Behaviour |
+|------|-----------|
+| **Promote / add** a non-legacy strategy to `execution_strategies` | **Hard:** `baseline_signal_gate` with `verdict: PASS` required (`assert_can_promote_to_execution` / persist overwrite). |
+| **Startup** with ChecklistMeta / VWAPDeviation already executing | **Soft:** missing gate field does **not** brick the paper bot (`LEGACY_EXECUTION_WITHOUT_BASELINE_GATE`). |
+| Gate record present but not PASS | Always fails, including for legacy names. |
+| `BOT_REQUIRE_BASELINE_GATE=1` | Removes grandfathering — every execution name needs PASS. |
+
+This is intentional, not inconsistent: measurement post-dates the current paper
+set; blocking boot would add no edge, while blocking *new* promotions prevents
+repeating the CM mistake.
+
+Hooks: `src/research/phase08_preregister.py`, `phase10_preregister.py`.
+
+---
+
+*Last updated: 2026-08-09 (feature-screening-first rule + baseline-signal gate).*
