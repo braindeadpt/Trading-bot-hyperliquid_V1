@@ -22,7 +22,7 @@ See `docs/BASELINE_SIGNAL_GATE.md`. Portfolio board:
 **First demotion:** ChecklistMeta powered FAIL → move to shadow.
 VWAPDeviation sole execution while underpowered.
 
-Last updated: 2026-08-10 (structure screen → C; candle+TA space closed)
+Last updated: 2026-08-10 (XS slow momentum → C; candle+TA+MM+OI+tape closed)
 
 ### Fee note — maker_fee_pct underestimated in config (do not rebuild history)
 
@@ -32,6 +32,21 @@ https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees.
 Prior maker cost tests used the underestimated fee (~33% too low on the fee
 leg). **Verdicts still stand** (they failed even with the optimistic fee).
 Awaiting explicit confirmation before changing production YAML to `0.015`.
+
+### Archived — cross-sectional slow momentum (verdict C)
+
+`scripts/xs_momentum_feasibility.py` /
+`docs/XS_MOMENTUM_FEASIBILITY.md` (2026-08-10):
+
+- **Data viability GO:** HL 1d panel 232 names (55 delisted with history),
+  concurrent ≥131, ~900d depth; funding paginated to full window (cov≈1.0).
+- **PRIMARY a priori:** 30d return, weekly rebalance, 10 long/10 short,
+  ADV≥$1M ∩ top-60, tier-0 taker 4.5 bps/side, exec open t+1, funding PIT.
+- Result: **net −12.8%** / 830d / 119 rebalances; random-rank PF pct **79.5**;
+  TO≈0.86 (cost premise failed); funding drag ≈−11pp.
+- Sensitivities (lb14, n5) look better on the **same** window — **not** a
+  reopen license (post-hoc search forbidden).
+- **Family CLOSED** under retail HL costs + this construction. Do not build.
 
 ### Archived — OI backfill viability + positioning screen (verdict C)
 
