@@ -101,17 +101,27 @@ class TopTraderTracker:
         self._min_all_time_pnl = float(min_all_time_pnl)
 
     async def refresh_from_leaderboard(self, *, force: bool = False) -> int:
-        """Pull durable top-N from HL stats leaderboard; returns wallet count."""
+        """Pull durable top-N from HL stats leaderboard; returns wallet count.
+
+        Skips the heavy ~40k-row download when the local wallets file is still
+        fresh (``leaderboard_refresh_hours``), so paper restarts stay light.
+        """
         if not self._auto_from_leaderboard and not force:
             return len(self.wallets)
         now = int(time.time() * 1000)
-        if (
-            not force
-            and self.wallets
-            and self._last_leaderboard_refresh_ms > 0
-            and (now - self._last_leaderboard_refresh_ms) < self._leaderboard_refresh_ms
-        ):
-            return len(self.wallets)
+        if not force and self.wallets:
+            if self._last_leaderboard_refresh_ms <= 0:
+                self._last_leaderboard_refresh_ms = self._wallets_file_updated_ms()
+            if (
+                self._last_leaderboard_refresh_ms > 0
+                and (now - self._last_leaderboard_refresh_ms)
+                < self._leaderboard_refresh_ms
+            ):
+                logger.info(
+                    "TopTrader leaderboard skipped (wallets file fresh, age=%.1fh)",
+                    (now - self._last_leaderboard_refresh_ms) / 3_600_000.0,
+                )
+                return len(self.wallets)
         try:
             from src.exchanges.hl_leaderboard import (
                 fetch_durable_top_wallets,
@@ -150,6 +160,20 @@ class TopTraderTracker:
             self._leaderboard_window,
         )
         return len(self.wallets)
+
+    def _wallets_file_updated_ms(self) -> int:
+        """Best-effort ``updated_ms`` from local wallets JSON (0 if missing)."""
+        try:
+            raw = Path(self._wallets_path)
+            path = raw if raw.is_absolute() else ROOT / raw
+            if not path.exists():
+                return 0
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return int(data.get("updated_ms") or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+        return 0
 
     def _write_wallets_file(self, payload: Dict[str, Any]) -> None:
         raw = Path(self._wallets_path)
@@ -218,6 +242,12 @@ class TopTraderTracker:
                 seen.add(w)
                 uniq.append(w)
         self.wallets = uniq[: max(1, int(self.top_n))] if self.top_n > 0 else uniq
+        # Mark leaderboard freshness from file so startup skips re-download.
+        if isinstance(data, dict):
+            if data.get("updated_ms"):
+                self._last_leaderboard_refresh_ms = int(data["updated_ms"])
+            if data.get("source"):
+                self._leaderboard_source = str(data.get("source"))
         logger.info(
             "TopTraderTracker loaded %d wallets (top_n=%d) from %s",
             len(self.wallets),
