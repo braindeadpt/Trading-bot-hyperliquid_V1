@@ -440,6 +440,70 @@ tr:hover td { background: var(--panel-hover); }
     </div>
 </div>
 
+<!-- Top Traders aggregate bias + virtual swing -->
+<div class="section-label section-intel">
+    <span class="bar"></span><span class="text">Top Traders (aggregate)</span><span class="line"></span>
+</div>
+<div class="grid">
+    <div class="g-12">
+        <div class="panel" style="max-height:340px;">
+            <div class="panel-header">
+                Bias + virtual swing
+                <span class="dim" id="tt-meta">research only</span>
+            </div>
+            <div class="panel-body" style="padding:6px 8px; max-height:300px; overflow-y:auto;">
+                <div id="tt-empty" class="muted" style="display:none;margin-bottom:6px;"></div>
+                <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">Aggregate bias by symbol</div>
+                <table style="width:100%; font-size:11px; border-collapse:collapse; margin-bottom:10px;">
+                    <thead>
+                        <tr style="color:var(--muted); text-align:left;">
+                            <th>Symbol</th>
+                            <th>Bias</th>
+                            <th>L/S</th>
+                            <th>Notional</th>
+                            <th>Age</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tt-bias-tbody">
+                        <tr><td colspan="5" class="muted">Waiting...</td></tr>
+                    </tbody>
+                </table>
+                <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">Open virtual positions</div>
+                <table style="width:100%; font-size:11px; border-collapse:collapse; margin-bottom:10px;">
+                    <thead>
+                        <tr style="color:var(--muted); text-align:left;">
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>Entry</th>
+                            <th>uPnL</th>
+                            <th>Age</th>
+                            <th>Bias</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tt-open-tbody">
+                        <tr><td colspan="6" class="muted">None</td></tr>
+                    </tbody>
+                </table>
+                <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">Recent virtual closes</div>
+                <table style="width:100%; font-size:11px; border-collapse:collapse;">
+                    <thead>
+                        <tr style="color:var(--muted); text-align:left;">
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>PnL</th>
+                            <th>Reason</th>
+                            <th>Hold</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tt-closed-tbody">
+                        <tr><td colspan="5" class="muted">None</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <!-- SECTION: LOGS                                                    -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -995,6 +1059,100 @@ function renderShadowPanel(payload) {
     }).join("");
 }
 
+function _ttFmtAge(ms) {
+    if (ms == null) return "—";
+    const m = Math.floor(Number(ms) / 60000);
+    if (m < 60) return m + "m";
+    const h = Math.floor(m / 60);
+    if (h < 48) return h + "h";
+    return (h / 24).toFixed(1) + "d";
+}
+
+function renderTopTradersPanel(payload) {
+    const meta = document.getElementById("tt-meta");
+    const empty = document.getElementById("tt-empty");
+    const biasBody = document.getElementById("tt-bias-tbody");
+    const openBody = document.getElementById("tt-open-tbody");
+    const closedBody = document.getElementById("tt-closed-tbody");
+    if (!biasBody || !openBody || !closedBody) return;
+    if (!payload || payload.error) {
+        biasBody.innerHTML = '<tr><td colspan="5" class="muted">Unavailable</td></tr>';
+        return;
+    }
+    if (meta) {
+        const thr = payload.bias_threshold != null ? Number(payload.bias_threshold).toFixed(2) : "—";
+        const hold = payload.max_hold_hours != null ? payload.max_hold_hours + "h" : "—";
+        meta.textContent = `wallets=${payload.wallets_configured || 0} · thr=${thr} · hold≤${hold} · hybrid`;
+        meta.title = payload.disclaimer || "";
+    }
+    if (empty) {
+        if (payload.empty_reason) {
+            empty.style.display = "block";
+            empty.textContent = payload.empty_reason;
+        } else {
+            empty.style.display = "none";
+        }
+    }
+    const snaps = payload.snapshots || [];
+    if (!snaps.length) {
+        biasBody.innerHTML = '<tr><td colspan="5" class="muted">No bias samples yet</td></tr>';
+    } else {
+        biasBody.innerHTML = snaps.map(s => {
+            const b = Number(s.net_bias) || 0;
+            const col = b > 0.05 ? "var(--up)" : b < -0.05 ? "var(--down)" : "var(--muted)";
+            const barW = Math.min(100, Math.abs(b) * 100);
+            const notion = ((Number(s.long_notional_usd)||0) + (Number(s.short_notional_usd)||0));
+            const notionS = notion >= 1e6 ? (notion/1e6).toFixed(1)+"M" : notion >= 1e3 ? (notion/1e3).toFixed(0)+"k" : notion.toFixed(0);
+            return `<tr style="border-top:1px solid var(--border);">
+                <td class="highlight">${s.symbol}</td>
+                <td style="color:${col};" title="long_frac=${(Number(s.long_frac)||0).toFixed(2)}">
+                    <div style="background:var(--border);height:6px;width:64px;display:inline-block;vertical-align:middle;border-radius:3px;">
+                        <div style="height:6px;width:${barW}%;background:${col};border-radius:3px;"></div>
+                    </div> ${b.toFixed(2)}
+                </td>
+                <td>${s.n_long||0}/${s.n_short||0}</td>
+                <td class="num">${notionS}</td>
+                <td class="muted">${_ttFmtAge(s.age_ms)}</td>
+            </tr>`;
+        }).join("");
+    }
+    const opens = payload.open_positions || [];
+    if (!opens.length) {
+        openBody.innerHTML = '<tr><td colspan="6" class="muted">None</td></tr>';
+    } else {
+        openBody.innerHTML = opens.map(p => {
+            const pnl = Number(p.unrealized_pnl_pct) || 0;
+            const col = pnl >= 0 ? "var(--up)" : "var(--down)";
+            return `<tr style="border-top:1px solid var(--border);">
+                <td class="highlight">${p.symbol}</td>
+                <td class="${p.side==='long'?'up':'down'}">${(p.side||'').toUpperCase()}</td>
+                <td class="num">${Number(p.entry_price).toFixed(2)}</td>
+                <td style="color:${col};">${(pnl*100).toFixed(2)}%</td>
+                <td class="muted">${_ttFmtAge(p.age_ms)}</td>
+                <td class="num">${Number(p.last_bias||0).toFixed(2)}</td>
+            </tr>`;
+        }).join("");
+    }
+    const closed = payload.closed_trades || [];
+    if (!closed.length) {
+        closedBody.innerHTML = '<tr><td colspan="5" class="muted">None</td></tr>';
+    } else {
+        closedBody.innerHTML = closed.slice(0, 15).map(t => {
+            const pnl = Number(t.pnl_pct) || 0;
+            const col = pnl >= 0 ? "var(--up)" : "var(--down)";
+            const hold = (t.entry_ts_ms != null && t.exit_ts_ms != null)
+                ? _ttFmtAge(Number(t.exit_ts_ms) - Number(t.entry_ts_ms)) : "—";
+            return `<tr style="border-top:1px solid var(--border);">
+                <td class="highlight">${t.symbol}</td>
+                <td class="${t.side==='long'?'up':'down'}">${(t.side||'').toUpperCase()}</td>
+                <td style="color:${col};">${(pnl*100).toFixed(2)}%</td>
+                <td class="muted">${t.exit_reason||"—"}</td>
+                <td class="muted">${hold}</td>
+            </tr>`;
+        }).join("");
+    }
+}
+
 // ── Signals ──
 function renderSignals(data) {
     const div = document.getElementById("signals-list");
@@ -1190,6 +1348,7 @@ function pollAll() {
         authFetch("/api/positions").then(r => r.json()).then(d => renderPositions(d)).catch(() => {});
     }
     authFetch("/api/shadow_panel?evaluate=0").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
+    authFetch("/api/top_traders").then(r => r.json()).then(d => renderTopTradersPanel(d)).catch(() => {});
 }
 setInterval(pollAll, 5000);
 // Full hypothetical evaluation is heavy (can block Flask for minutes on large

@@ -149,6 +149,7 @@ def test_poll_once_aggregates(monkeypatch: pytest.MonkeyPatch) -> None:
         min_notional_usd=1_000,
         request_delay_sec=0.0,
     )
+    tr._persist_samples = False
 
     async def _run() -> None:
         await tr.bind_client(_Client())

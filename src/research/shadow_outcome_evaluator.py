@@ -93,6 +93,7 @@ STRATEGY_CONFIG_SECTION: Dict[str, str] = {
     "SpotPerpCarry": "spot_perp_carry",
     "VolatilityBreakout": "volatility_breakout",
     "VWAPDeviation": "vwap_deviation",
+    "TopTraderFlow": "top_trader_flow",
 }
 
 # Documented defaults when config section is missing/empty.
@@ -103,6 +104,7 @@ DEFAULT_MAX_HOLD_MS: Dict[str, int] = {
     "FundingArbitrage": 8 * 3600 * 1000,
     "FundingMomentum": 12 * 3600 * 1000,
     "SpotPerpCarry": 24 * 3600 * 1000,
+    "TopTraderFlow": 120 * 3600 * 1000,  # 5d swing
 }
 
 SKIP_MISSING_BRACKET = "missing_bracket_params"
@@ -115,6 +117,7 @@ EXIT_SL = "stop_loss"
 EXIT_TIMEOUT = "timeout"
 EXIT_GAP_SL = "gap_stop_loss"
 EXIT_GAP_TP = "gap_take_profit"
+EXIT_BIAS_FLIP = "bias_flip"
 
 LIVE_DB_DEFAULT = Path("data") / "live" / "bot.db"
 
@@ -575,8 +578,14 @@ def simulate_decision(
     *,
     max_hold_ms: int,
     cost_model: Optional[ShadowCostModel] = None,
+    bias_samples: Optional[Sequence[Dict[str, Any]]] = None,
+    bias_threshold: float = 0.55,
 ) -> SimulatedOutcome:
-    """Simulate one shadow entry against forward 1m candles."""
+    """Simulate one shadow entry against forward 1m candles.
+
+    When *bias_samples* are provided (TopTraderFlow), hybrid exit also fires on
+    aggregate bias flip against the position before SL/TP/timeout.
+    """
     base = SimulatedOutcome(
         decision_id=decision.row_id,
         symbol=decision.symbol,
@@ -614,6 +623,12 @@ def simulate_decision(
     deadline = decision.timestamp_ms + max_hold_ms
     model = cost_model or resolve_shadow_cost_model(decision.strategy)
 
+    # Prefer threshold from recorded metadata when present
+    meta = (decision.market_snapshot or {}).get("metadata") or {}
+    thr = float(meta.get("bias_threshold", bias_threshold))
+    samples = list(bias_samples or [])
+    sample_idx = 0
+
     if not candles:
         return dataclasses_replace(
             base,
@@ -629,6 +644,36 @@ def simulate_decision(
         if candle.timestamp_ms <= decision.timestamp_ms:
             continue
         last_candle = candle
+
+        # Hybrid: bias flip samples up to this candle timestamp
+        while sample_idx < len(samples):
+            sample = samples[sample_idx]
+            ts = int(sample.get("timestamp_ms", 0))
+            if ts <= decision.timestamp_ms:
+                sample_idx += 1
+                continue
+            if ts > candle.timestamp_ms:
+                break
+            b = float(sample.get("net_bias", 0.0))
+            flipped = (side == "long" and b <= -thr) or (
+                side == "short" and b >= thr
+            )
+            sample_idx += 1
+            if flipped:
+                return _finish_outcome(
+                    decision,
+                    entry,
+                    stop,
+                    take,
+                    size,
+                    side,
+                    float(candle.open),
+                    ts,
+                    EXIT_BIAS_FLIP,
+                    candles=candles,
+                    cost_model=model,
+                )
+
         hit = resolve_candle_exit(
             side=side,
             entry=entry,
@@ -845,9 +890,28 @@ def evaluate_shadow_decisions(
         by_key.setdefault((d.strategy, variant), []).append(d)
 
     boards: Dict[str, StrategyScoreboard] = {}
+    bias_store = None
     for (strategy, variant), group in by_key.items():
         max_hold = resolve_max_hold_ms(strategy, cfg)
         cost_model = resolve_shadow_cost_model(strategy, cfg)
+        thr = 0.55
+        if strategy == "TopTraderFlow" and cfg is not None:
+            try:
+                from src.utils.config import get_strategy_section
+
+                sec = get_strategy_section(cfg, "top_trader_flow")
+                thr = float(sec.get("bias_threshold", 0.55))
+            except Exception:  # noqa: BLE001
+                thr = 0.55
+            if bias_store is None:
+                try:
+                    from src.research.top_trader_store import TopTraderStore
+
+                    bias_store = TopTraderStore(
+                        ResearchDatabase(Path(research_db_path))
+                    )
+                except Exception:  # noqa: BLE001
+                    bias_store = False  # type: ignore[assignment]
         outcomes: List[SimulatedOutcome] = []
         sources_seen: List[str] = []
         for d in group:
@@ -862,12 +926,21 @@ def evaluate_shadow_decisions(
                     live_db_path=Path(live_db_path) if live_db_path else None,
                 )
             sources_seen.append(src)
+            samples: Optional[List[Dict[str, Any]]] = None
+            if strategy == "TopTraderFlow" and bias_store not in (None, False):
+                samples = bias_store.load_bias_samples(  # type: ignore[union-attr]
+                    d.symbol,
+                    start_ms=d.timestamp_ms,
+                    end_ms=d.timestamp_ms + max_hold,
+                )
             outcomes.append(
                 simulate_decision(
                     d,
                     candles,
                     max_hold_ms=max_hold,
                     cost_model=cost_model,
+                    bias_samples=samples,
+                    bias_threshold=thr,
                 )
             )
         source_label = max(set(sources_seen), key=sources_seen.count) if sources_seen else ""

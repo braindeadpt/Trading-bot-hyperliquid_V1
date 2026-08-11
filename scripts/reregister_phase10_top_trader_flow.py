@@ -31,14 +31,14 @@ from src.research.phase10_preregister import (  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
 
 REREG_REASON = (
-    "research shadow add — TopTraderFlow (aggregate top-wallet bias via "
-    "clearinghouseState poll). No execution_strategies change; no copy-trade. "
-    "OOS counter restarts because config_hash includes shadow roster."
+    "research shadow — TopTraderFlow hybrid swing panel (bias samples + "
+    "virtual book + 5d max_hold / wider SL-TP). No execution_strategies "
+    "change; OOS counter restarts because config_hash includes strategy params."
 )
 IN_SAMPLE_NOTE = (
     "VWAPDeviation remains the sole paper execution control (INCONCLUSIVE "
-    "sample). TopTraderFlow is shadow-only pending feature screening / "
-    "baseline-signal gate. Mainnet still blocked."
+    "sample). TopTraderFlow is shadow-only swing research (aggregate bias). "
+    "Mainnet still blocked."
 )
 
 SETTINGS = ROOT / "config" / "settings.yaml"
@@ -52,7 +52,7 @@ def _set_ignore_trades_before_ms(path: Path, window_start_ms: int) -> None:
     )
     replacement = (
         rf"\g<1>{window_start_ms}"
-        r"  # Fase 10 window_start_ms (re-registered 2026-08-11 TopTraderFlow shadow)"
+        r"  # Fase 10 window_start_ms (re-registered 2026-08-11 TopTrader swing panel)"
     )
     new_text, n = pattern.subn(replacement, text, count=1)
     if n != 1:

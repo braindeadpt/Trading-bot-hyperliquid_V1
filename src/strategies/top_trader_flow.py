@@ -29,8 +29,9 @@ class TopTraderFlow(Strategy):
         self.MIN_WALLETS = int(cfg.get("min_wallets_with_position", 3))
         self.MIN_NOTIONAL_USD = float(cfg.get("min_aggregate_notional_usd", 50_000.0))
         self.SIZE_PCT = float(cfg.get("size_pct", 0.01))
-        self.STOP_LOSS_PCT = float(cfg.get("stop_loss_pct", 0.015))
-        self.TAKE_PROFIT_PCT = float(cfg.get("take_profit_pct", 0.03))
+        self.STOP_LOSS_PCT = float(cfg.get("stop_loss_pct", 0.04))
+        self.TAKE_PROFIT_PCT = float(cfg.get("take_profit_pct", 0.10))
+        self.MAX_HOLD_HOURS = float(cfg.get("max_hold_hours", 120.0))
         self.SIGNAL_THROTTLE_MS = int(cfg.get("signal_throttle_ms", 300_000))
         self.MAX_SNAPSHOT_AGE_MS = int(cfg.get("max_snapshot_age_ms", 180_000))
         self._last_signal_ms: Dict[str, int] = {}
@@ -102,6 +103,8 @@ class TopTraderFlow(Strategy):
                 "notional_usd": total_notional,
                 "mode": self.MODE,
                 "tracker_updated_ms": snap.updated_ms,
+                "max_hold_hours": self.MAX_HOLD_HOURS,
+                "exit_style": "hybrid_flip_or_hold",
             },
         )
 

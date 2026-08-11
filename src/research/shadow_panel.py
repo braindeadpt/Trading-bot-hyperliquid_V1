@@ -174,6 +174,7 @@ def build_shadow_panel_payload(
             "FundingArbitrage",
             "FundingMomentum",
             "SpotPerpCarry",
+            "TopTraderFlow",
         ):
             fidelity = "tier_b_missing_or_proxy"
         note = None
@@ -181,6 +182,11 @@ def build_shadow_panel_payload(
             note = (
                 "L2 not in historical replay — live shadow signals OK; "
                 "baseline gate in candle replay remains non-validatable."
+            )
+        if name == "TopTraderFlow":
+            note = (
+                "Hybrid swing: bias flip OR max hold OR SL/TP. "
+                "Offline flip needs persisted bias samples; cold start falls back to SL/TP/timeout."
             )
 
         rows.append(

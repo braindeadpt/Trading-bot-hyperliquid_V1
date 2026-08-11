@@ -442,6 +442,7 @@ class TradingEngine:
         self._top_trader_task: Optional[asyncio.Task] = None
         self._top_trader_tracker: Optional[Any] = None
         self._top_trader_rest: Optional[Any] = None
+        self._top_trader_virtual_book: Optional[Any] = None
         self._market_data_health: Dict[str, SymbolFeedHealth] = {}
         _health_window = float(_md.get("health_history_window_sec", 3600))
         self._health_tracker = MarketDataHealthTracker(window_sec=_health_window)
@@ -1325,28 +1326,49 @@ class TradingEngine:
         await self._background_tasks.poll_funding_loop()
 
     async def _start_top_trader_tracker(self) -> None:
-        """Start optional TopTraderTracker poller (shadow feature feed)."""
+        """Start optional TopTraderTracker poller + virtual swing book."""
         from src.exchanges.hyperliquid_rest import HyperliquidRESTClient
         from src.exchanges.top_trader_tracker import build_tracker_from_config
+        from src.research.top_trader_virtual_book import (
+            build_virtual_book_from_config,
+            set_virtual_book,
+        )
 
         tracker = build_tracker_from_config(self._config)
         if tracker is None:
             logger.info("TopTraderTracker disabled by config")
+            set_virtual_book(None)
+            self._top_trader_virtual_book = None
             return
+
+        book = build_virtual_book_from_config(self._config)
+        set_virtual_book(book)
+        self._top_trader_virtual_book = book
+
+        def _on_poll(snaps: dict) -> None:
+            prices: dict = {}
+            for sym, tick in (self._latest_price or {}).items():
+                mid = getattr(tick, "mid", None)
+                if mid is not None:
+                    prices[str(sym).upper()] = float(mid)
+            book.on_snapshots(snaps, prices=prices)
+
+        tracker.set_on_poll(_on_poll)
+        self._top_trader_tracker = tracker
+
         if not tracker.wallets:
             logger.warning(
                 "TopTraderTracker enabled but no wallets configured — "
-                "fill data/research/top_traders.json (shadow stays silent)"
+                "fill data/research/top_traders.json (panel idle / shadow silent)"
             )
             return
         rest = HyperliquidRESTClient(use_testnet=(self._mode == "testnet"))
         await rest.open()
         await tracker.bind_client(rest)
-        self._top_trader_tracker = tracker
         self._top_trader_rest = rest
         self._top_trader_task = asyncio.create_task(tracker.run_loop())
         logger.info(
-            "TopTraderTracker started — wallets=%d interval=%ss",
+            "TopTraderTracker started — wallets=%d interval=%ss (virtual swing book on)",
             len(tracker.wallets),
             tracker.poll_interval_sec,
         )
@@ -1399,6 +1421,13 @@ class TradingEngine:
             except Exception as exc:  # noqa: BLE001
                 logger.debug("TopTrader REST close: %s", exc)
             self._top_trader_rest = None
+        self._top_trader_virtual_book = None
+        try:
+            from src.research.top_trader_virtual_book import set_virtual_book
+
+            set_virtual_book(None)
+        except Exception:  # noqa: BLE001
+            pass
 
         # 1. Unsubscribe from DataBus
         for topic, callback in self._subscribed_callbacks.items():
@@ -1851,6 +1880,14 @@ class TradingEngine:
 
             # --- FundingArbitrage pair scan (after all symbols have been seen) ---
             await self._maybe_scan_funding_arbitrage(event)
+
+            # --- TopTrader virtual swing book (research mark-to-market) ---
+            book = getattr(self, "_top_trader_virtual_book", None)
+            if book is not None:
+                try:
+                    book.on_price(symbol, event.price, event.timestamp_ms)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("TopTraderVirtualBook on_price %s: %s", symbol, exc)
 
             # --- Phase08 shadow strategies (observability only, no execution) ---
             self._evaluate_shadow_strategies(event, symbol)

@@ -1071,6 +1071,26 @@ def create_app(config: Dict[str, Any]) -> tuple:
             _shadow_panel_cache[cache_key] = {"ts": now, "payload": payload}
         return jsonify(payload)
 
+    @app.route("/api/top_traders")
+    def api_top_traders():
+        """Top-wallet aggregate bias + virtual swing book (research only)."""
+        from src.research.top_trader_panel import build_top_traders_panel_payload
+        from src.utils.config import load_config
+
+        try:
+            cfg = None
+            if _engine is not None and getattr(_engine, "_config", None) is not None:
+                cfg = _engine._config
+            else:
+                from pathlib import Path
+
+                cfg = load_config(Path("config/settings.yaml"))
+            payload = build_top_traders_panel_payload(config=cfg, engine=_engine)
+            return jsonify(payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("top_traders panel failed: %s", exc)
+            return jsonify({"error": str(exc), "snapshots": [], "open_positions": []}), 500
+
     @app.route("/api/strategy/<name>")
     def api_strategy_detail(name):
         """Drill-down endpoint for a single strategy (Task 5.3).

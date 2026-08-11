@@ -156,6 +156,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "feed_silence": {
             "l2_book_recording_max_sec": 120.0,
         },
+        "top_trader_tracker": {
+            "enabled": True,
+            "top_n": 10,
+            "poll_interval_sec": 60.0,
+            "request_delay_sec": 0.15,
+            "min_notional_usd": 10000.0,
+            "wallets_path": "data/research/top_traders.json",
+        },
     },
     "logging": {
         "level": "INFO",

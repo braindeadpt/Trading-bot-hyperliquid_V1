@@ -56,6 +56,12 @@ class TopTraderTracker:
         self._running = False
         self._last_poll_ms: int = 0
         self._last_error: Optional[str] = None
+        self._on_poll: Optional[Any] = None  # sync callback(snaps) after poll
+        self._persist_samples: bool = True
+
+    def set_on_poll(self, callback: Optional[Any]) -> None:
+        """Optional sync callback invoked with snapshot dict after each poll."""
+        self._on_poll = callback
 
     def load_wallets_from_path(self, path: str | Path) -> int:
         """Load wallet addresses from JSON; returns count loaded."""
@@ -201,6 +207,18 @@ class TopTraderTracker:
             self._snapshots = snaps
             self._last_poll_ms = now_ms
             self._last_error = f"errors={errors}" if errors else None
+        if snaps and self._persist_samples:
+            try:
+                from src.research.top_trader_store import TopTraderStore
+
+                TopTraderStore().persist_bias_samples(snaps)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("TopTrader bias persist skipped: %s", exc)
+        if self._on_poll is not None:
+            try:
+                self._on_poll(snaps)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("TopTrader on_poll callback failed: %s", exc)
         logger.info(
             "TopTraderTracker poll: wallets=%d symbols=%d errors=%d",
             len(self.wallets),

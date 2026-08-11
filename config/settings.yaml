@@ -523,8 +523,10 @@ strategy:
     min_wallets_with_position: 3
     min_aggregate_notional_usd: 50000
     size_pct: 0.01
-    stop_loss_pct: 0.015
-    take_profit_pct: 0.03
+    # Swing defaults (hybrid exit: bias flip OR max hold OR SL/TP)
+    max_hold_hours: 120             # 5d swing timeout
+    stop_loss_pct: 0.04
+    take_profit_pct: 0.10
     signal_throttle_ms: 300000
     max_snapshot_age_ms: 180000
     wallets_path: "data/research/top_traders.json"
@@ -790,7 +792,7 @@ strategy:
     last_strategy_size_multiplier: 0.5  # when protecting last exec, cut size instead of disable
     # Fase 10 frozen-window floor — governor ignores trades entered before
     # this; updated at window re-registration 2026-08-08 (deadlock fix).
-    ignore_trades_before_ms: 1786454475917  # Fase 10 window_start_ms (re-registered 2026-08-11 TopTraderFlow shadow)
+    ignore_trades_before_ms: 1786455999486  # Fase 10 window_start_ms (re-registered 2026-08-11 TopTrader swing panel)
 
 # ═══════════════════════════════════════════════════════════
 # Exchange reconciliation & native protection (Phase 03)
