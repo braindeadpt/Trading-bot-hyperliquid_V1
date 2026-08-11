@@ -59,14 +59,20 @@ class TopTraderTracker:
 
     def load_wallets_from_path(self, path: str | Path) -> int:
         """Load wallet addresses from JSON; returns count loaded."""
-        candidate = Path(path)
-        if not candidate.is_absolute():
-            candidate = ROOT / candidate
-        safe = validate_safe_path(str(candidate))
+        raw = Path(path)
+        try:
+            if raw.is_absolute():
+                rel = raw.resolve().relative_to(ROOT)
+            else:
+                rel = Path(str(path).replace("\\", "/"))
+        except ValueError:
+            logger.warning("TopTraderTracker wallets path outside project: %s", path)
+            return 0
+        safe = validate_safe_path(rel.as_posix())
         if safe is None:
             logger.warning("TopTraderTracker wallets path rejected: %s", path)
             return 0
-        p = Path(safe)
+        p = Path(safe) if Path(safe).is_absolute() else ROOT / safe
         if not p.exists():
             logger.warning("TopTraderTracker wallets file missing: %s", p)
             return 0
@@ -89,7 +95,11 @@ class TopTraderTracker:
                 addr = str(row.get("address") or row.get("user") or "").strip()
             else:
                 continue
-            if addr.startswith("0x") and len(addr) >= 10:
+            if (
+                addr.startswith("0x")
+                and len(addr) >= 42
+                and "replace" not in addr.lower()
+            ):
                 wallets.append(addr.lower())
         # de-dupe preserve order
         seen = set()
