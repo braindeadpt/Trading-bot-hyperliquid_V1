@@ -1082,7 +1082,8 @@ function renderTopTradersPanel(payload) {
     if (meta) {
         const thr = payload.bias_threshold != null ? Number(payload.bias_threshold).toFixed(2) : "—";
         const hold = payload.max_hold_hours != null ? payload.max_hold_hours + "h" : "—";
-        meta.textContent = `wallets=${payload.wallets_configured || 0} · thr=${thr} · hold≤${hold} · hybrid`;
+        const auto = payload.auto_from_leaderboard ? "autoLB" : "manual";
+        meta.textContent = `wallets=${payload.wallets_configured || 0} · ${auto} · thr=${thr} · hold≤${hold}`;
         meta.title = payload.disclaimer || "";
     }
     if (empty) {

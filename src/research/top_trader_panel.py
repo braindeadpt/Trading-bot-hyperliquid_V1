@@ -36,6 +36,8 @@ def build_top_traders_panel_payload(
     wallets_n = len(tracker.wallets) if tracker is not None else 0
     last_poll_ms = int(getattr(tracker, "_last_poll_ms", 0) or 0) if tracker else 0
     last_error = getattr(tracker, "_last_error", None) if tracker else None
+    lb_source = getattr(tracker, "_leaderboard_source", None) if tracker else None
+    auto_lb = bool(getattr(tracker, "_auto_from_leaderboard", False)) if tracker else False
     enabled = bool(cfg_section.get("enabled", True))
 
     snapshots: List[Dict[str, Any]] = []
@@ -80,7 +82,10 @@ def build_top_traders_panel_payload(
 
     empty_reason = None
     if wallets_n == 0:
-        empty_reason = "fill data/research/top_traders.json with HL wallet addresses"
+        if auto_lb:
+            empty_reason = "auto leaderboard pending first refresh (allTime durable top-N)"
+        else:
+            empty_reason = "fill data/research/top_traders.json with HL wallet addresses"
     elif not snapshots and not open_positions:
         empty_reason = "waiting for first clearinghouse poll"
 
@@ -88,6 +93,8 @@ def build_top_traders_panel_payload(
         "generated_ms": now_ms,
         "enabled": enabled,
         "wallets_configured": wallets_n,
+        "auto_from_leaderboard": auto_lb,
+        "leaderboard_source": lb_source,
         "last_poll_ms": last_poll_ms or None,
         "last_error": last_error,
         "bias_threshold": float(cfg_section.get("bias_threshold", 0.55)),
@@ -97,7 +104,7 @@ def build_top_traders_panel_payload(
         "exit_style": "hybrid_flip_or_hold",
         "disclaimer": (
             "Research / virtual swing only — aggregate wallet bias, not copy-trade. "
-            "No OMS execution."
+            "No OMS execution. Wallets = durable HL leaderboard top-N when auto enabled."
         ),
         "empty_reason": empty_reason,
         "snapshots": snapshots,

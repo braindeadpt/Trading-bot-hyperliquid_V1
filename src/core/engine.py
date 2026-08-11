@@ -1356,7 +1356,9 @@ class TradingEngine:
         tracker.set_on_poll(_on_poll)
         self._top_trader_tracker = tracker
 
-        if not tracker.wallets:
+        # Auto leaderboard: start REST + loop even with empty file — first
+        # refresh_from_leaderboard inside run_loop fills wallets.
+        if not tracker.wallets and not getattr(tracker, "_auto_from_leaderboard", False):
             logger.warning(
                 "TopTraderTracker enabled but no wallets configured — "
                 "fill data/research/top_traders.json (panel idle / shadow silent)"
@@ -1368,9 +1370,11 @@ class TradingEngine:
         self._top_trader_rest = rest
         self._top_trader_task = asyncio.create_task(tracker.run_loop())
         logger.info(
-            "TopTraderTracker started — wallets=%d interval=%ss (virtual swing book on)",
+            "TopTraderTracker started — wallets=%d interval=%ss auto_lb=%s "
+            "(virtual swing book on)",
             len(tracker.wallets),
             tracker.poll_interval_sec,
+            getattr(tracker, "_auto_from_leaderboard", False),
         )
 
     def _should_close_positions_on_shutdown(self) -> bool:

@@ -792,7 +792,7 @@ strategy:
     last_strategy_size_multiplier: 0.5  # when protecting last exec, cut size instead of disable
     # Fase 10 frozen-window floor — governor ignores trades entered before
     # this; updated at window re-registration 2026-08-08 (deadlock fix).
-    ignore_trades_before_ms: 1786455999486  # Fase 10 window_start_ms (re-registered 2026-08-11 TopTrader swing panel)
+    ignore_trades_before_ms: 1786456878457  # Fase 10 window_start_ms (re-registered 2026-08-11 TopTrader swing panel)
 
 # ═══════════════════════════════════════════════════════════
 # Exchange reconciliation & native protection (Phase 03)
@@ -912,6 +912,12 @@ market_data:
     min_notional_usd: 10000
     wallets_path: "data/research/top_traders.json"
     wallets: []
+    auto_from_leaderboard: true
+    leaderboard_window: allTime
+    leaderboard_refresh_hours: 24
+    min_account_value: 100000
+    min_volume: 5000000
+    require_month_positive: true
 # ═══════════════════════════════════════════════════════════
 # Backtest
 # ═══════════════════════════════════════════════════════════

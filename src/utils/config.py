@@ -163,6 +163,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "request_delay_sec": 0.15,
             "min_notional_usd": 10000.0,
             "wallets_path": "data/research/top_traders.json",
+            "auto_from_leaderboard": True,
+            "leaderboard_window": "allTime",
+            "leaderboard_refresh_hours": 24.0,
+            "min_account_value": 100000.0,
+            "min_volume": 5000000.0,
+            "require_month_positive": True,
         },
     },
     "logging": {

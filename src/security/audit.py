@@ -149,6 +149,7 @@ _SUSPICIOUS_COMMENT_RE: re.Pattern[str] = re.compile(
 _ALLOWED_DOMAINS: Tuple[str, ...] = (
     "api.hyperliquid.xyz",
     "api.hyperliquid-testnet.xyz",
+    "stats-data.hyperliquid.xyz",
     "api.binance.com",
     "fapi.binance.com",
     "testnet.binance.vision",

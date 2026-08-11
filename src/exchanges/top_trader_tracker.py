@@ -58,10 +58,101 @@ class TopTraderTracker:
         self._last_error: Optional[str] = None
         self._on_poll: Optional[Any] = None  # sync callback(snaps) after poll
         self._persist_samples: bool = True
+        self._wallets_path: str = "data/research/top_traders.json"
+        self._auto_from_leaderboard: bool = False
+        self._leaderboard_window: str = "allTime"
+        self._leaderboard_refresh_ms: int = 24 * 3_600_000
+        self._min_account_value: float = 100_000.0
+        self._min_volume: float = 5_000_000.0
+        self._require_month_positive: bool = True
+        self._last_leaderboard_refresh_ms: int = 0
+        self._leaderboard_source: Optional[str] = None
 
     def set_on_poll(self, callback: Optional[Any]) -> None:
         """Optional sync callback invoked with snapshot dict after each poll."""
         self._on_poll = callback
+
+    def configure_leaderboard(
+        self,
+        *,
+        enabled: bool,
+        wallets_path: str,
+        window: str = "allTime",
+        refresh_hours: float = 24.0,
+        min_account_value: float = 100_000.0,
+        min_volume: float = 5_000_000.0,
+        require_month_positive: bool = True,
+    ) -> None:
+        self._auto_from_leaderboard = bool(enabled)
+        self._wallets_path = str(wallets_path)
+        self._leaderboard_window = str(window or "allTime")
+        self._leaderboard_refresh_ms = int(max(1.0, float(refresh_hours)) * 3_600_000)
+        self._min_account_value = float(min_account_value)
+        self._min_volume = float(min_volume)
+        self._require_month_positive = bool(require_month_positive)
+
+    async def refresh_from_leaderboard(self, *, force: bool = False) -> int:
+        """Pull durable top-N from HL stats leaderboard; returns wallet count."""
+        if not self._auto_from_leaderboard and not force:
+            return len(self.wallets)
+        now = int(time.time() * 1000)
+        if (
+            not force
+            and self.wallets
+            and self._last_leaderboard_refresh_ms > 0
+            and (now - self._last_leaderboard_refresh_ms) < self._leaderboard_refresh_ms
+        ):
+            return len(self.wallets)
+        try:
+            from src.exchanges.hl_leaderboard import (
+                fetch_durable_top_wallets,
+                wallets_payload,
+            )
+
+            selected = await fetch_durable_top_wallets(
+                top_n=self.top_n,
+                window=self._leaderboard_window,
+                min_account_value=self._min_account_value,
+                min_volume=self._min_volume,
+                require_month_positive=self._require_month_positive,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = f"leaderboard_refresh_failed:{exc}"
+            logger.warning("TopTrader leaderboard refresh failed: %s", exc)
+            return len(self.wallets)
+        if not selected:
+            self._last_error = "leaderboard_empty"
+            logger.warning("TopTrader leaderboard returned 0 wallets after filters")
+            return len(self.wallets)
+        self.set_wallets([w.address for w in selected])
+        self._last_leaderboard_refresh_ms = now
+        self._leaderboard_source = "stats-data.hyperliquid.xyz"
+        payload = wallets_payload(selected)
+        try:
+            self._write_wallets_file(payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("TopTrader wallets file write skipped: %s", exc)
+        logger.info(
+            "TopTrader leaderboard refreshed — top_n=%d window=%s",
+            len(self.wallets),
+            self._leaderboard_window,
+        )
+        return len(self.wallets)
+
+    def _write_wallets_file(self, payload: Dict[str, Any]) -> None:
+        raw = Path(self._wallets_path)
+        if not raw.is_absolute():
+            candidate = ROOT / raw
+            rel = Path(str(self._wallets_path).replace("\\", "/"))
+        else:
+            candidate = raw
+            rel = candidate.resolve().relative_to(ROOT)
+        safe = validate_safe_path(rel.as_posix())
+        if safe is None:
+            raise ValueError(f"unsafe wallets path: {self._wallets_path}")
+        path = Path(safe) if Path(safe).is_absolute() else ROOT / safe
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     def load_wallets_from_path(self, path: str | Path) -> int:
         """Load wallet addresses from JSON; returns count loaded."""
@@ -230,8 +321,15 @@ class TopTraderTracker:
     async def run_loop(self) -> None:
         """Background poll until cancelled."""
         self._running = True
+        if self._auto_from_leaderboard:
+            try:
+                await self.refresh_from_leaderboard(force=not bool(self.wallets))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("TopTrader initial leaderboard refresh: %s", exc)
         while self._running:
             try:
+                if self._auto_from_leaderboard:
+                    await self.refresh_from_leaderboard(force=False)
                 await self.poll_once()
             except asyncio.CancelledError:
                 self._running = False
@@ -316,6 +414,11 @@ def build_tracker_from_config(config: Any) -> Optional[TopTraderTracker]:
         return None
 
     top_n = int(md.get("top_n", strat.get("top_n", 10)))
+    wallets_path = str(
+        md.get("wallets_path")
+        or strat.get("wallets_path")
+        or "data/research/top_traders.json"
+    )
     tracker = TopTraderTracker(
         top_n=top_n,
         min_notional_usd=float(md.get("min_notional_usd", 10_000.0)),
@@ -327,16 +430,20 @@ def build_tracker_from_config(config: Any) -> Optional[TopTraderTracker]:
     if hasattr(config, "get"):
         symbols = list(config.get("symbols", []) or config.get("assets", []) or [])
     tracker.symbols = [str(s).upper() for s in symbols]
+    tracker.configure_leaderboard(
+        enabled=bool(md.get("auto_from_leaderboard", True)),
+        wallets_path=wallets_path,
+        window=str(md.get("leaderboard_window", "allTime")),
+        refresh_hours=float(md.get("leaderboard_refresh_hours", 24.0)),
+        min_account_value=float(md.get("min_account_value", 100_000.0)),
+        min_volume=float(md.get("min_volume", 5_000_000.0)),
+        require_month_positive=bool(md.get("require_month_positive", True)),
+    )
 
     wallets = list(md.get("wallets") or strat.get("wallets") or [])
     if wallets:
         tracker.set_wallets([str(w) for w in wallets])
     else:
-        path = str(
-            md.get("wallets_path")
-            or strat.get("wallets_path")
-            or "data/research/top_traders.json"
-        )
-        tracker.load_wallets_from_path(path)
+        tracker.load_wallets_from_path(wallets_path)
     set_tracker(tracker)
     return tracker
