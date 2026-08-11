@@ -439,6 +439,9 @@ class TradingEngine:
         )
         self._latest_agg_funding: Dict[str, AggregatedFundingOI] = {}
         self._funding_poll_task: Optional[asyncio.Task] = None
+        self._top_trader_task: Optional[asyncio.Task] = None
+        self._top_trader_tracker: Optional[Any] = None
+        self._top_trader_rest: Optional[Any] = None
         self._market_data_health: Dict[str, SymbolFeedHealth] = {}
         _health_window = float(_md.get("health_history_window_sec", 3600))
         self._health_tracker = MarketDataHealthTracker(window_sec=_health_window)
@@ -829,6 +832,9 @@ class TradingEngine:
         # 4. Start background funding + OI polling
         self._funding_poll_task = asyncio.create_task(self._poll_funding_loop())
         logger.info("FundingAggregator polling started (interval=30s)")
+
+        # Top-trader aggregate tracker (shadow TopTraderFlow)
+        await self._start_top_trader_tracker()
 
         # 6. Start periodic summary loop
         self._summary_task = asyncio.create_task(self._periodic_summary_loop())
@@ -1318,6 +1324,33 @@ class TradingEngine:
         """Background task: poll CEX funding/OI and HL predictedFundings."""
         await self._background_tasks.poll_funding_loop()
 
+    async def _start_top_trader_tracker(self) -> None:
+        """Start optional TopTraderTracker poller (shadow feature feed)."""
+        from src.exchanges.hyperliquid_rest import HyperliquidRESTClient
+        from src.exchanges.top_trader_tracker import build_tracker_from_config
+
+        tracker = build_tracker_from_config(self._config)
+        if tracker is None:
+            logger.info("TopTraderTracker disabled by config")
+            return
+        if not tracker.wallets:
+            logger.warning(
+                "TopTraderTracker enabled but no wallets configured — "
+                "fill data/research/top_traders.json (shadow stays silent)"
+            )
+            return
+        rest = HyperliquidRESTClient(use_testnet=(self._mode == "testnet"))
+        await rest.open()
+        await tracker.bind_client(rest)
+        self._top_trader_tracker = tracker
+        self._top_trader_rest = rest
+        self._top_trader_task = asyncio.create_task(tracker.run_loop())
+        logger.info(
+            "TopTraderTracker started — wallets=%d interval=%ss",
+            len(tracker.wallets),
+            tracker.poll_interval_sec,
+        )
+
     def _should_close_positions_on_shutdown(self) -> bool:
         """True when graceful stop should flatten all open positions.
 
@@ -1344,7 +1377,7 @@ class TradingEngine:
         # Cancel background tasks
         for task_name in (
             "_funding_poll_task", "_ws_health_check_task", "_summary_task",
-            "_reconcile_task",
+            "_reconcile_task", "_top_trader_task",
         ):
             task = getattr(self, task_name, None)
             if task and not task.done():
@@ -1353,6 +1386,16 @@ class TradingEngine:
                     await task
                 except asyncio.CancelledError:
                     pass
+
+        if self._top_trader_tracker is not None:
+            self._top_trader_tracker.stop()
+            self._top_trader_tracker = None
+        if self._top_trader_rest is not None:
+            try:
+                await self._top_trader_rest.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("TopTrader REST close: %s", exc)
+            self._top_trader_rest = None
 
         # 1. Unsubscribe from DataBus
         for topic, callback in self._subscribed_callbacks.items():

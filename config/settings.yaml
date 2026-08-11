@@ -513,6 +513,23 @@ strategy:
     oir_min_alignment: 0.10         # long needs OIR≥+0.10; short needs ≤−0.10; None passes
 
   # ═══════════════════════════════════════════════════════════
+  # Strategy: TopTraderFlow — aggregate HL top-wallet bias (shadow)
+  # ═══════════════════════════════════════════════════════════
+  top_trader_flow:
+    enabled: true
+    mode: aggregate                 # aggregate | single (single still uses list head)
+    top_n: 10
+    bias_threshold: 0.55            # |net_bias| = |(L-S)/(L+S)|
+    min_wallets_with_position: 3
+    min_aggregate_notional_usd: 50000
+    size_pct: 0.01
+    stop_loss_pct: 0.015
+    take_profit_pct: 0.03
+    signal_throttle_ms: 300000
+    max_snapshot_age_ms: 180000
+    wallets_path: "data/research/top_traders.json"
+
+  # ═══════════════════════════════════════════════════════════
   # Strategy: OrderBook Imbalance Scalper
   # ═══════════════════════════════════════════════════════════
   orderbook_scalper:
@@ -735,6 +752,7 @@ strategy:
       - LeadLag
       - LiquidationCatcher
       - ChecklistMeta
+      - TopTraderFlow
     regime_router:
       enabled: true
       adx_range_threshold: 20.0    # ADX < 20 → low_vol (VWAP + ChecklistMeta)
@@ -882,7 +900,16 @@ market_data:
     liquidation_binance_max_sec: 21600      # 6h (expected degraded — fstream blocked)
     liquidation_coinalyze_check_max_sec: 43200  # 12h (low-freq verify)
     l2_book_recording_max_sec: 120          # research L2 level writer
-
+  # Aggregate top-wallet positioning (shadow TopTraderFlow). Fill wallets via
+  # data/research/top_traders.json — no copy-trade execution.
+  top_trader_tracker:
+    enabled: true
+    top_n: 10
+    poll_interval_sec: 60
+    request_delay_sec: 0.2
+    min_notional_usd: 10000
+    wallets_path: "data/research/top_traders.json"
+    wallets: []
 # ═══════════════════════════════════════════════════════════
 # Backtest
 # ═══════════════════════════════════════════════════════════

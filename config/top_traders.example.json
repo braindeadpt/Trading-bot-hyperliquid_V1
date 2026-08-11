@@ -1,0 +1,8 @@
+{
+  "updated_ms": 0,
+  "notes": "Copy to data/research/top_traders.json and fill real Hyperliquid wallet addresses. Used by TopTraderTracker / TopTraderFlow (shadow).",
+  "wallets": [
+    {"address": "0xREPLACE_WITH_WALLET_1", "rank": 1, "label": "example"},
+    {"address": "0xREPLACE_WITH_WALLET_2", "rank": 2, "label": "example"}
+  ]
+}

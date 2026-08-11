@@ -26,6 +26,7 @@ from src.strategies.va_rejection import VARejection
 from src.strategies.volatility_breakout import VolatilityBreakout
 from src.strategies.vwap_deviation import VWAPDeviation
 from src.strategies.checklist_meta import ChecklistMeta
+from src.strategies.top_trader_flow import TopTraderFlow
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,8 @@ _STRATEGY_REGISTRY = (
     ("strategy.va_rejection", VARejection),
     # v3.1.37: Checklist meta-signal (replaces ensemble with weighted bull/bear)
     ("strategy.checklist_meta", ChecklistMeta),
+    # Top-trader aggregate bias (shadow / research)
+    ("strategy.top_trader_flow", TopTraderFlow),
 )
 
 
