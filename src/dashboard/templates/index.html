@@ -417,18 +417,23 @@ tr:hover td { background: var(--panel-hover); }
                 <span class="dim" id="shadow-disclaimer">Idealized fills — not executable edge</span>
             </div>
             <div class="panel-body" style="padding:6px 8px; max-height:240px; overflow-y:auto;">
+                <div class="muted" style="font-size:10px;margin-bottom:6px;line-height:1.35;">
+                    <b>INCONCLUSIVE</b> = sample &lt;30 trades (not tested yet — not a FAIL).
+                    <b>WR / E[R] / Hyp.n</b> fill only after closed hypothetical trades.
+                    <b>tier_b</b> = needs L2/tape/funding feeds; candle-only gate stays weak.
+                </div>
                 <table style="width:100%; font-size:11px; border-collapse:collapse;">
                     <thead>
                         <tr style="color:var(--muted); text-align:left;">
-                            <th>Strategy</th>
-                            <th>Sig today</th>
-                            <th>7d</th>
-                            <th>Hyp. n</th>
-                            <th>WR</th>
-                            <th>E[R]</th>
-                            <th>Gate n/30</th>
-                            <th>Last gate</th>
-                            <th>Tier</th>
+                            <th title="Shadow = signals logged, no OMS orders">Strategy</th>
+                            <th title="Would-enter signals today">Sig today</th>
+                            <th title="Would-enter signals last 7 days">7d</th>
+                            <th title="Closed hypothetical trades evaluated">Hyp. n</th>
+                            <th title="Hypothetical win rate (needs Hyp.n &gt; 0)">WR</th>
+                            <th title="Hypothetical expectancy in R (needs Hyp.n &gt; 0)">E[R]</th>
+                            <th title="Progress toward n≥30 power floor">Gate n/30</th>
+                            <th title="Last baseline-signal gate from research artifacts">Last gate</th>
+                            <th title="Feed fidelity for replay validation">Tier</th>
                         </tr>
                     </thead>
                     <tbody id="shadow-panel-tbody">
@@ -446,57 +451,69 @@ tr:hover td { background: var(--panel-hover); }
 </div>
 <div class="grid">
     <div class="g-12">
-        <div class="panel" style="max-height:340px;">
+        <div class="panel" style="max-height:420px;">
             <div class="panel-header">
-                Bias + virtual swing
+                Research bias + simulated swing
                 <span class="dim" id="tt-meta">research only</span>
             </div>
-            <div class="panel-body" style="padding:6px 8px; max-height:300px; overflow-y:auto;">
+            <div class="panel-body" style="padding:6px 8px; max-height:380px; overflow-y:auto;">
+                <div id="tt-help" class="muted" style="font-size:10px;line-height:1.4;margin-bottom:8px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;">
+                    <b>What this is:</b> polls top Hyperliquid wallets, measures if they are more long or short
+                    (notional-weighted), then opens a <b>simulated</b> position when bias is strong.
+                    <b>No real orders</b> — OMS never sees these.
+                    <br><b>Bias:</b> −1 = all short · 0 = flat · +1 = all long. Opens when |bias| ≥ threshold.
+                    <br><b>Exit (hybrid):</b> bias flips the other way, <span id="tt-help-sl">SL</span>,
+                    <span id="tt-help-tp">TP</span>, or max hold <span id="tt-help-hold">—</span>.
+                </div>
                 <div id="tt-empty" class="muted" style="display:none;margin-bottom:6px;"></div>
-                <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">Aggregate bias by symbol</div>
+                <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">
+                    Wallet lean by symbol <span class="dim">(L/S = wallets long vs short)</span>
+                </div>
                 <table style="width:100%; font-size:11px; border-collapse:collapse; margin-bottom:10px;">
                     <thead>
                         <tr style="color:var(--muted); text-align:left;">
                             <th>Symbol</th>
-                            <th>Bias</th>
-                            <th>L/S</th>
-                            <th>Notional</th>
-                            <th>Age</th>
+                            <th title="−1 short … +1 long (notional-weighted)">Lean</th>
+                            <th>Wallets L/S</th>
+                            <th title="Combined long+short notional of tracked wallets">Size</th>
+                            <th title="Age of last poll for this symbol">Updated</th>
                         </tr>
                     </thead>
                     <tbody id="tt-bias-tbody">
                         <tr><td colspan="5" class="muted">Waiting...</td></tr>
                     </tbody>
                 </table>
-                <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">Open virtual positions</div>
+                <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">
+                    Open <b>simulated</b> swings <span class="dim" id="tt-open-count"></span>
+                </div>
                 <table style="width:100%; font-size:11px; border-collapse:collapse; margin-bottom:10px;">
                     <thead>
                         <tr style="color:var(--muted); text-align:left;">
                             <th>Symbol</th>
                             <th>Side</th>
                             <th>Entry</th>
-                            <th>uPnL</th>
+                            <th title="Unrealized PnL % vs entry (mark)">uPnL</th>
                             <th>Age</th>
-                            <th>Bias</th>
+                            <th title="Bias when opened / last bias">Bias</th>
                         </tr>
                     </thead>
                     <tbody id="tt-open-tbody">
-                        <tr><td colspan="6" class="muted">None</td></tr>
+                        <tr><td colspan="6" class="muted">None yet — waiting for |bias| ≥ threshold</td></tr>
                     </tbody>
                 </table>
-                <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">Recent virtual closes</div>
+                <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">Recent simulated closes</div>
                 <table style="width:100%; font-size:11px; border-collapse:collapse;">
                     <thead>
                         <tr style="color:var(--muted); text-align:left;">
                             <th>Symbol</th>
                             <th>Side</th>
                             <th>PnL</th>
-                            <th>Reason</th>
-                            <th>Hold</th>
+                            <th title="bias_flip / stop_loss / take_profit / max_hold">Exit reason</th>
+                            <th>Held</th>
                         </tr>
                     </thead>
                     <tbody id="tt-closed-tbody">
-                        <tr><td colspan="5" class="muted">None</td></tr>
+                        <tr><td colspan="5" class="muted">None yet</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1063,11 +1080,31 @@ function renderShadowPanel(payload) {
 
 function _ttFmtAge(ms) {
     if (ms == null) return "—";
-    const m = Math.floor(Number(ms) / 60000);
+    const sec = Math.max(0, Math.floor(Number(ms) / 1000));
+    if (sec < 60) return sec + "s";
+    const m = Math.floor(sec / 60);
     if (m < 60) return m + "m";
     const h = Math.floor(m / 60);
     if (h < 48) return h + "h";
     return (h / 24).toFixed(1) + "d";
+}
+
+function _ttLeanLabel(bias) {
+    const b = Number(bias) || 0;
+    if (b >= 0.55) return "LONG lean";
+    if (b <= -0.55) return "SHORT lean";
+    if (b > 0.05) return "mild long";
+    if (b < -0.05) return "mild short";
+    return "flat";
+}
+
+function _ttExitLabel(reason) {
+    const r = String(reason || "");
+    if (r === "bias_flip" || r === "EXIT_BIAS_FLIP") return "bias flipped";
+    if (r === "stop_loss" || r === "sl") return "stop-loss";
+    if (r === "take_profit" || r === "tp") return "take-profit";
+    if (r === "max_hold" || r === "timeout") return "max hold";
+    return r || "—";
 }
 
 function renderTopTradersPanel(payload) {
@@ -1076,16 +1113,25 @@ function renderTopTradersPanel(payload) {
     const biasBody = document.getElementById("tt-bias-tbody");
     const openBody = document.getElementById("tt-open-tbody");
     const closedBody = document.getElementById("tt-closed-tbody");
+    const openCount = document.getElementById("tt-open-count");
     if (!biasBody || !openBody || !closedBody) return;
     if (!payload || payload.error) {
         biasBody.innerHTML = '<tr><td colspan="5" class="muted">Unavailable</td></tr>';
         return;
     }
+    const thr = payload.bias_threshold != null ? Number(payload.bias_threshold) : 0.55;
+    const slPct = payload.stop_loss_pct != null ? (100 * Number(payload.stop_loss_pct)).toFixed(0) : "4";
+    const tpPct = payload.take_profit_pct != null ? (100 * Number(payload.take_profit_pct)).toFixed(0) : "10";
+    const hold = payload.max_hold_hours != null ? payload.max_hold_hours + "h" : "120h";
+    const helpSl = document.getElementById("tt-help-sl");
+    const helpTp = document.getElementById("tt-help-tp");
+    const helpHold = document.getElementById("tt-help-hold");
+    if (helpSl) helpSl.textContent = "SL " + slPct + "%";
+    if (helpTp) helpTp.textContent = "TP " + tpPct + "%";
+    if (helpHold) helpHold.textContent = hold;
     if (meta) {
-        const thr = payload.bias_threshold != null ? Number(payload.bias_threshold).toFixed(2) : "—";
-        const hold = payload.max_hold_hours != null ? payload.max_hold_hours + "h" : "—";
-        const auto = payload.auto_from_leaderboard ? "autoLB" : "manual";
-        meta.textContent = `wallets=${payload.wallets_configured || 0} · ${auto} · thr=${thr} · hold≤${hold}`;
+        const auto = payload.auto_from_leaderboard ? "auto wallets" : "manual wallets";
+        meta.textContent = `${payload.wallets_configured || 0} wallets · ${auto} · open if |bias|≥${thr.toFixed(2)} · hold≤${hold}`;
         meta.title = payload.disclaimer || "";
     }
     if (empty) {
@@ -1098,7 +1144,7 @@ function renderTopTradersPanel(payload) {
     }
     const snaps = payload.snapshots || [];
     if (!snaps.length) {
-        biasBody.innerHTML = '<tr><td colspan="5" class="muted">No bias samples yet</td></tr>';
+        biasBody.innerHTML = '<tr><td colspan="5" class="muted">No bias samples yet — waiting for wallet poll</td></tr>';
     } else {
         biasBody.innerHTML = snaps.map(s => {
             const b = Number(s.net_bias) || 0;
@@ -1106,12 +1152,13 @@ function renderTopTradersPanel(payload) {
             const barW = Math.min(100, Math.abs(b) * 100);
             const notion = ((Number(s.long_notional_usd)||0) + (Number(s.short_notional_usd)||0));
             const notionS = notion >= 1e6 ? (notion/1e6).toFixed(1)+"M" : notion >= 1e3 ? (notion/1e3).toFixed(0)+"k" : notion.toFixed(0);
+            const strong = Math.abs(b) >= thr;
             return `<tr style="border-top:1px solid var(--border);">
-                <td class="highlight">${s.symbol}</td>
-                <td style="color:${col};" title="long_frac=${(Number(s.long_frac)||0).toFixed(2)}">
+                <td class="highlight">${s.symbol}${strong ? ' <span class="pill" style="font-size:9px;">signal</span>' : ''}</td>
+                <td style="color:${col};" title="net_bias=${b.toFixed(3)}">
                     <div style="background:var(--border);height:6px;width:64px;display:inline-block;vertical-align:middle;border-radius:3px;">
                         <div style="height:6px;width:${barW}%;background:${col};border-radius:3px;"></div>
-                    </div> ${b.toFixed(2)}
+                    </div> ${b.toFixed(2)} <span class="dim">${_ttLeanLabel(b)}</span>
                 </td>
                 <td>${s.n_long||0}/${s.n_short||0}</td>
                 <td class="num">${notionS}</td>
@@ -1120,37 +1167,38 @@ function renderTopTradersPanel(payload) {
         }).join("");
     }
     const opens = payload.open_positions || [];
+    if (openCount) openCount.textContent = opens.length ? `(${opens.length})` : "(0)";
     if (!opens.length) {
-        openBody.innerHTML = '<tr><td colspan="6" class="muted">None</td></tr>';
+        openBody.innerHTML = '<tr><td colspan="6" class="muted">None yet — waiting for |bias| ≥ threshold</td></tr>';
     } else {
         openBody.innerHTML = opens.map(p => {
             const pnl = Number(p.unrealized_pnl_pct) || 0;
             const col = pnl >= 0 ? "var(--up)" : "var(--down)";
             return `<tr style="border-top:1px solid var(--border);">
-                <td class="highlight">${p.symbol}</td>
+                <td class="highlight">${p.symbol} <span class="dim" style="font-size:9px;">SIM</span></td>
                 <td class="${p.side==='long'?'up':'down'}">${(p.side||'').toUpperCase()}</td>
                 <td class="num">${Number(p.entry_price).toFixed(2)}</td>
                 <td style="color:${col};">${(pnl*100).toFixed(2)}%</td>
                 <td class="muted">${_ttFmtAge(p.age_ms)}</td>
-                <td class="num">${Number(p.last_bias||0).toFixed(2)}</td>
+                <td class="num" title="entry bias → last bias">${Number(p.entry_bias||0).toFixed(2)} → ${Number(p.last_bias||0).toFixed(2)}</td>
             </tr>`;
         }).join("");
     }
     const closed = payload.closed_trades || [];
     if (!closed.length) {
-        closedBody.innerHTML = '<tr><td colspan="5" class="muted">None</td></tr>';
+        closedBody.innerHTML = '<tr><td colspan="5" class="muted">None yet</td></tr>';
     } else {
         closedBody.innerHTML = closed.slice(0, 15).map(t => {
             const pnl = Number(t.pnl_pct) || 0;
             const col = pnl >= 0 ? "var(--up)" : "var(--down)";
-            const hold = (t.entry_ts_ms != null && t.exit_ts_ms != null)
+            const holdAge = (t.entry_ts_ms != null && t.exit_ts_ms != null)
                 ? _ttFmtAge(Number(t.exit_ts_ms) - Number(t.entry_ts_ms)) : "—";
             return `<tr style="border-top:1px solid var(--border);">
                 <td class="highlight">${t.symbol}</td>
                 <td class="${t.side==='long'?'up':'down'}">${(t.side||'').toUpperCase()}</td>
                 <td style="color:${col};">${(pnl*100).toFixed(2)}%</td>
-                <td class="muted">${t.exit_reason||"—"}</td>
-                <td class="muted">${hold}</td>
+                <td class="muted">${_ttExitLabel(t.exit_reason)}</td>
+                <td class="muted">${holdAge}</td>
             </tr>`;
         }).join("");
     }
