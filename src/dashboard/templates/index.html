@@ -665,6 +665,8 @@ document.getElementById("auth-submit-btn").addEventListener("click", async () =>
 });
 
 let socket = null;
+// Replaced inside bindSocketHandlers so REST poll can see nested render* fns.
+let pollAll = function () {};
 function connectSocket() {
     if (socket && socket.connected) return;
     const token = getDashboardToken();
@@ -1314,24 +1316,10 @@ socket.on("strategies", (data) => renderStrategies(data));
 socket.on("positions", (data) => renderPositions(data));
 socket.on("trades", (data) => renderTrades(data));
 socket.on("logs", (data) => renderLogs(data));
-}
 
-// Latency ping
-let _pingStart = null;
-setInterval(() => {
-    if (socket && socket.connected) {
-        _pingStart = Date.now();
-        socket.emit("ping", () => {
-            lastSocketLatency = Date.now() - _pingStart;
-            document.getElementById("latency-badge").textContent = lastSocketLatency + "ms";
-            document.getElementById("latency-badge").className = "badge " + (lastSocketLatency > 500 ? "badge-yellow" : "badge-blue");
-            updateKPIs(_lastPortfolio, _lastEngine);
-        });
-    }
-}, 5000);
-
-// REST fallback
-function pollAll() {
+// REST + timers must live inside this closure: render*/updateKPIs are scoped
+// here. Defining pollAll outside caused silent ReferenceErrors (empty panels).
+pollAll = function pollAll() {
     authFetch("/api/status").then(r => r.json()).then(d => {
         if (d.mode) document.getElementById("mode-badge").textContent = d.mode.toUpperCase();
         const statusEl = document.getElementById("status-badge");
@@ -1344,30 +1332,45 @@ function pollAll() {
             updateKPIs(d, _lastEngine);
         }
     }).catch(() => {});
-    if (!socket.connected) {
+    if (!socket || !socket.connected) {
         authFetch("/api/trades").then(r => r.json()).then(d => renderTrades(d)).catch(() => {});
         authFetch("/api/positions").then(r => r.json()).then(d => renderPositions(d)).catch(() => {});
     }
     authFetch("/api/shadow_panel?evaluate=0").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
     authFetch("/api/top_traders").then(r => r.json()).then(d => renderTopTradersPanel(d)).catch(() => {});
-}
-setInterval(pollAll, 5000);
-// Full hypothetical evaluation is heavy (can block Flask for minutes on large
-// shadow DBs). Refresh rarely; light panel already updates via pollAll.
-setInterval(() => {
-    authFetch("/api/shadow_panel?evaluate=1").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
-}, 600000);
+};
 
-// Uptime ticker
-setInterval(() => {
-    if (statusUpdate.uptime_sec != null && statusReceivedAt > 0) {
-        const s = statusUpdate.uptime_sec + Math.floor((Date.now() - statusReceivedAt) / 1000);
-        const h = Math.floor(s / 3600).toString().padStart(2, "0");
-        const m = Math.floor((s % 3600) / 60).toString().padStart(2, "0");
-        const sec = (s % 60).toString().padStart(2, "0");
-        document.getElementById("uptime-badge").textContent = `${h}:${m}:${sec}`;
-    }
-}, 1000);
+if (!window.__hlDashTimers) {
+    window.__hlDashTimers = true;
+    let _pingStart = null;
+    setInterval(() => {
+        if (socket && socket.connected) {
+            _pingStart = Date.now();
+            socket.emit("ping", () => {
+                lastSocketLatency = Date.now() - _pingStart;
+                document.getElementById("latency-badge").textContent = lastSocketLatency + "ms";
+                document.getElementById("latency-badge").className = "badge " + (lastSocketLatency > 500 ? "badge-yellow" : "badge-blue");
+                updateKPIs(_lastPortfolio, _lastEngine);
+            });
+        }
+    }, 5000);
+    setInterval(pollAll, 5000);
+    // Full hypothetical evaluation is heavy (can block Flask for minutes on large
+    // shadow DBs). Refresh rarely; light panel already updates via pollAll.
+    setInterval(() => {
+        authFetch("/api/shadow_panel?evaluate=1").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
+    }, 600000);
+    setInterval(() => {
+        if (statusUpdate.uptime_sec != null && statusReceivedAt > 0) {
+            const s = statusUpdate.uptime_sec + Math.floor((Date.now() - statusReceivedAt) / 1000);
+            const h = Math.floor(s / 3600).toString().padStart(2, "0");
+            const m = Math.floor((s % 3600) / 60).toString().padStart(2, "0");
+            const sec = (s % 60).toString().padStart(2, "0");
+            document.getElementById("uptime-badge").textContent = `${h}:${m}:${sec}`;
+        }
+    }, 1000);
+}
+} // end bindSocketHandlers
 
 // ── Strategy Modal ──
 async function showStrategyDetail(name) {
