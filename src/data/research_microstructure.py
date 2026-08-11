@@ -118,6 +118,7 @@ class ResearchMicrostructureRecorder:
         self._retry_buffer: List[TradeTapeRecord] = []
         self._tape_lock = threading.Lock()
         self._ws_client: Optional[HyperliquidWSClient] = None
+        self._last_logged_bus_drops: Dict[str, int] = {}
 
         self._last_trade_ts: Dict[str, int] = {}
         self._last_trade_tid: Dict[str, int] = {}
@@ -480,10 +481,24 @@ class ResearchMicrostructureRecorder:
                 logger.debug("Health snapshot %s: %s", sym, exc)
 
         if dropped:
-            logger.warning(
-                "DataBus dropped events (session): %s",
-                {k: v for k, v in dropped.items() if v > 0},
-            )
+            # Only warn when counts rise — cumulative session totals were
+            # re-logged every health tick and looked like a live failure.
+            deltas = {
+                k: v - self._last_logged_bus_drops.get(k, 0)
+                for k, v in dropped.items()
+                if v > self._last_logged_bus_drops.get(k, 0)
+            }
+            if deltas:
+                self._last_logged_bus_drops.update(
+                    {k: v for k, v in dropped.items() if v > 0}
+                )
+                logger.warning(
+                    "DataBus dropped events (+delta this interval): %s "
+                    "(session total %s) — rate-limit backpressure; research "
+                    "feeds only, not execution.",
+                    deltas,
+                    {k: v for k, v in dropped.items() if v > 0},
+                )
 
 
 def start_microstructure_recorder_from_config(
