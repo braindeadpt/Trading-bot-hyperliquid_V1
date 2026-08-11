@@ -1192,10 +1192,11 @@ function pollAll() {
     authFetch("/api/shadow_panel?evaluate=0").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
 }
 setInterval(pollAll, 5000);
-// Full hypothetical evaluation is heavier — refresh every 2 minutes
+// Full hypothetical evaluation is heavy (can block Flask for minutes on large
+// shadow DBs). Refresh rarely; light panel already updates via pollAll.
 setInterval(() => {
     authFetch("/api/shadow_panel?evaluate=1").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
-}, 120000);
+}, 600000);
 
 // Uptime ticker
 setInterval(() => {

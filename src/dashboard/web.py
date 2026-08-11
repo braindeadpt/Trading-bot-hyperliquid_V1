@@ -34,6 +34,13 @@ _socketio: Optional[SocketIO] = None
 _emit_fn: Optional[Callable] = None
 _emitter: Optional["DashboardEmitter"] = None
 
+# Shadow panel can be expensive (DB scans + optional outcome eval). Cache
+# responses so the sync Flask thread does not stall the whole dashboard.
+_shadow_panel_cache: Dict[str, Any] = {}
+_shadow_panel_lock = threading.Lock()
+_SHADOW_CACHE_TTL_LIGHT_S = 15.0
+_SHADOW_CACHE_TTL_EVAL_S = 300.0
+
 
 def set_engine(engine: Any) -> None:
     global _engine
@@ -1004,16 +1011,25 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
         Idealized fills disclaimer included. Does not affect trading.
         Query: evaluate=0 to skip expensive outcome simulation (signals only).
+        Results are TTL-cached to keep the dashboard responsive.
         """
         from src.research.shadow_panel import build_shadow_panel_payload
         from src.utils.config import get_strategy_section, load_config
 
-        evaluate = str(request.args.get("evaluate", "1")).strip() not in (
+        evaluate = str(request.args.get("evaluate", "0")).strip() not in (
             "0",
             "false",
             "False",
             "no",
         )
+        cache_key = "eval" if evaluate else "light"
+        ttl = _SHADOW_CACHE_TTL_EVAL_S if evaluate else _SHADOW_CACHE_TTL_LIGHT_S
+        now = time.time()
+        with _shadow_panel_lock:
+            cached = _shadow_panel_cache.get(cache_key)
+            if cached and (now - float(cached.get("ts", 0))) < ttl:
+                return jsonify(cached["payload"])
+
         cfg = None
         shadow_names: list = []
         try:
@@ -1034,11 +1050,25 @@ def create_app(config: Dict[str, Any]) -> tuple:
         except Exception as exc:  # noqa: BLE001
             return jsonify({"error": str(exc), "rows": []}), 500
 
-        payload = build_shadow_panel_payload(
-            shadow_names=shadow_names,
-            config=cfg,
-            evaluate=evaluate,
-        )
+        try:
+            payload = build_shadow_panel_payload(
+                shadow_names=shadow_names,
+                config=cfg,
+                evaluate=evaluate,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("shadow_panel build failed evaluate=%s: %s", evaluate, exc)
+            with _shadow_panel_lock:
+                stale = _shadow_panel_cache.get(cache_key)
+            if stale:
+                out = dict(stale["payload"])
+                out["stale"] = True
+                out["error"] = str(exc)
+                return jsonify(out)
+            return jsonify({"error": str(exc), "rows": []}), 500
+
+        with _shadow_panel_lock:
+            _shadow_panel_cache[cache_key] = {"ts": now, "payload": payload}
         return jsonify(payload)
 
     @app.route("/api/strategy/<name>")

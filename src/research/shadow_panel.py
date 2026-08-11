@@ -93,13 +93,11 @@ def _count_signals(
     *,
     since_ms: Optional[int],
 ) -> int:
-    rows = recorder.load_decisions(
+    return recorder.count_decisions(
         strategy=strategy,
         since_ms=since_ms,
         would_enter_only=True,
-        limit=None,
     )
-    return len(rows)
 
 
 def build_shadow_panel_payload(
@@ -128,12 +126,26 @@ def build_shadow_panel_payload(
         except Exception as exc:  # noqa: BLE001
             boards = {"_error": str(exc)}
 
+    counts = recorder.count_decisions_by_strategy(
+        strategies=shadow_names,
+        day_ms=day_ms,
+        week_ms=week_ms,
+        quarter_ms=quarter_ms,
+        would_enter_only=True,
+    )
+
     rows: List[Dict[str, Any]] = []
     for name in shadow_names:
-        n_today = _count_signals(recorder, name, since_ms=day_ms)
-        n_7d = _count_signals(recorder, name, since_ms=week_ms)
-        n_total = _count_signals(recorder, name, since_ms=None)
-        n_quarter = _count_signals(recorder, name, since_ms=quarter_ms)
+        bucket = counts.get(name) or {
+            "today": 0,
+            "7d": 0,
+            "90d": 0,
+            "total": 0,
+        }
+        n_today = int(bucket["today"])
+        n_7d = int(bucket["7d"])
+        n_total = int(bucket["total"])
+        n_quarter = int(bucket["90d"])
 
         board = None
         if isinstance(boards, dict):

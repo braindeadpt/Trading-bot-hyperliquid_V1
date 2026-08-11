@@ -242,3 +242,94 @@ class ShadowRecorder:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(sql, params).fetchall()
         return [self._row_to_decision(r) for r in rows]
+
+    def count_decisions(
+        self,
+        *,
+        strategy: Optional[str] = None,
+        variant: Optional[str] = None,
+        since_ms: Optional[int] = None,
+        until_ms: Optional[int] = None,
+        would_enter_only: bool = True,
+    ) -> int:
+        """COUNT(*) path for dashboard panels (avoids loading full rows)."""
+        conditions: List[str] = []
+        params: List[Any] = []
+        if would_enter_only:
+            conditions.append("would_enter = 1")
+        if strategy:
+            conditions.append("strategy = ?")
+            params.append(strategy)
+        if variant:
+            conditions.append("variant = ?")
+            params.append(variant)
+        if since_ms is not None:
+            conditions.append("timestamp_ms >= ?")
+            params.append(int(since_ms))
+        if until_ms is not None:
+            conditions.append("timestamp_ms <= ?")
+            params.append(int(until_ms))
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        sql = f"SELECT COUNT(*) AS n FROM shadow_decisions{where}"
+        with self._lock:
+            conn = self._db._conn()
+            row = conn.execute(sql, params).fetchone()
+        if row is None:
+            return 0
+        try:
+            return int(row[0])
+        except (TypeError, ValueError, IndexError):
+            return 0
+
+    def count_decisions_by_strategy(
+        self,
+        *,
+        strategies: Sequence[str],
+        day_ms: int,
+        week_ms: int,
+        quarter_ms: int,
+        would_enter_only: bool = True,
+    ) -> Dict[str, Dict[str, int]]:
+        """One grouped scan for dashboard buckets (today / 7d / 90d / total)."""
+        names = [str(s) for s in strategies if s]
+        empty = {
+            n: {"today": 0, "7d": 0, "90d": 0, "total": 0} for n in names
+        }
+        if not names:
+            return empty
+        placeholders = ",".join("?" for _ in names)
+        conditions = [f"strategy IN ({placeholders})"]
+        params: List[Any] = list(names)
+        if would_enter_only:
+            conditions.append("would_enter = 1")
+        where = " WHERE " + " AND ".join(conditions)
+        sql = (
+            f"SELECT strategy, "
+            f"SUM(CASE WHEN timestamp_ms >= ? THEN 1 ELSE 0 END) AS n_today, "
+            f"SUM(CASE WHEN timestamp_ms >= ? THEN 1 ELSE 0 END) AS n_7d, "
+            f"SUM(CASE WHEN timestamp_ms >= ? THEN 1 ELSE 0 END) AS n_90d, "
+            f"COUNT(*) AS n_total "
+            f"FROM shadow_decisions{where} GROUP BY strategy"
+        )
+        params_q = [int(day_ms), int(week_ms), int(quarter_ms)] + params
+        with self._lock:
+            conn = self._db._conn()
+            # Helpful composite index for dashboard aggregates (idempotent).
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_shadow_strategy_enter_ts "
+                "ON shadow_decisions(strategy, would_enter, timestamp_ms)"
+            )
+            rows = conn.execute(sql, params_q).fetchall()
+        out = dict(empty)
+        for row in rows:
+            try:
+                name = str(row[0])
+                out[name] = {
+                    "today": int(row[1] or 0),
+                    "7d": int(row[2] or 0),
+                    "90d": int(row[3] or 0),
+                    "total": int(row[4] or 0),
+                }
+            except (TypeError, ValueError, IndexError):
+                continue
+        return out
