@@ -51,11 +51,14 @@ class TopTraderVirtualBook:
     take_profit_pct: float = 0.10
     size_pct: float = 0.01
     signal_throttle_ms: int = 300_000
+    # Require N consecutive opposing strong polls before bias_flip (filters one-off API gaps).
+    flip_confirm_polls: int = 2
     store: Optional[TopTraderStore] = None
 
     def __post_init__(self) -> None:
         self._open: Dict[str, VirtualPosition] = {}
         self._last_entry_ms: Dict[str, int] = {}
+        self._flip_streak: Dict[str, int] = {}
         self._store = self.store or TopTraderStore()
         self._closed_cache: List[Dict[str, Any]] = []
 
@@ -108,7 +111,17 @@ class TopTraderVirtualBook:
                 pos.last_bias = bias
                 if px > 0:
                     pos.last_mark = px
-                event = self._try_exit(pos, bias=bias, price=pos.last_mark or px, now_ms=now_ms)
+                event = self._try_exit(
+                    pos,
+                    bias=bias,
+                    price=pos.last_mark or px,
+                    now_ms=now_ms,
+                    n_wallets=int(snap.n_wallets),
+                    total_notional=float(
+                        snap.long_notional_usd + snap.short_notional_usd
+                    ),
+                    allow_flip=True,
+                )
                 if event is not None:
                     closed.append(event)
                 continue
@@ -155,6 +168,7 @@ class TopTraderVirtualBook:
             pos.row_id = row_id
             self._open[symbol] = pos
             self._last_entry_ms[symbol] = now_ms
+            self._flip_streak[symbol] = 0
             logger.info(
                 "TopTraderVirtualBook OPEN %s %s @ %.4f bias=%.2f",
                 side,
@@ -179,7 +193,7 @@ class TopTraderVirtualBook:
         return closed
 
     def on_price(self, symbol: str, price: float, timestamp_ms: int) -> Optional[Dict[str, Any]]:
-        """Mark open position and check SL/TP / max-hold."""
+        """Mark open position and check SL/TP / max-hold (never bias-flip on ticks)."""
         symbol = symbol.upper()
         pos = self._open.get(symbol)
         if pos is None:
@@ -193,7 +207,7 @@ class TopTraderVirtualBook:
             bias=pos.last_bias,
             price=px,
             now_ms=int(timestamp_ms),
-            allow_flip=True,
+            allow_flip=False,
         )
 
     def _try_exit(
@@ -204,6 +218,8 @@ class TopTraderVirtualBook:
         price: float,
         now_ms: int,
         allow_flip: bool = True,
+        n_wallets: Optional[int] = None,
+        total_notional: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         if price <= 0:
             # Still allow timeout without mark
@@ -227,12 +243,24 @@ class TopTraderVirtualBook:
             if price <= tp:
                 return self._close(pos, price, now_ms, EXIT_TP, bias)
 
-        # Bias flip
+        # Bias flip — ignore thin/partial polls; require consecutive confirms.
         if allow_flip:
-            if pos.side == "long" and bias <= -self.bias_threshold:
-                return self._close(pos, price, now_ms, EXIT_BIAS_FLIP, bias)
-            if pos.side == "short" and bias >= self.bias_threshold:
-                return self._close(pos, price, now_ms, EXIT_BIAS_FLIP, bias)
+            coverage_ok = True
+            if n_wallets is not None and n_wallets < self.min_wallets:
+                coverage_ok = False
+            if total_notional is not None and total_notional < self.min_notional_usd:
+                coverage_ok = False
+            opposing = (
+                (pos.side == "long" and bias <= -self.bias_threshold)
+                or (pos.side == "short" and bias >= self.bias_threshold)
+            )
+            if coverage_ok and opposing:
+                streak = self._flip_streak.get(pos.symbol, 0) + 1
+                self._flip_streak[pos.symbol] = streak
+                if streak >= max(1, int(self.flip_confirm_polls)):
+                    return self._close(pos, price, now_ms, EXIT_BIAS_FLIP, bias)
+            else:
+                self._flip_streak[pos.symbol] = 0
 
         # Max hold
         if now_ms - pos.entry_ts_ms >= self.max_hold_ms:
@@ -272,6 +300,7 @@ class TopTraderVirtualBook:
             "row_id": pos.row_id,
         }
         self._open.pop(pos.symbol, None)
+        self._flip_streak.pop(pos.symbol, None)
         self._closed_cache.insert(0, event)
         self._closed_cache = self._closed_cache[:100]
         logger.info(
@@ -307,6 +336,7 @@ def build_virtual_book_from_config(config: Any) -> TopTraderVirtualBook:
         take_profit_pct=float(cfg.get("take_profit_pct", 0.10)),
         size_pct=float(cfg.get("size_pct", 0.01)),
         signal_throttle_ms=int(cfg.get("signal_throttle_ms", 300_000)),
+        flip_confirm_polls=int(cfg.get("flip_confirm_polls", 2)),
     )
 
 

@@ -148,6 +148,7 @@ def test_poll_once_aggregates(monkeypatch: pytest.MonkeyPatch) -> None:
         top_n=10,
         min_notional_usd=1_000,
         request_delay_sec=0.0,
+        min_publish_wallets=2,
     )
     tr._persist_samples = False
 

@@ -75,6 +75,7 @@ def test_virtual_book_open_flip_and_sl(tmp_path: Path) -> None:
         stop_loss_pct=0.04,
         take_profit_pct=0.10,
         signal_throttle_ms=0,
+        flip_confirm_polls=1,
         store=store,
     )
     # Open long on strong bias
@@ -103,6 +104,63 @@ def test_virtual_book_open_flip_and_sl(tmp_path: Path) -> None:
     ev = book.on_price("BTC", 47_000.0, 2_000_500)  # -6% < -4% SL
     assert ev is not None
     assert ev["exit_reason"] == "stop_loss"
+
+
+def test_virtual_book_ignores_thin_false_flip(tmp_path: Path) -> None:
+    """Partial poll (1 wallet, bias=-1) must NOT close a solid long."""
+    store = TopTraderStore(ResearchDatabase(tmp_path / "thin.db"))
+    book = TopTraderVirtualBook(
+        bias_threshold=0.55,
+        min_wallets=3,
+        min_notional_usd=10_000,
+        max_hold_ms=10_000_000,
+        stop_loss_pct=0.50,
+        take_profit_pct=0.50,
+        signal_throttle_ms=0,
+        flip_confirm_polls=2,
+        store=store,
+    )
+    book.on_snapshots(
+        {"ETH": _snap("ETH", bias=0.8, n_long=1, n_short=2, long_n=20_000_000, short_n=2_000_000)},
+        prices={"ETH": 1900.0},
+    )
+    assert len(book.open_positions()) == 1
+
+    # One-wallet garbage snap (the production bug)
+    closed = book.on_snapshots(
+        {
+            "ETH": _snap(
+                "ETH",
+                bias=-1.0,
+                n_long=0,
+                n_short=1,
+                long_n=0,
+                short_n=2_400_000,
+                ts=2_000_000,
+            )
+        },
+        prices={"ETH": 1860.0},
+    )
+    assert closed == []
+    assert len(book.open_positions()) == 1
+
+    # Real flip needs coverage + 2 confirms
+    opposing = _snap(
+        "ETH",
+        bias=-0.8,
+        n_long=1,
+        n_short=4,
+        long_n=50_000,
+        short_n=400_000,
+        ts=3_000_000,
+    )
+    assert book.on_snapshots({"ETH": opposing}, prices={"ETH": 1860.0}) == []
+    closed = book.on_snapshots(
+        {"ETH": _snap("ETH", bias=-0.85, n_long=1, n_short=4, long_n=50_000, short_n=450_000, ts=3_000_100)},
+        prices={"ETH": 1855.0},
+    )
+    assert len(closed) == 1
+    assert closed[0]["exit_reason"] == "bias_flip"
 
 
 def test_virtual_book_timeout(tmp_path: Path) -> None:

@@ -48,6 +48,7 @@ class TopTraderTracker:
     poll_interval_sec: float = 60.0
     request_delay_sec: float = 0.15
     enabled: bool = True
+    min_publish_wallets: int = 3
 
     def __post_init__(self) -> None:
         self._snapshots: Dict[str, TopTraderSymbolSnapshot] = {}
@@ -336,15 +337,60 @@ class TopTraderTracker:
                 updated_ms=now_ms,
             )
 
+        # Drop thin / collapsed aggregates (partial wallet failures look like fake ±1 bias).
+        min_publish = max(1, int(getattr(self, "min_publish_wallets", 3)))
         async with self._lock:
-            self._snapshots = snaps
+            prev = dict(self._snapshots)
+            published: Dict[str, TopTraderSymbolSnapshot] = {}
+            for coin, snap in snaps.items():
+                old = prev.get(coin)
+                if snap.n_wallets < min_publish:
+                    logger.info(
+                        "TopTraderTracker skip thin %s snap n_wallets=%d (need ≥%d)",
+                        coin,
+                        snap.n_wallets,
+                        min_publish,
+                    )
+                    if old is not None:
+                        published[coin] = old
+                    continue
+                if (
+                    errors > 0
+                    and old is not None
+                    and old.n_wallets > 0
+                    and snap.n_wallets < max(min_publish, (old.n_wallets + 1) // 2)
+                ):
+                    logger.info(
+                        "TopTraderTracker keep prior %s snap (coverage %d→%d with errors=%d)",
+                        coin,
+                        old.n_wallets,
+                        snap.n_wallets,
+                        errors,
+                    )
+                    published[coin] = old
+                    continue
+                published[coin] = snap
+            # Preserve prior symbols missing entirely when this poll had API errors
+            if errors > 0:
+                for coin, old in prev.items():
+                    if coin not in published:
+                        published[coin] = old
+            self._snapshots = published
             self._last_poll_ms = now_ms
             self._last_error = f"errors={errors}" if errors else None
+            snaps = published
         if snaps and self._persist_samples:
             try:
                 from src.research.top_trader_store import TopTraderStore
 
-                TopTraderStore().persist_bias_samples(snaps)
+                # Only persist fresh (non-stale) samples from this poll timestamp
+                fresh = {
+                    k: v
+                    for k, v in snaps.items()
+                    if int(v.updated_ms) == now_ms and v.n_wallets >= min_publish
+                }
+                if fresh:
+                    TopTraderStore().persist_bias_samples(fresh)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("TopTrader bias persist skipped: %s", exc)
         if self._on_poll is not None:
@@ -467,6 +513,12 @@ def build_tracker_from_config(config: Any) -> Optional[TopTraderTracker]:
         poll_interval_sec=float(md.get("poll_interval_sec", 60.0)),
         request_delay_sec=float(md.get("request_delay_sec", 0.15)),
         enabled=True,
+        min_publish_wallets=int(
+            md.get(
+                "min_publish_wallets",
+                strat.get("min_wallets_with_position", 3),
+            )
+        ),
     )
     symbols = []
     if hasattr(config, "get"):

@@ -419,8 +419,10 @@ tr:hover td { background: var(--panel-hover); }
             <div class="panel-body" style="padding:6px 8px; max-height:240px; overflow-y:auto;">
                 <div class="muted" style="font-size:10px;margin-bottom:6px;line-height:1.35;">
                     <b>INCONCLUSIVE</b> = sample &lt;30 trades (not tested yet — not a FAIL).
+                    <b>FAIL</b> = enough trades AND lost the baseline gate (direction ≤ random and/or loses money).
                     <b>WR / E[R] / Hyp.n</b> fill only after closed hypothetical trades.
                     <b>tier_b</b> = needs L2/tape/funding feeds; candle-only gate stays weak.
+                    Hover <b>Last gate</b> for the exact failed conditions.
                 </div>
                 <table style="width:100%; font-size:11px; border-collapse:collapse;">
                     <thead>
@@ -462,8 +464,10 @@ tr:hover td { background: var(--panel-hover); }
                     (notional-weighted), then opens a <b>simulated</b> position when bias is strong.
                     <b>No real orders</b> — OMS never sees these.
                     <br><b>Bias:</b> −1 = all short · 0 = flat · +1 = all long. Opens when |bias| ≥ threshold.
-                    <br><b>Exit (hybrid):</b> bias flips the other way, <span id="tt-help-sl">SL</span>,
+                    <br><b>Exit (hybrid):</b> bias flips the other way (needs ≥3 wallets + 2 polls),
+                    <span id="tt-help-sl">SL</span>,
                     <span id="tt-help-tp">TP</span>, or max hold <span id="tt-help-hold">—</span>.
+                    Thin/partial wallet polls are ignored (avoids fake flips).
                 </div>
                 <div id="tt-empty" class="muted" style="display:none;margin-bottom:6px;"></div>
                 <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">
