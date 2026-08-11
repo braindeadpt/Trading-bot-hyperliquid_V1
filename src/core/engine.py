@@ -1387,12 +1387,15 @@ class TradingEngine:
                 except asyncio.CancelledError:
                     pass
 
-        if self._top_trader_tracker is not None:
-            self._top_trader_tracker.stop()
+        # getattr: unit stubs use TradingEngine.__new__ without full __init__
+        tracker = getattr(self, "_top_trader_tracker", None)
+        if tracker is not None:
+            tracker.stop()
             self._top_trader_tracker = None
-        if self._top_trader_rest is not None:
+        rest = getattr(self, "_top_trader_rest", None)
+        if rest is not None:
             try:
-                await self._top_trader_rest.close()
+                await rest.close()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("TopTrader REST close: %s", exc)
             self._top_trader_rest = None
