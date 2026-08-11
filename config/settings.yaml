@@ -790,7 +790,7 @@ strategy:
     last_strategy_size_multiplier: 0.5  # when protecting last exec, cut size instead of disable
     # Fase 10 frozen-window floor — governor ignores trades entered before
     # this; updated at window re-registration 2026-08-08 (deadlock fix).
-    ignore_trades_before_ms: 1786372085694  # Fase 10 window_start_ms (re-registered 2026-08-10 tier-0 fees)
+    ignore_trades_before_ms: 1786454475917  # Fase 10 window_start_ms (re-registered 2026-08-11 TopTraderFlow shadow)
 
 # ═══════════════════════════════════════════════════════════
 # Exchange reconciliation & native protection (Phase 03)
