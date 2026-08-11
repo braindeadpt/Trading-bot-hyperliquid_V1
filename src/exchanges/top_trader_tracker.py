@@ -65,6 +65,9 @@ class TopTraderTracker:
         self._min_account_value: float = 100_000.0
         self._min_volume: float = 5_000_000.0
         self._require_month_positive: bool = True
+        self._require_consistent_windows: bool = True
+        self._min_month_volume: float = 1_000_000.0
+        self._min_all_time_pnl: float = 1_000_000.0
         self._last_leaderboard_refresh_ms: int = 0
         self._leaderboard_source: Optional[str] = None
 
@@ -82,6 +85,9 @@ class TopTraderTracker:
         min_account_value: float = 100_000.0,
         min_volume: float = 5_000_000.0,
         require_month_positive: bool = True,
+        require_consistent_windows: bool = True,
+        min_month_volume: float = 1_000_000.0,
+        min_all_time_pnl: float = 1_000_000.0,
     ) -> None:
         self._auto_from_leaderboard = bool(enabled)
         self._wallets_path = str(wallets_path)
@@ -90,6 +96,9 @@ class TopTraderTracker:
         self._min_account_value = float(min_account_value)
         self._min_volume = float(min_volume)
         self._require_month_positive = bool(require_month_positive)
+        self._require_consistent_windows = bool(require_consistent_windows)
+        self._min_month_volume = float(min_month_volume)
+        self._min_all_time_pnl = float(min_all_time_pnl)
 
     async def refresh_from_leaderboard(self, *, force: bool = False) -> int:
         """Pull durable top-N from HL stats leaderboard; returns wallet count."""
@@ -115,6 +124,9 @@ class TopTraderTracker:
                 min_account_value=self._min_account_value,
                 min_volume=self._min_volume,
                 require_month_positive=self._require_month_positive,
+                require_consistent_windows=self._require_consistent_windows,
+                min_month_volume=self._min_month_volume,
+                min_all_time_pnl=self._min_all_time_pnl,
             )
         except Exception as exc:  # noqa: BLE001
             self._last_error = f"leaderboard_refresh_failed:{exc}"
@@ -438,6 +450,9 @@ def build_tracker_from_config(config: Any) -> Optional[TopTraderTracker]:
         min_account_value=float(md.get("min_account_value", 100_000.0)),
         min_volume=float(md.get("min_volume", 5_000_000.0)),
         require_month_positive=bool(md.get("require_month_positive", True)),
+        require_consistent_windows=bool(md.get("require_consistent_windows", True)),
+        min_month_volume=float(md.get("min_month_volume", 1_000_000.0)),
+        min_all_time_pnl=float(md.get("min_all_time_pnl", 1_000_000.0)),
     )
 
     wallets = list(md.get("wallets") or strat.get("wallets") or [])

@@ -68,11 +68,15 @@ async def _from_leaderboard(args: argparse.Namespace) -> Dict[str, Any]:
         min_volume=float(args.min_volume),
         min_pnl=float(args.min_pnl),
         require_month_positive=not bool(args.no_month_filter),
+        require_consistent_windows=not bool(args.no_consistency_filter),
+        min_month_volume=float(args.min_month_volume),
+        min_all_time_pnl=float(args.min_all_time_pnl),
     )
     return wallets_payload(
         wallets,
         notes=(
-            f"Auto-selected top {args.top_n} by {args.window} PnL "
+            f"Consistent top {args.top_n}: week+month+allTime>0, "
+            f"ranked by consistency score "
             f"(min_av={args.min_account_value}, min_vlm={args.min_volume})"
         ),
     )
@@ -89,11 +93,18 @@ def main() -> int:
     p.add_argument("--min-account-value", type=float, default=100_000.0)
     p.add_argument("--min-volume", type=float, default=5_000_000.0)
     p.add_argument("--min-pnl", type=float, default=0.0)
+    p.add_argument("--min-all-time-pnl", type=float, default=1_000_000.0)
     p.add_argument(
         "--no-month-filter",
         action="store_true",
-        help="Do not require positive month PnL when window=allTime",
+        help="Do not require positive month PnL when consistency filter is off",
     )
+    p.add_argument(
+        "--no-consistency-filter",
+        action="store_true",
+        help="Disable week+month+allTime positivity (falls back toward allTime rank)",
+    )
+    p.add_argument("--min-month-volume", type=float, default=1_000_000.0)
     p.add_argument("--addresses", default="", help="Comma-separated 0x wallets")
     p.add_argument("--from-json", default="", help="JSON file with wallets/addresses")
     p.add_argument("--top-n", type=int, default=10)

@@ -169,6 +169,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "min_account_value": 100000.0,
             "min_volume": 5000000.0,
             "require_month_positive": True,
+            "require_consistent_windows": True,
+            "min_month_volume": 1000000.0,
+            "min_all_time_pnl": 1000000.0,
         },
     },
     "logging": {

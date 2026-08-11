@@ -1,19 +1,22 @@
-"""Hyperliquid public leaderboard (stats-data) — durable top-wallet selection.
+"""Hyperliquid public leaderboard (stats-data) — consistent durable top wallets.
 
 Source: ``https://stats-data.hyperliquid.xyz/Mainnet/leaderboard``
 (same feed the official app leaderboard uses). No API key.
 
-Default ranking prefers **allTime** PnL with account-value / volume floors so
-day-lottery wallets and thin-volume outliers are filtered out.
+Goal: **consistent winners**, not one-off allTime lottery whales.
+Default filters require positive PnL on week + month + allTime, then rank by a
+multi-horizon consistency score (month-weighted). We cannot see historical
+“always ranked top-10” without a time-series archive; multi-window positivity
+is the best public proxy for staying profitable across regimes.
 """
 
 from __future__ import annotations
 
-import json
 import logging
+import math
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import aiohttp
 
@@ -23,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 LEADERBOARD_URL = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
 VALID_WINDOWS = frozenset({"day", "week", "month", "allTime"})
+DEFAULT_POSITIVE_WINDOWS: Tuple[str, ...] = ("week", "month", "allTime")
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,10 @@ class LeaderboardWallet:
     roi: float
     volume: float
     display_name: str = ""
+    consistency_score: float = 0.0
+    week_pnl: float = 0.0
+    month_pnl: float = 0.0
+    all_time_pnl: float = 0.0
 
 
 def _window_perf(row: Dict[str, Any], window: str) -> Dict[str, float]:
@@ -54,6 +62,34 @@ def _window_perf(row: Dict[str, Any], window: str) -> Dict[str, float]:
     return {"pnl": 0.0, "roi": 0.0, "vlm": 0.0}
 
 
+def _consistency_score(
+    *,
+    week_pnl: float,
+    month_pnl: float,
+    all_pnl: float,
+    month_roi: float,
+    all_vlm: float,
+) -> float:
+    """Higher = more sustained edge across horizons.
+
+    Month dominates (regime persistence); week confirms recent edge; allTime
+    is a soft tie-break via log so early lucky whales don't dominate.
+    ROI is clamped — HL can report extreme ratios that would otherwise swamp PnL.
+    """
+    week_term = math.log1p(max(0.0, week_pnl))
+    month_term = math.log1p(max(0.0, month_pnl))
+    all_term = math.log1p(max(0.0, all_pnl))
+    roi_term = min(max(0.0, float(month_roi)), 1.0)  # cap at 100% month ROI
+    vol_term = math.log1p(max(0.0, all_vlm)) / 30.0
+    return (
+        (0.40 * month_term)
+        + (0.30 * week_term)
+        + (0.25 * all_term)
+        + (0.03 * roi_term)
+        + (0.02 * vol_term)
+    )
+
+
 def select_durable_top(
     rows: Sequence[Dict[str, Any]],
     *,
@@ -62,11 +98,22 @@ def select_durable_top(
     min_account_value: float = 100_000.0,
     min_volume: float = 5_000_000.0,
     min_pnl: float = 0.0,
+    min_all_time_pnl: float = 1_000_000.0,
     require_month_positive: bool = True,
+    require_consistent_windows: bool = True,
+    positive_windows: Optional[Sequence[str]] = None,
+    min_month_volume: float = 1_000_000.0,
 ) -> List[LeaderboardWallet]:
-    """Filter + rank leaderboard rows for long-horizon reliability."""
+    """Filter + rank for multi-horizon consistent winners.
+
+    ``require_consistent_windows`` (default True): PnL > 0 on week, month and
+    allTime. Ranking uses ``_consistency_score`` (month-weighted), not raw
+    allTime PnL alone. ``min_all_time_pnl`` keeps the set in top-trader scale.
+    """
     win = window if window in VALID_WINDOWS else "allTime"
-    candidates: List[tuple] = []
+    need = tuple(positive_windows) if positive_windows else DEFAULT_POSITIVE_WINDOWS
+
+    candidates: List[Tuple[Any, ...]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -76,31 +123,74 @@ def select_durable_top(
         av = safe_float(row.get("accountValue"))
         if av < min_account_value:
             continue
-        perf = _window_perf(row, win)
-        if perf["pnl"] < min_pnl:
-            continue
-        if perf["vlm"] < min_volume:
-            continue
-        if require_month_positive and win == "allTime":
-            month = _window_perf(row, "month")
-            if month["pnl"] <= 0:
-                continue
-        name = str(row.get("displayName") or "")
-        candidates.append((perf["pnl"], addr, av, perf, name))
 
-    candidates.sort(key=lambda t: t[0], reverse=True)
+        week = _window_perf(row, "week")
+        month = _window_perf(row, "month")
+        all_t = _window_perf(row, "allTime")
+        primary = _window_perf(row, win)
+
+        if primary["pnl"] < min_pnl:
+            continue
+        if all_t["pnl"] < min_all_time_pnl:
+            continue
+        if all_t["vlm"] < min_volume:
+            continue
+        if month["vlm"] < min_month_volume:
+            continue
+
+        perfs = {
+            "week": week,
+            "month": month,
+            "allTime": all_t,
+            "day": _window_perf(row, "day"),
+        }
+        if require_consistent_windows:
+            if any(perfs.get(wname, {}).get("pnl", 0.0) <= 0 for wname in need):
+                continue
+        elif require_month_positive and month["pnl"] <= 0:
+            continue
+
+        score = _consistency_score(
+            week_pnl=week["pnl"],
+            month_pnl=month["pnl"],
+            all_pnl=all_t["pnl"],
+            month_roi=month["roi"],
+            all_vlm=all_t["vlm"],
+        )
+        name = str(row.get("displayName") or "")
+        candidates.append(
+            (
+                score,
+                month["pnl"],
+                all_t["pnl"],
+                addr,
+                av,
+                all_t,
+                name,
+                week["pnl"],
+                month["pnl"],
+                all_t["pnl"],
+            )
+        )
+
+    candidates.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
     out: List[LeaderboardWallet] = []
-    for i, (pnl, addr, av, perf, name) in enumerate(candidates[: max(1, int(top_n))]):
+    for i, row_t in enumerate(candidates[: max(1, int(top_n))]):
+        score, _m, _a, addr, av, all_t, name, week_pnl, month_pnl, all_pnl = row_t
         out.append(
             LeaderboardWallet(
                 address=addr,
                 rank=i + 1,
                 account_value=av,
-                window=win,
-                pnl=float(pnl),
-                roi=float(perf["roi"]),
-                volume=float(perf["vlm"]),
+                window="consistent" if require_consistent_windows else win,
+                pnl=float(all_pnl),
+                roi=float(all_t.get("roi", 0.0)),
+                volume=float(all_t.get("vlm", 0.0)),
                 display_name=name,
+                consistency_score=float(score),
+                week_pnl=float(week_pnl),
+                month_pnl=float(month_pnl),
+                all_time_pnl=float(all_pnl),
             )
         )
     return out
@@ -115,8 +205,12 @@ def wallets_payload(
     return {
         "updated_ms": int(time.time() * 1000),
         "source": "stats-data.hyperliquid.xyz/Mainnet/leaderboard",
+        "selection": "consistent_multi_window",
         "notes": notes
-        or "Auto-selected durable top wallets (allTime PnL + filters). Shadow only.",
+        or (
+            "Consistent winners: week+month+allTime PnL > 0, ranked by "
+            "month-weighted consistency score (not allTime lottery)."
+        ),
         "wallets": [
             {
                 "address": w.address,
@@ -125,6 +219,10 @@ def wallets_payload(
                 "account_value": w.account_value,
                 "window": w.window,
                 "pnl": w.pnl,
+                "all_time_pnl": w.all_time_pnl,
+                "month_pnl": w.month_pnl,
+                "week_pnl": w.week_pnl,
+                "consistency_score": w.consistency_score,
                 "roi": w.roi,
                 "volume": w.volume,
             }
@@ -165,7 +263,10 @@ async def fetch_durable_top_wallets(
     min_account_value: float = 100_000.0,
     min_volume: float = 5_000_000.0,
     min_pnl: float = 0.0,
+    min_all_time_pnl: float = 1_000_000.0,
     require_month_positive: bool = True,
+    require_consistent_windows: bool = True,
+    min_month_volume: float = 1_000_000.0,
     session: Optional[aiohttp.ClientSession] = None,
 ) -> List[LeaderboardWallet]:
     rows = await fetch_leaderboard_rows(session=session)
@@ -176,12 +277,14 @@ async def fetch_durable_top_wallets(
         min_account_value=min_account_value,
         min_volume=min_volume,
         min_pnl=min_pnl,
+        min_all_time_pnl=min_all_time_pnl,
         require_month_positive=require_month_positive,
+        require_consistent_windows=require_consistent_windows,
+        min_month_volume=min_month_volume,
     )
     logger.info(
-        "HL leaderboard durable top: n=%d window=%s (from %d rows)",
+        "HL leaderboard consistent top: n=%d (from %d rows, multi-window filter)",
         len(selected),
-        window,
         len(rows),
     )
     return selected
