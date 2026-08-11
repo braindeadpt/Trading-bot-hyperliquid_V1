@@ -1036,7 +1036,7 @@ function renderStrategies(data) {
             <div style="margin-top:2px; font-size:9px; color:var(--dim);">
                 Last: <span class="${s.last_signal_side === 'long' ? 'up' : s.last_signal_side === 'short' ? 'down' : ''}">${s.last_signal_side ? s.last_signal_side.toUpperCase() : "never"}</span>
                 ${s.last_signal_confidence != null ? `(${(s.last_signal_confidence * 100).toFixed(0)}%)` : ""}
-                <span class="pill ${statusClass}">${s.last_signal_status || "PENDING"}</span>
+                <span class="pill ${statusClass}">${s.last_signal_status || "idle"}</span>
             </div>
         </div>`;
     }).join('');
@@ -1452,6 +1452,9 @@ async function showStrategyDetail(name) {
         let html = '<div class="stat-row"><span class="stat-label">Enabled</span><span class="stat-value" style="color:' + (data.enabled ? 'var(--up)' : 'var(--muted)') + '">' + (data.enabled ? 'YES' : 'NO') + '</span></div>';
         html += '<div class="stat-row"><span class="stat-label">Description</span><span class="stat-value" style="font-weight:400;max-width:300px;text-align:right;">' + (data.description || "—") + '</span></div>';
         html += '<div class="stat-row"><span class="stat-label">Params</span><span class="stat-value" style="font-weight:400;max-width:300px;text-align:right;font-family:monospace;font-size:10px;">' + JSON.stringify(data.params || {}) + '</span></div>';
+        if (data.note) {
+            html += '<div class="muted" style="font-size:10px;margin-top:6px;line-height:1.35;">' + data.note + '</div>';
+        }
         html += '<div style="margin-top:10px; font-weight:600; font-size:11px; color:var(--accent);">Performance</div>';
         html += '<div class="stat-row"><span class="stat-label">Signals (tot/app/rej)</span><span class="stat-value">' + (s.total_signals || 0) + ' / ' + (s.approved_signals || 0) + ' / ' + (s.rejected_signals || 0) + '</span></div>';
         html += '<div class="stat-row"><span class="stat-label">Trades (win / loss)</span><span class="stat-value">' + (s.winning_trades || 0) + ' / ' + (s.losing_trades || 0) + '</span></div>';

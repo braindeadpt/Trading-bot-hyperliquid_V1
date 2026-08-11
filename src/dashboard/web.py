@@ -1097,6 +1097,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
         Returns signals, win rate, PnL, and parameters.
         Searches both top-level and sub-strategies (e.g. within ensemble).
+        Prefers live DB trades/signals over empty in-memory ``_strategy_stats``.
         """
         if _engine is None:
             return jsonify({"error": "Engine not running"}), 503
@@ -1120,25 +1121,129 @@ def create_app(config: Dict[str, Any]) -> tuple:
         if strategy is None:
             return jsonify({"error": f"Strategy {name} not found"}), 404
 
-        # Get stats from engine
-        stats = getattr(_engine, "_strategy_stats", {}).get(name, {})
+        # Params: prefer YAML section / strategy._cfg over empty ``.params``
+        params: Dict[str, Any] = {}
+        raw_params = getattr(strategy, "params", None)
+        if isinstance(raw_params, dict) and raw_params:
+            params = dict(raw_params)
+        else:
+            cfg_obj = getattr(_engine, "_config", None)
+            section_key = None
+            # Map class names → settings.yaml keys
+            name_to_section = {
+                "VWAPDeviation": "vwap_deviation",
+                "ChecklistMeta": "checklist_meta",
+                "VolatilityBreakout": "volatility_breakout",
+                "OrderBookScalper": "orderbook_scalper",
+                "CVDOrderFlow": "cvd_orderflow",
+                "FundingArbitrage": "funding_arbitrage",
+                "FundingMomentum": "funding_momentum",
+                "SpotPerpCarry": "spot_perp_carry",
+                "LeadLag": "lead_lag",
+                "LiquidationCatcher": "liquidation_catcher",
+                "TopTraderFlow": "top_trader_flow",
+            }
+            section_key = name_to_section.get(name)
+            if cfg_obj is not None and section_key and hasattr(cfg_obj, "get"):
+                section = cfg_obj.get(f"strategy.{section_key}", {}) or {}
+                if isinstance(section, dict):
+                    # Keep a short readable subset for the modal
+                    keep = (
+                        "enabled", "z_threshold", "volume_surge", "min_adx", "max_adx",
+                        "min_confidence", "use_session_filter", "session_start_utc_h",
+                        "session_end_utc_h", "max_hold_hours", "bias_threshold",
+                        "stop_loss_pct", "take_profit_pct",
+                    )
+                    params = {k: section[k] for k in keep if k in section}
+            if not params:
+                # Fall back to a few public UPPER attrs on the strategy instance
+                for attr in (
+                    "Z_THRESHOLD", "VOLUME_SURGE", "MIN_ADX", "MAX_ADX",
+                    "MIN_CONFIDENCE", "USE_SESSION_FILTER", "BIAS_THRESHOLD",
+                ):
+                    if hasattr(strategy, attr):
+                        params[attr.lower()] = getattr(strategy, attr)
+
+        mem_stats = getattr(_engine, "_strategy_stats", {}).get(name, {})
+        db = getattr(_engine, "_db", None)
+        total_signals = int(mem_stats.get("total_signals", 0) or 0)
+        approved = int(mem_stats.get("approved_signals", 0) or 0)
+        rejected = int(mem_stats.get("rejected_signals", 0) or 0)
+        winning = int(mem_stats.get("winning_trades", 0) or 0)
+        losing = int(mem_stats.get("losing_trades", 0) or 0)
+        total_pnl = float(mem_stats.get("total_pnl", 0.0) or 0.0)
+        avg_pnl = float(mem_stats.get("avg_pnl", 0.0) or 0.0)
+        signal_history = list(mem_stats.get("signal_history", []) or [])[:20]
+
+        if db is not None:
+            try:
+                trades = db.get_trades(limit=500, strategy=name) or []
+                closed = [t for t in trades if str(t.get("status") or "") == "closed"]
+                if closed:
+                    pnls = []
+                    for t in closed:
+                        p = t.get("pnl_pct")
+                        if p is None and t.get("pnl_usd") is not None and t.get("entry_price"):
+                            # best-effort; prefer stored pct
+                            p = t.get("pnl_pct")
+                        if p is not None:
+                            pnls.append(float(p))
+                    winning = sum(1 for p in pnls if p > 0)
+                    losing = sum(1 for p in pnls if p <= 0)
+                    if pnls:
+                        avg_pnl = sum(pnls) / len(pnls)
+                        # pnl_pct in DB is often already fraction (0.01 = 1%)
+                        total_pnl = sum(pnls)
+                if hasattr(db, "get_signals"):
+                    sigs = db.get_signals(limit=500, strategy=name) or []
+                    if sigs:
+                        total_signals = max(total_signals, len(sigs))
+                        signal_history = [
+                            {
+                                "time": (
+                                    datetime.fromtimestamp(
+                                        int(s.get("timestamp") or 0) / 1000.0,
+                                        tz=timezone.utc,
+                                    ).strftime("%Y-%m-%d %H:%M")
+                                    if s.get("timestamp")
+                                    else "--"
+                                ),
+                                "symbol": s.get("symbol"),
+                                "side": s.get("side"),
+                                "confidence": s.get("confidence"),
+                                "status": "logged",
+                                "reason": s.get("reason"),
+                            }
+                            for s in sigs[:20]
+                        ]
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("strategy detail DB enrich failed: %s", exc)
+
+        n_closed = winning + losing
+        win_rate = (winning / n_closed) if n_closed else float(mem_stats.get("win_rate", 0.0) or 0.0)
 
         return jsonify({
             "name": name,
             "enabled": getattr(strategy, "enabled", True),
             "description": (getattr(strategy, "__doc__", "") or "No description").split("\n")[0][:200],
-            "params": getattr(strategy, "params", {}),
+            "params": params,
             "stats": {
-                "total_signals": stats.get("total_signals", 0),
-                "approved_signals": stats.get("approved_signals", 0),
-                "rejected_signals": stats.get("rejected_signals", 0),
-                "winning_trades": stats.get("winning_trades", 0),
-                "losing_trades": stats.get("losing_trades", 0),
-                "win_rate": stats.get("win_rate", 0.0),
-                "total_pnl_pct": stats.get("total_pnl", 0.0) * 100,
-                "avg_pnl_pct": stats.get("avg_pnl", 0.0) * 100,
+                "total_signals": total_signals,
+                "approved_signals": approved,
+                "rejected_signals": rejected,
+                "winning_trades": winning,
+                "losing_trades": losing,
+                "win_rate": win_rate,
+                "total_pnl_pct": total_pnl * 100.0,
+                "avg_pnl_pct": avg_pnl * 100.0,
             },
-            "signal_history": stats.get("signal_history", [])[:20],
+            "signal_history": signal_history,
+            "note": (
+                "Evaluating live — 0 today often means volume_surge/session filters skipped entries "
+                "(need vol ≥1.5×). Not broken."
+                if name == "VWAPDeviation"
+                else None
+            ),
         })
 
     @app.route("/api/portfolio")
