@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 
 import pytest
 
@@ -28,6 +29,30 @@ def test_feed_silence_monitor_alerts_after_threshold() -> None:
     assert alerts, alerts
     assert mon.any_degraded
     assert mon.snapshot()["binance_perp"]["degraded"] is True
+
+
+def test_feed_silence_stale_event_ts_false_alarm_pattern() -> None:
+    """OKX REST bootstrap uses event timestamps up to 6h old.
+
+    Beating silence with those stamps trips FEED SILENT at restart.
+    Engine must beat with receive time instead (see engine liquidation cb).
+    """
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 6 * 3600.0},
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    now = int(time.time() * 1000)
+    stale = now - 6 * 3600 * 1000
+    mon.beat("liquidation_okx", stale)
+    alerts = mon.check(now_ms=now)
+    assert alerts and "quiet for" in alerts[0]
+
+    mon.beat("liquidation_okx", now)
+    assert mon.check(now_ms=now) == []
+    assert mon.snapshot()["liquidation_okx"]["degraded"] is False
 
 
 def test_feed_silence_never_seen_waits_for_process_uptime(

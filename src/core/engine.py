@@ -1690,7 +1690,10 @@ class TradingEngine:
                     silence_key = f"liquidation_{source}"
                     # Coinalyze must never publish here; map known venues only
                     if source in ("hl", "okx", "bybit", "binance"):
-                        self._feed_silence.beat(silence_key, ts)
+                        # Beat with *receive* time, not event.timestamp_ms.
+                        # OKX REST bootstrap republishes up to 6h-old prints;
+                        # using event time falsely trips FEED SILENT at startup.
+                        self._feed_silence.beat(silence_key, utc_timestamp_ms())
 
         return _on_liquidation
 
