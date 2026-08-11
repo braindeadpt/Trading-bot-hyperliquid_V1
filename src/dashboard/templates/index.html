@@ -1063,6 +1063,19 @@ function renderShadowPanel(payload) {
         const wr = r.hypothetical_win_rate != null ? (100 * r.hypothetical_win_rate).toFixed(0) + "%" : "—";
         const er = r.hypothetical_expectancy_r != null ? Number(r.hypothetical_expectancy_r).toFixed(2) : "—";
         const fail = (g.failed_conditions || []).join("; ") || g.reason || "";
+        let gateHint = "";
+        if (verdict === "FAIL") {
+            const conds = (g.failed_conditions || []).join(" ");
+            if (conds.includes("not_profitable") && conds.includes("B1_")) {
+                gateHint = " <span class='dim' style='font-size:9px;'>(no edge + loses $)</span>";
+            } else if (conds.includes("not_profitable")) {
+                gateHint = " <span class='dim' style='font-size:9px;'>(loses money)</span>";
+            } else if (conds.includes("B1_")) {
+                gateHint = " <span class='dim' style='font-size:9px;'>(≤ random)</span>";
+            }
+        } else if (verdict === "INCONCLUSIVE") {
+            gateHint = " <span class='dim' style='font-size:9px;'>(n&lt;30)</span>";
+        }
         const freq = r.frequency_insufficient_90d ? " <span style='color:var(--yellow)' title='n&lt;30 in 90d'>freq</span>" : "";
         return `<tr style="border-top:1px solid var(--border);">
             <td title="${r.fidelity_note || ""}">${r.strategy}${freq}</td>
@@ -1072,7 +1085,7 @@ function renderShadowPanel(payload) {
             <td>${wr}</td>
             <td>${er}</td>
             <td>${bar}</td>
-            <td style="color:${vColor};" title="${fail}">${verdict}</td>
+            <td style="color:${vColor};" title="${fail}">${verdict}${gateHint}</td>
             <td style="font-size:9px;color:var(--dim);">${(r.fidelity_tier || "").replace("tier_", "")}</td>
         </tr>`;
     }).join("");
