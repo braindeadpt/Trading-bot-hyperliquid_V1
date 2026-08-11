@@ -217,6 +217,12 @@ class ExecutionEngine:
         native_cfg = config.get("execution.native_protection", {}) or {}
         self._native_protection_enabled = bool(native_cfg.get("enabled", True))
 
+        market_cfg = config.get("execution.market_order", {}) or {}
+        self._market_order_mode = str(market_cfg.get("mode", "sdk_market"))
+        self._market_max_slippage_pct = safe_float(
+            market_cfg.get("max_slippage_pct", 5.0), 5.0
+        )
+
         # Phase 03: injected by engine after live client is ready
         self._protection_manager: Optional[Any] = None
         self._reconciler: Optional[Any] = None
@@ -1022,6 +1028,14 @@ class ExecutionEngine:
         order_type = str(meta.get("order_type", "market"))
         post_only = bool(meta.get("post_only", False))
         limit_price = safe_float(meta.get("limit_price"), price)
+        max_slip = self._market_max_slippage_pct
+
+        # HL has no true market orders. Opt-in mode places an aggressive IoC
+        # limit with an explicit slip band (Freqtrade/CCXT-style).
+        if order_type == "market" and self._market_order_mode == "limit_slippage_cap":
+            order_type = "limit_slippage_cap"
+            if limit_price <= 0:
+                limit_price = price
 
         if order_type == "limit_maker":
             logger.info(
@@ -1031,6 +1045,15 @@ class ExecutionEngine:
                 size,
                 limit_price,
                 post_only,
+            )
+        elif order_type == "limit_slippage_cap":
+            logger.info(
+                "LIVE AGGRESSIVE LIMIT %s %s size=%.6f ref=%.4f cap=%.3f%%",
+                signal.symbol,
+                signal.side,
+                size,
+                limit_price,
+                max_slip,
             )
         else:
             logger.info(
@@ -1048,6 +1071,7 @@ class ExecutionEngine:
             order_type=order_type,
             limit_price=limit_price,
             post_only=post_only,
+            max_slippage_pct=max_slip,
         )
 
     @staticmethod
@@ -1068,14 +1092,22 @@ class ExecutionEngine:
 
         close_side = "short" if position.side == "long" else "long"
         logger.info(
-            "LIVE CLOSE (submit) %s %s size=%.6f @ %.4f",
+            "LIVE CLOSE (submit) %s %s size=%.6f @ %.4f mode=%s",
             position.symbol,
             close_side,
             position.size,
             exit_price,
+            self._market_order_mode,
         )
 
-        return await self._live_client.close_position(position.symbol, position.size)
+        return await self._live_client.close_position(
+            position.symbol,
+            position.size,
+            reference_price=exit_price,
+            market_mode=self._market_order_mode,
+            max_slippage_pct=self._market_max_slippage_pct,
+            position_side=position.side,
+        )
 
     # ------------------------------------------------------------------
     # Phase 03 hooks — native SL/TP (not implemented in Phase 01)

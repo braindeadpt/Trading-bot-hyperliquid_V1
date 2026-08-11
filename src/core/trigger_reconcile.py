@@ -48,6 +48,30 @@ def _is_closing_fill_for_position(fill: Dict[str, Any], position_side: str) -> b
     return is_buy
 
 
+def fill_is_liquidation(fill: Dict[str, Any]) -> bool:
+    """True when a Hyperliquid user fill is a forced liquidation leg.
+
+    HL attaches a ``liquidation`` object and/or ``liquidationMarkPx`` on
+    fills that participate in an account liquidation (Freqtrade-style
+    own-account detection — not cross-venue pressure feeds).
+    """
+    if not isinstance(fill, dict):
+        return False
+    mark = fill.get("liquidationMarkPx")
+    if mark not in (None, "", 0, "0"):
+        try:
+            if float(mark) > 0:
+                return True
+        except (TypeError, ValueError):
+            return True
+    liq = fill.get("liquidation")
+    if isinstance(liq, dict) and liq:
+        return True
+    if liq not in (None, False, "", 0, "0"):
+        return True
+    return False
+
+
 def match_closing_fills(
     fills: List[Dict[str, Any]],
     *,
@@ -101,12 +125,21 @@ def match_closing_fills(
     timestamps: List[int] = []
     trigger_oid: Optional[str] = None
     last_px = 0.0
+    saw_liquidation = False
+    liq_mark_px = 0.0
 
     for fill in pool:
         sz = safe_float(fill.get("sz", fill.get("size")))
         px = safe_float(fill.get("px", fill.get("price")))
         if sz <= 0 or px <= 0:
             continue
+        if fill_is_liquidation(fill):
+            saw_liquidation = True
+            mark = safe_float(fill.get("liquidationMarkPx"))
+            if mark <= 0 and isinstance(fill.get("liquidation"), dict):
+                mark = safe_float(fill["liquidation"].get("markPx"))
+            if mark > 0:
+                liq_mark_px = mark
         total_sz += sz
         notional += sz * px
         fee_total += abs(safe_float(fill.get("fee")))
@@ -123,15 +156,20 @@ def match_closing_fills(
         return None
 
     avg_px = safe_divide(notional, total_sz, last_px)
-    exit_reason = _infer_exit_reason(
-        avg_px,
-        position_side,
-        sl_price=sl_price,
-        tp_price=tp_price,
-        trigger_oid=trigger_oid,
-        sl_oid=sl_oid,
-        tp_oid=tp_oid,
-    )
+    if saw_liquidation and liq_mark_px > 0:
+        avg_px = liq_mark_px
+    if saw_liquidation:
+        exit_reason = "liquidation"
+    else:
+        exit_reason = _infer_exit_reason(
+            avg_px,
+            position_side,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            trigger_oid=trigger_oid,
+            sl_oid=sl_oid,
+            tp_oid=tp_oid,
+        )
     return ClosingFillMatch(
         exit_price=avg_px,
         closed_size=min(total_sz, target),
@@ -213,8 +251,15 @@ async def reconcile_trigger_close_once(
     protection: Any,
     executor: Any,
     db_row: Optional[Dict[str, Any]] = None,
+    allow_pending: bool = True,
+    lookback_ms: int = 86_400_000,
 ) -> TriggerReconcileResult:
-    """Close a native-triggered exit exactly once using fill tape."""
+    """Close a native-triggered / liquidated exit exactly once using fill tape.
+
+    When *allow_pending* is False and no closing fill is found, returns
+    ``pending=False`` so callers can fall through to phantom-cancel (used
+    for orphan local without native protection).
+    """
     meta = position.metadata or {}
     trade_id = int(meta.get("trade_id") or 0)
     row = db_row or {}
@@ -238,7 +283,7 @@ async def reconcile_trigger_close_once(
     fills: List[Dict[str, Any]] = []
     if hasattr(live_client, "get_user_fills"):
         try:
-            fills = await live_client.get_user_fills(lookback_ms=86_400_000)
+            fills = await live_client.get_user_fills(lookback_ms=int(lookback_ms))
         except Exception as exc:  # noqa: BLE001
             logger.warning("get_user_fills failed for %s: %s", symbol, exc)
 
@@ -255,6 +300,8 @@ async def reconcile_trigger_close_once(
     )
 
     if match is None:
+        if not allow_pending:
+            return TriggerReconcileResult(reconciled=False, pending=False)
         if trade_id > 0 and db is not None:
             db.update_trade_status(
                 trade_id,

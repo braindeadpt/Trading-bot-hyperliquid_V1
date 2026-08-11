@@ -797,8 +797,17 @@ execution:
   # Paper default false (preserve positions across restarts).
   flatten_on_stop: false
   native_protection:
-    enabled: true                   # place HL reduce-only SL/TP triggers on fill
+    enabled: true                   # place HL reduce-only SL/TP triggers on fill (live/testnet)
     software_stop_redundancy: true  # bot loop still monitors stops when online
+  # HL has no true market orders. Default keeps SDK market_open/close;
+  # set mode: limit_slippage_cap to use aggressive IoC limits with a hard band.
+  market_order:
+    mode: sdk_market                # sdk_market | limit_slippage_cap
+    max_slippage_pct: 5.0           # price band % for limit_slippage_cap (Freqtrade-style)
+  # Own-account liquidation detection via user fills (liquidationMarkPx).
+  liquidation_reconcile:
+    enabled: true
+    lookback_ms: 86400000
   oms_poll_interval_s: 5
   live_order_timeout_s: 60
   trailing_stop:
@@ -1030,8 +1039,9 @@ mode_overrides:
       # short-duration strategies.
       maker_orders:
         enabled: true
-      # mainnet flatten até SL/TP serem trigger orders nativas via SDK
-      # Mainnet: flatten on stop while exits are bot-managed (no SDK triggers yet).
+      # Mainnet: flatten on stop until native SL/TP + recon are proven on
+      # testnet with live capital. Native triggers are already implemented
+      # (execution.native_protection); keep flatten true as belt-and-braces.
       flatten_on_stop: true
   testnet:
     reconciliation:

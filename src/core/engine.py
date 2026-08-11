@@ -877,6 +877,10 @@ class TradingEngine:
             return
 
         recon_cfg = self._config.get("reconciliation", {}) or {}
+        liq_cfg = (
+            (self._config.get("execution", {}) or {}).get("liquidation_reconcile", {})
+            or {}
+        )
         self._protection_manager = NativeProtectionManager(live_client, self._db)
         self._reconciler = ExchangeReconciler(
             live_client=live_client,
@@ -889,6 +893,8 @@ class TradingEngine:
             mismatch_policy=str(recon_cfg.get("mismatch_policy", "HALT")),
             stale_threshold_sec=float(recon_cfg.get("stale_threshold_sec", 120)),
             alert_callback=self._reconciliation_alert,
+            liquidation_reconcile_enabled=bool(liq_cfg.get("enabled", True)),
+            fill_lookback_ms=int(liq_cfg.get("lookback_ms", 86_400_000)),
         )
         if hasattr(self._executor, "set_protection_manager"):
             self._executor.set_protection_manager(self._protection_manager)

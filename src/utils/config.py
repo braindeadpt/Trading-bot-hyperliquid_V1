@@ -202,6 +202,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "enabled": True,
             "software_stop_redundancy": True,
         },
+        "market_order": {
+            # sdk_market = HL SDK market_open/close (default).
+            # limit_slippage_cap = aggressive IoC limit with hard slip band.
+            "mode": "sdk_market",
+            "max_slippage_pct": 5.0,
+        },
+        "liquidation_reconcile": {
+            "enabled": True,
+            "lookback_ms": 86_400_000,
+        },
         "oms_poll_interval_s": 5.0,
         "live_order_timeout_s": 60.0,
         "tca_mode": "strict",

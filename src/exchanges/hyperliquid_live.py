@@ -202,8 +202,9 @@ class HyperliquidLiveClient:
         order_type: str = "market",
         limit_price: Optional[float] = None,
         post_only: bool = False,
+        max_slippage_pct: float = 5.0,
     ) -> Dict[str, Any]:
-        """Submit entry order (limit Alo or market).
+        """Submit entry order (limit Alo, capped aggressive limit, or SDK market).
 
         Returns the raw HL response dict.  Raises on invalid params.
         """
@@ -229,6 +230,20 @@ class HyperliquidLiveClient:
                 px,
                 hl_order_type,
             )
+        elif order_type == "limit_slippage_cap":
+            ref = safe_float(limit_price)
+            if ref <= 0:
+                raise ValueError(
+                    f"limit_slippage_cap requires reference price for {symbol}"
+                )
+            result = await self.place_aggressive_limit(
+                symbol,
+                side,
+                sz,
+                reference_price=ref,
+                max_slippage_pct=max_slippage_pct,
+                reduce_only=False,
+            )
         else:
             result = await asyncio.to_thread(
                 self._exchange.market_open,
@@ -240,14 +255,78 @@ class HyperliquidLiveClient:
         logger.info("HL entry response %s %s: %s", symbol, side, result)
         return result if isinstance(result, dict) else {"raw": result}
 
+    async def place_aggressive_limit(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        *,
+        reference_price: float,
+        max_slippage_pct: float = 5.0,
+        reduce_only: bool = False,
+        tif: str = "Ioc",
+    ) -> Dict[str, Any]:
+        """Place an aggressive IoC limit that simulates a market with a hard slip cap.
+
+        Hyperliquid has no true market orders; CCXT/`market_open` already
+        synthesises them. This path makes the band explicit: buy at
+        ``ref * (1 + cap%)``, sell at ``ref * (1 - cap%)``, IoC so unfilled
+        size is cancelled rather than resting as a maker.
+        """
+        if self._exchange is None:
+            raise RuntimeError("HyperliquidLiveClient not initialized")
+
+        is_buy = side in ("long", "buy", "B")
+        sz = normalize_size(symbol, safe_float(size))
+        if sz <= 0:
+            raise ValueError(f"Invalid aggressive size for {symbol}: {sz}")
+        ref = safe_float(reference_price)
+        if ref <= 0:
+            raise ValueError(f"Invalid reference price for {symbol}: {ref}")
+        cap = max(0.0, safe_float(max_slippage_pct)) / 100.0
+        raw_px = ref * (1.0 + cap) if is_buy else ref * (1.0 - cap)
+        px = normalize_price(symbol, raw_px)
+        if px <= 0:
+            raise ValueError(f"Invalid aggressive price for {symbol}: {px}")
+
+        hl_order_type = {"limit": {"tif": tif if tif in ("Ioc", "Gtc", "Alo") else "Ioc"}}
+        result = await asyncio.to_thread(
+            self._exchange.order,
+            symbol,
+            is_buy,
+            sz,
+            px,
+            hl_order_type,
+            bool(reduce_only),
+        )
+        logger.info(
+            "HL aggressive limit %s side=%s size=%.6f ref=%.4f px=%.4f cap=%.3f%% tif=%s: %s",
+            symbol,
+            side,
+            sz,
+            ref,
+            px,
+            max_slippage_pct,
+            tif,
+            result,
+        )
+        return result if isinstance(result, dict) else {"raw": result}
+
     async def close_position(
         self,
         symbol: str,
         size: float,
+        *,
+        reference_price: Optional[float] = None,
+        market_mode: str = "sdk_market",
+        max_slippage_pct: float = 5.0,
+        position_side: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Market-close an open perp position (reduce-only by design).
+        """Close an open perp position (reduce-only).
 
-        Returns the raw HL response dict.
+        *market_mode*:
+          - ``sdk_market`` — SDK ``market_close`` (default, legacy)
+          - ``limit_slippage_cap`` — aggressive IoC limit with hard slip band
         """
         if self._exchange is None:
             raise RuntimeError("HyperliquidLiveClient not initialized")
@@ -256,11 +335,32 @@ class HyperliquidLiveClient:
         if sz <= 0:
             raise ValueError(f"Invalid close size for {symbol}: {sz}")
 
-        result = await asyncio.to_thread(
-            self._exchange.market_close,
-            symbol,
-            sz,
-        )
+        if str(market_mode) == "limit_slippage_cap":
+            ref = safe_float(reference_price)
+            if ref <= 0:
+                raise ValueError(
+                    f"limit_slippage_cap close requires reference_price for {symbol}"
+                )
+            if position_side not in ("long", "short"):
+                raise ValueError(
+                    f"limit_slippage_cap close requires position_side for {symbol}"
+                )
+            # Closing long → sell; closing short → buy.
+            close_side = "short" if position_side == "long" else "long"
+            result = await self.place_aggressive_limit(
+                symbol,
+                close_side,
+                sz,
+                reference_price=ref,
+                max_slippage_pct=max_slippage_pct,
+                reduce_only=True,
+            )
+        else:
+            result = await asyncio.to_thread(
+                self._exchange.market_close,
+                symbol,
+                sz,
+            )
         logger.info("HL close response %s: %s", symbol, result)
         return result if isinstance(result, dict) else {"raw": result}
 

@@ -82,6 +82,8 @@ class ExchangeReconciler:
         mismatch_policy: str = MismatchPolicy.HALT.value,
         stale_threshold_sec: float = 120.0,
         alert_callback: Optional[Any] = None,
+        liquidation_reconcile_enabled: bool = True,
+        fill_lookback_ms: int = 86_400_000,
     ) -> None:
         self._client = live_client
         self._portfolio = portfolio
@@ -91,6 +93,8 @@ class ExchangeReconciler:
         self._mismatch_policy = MismatchPolicy(mismatch_policy)
         self._stale_threshold_sec = float(stale_threshold_sec)
         self._alert = alert_callback
+        self._liquidation_reconcile_enabled = bool(liquidation_reconcile_enabled)
+        self._fill_lookback_ms = int(fill_lookback_ms)
         self._health = ReconciliationHealth()
 
     @property
@@ -250,7 +254,12 @@ class ExchangeReconciler:
             or meta.get("native_tp_oid")
         )
 
-        if had_native:
+        # Always attempt fill-tape reconcile first: covers native SL/TP closes
+        # and own-account liquidations (liquidationMarkPx / liquidation object).
+        # Pending (halt) only when we expected a native close; otherwise fall
+        # through to phantom cancel so stray local rows do not brick entries.
+        try_fill_tape = had_native or self._liquidation_reconcile_enabled
+        if try_fill_tape:
             result = await reconcile_trigger_close_once(
                 symbol=symbol,
                 position=position,
@@ -260,6 +269,8 @@ class ExchangeReconciler:
                 protection=self._protection,
                 executor=executor,
                 db_row=db_row,
+                allow_pending=had_native,
+                lookback_ms=self._fill_lookback_ms,
             )
             if result.already_done:
                 report.actions.append(f"trigger_close_already_done:{symbol}")
@@ -269,10 +280,17 @@ class ExchangeReconciler:
                 report.actions.append(
                     f"trigger_close_reconciled:{symbol}:{result.exit_reason}"
                 )
+                if result.exit_reason == "liquidation":
+                    report.actions.append(f"liquidation_reconciled:{symbol}")
+                    self._halt(f"liquidation:{symbol}")
                 self._audit(
                     "trigger_close_reconciled",
                     symbol,
-                    {"trade_id": trade_id, "pnl_usd": result.pnl_usd},
+                    {
+                        "trade_id": trade_id,
+                        "pnl_usd": result.pnl_usd,
+                        "exit_reason": result.exit_reason,
+                    },
                 )
                 return
             if result.pending:
