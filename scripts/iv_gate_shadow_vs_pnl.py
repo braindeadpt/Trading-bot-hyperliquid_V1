@@ -88,11 +88,15 @@ def load_shadow_decisions(db_path: Path) -> List[Dict[str, Any]]:
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
-        rows = con.execute(
-            "SELECT id, symbol, strategy, side, timestamp_ms, reason, snapshot_json "
-            "FROM shadow_decisions WHERE variant = 'iv_gate_shadow' "
-            "ORDER BY timestamp_ms ASC"
-        ).fetchall()
+        try:
+            rows = con.execute(
+                "SELECT id, symbol, strategy, side, timestamp_ms, reason, snapshot_json "
+                "FROM shadow_decisions WHERE variant = 'iv_gate_shadow' "
+                "ORDER BY timestamp_ms ASC"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Fresh research DB without the table yet — zero decisions.
+            rows = []
     finally:
         con.close()
     out: List[Dict[str, Any]] = []
@@ -137,10 +141,14 @@ def load_trades(db_path: Path) -> List[Dict[str, Any]]:
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
-        rows = con.execute(
-            "SELECT id, symbol, side, entry_time, exit_time, pnl_usd, pnl_pct, "
-            "strategy, status, exit_reason FROM trades ORDER BY entry_time ASC"
-        ).fetchall()
+        try:
+            rows = con.execute(
+                "SELECT id, symbol, side, entry_time, exit_time, pnl_usd, pnl_pct, "
+                "strategy, status, exit_reason FROM trades ORDER BY entry_time ASC"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Fresh live DB without the trades table yet — zero trades.
+            rows = []
     finally:
         con.close()
     return [
@@ -211,6 +219,8 @@ def slice_stats(trades: List[Dict[str, Any]], iv_class: str) -> Dict[str, Any]:
     n = len(sl)
     wins = sum(1 for p in pnls if p > 0)
     net = sum(pnls)
+    # Average recorded IV percentile for the slice (sample distribution).
+    pcts = [float(t["iv_percentile"]) for t in sl if t.get("iv_percentile") is not None]
     return {
         "class": iv_class,
         "n": n,
@@ -222,6 +232,8 @@ def slice_stats(trades: List[Dict[str, Any]], iv_class: str) -> Dict[str, Any]:
         "median_pnl_usd": (sorted(pnls)[len(pnls) // 2] if pnls else None),
         "best_usd": (max(pnls) if pnls else None),
         "worst_usd": (min(pnls) if pnls else None),
+        "n_pct": len(pcts),
+        "avg_pct": (sum(pcts) / len(pcts) if pcts else None),
     }
 
 

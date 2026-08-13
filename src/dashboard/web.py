@@ -1243,6 +1243,50 @@ def create_app(config: Dict[str, Any]) -> tuple:
             logger.warning("dvol endpoint failed: %s", exc)
             return jsonify({"error": str(exc), "series": {}, "current": {}}), 500
 
+    @app.route("/api/iv_gate_shadow")
+    def api_iv_gate_shadow():
+        """Shadow IV sample distribution — n per class + avg percentile.
+
+        Uses the exact same join/slices as ``scripts/iv_gate_shadow_vs_pnl.py``
+        (the single source of truth), so the dashboard and the recheck watchdog
+        can never disagree about what counts as a matched IV decision. Read-only
+        research data — the gate stays shadow, never touches execution.
+        """
+        try:
+            from scripts.iv_gate_shadow_vs_pnl import (
+                BACKTEST_EVIDENCE,
+                build_report,
+            )
+            from scripts.iv_gate_shadow_recheck import TARGET_CLOSED
+
+            report = build_report()
+            if report.get("error"):
+                return jsonify({"error": report["error"], "by_class": {}, "total": 0}), 200
+            by_class = {}
+            for cls in ("high_iv", "low_iv", "unknown"):
+                s = report["slices"][cls]
+                by_class[cls] = {
+                    "n": s["n"],
+                    "n_closed": s["n_closed"],
+                    "n_open": s["n_open"],
+                    "n_pct": s.get("n_pct", 0),
+                    "avg_pct": s.get("avg_pct"),
+                }
+            return jsonify({
+                "by_class": by_class,
+                "total": report["n_trades"],
+                "n_decisions": report["n_decisions"],
+                "matched": report["matched_decisions"],
+                "trades_with_decision": report["trades_with_decision"],
+                "threshold": report["iv_high_pct"],
+                "target_closed": TARGET_CLOSED,
+                "backtest": BACKTEST_EVIDENCE,
+                "asof_ms": int(time.time() * 1000),
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("iv_gate_shadow endpoint failed: %s", exc)
+            return jsonify({"error": str(exc), "by_class": {}, "total": 0}), 500
+
     @app.route("/api/strategy/<name>")
     def api_strategy_detail(name):
         """Drill-down endpoint for a single strategy (Task 5.3).

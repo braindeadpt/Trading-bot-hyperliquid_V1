@@ -613,6 +613,55 @@ tr:hover td { background: var(--panel-hover); }
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
+<!-- IV gate shadow — amostra high/low por trade                   -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="section-label section-intel">
+    <span class="bar"></span><span class="text">IV gate shadow · amostra</span><span class="line"></span>
+</div>
+<div class="grid">
+    <div class="g-12">
+        <div class="panel">
+            <div class="panel-header">
+                Distribuição high/low-IV dos trades shadow
+                <span class="dim" id="ivshadow-meta">amostra a crescer até ao gate de decisão</span>
+            </div>
+            <div class="panel-body" style="padding:8px;">
+                <div class="muted" style="font-size:10px;line-height:1.4;margin-bottom:8px;">
+                    Cada trade roteado pelo regime router regista a classe IV (<code>variant=iv_gate_shadow</code>).
+                    A amostra decide <b>shadow → enforcement</b> quando ≥<span id="ivshadow-target">30</span> trades
+                    <b>closed</b> tiverem decisão (watchdog de recheck). Threshold <code>p66.7</code>.
+                </div>
+                <div id="ivshadow-bar" style="margin-bottom:10px;">
+                    <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-bottom:2px;">
+                        <span id="ivshadow-progress-txt">0/0 closed com decisão</span>
+                        <span id="ivshadow-pct">0%</span>
+                    </div>
+                    <div style="background:var(--border);height:8px;border-radius:4px;">
+                        <div id="ivshadow-bar-fill" style="height:8px;width:0%;background:var(--accent, #4a9eff);border-radius:4px;"></div>
+                    </div>
+                </div>
+                <table style="width:100%;font-size:11px;border-collapse:collapse;">
+                    <thead>
+                        <tr style="color:var(--muted);text-align:left;">
+                            <th>Classe</th>
+                            <th>n</th>
+                            <th>closed</th>
+                            <th>open</th>
+                            <th>% amostra</th>
+                            <th>avg pct</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ivshadow-tbody">
+                        <tr><td colspan="6" class="muted">Waiting...</td></tr>
+                    </tbody>
+                </table>
+                <div id="ivshadow-coverage" class="dim" style="font-size:10px;margin-top:8px;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
 <!-- SECTION: LOGS                                                    -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="section-label section-logs">
@@ -1446,6 +1495,53 @@ function drawDvolChart(container, series, threshold) {
         '<div style="margin-top:4px;">' + legends.join("") + '</div>';
 }
 
+// ── IV gate shadow sample ──
+function renderIvGateShadow(payload) {
+    const tbody = document.getElementById("ivshadow-tbody");
+    if (!tbody) return;
+    if (!payload || payload.error || !payload.by_class) {
+        tbody.innerHTML = '<tr><td colspan="6" class="muted">Unavailable</td></tr>';
+        return;
+    }
+    const target = Number(payload.target_closed) || 30;
+    document.getElementById("ivshadow-target").textContent = target;
+    const rows = payload.by_class;
+    const withDec = Number(payload.trades_with_decision) || 0;
+    const total = Math.max(1, withDec);
+    const order = ["high_iv", "low_iv", "unknown"];
+    const labels = { high_iv: "high_iv", low_iv: "low_iv", unknown: "unknown (sem decisão)" };
+    const colors = { high_iv: "var(--up)", low_iv: "var(--down)", unknown: "var(--muted)" };
+    const rowsHtml = order.map(cls => {
+        const s = rows[cls] || { n: 0, n_closed: 0, n_open: 0, n_pct: 0, avg_pct: null };
+        const pctShare = total > 0 ? (s.n / total * 100) : 0;
+        const avgPct = s.avg_pct == null ? "—" : s.avg_pct.toFixed(1) + "%";
+        const nPctNote = s.n_pct ? ' <span class="dim" style="font-size:9px;">(' + s.n_pct + " com pct)</span>" : "";
+        return '<tr>' +
+            '<td style="color:' + (colors[cls] || "") + ';font-weight:600;">' + (labels[cls] || cls) + '</td>' +
+            '<td>' + s.n + '</td>' +
+            '<td>' + s.n_closed + '</td>' +
+            '<td>' + s.n_open + '</td>' +
+            '<td>' + pctShare.toFixed(0) + '%</td>' +
+            '<td>' + avgPct + nPctNote + '</td>' +
+            '</tr>';
+    }).join("");
+    tbody.innerHTML = rowsHtml;
+    // Progress toward the decision gate (n closed with an IV decision).
+    const closed = (rows.high_iv ? rows.high_iv.n_closed : 0) + (rows.low_iv ? rows.low_iv.n_closed : 0);
+    const pct = Math.max(0, Math.min(100, closed / target * 100));
+    document.getElementById("ivshadow-progress-txt").textContent =
+        closed + "/" + target + " closed com decisão";
+    document.getElementById("ivshadow-pct").textContent = pct.toFixed(0) + "%";
+    const fill = document.getElementById("ivshadow-bar-fill");
+    fill.style.width = pct.toFixed(0) + "%";
+    fill.style.background = pct >= 100 ? "var(--up)" : (pct >= 60 ? "var(--yellow, #d29922)" : "var(--accent, #4a9eff)");
+    const cov = document.getElementById("ivshadow-coverage");
+    cov.innerHTML = "decisões registadas: " + (payload.n_decisions || 0) +
+        " · matched a trades: " + (payload.matched || 0) +
+        " · trades com decisão: " + withDec + " / " + (payload.total || 0) +
+        " · backtest referência: " + (payload.backtest ? "+" + payload.backtest.net_high_iv_only_usd + " USD (n=" + payload.backtest.n + ")" : "—");
+}
+
 // ── Signals ──
 function renderSignals(data) {
     const div = document.getElementById("signals-list");
@@ -1630,6 +1726,7 @@ pollAll = function pollAll() {
     authFetch("/api/top_traders").then(r => r.json()).then(d => renderTopTradersPanel(d)).catch(() => {});
     authFetch("/api/research_watchdogs").then(r => r.json()).then(d => renderResearchWatchdogs(d)).catch(() => {});
     authFetch("/api/dvol").then(r => r.json()).then(d => renderDvolPanel(d)).catch(() => {});
+    authFetch("/api/iv_gate_shadow").then(r => r.json()).then(d => renderIvGateShadow(d)).catch(() => {});
     authFetch("/api/market_data_health").then(r => r.json()).then(d => renderFeedSilence(d)).catch(() => {});
 };
 
