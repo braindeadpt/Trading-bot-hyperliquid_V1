@@ -6,6 +6,7 @@ grows between resets) and the creeping-age detector.
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -16,8 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.data.feed_age_history import (  # noqa: E402
+    SAMPLE_BUCKET_MS,
     FeedAgeRecorder,
+    age_pct,
     creeping_age_detector,
+    sample_bucket_start_ms,
     start_feed_age_recorder_from_config,
     utc_day_start_ms,
 )
@@ -74,6 +78,51 @@ class TestResearchDb:
         assert rdb.load_latest_feed_age("liquidation_okx") == (DAY, 300.0, 8)
 
 
+class TestIntradaySamples:
+    def test_bucket_start_floors_to_10min(self):
+        assert sample_bucket_start_ms(0) == 0
+        assert sample_bucket_start_ms(1) == 0
+        assert sample_bucket_start_ms(SAMPLE_BUCKET_MS - 1) == 0
+        assert sample_bucket_start_ms(SAMPLE_BUCKET_MS) == SAMPLE_BUCKET_MS
+        assert sample_bucket_start_ms(SAMPLE_BUCKET_MS + 123) == SAMPLE_BUCKET_MS
+
+    def test_age_pct(self):
+        assert age_pct(0.0, 3600.0) == 0.0
+        assert age_pct(1800.0, 3600.0) == 50.0
+        assert age_pct(3600.0, 3600.0) == 100.0
+        assert age_pct(999999.0, 100.0) == 999.0  # capped
+        assert age_pct(100.0, 0.0) == 0.0  # no threshold -> 0
+
+    def test_save_load_and_upsert_max(self, tmp_path):
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        rows = [
+            ("funding_hl", 0, 10.0, 3),
+            ("funding_hl", SAMPLE_BUCKET_MS, 55.0, 2),
+        ]
+        assert rdb.save_feed_age_samples(rows) == 2
+        assert rdb.load_feed_age_samples("funding_hl", 0, 10**15) == [
+            (0, 10.0, 3),
+            (SAMPLE_BUCKET_MS, 55.0, 2),
+        ]
+        # upsert raises the max and accumulates samples
+        rdb.save_feed_age_samples([("funding_hl", SAMPLE_BUCKET_MS, 20.0, 1)])
+        rdb.save_feed_age_samples([("funding_hl", SAMPLE_BUCKET_MS, 70.0, 4)])
+        assert rdb.load_feed_age_samples("funding_hl", 0, 10**15) == [
+            (0, 10.0, 3),
+            (SAMPLE_BUCKET_MS, 70.0, 7),
+        ]
+
+    def test_prune_removes_stale_buckets(self, tmp_path):
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        now = sample_bucket_start_ms(int(time.time() * 1000))
+        old = sample_bucket_start_ms(now - 60 * 86_400_000)  # 60 days ago
+        rdb.save_feed_age_samples([("funding_hl", old, 99.0, 1)])
+        rdb.save_feed_age_samples([("funding_hl", now, 5.0, 1)])
+        n = rdb.prune_feed_age_samples(now_ms=now)
+        assert n == 1
+        assert rdb.load_feed_age_samples("funding_hl", 0, 10**15) == [(now, 5.0, 1)]
+
+
 class TestCreepingDetector:
     def test_not_enough_days_returns_none(self):
         daily = [(0, 100.0), (DAY, 120.0)]
@@ -98,9 +147,13 @@ class TestCreepingDetector:
 
 
 class TestFeedAgeRecorder:
-    def _snap(self, ages: dict):
+    def _snap(self, ages: dict, max_silence: float = 3600.0):
         return {
-            feed: {"age_sec": age, "degraded": False, "max_silence_sec": 3600.0}
+            feed: {
+                "age_sec": age,
+                "degraded": False,
+                "max_silence_sec": max_silence,
+            }
             for feed, age in ages.items()
         }
 
@@ -164,6 +217,59 @@ class TestFeedAgeRecorder:
         assert st["interval_sec"] == 120.0
         assert st["running"] is False
         assert st["feeds_tracked"] == 0
+
+    def test_sample_tracks_intraday_bucket_pct(self, tmp_path):
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        ages = {"liquidation_okx": 1800.0}  # 50% of 1h
+        rec = FeedAgeRecorder(
+            rdb,
+            lambda: self._snap(ages, max_silence=3600.0),
+        )
+        bucket = SAMPLE_BUCKET_MS
+        rec.sample(now_ms=bucket + 1000)
+        assert rec._running_samples["liquidation_okx"] == (bucket, 50.0, 1)
+        # higher pct within same bucket raises the max
+        ages["liquidation_okx"] = 2700.0  # 75%
+        rec.sample(now_ms=bucket + 2000)
+        assert rec._running_samples["liquidation_okx"] == (bucket, 75.0, 2)
+
+    def test_sample_uses_feed_max_silence_for_pct(self, tmp_path):
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        ages = {"funding_hl": 1800.0}
+        rec = FeedAgeRecorder(rdb, lambda: self._snap(ages, max_silence=3600.0))
+        rec.sample(now_ms=1000)
+        assert rec._running_samples["funding_hl"][1] == 50.0
+
+    def test_intraday_rollover_flushes_completed_bucket(self, tmp_path):
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        ages = {"funding_hl": 900.0}
+        rec = FeedAgeRecorder(
+            rdb,
+            lambda: self._snap(ages, max_silence=3600.0),
+        )
+        rec.sample(now_ms=SAMPLE_BUCKET_MS + 1000)
+        # Next bucket: completed bucket flushed, new one tracked.
+        rec.sample(now_ms=2 * SAMPLE_BUCKET_MS + 1000)
+        assert rdb.load_feed_age_samples("funding_hl", 0, 10**15) == [
+            (SAMPLE_BUCKET_MS, 25.0, 1)
+        ]
+        assert rec._running_samples["funding_hl"][0] == 2 * SAMPLE_BUCKET_MS
+
+    def test_flush_samples_and_load_sparkline(self, tmp_path):
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        ages = {"funding_hl": 1200.0}
+        rec = FeedAgeRecorder(
+            rdb,
+            lambda: self._snap(ages, max_silence=3600.0),
+        )
+        bucket = 2 * SAMPLE_BUCKET_MS
+        rec.sample(now_ms=bucket + 500)
+        n = rec.flush_samples()
+        assert n == 1
+        series = rec.load_sparkline("funding_hl", now_ms=bucket + 500, hours=24)
+        assert series[0][0] == bucket
+        assert series[0][1] == pytest.approx(1200.0 / 3600.0 * 100.0)
+        assert rec._running_samples == {}
 
 
 class TestHashNeutral:

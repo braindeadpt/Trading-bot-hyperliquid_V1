@@ -390,11 +390,12 @@ tr:hover td { background: var(--panel-hover); }
                     <th title="Seconds since last event (— = never seen this process)">Age</th>
                     <th title="Max allowed silence before degraded">Threshold</th>
                     <th title="age / threshold — how close to degrading">% of threshold</th>
+                    <th title="Max % of threshold per 10-min bucket, last 24h — a rising sawtooth = age growing between resets">24h %</th>
                     <th title="Silence watchdog state">State</th>
                 </tr>
             </thead>
             <tbody id="feed-silence-tbody">
-                <tr><td colspan="5" class="muted">Waiting...</td></tr>
+                <tr><td colspan="6" class="muted">Waiting...</td></tr>
             </tbody>
         </table>
     </div>
@@ -1394,14 +1395,33 @@ function renderResearchWatchdogs(payload) {
 }
 
 // ── DVOL / IV regime ──
+function sparklineSvg(series, w, h) {
+    // series: [[ts_ms, pct], ...] — % of silence threshold per bucket, 24h.
+    if (!series || !series.length) return '<span class="muted">—</span>';
+    const vals = series.map(p => Math.max(0, Math.min(100, Number(p[1]))));
+    const minV = Math.min.apply(null, vals);
+    const maxV = Math.max.apply(null, vals);
+    const span = Math.max(1, maxV - minV);
+    const pad = 2;
+    const x = (i) => pad + (i / Math.max(1, vals.length - 1)) * (w - 2 * pad);
+    const y = (v) => (h - pad) - ((v - minV) / span) * (h - 2 * pad);
+    const pts = vals.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
+    const color = maxV >= 90 ? "var(--down)" : maxV >= 60 ? "var(--warn, #d29922)" : "var(--up)";
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block;">' +
+        '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.2" />' +
+        '<circle cx="' + x(vals.length - 1).toFixed(1) + '" cy="' + y(vals[vals.length - 1]).toFixed(1) + '" r="1.6" fill="' + color + '" />' +
+        '</svg>';
+}
+
 function renderFeedSilence(payload) {
     const tbody = document.getElementById("feed-silence-tbody");
     const meta = document.getElementById("feed-silence-meta");
     if (!tbody) return;
     const sil = (payload && payload.feed_silence) || {};
+    const sparks = (payload && payload.feed_silence_spark) || {};
     const entries = Object.entries(sil);
     if (!entries.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="muted">No silence data (feed_silence monitor off)</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="muted">No silence data (feed_silence monitor off)</td></tr>';
         if (meta) meta.textContent = "threshold vs age";
         return;
     }
@@ -1446,6 +1466,7 @@ function renderFeedSilence(payload) {
                     '<span style="font-size:10px;white-space:nowrap;color:' + (pct != null && pct >= 60 ? (pct >= 90 ? "var(--down)" : "#d29922") : "var(--muted)") + ';">' + pctTxt + '</span>' +
                 '</div>' +
             '</td>' +
+            '<td style="padding:3px 4px;width:96px;">' + sparklineSvg(sparks[feed] || [], 92, 20) + '</td>' +
             '<td style="padding:3px 4px;font-weight:600;color:' + stateColor + ';">' + stateTxt + '</td>' +
             '</tr>';
     }).join("");

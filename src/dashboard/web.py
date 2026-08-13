@@ -64,6 +64,30 @@ def _get_db():
     return getattr(_engine, "_db", None)
 
 
+def _feed_silence_sparklines(feed_silence: Dict[str, Any]) -> Dict[str, List[List[float]]]:
+    """Intraday max-pct series per feed (last 24h) for the sparkline panel.
+
+    Reads ``feed_age_samples`` from the research DB — the same store the
+    FeedAgeRecorder writes. Best-effort: a missing/broken research DB
+    degrades to empty series, never an error.
+    """
+    out: Dict[str, List[List[float]]] = {}
+    if not feed_silence:
+        return out
+    try:
+        from src.data.research_database import ResearchDatabase
+
+        rdb = ResearchDatabase()
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - 24 * 3_600_000
+        for feed in feed_silence:
+            series = rdb.load_feed_age_samples(feed, start_ms, now_ms)
+            out[feed] = [[float(b), float(p)] for b, p, _ in series]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("feed_silence_sparklines failed: %s", exc)
+    return out
+
+
 def _socket_connect_auth(auth, enabled: bool, token: Optional[str]) -> Optional[bool]:
     """Token gate for the Socket.IO ``connect`` event.
 
@@ -966,6 +990,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
             if silence is not None:
                 body["feed_silence"] = silence.snapshot()
                 body["feed_silence_degraded"] = bool(silence.any_degraded)
+            body["feed_silence_spark"] = _feed_silence_sparklines(
+                body.get("feed_silence", {})
+            )
             return jsonify(body)
         health = getattr(_engine, "_market_data_health", {}) or {}
         rows = [h.to_dict() for h in health.values()]
@@ -979,6 +1006,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
         if silence is not None:
             body["feed_silence"] = silence.snapshot()
             body["feed_silence_degraded"] = bool(silence.any_degraded)
+        body["feed_silence_spark"] = _feed_silence_sparklines(
+            body.get("feed_silence", {})
+        )
         return jsonify(body)
 
     @app.route("/api/live_data")

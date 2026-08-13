@@ -17,11 +17,24 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tup
 logger = logging.getLogger(__name__)
 
 UTC_DAY_MS = 86_400_000
+SAMPLE_BUCKET_MS = 600_000  # 10 minutes — intraday sparkline resolution
 
 
 def utc_day_start_ms(ts_ms: int) -> int:
     """Start of the UTC day containing ``ts_ms`` (floor to 00:00 UTC)."""
     return (int(ts_ms) // UTC_DAY_MS) * UTC_DAY_MS
+
+
+def sample_bucket_start_ms(ts_ms: int) -> int:
+    """Start of the 10-minute intraday bucket containing ``ts_ms``."""
+    return (int(ts_ms) // SAMPLE_BUCKET_MS) * SAMPLE_BUCKET_MS
+
+
+def age_pct(age_sec: float, max_silence_sec: float) -> float:
+    """% of silence threshold reached by ``age_sec`` (cap at 999 for safety)."""
+    if max_silence_sec <= 0:
+        return 0.0
+    return min(999.0, (float(age_sec) / float(max_silence_sec)) * 100.0)
 
 
 def creeping_age_detector(
@@ -83,10 +96,14 @@ class FeedAgeRecorder:
         self._snapshot_fn = snapshot_fn
         self._interval = max(30.0, float(interval_sec))
         self._running: Dict[str, Tuple[int, float, int]] = {}  # feed -> (day, max, samples)
+        # feed -> (bucket_ms, max_pct, samples) — intraday sparkline data
+        self._running_samples: Dict[str, Tuple[int, float, int]] = {}
         self._task: Optional[asyncio.Task] = None
         self._running_flag = False
         self._last_error: Optional[str] = None
         self._flushed_days = 0
+        self._flushed_buckets = 0
+        self._last_sample_ms: Optional[int] = None
 
     async def start(self) -> None:
         if self._task is not None:
@@ -108,8 +125,9 @@ class FeedAgeRecorder:
             except asyncio.CancelledError:
                 pass
             self._task = None
-        # Flush the partial current day so a restart doesn't lose it.
+        # Flush the partial current day/buckets so a restart doesn't lose them.
         self.flush()
+        self.flush_samples()
 
     async def _loop(self) -> None:
         while self._running_flag:
@@ -129,14 +147,22 @@ class FeedAgeRecorder:
                 pass
 
     def sample(self, now_ms: Optional[int] = None) -> None:
-        """Track the running max age per feed for the current UTC day."""
+        """Track running daily max + intraday bucket max pct per feed."""
         now = now_ms if now_ms is not None else int(time.time() * 1000)
+        self._last_sample_ms = int(now)
         day = utc_day_start_ms(now)
+        bucket = sample_bucket_start_ms(now)
         # Roll over FIRST: flush any completed (previous) day bucket before
         # the new day's samples overwrite the running state.
         stale = [f for f, (d, _, _) in self._running.items() if d < day]
         if stale:
             self.flush(day_start_ms=day - UTC_DAY_MS)
+        # Same for intraday buckets — flush completed buckets, keep current.
+        stale_buckets = [
+            f for f, (b, _, _) in self._running_samples.items() if b < bucket
+        ]
+        if stale_buckets:
+            self.flush_samples(bucket_start_ms=bucket - SAMPLE_BUCKET_MS)
         snapshot = self._snapshot_fn() or {}
         for feed, st in snapshot.items():
             age = st.get("age_sec")
@@ -147,6 +173,12 @@ class FeedAgeRecorder:
                 self._running[feed] = (day, float(age), 1)
             else:
                 self._running[feed] = (day, max(cur[1], float(age)), cur[2] + 1)
+            pct = age_pct(float(age), float(st.get("max_silence_sec") or 0.0))
+            cur_s = self._running_samples.get(feed)
+            if cur_s is None or cur_s[0] != bucket:
+                self._running_samples[feed] = (bucket, pct, 1)
+            else:
+                self._running_samples[feed] = (bucket, max(cur_s[1], pct), cur_s[2] + 1)
 
     def flush(self, day_start_ms: Optional[int] = None) -> int:
         """Persist running maxes.
@@ -181,14 +213,72 @@ class FeedAgeRecorder:
             logger.warning("FeedAgeRecorder flush failed: %s", exc)
             return 0
 
+    def flush_samples(self, bucket_start_ms: Optional[int] = None) -> int:
+        """Persist intraday bucket maxes.
+
+        With ``bucket_start_ms`` given, flush only that bucket (rollover
+        path). Without it, flush every bucket tracked — the partial current
+        bucket at shutdown. Also prunes stale intraday rows (48h retention)
+        so the sparkline table stays bounded.
+        """
+        if not self._running_samples:
+            return 0
+        if bucket_start_ms is not None:
+            targets = {int(bucket_start_ms)}
+        else:
+            targets = {b for _, (b, _, _) in self._running_samples.items()}
+        rows = [
+            (feed, bucket_ms, max_pct, samples)
+            for feed, (bucket_ms, max_pct, samples) in self._running_samples.items()
+            if bucket_ms in targets
+        ]
+        n = 0
+        if rows:
+            try:
+                n = self._db.save_feed_age_samples(rows)
+                self._flushed_buckets += n
+                self._running_samples = {
+                    f: v
+                    for f, v in self._running_samples.items()
+                    if v[0] not in targets
+                }
+            except Exception as exc:  # noqa: BLE001
+                self._last_error = str(exc)
+                logger.warning("FeedAgeRecorder flush_samples failed: %s", exc)
+                return 0
+        try:
+            self._db.prune_feed_age_samples(now_ms=self._last_sample_ms)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("FeedAgeRecorder prune failed: %s", exc)
+        return n
+
     def status(self) -> dict:
         return {
             "interval_sec": self._interval,
             "running": self._running_flag,
             "feeds_tracked": len(self._running),
             "flushed_days": self._flushed_days,
+            "flushed_buckets": self._flushed_buckets,
             "last_error": self._last_error,
         }
+
+    def load_sparkline(
+        self,
+        feed: str,
+        now_ms: Optional[int] = None,
+        hours: int = 24,
+    ) -> List[Tuple[int, float]]:
+        """Intraday max-pct series for ``feed`` over the last ``hours``.
+
+        Returns ascending (bucket_ms, max_pct) from the research DB — the
+        sparkline data for the dashboard panel.
+        """
+        now = now_ms if now_ms is not None else int(time.time() * 1000)
+        start = now - int(hours) * 3_600_000
+        return [
+            (int(b), float(p))
+            for b, p, _ in self._db.load_feed_age_samples(feed, start, now)
+        ]
 
 
 def start_feed_age_recorder_from_config(

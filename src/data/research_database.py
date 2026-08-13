@@ -242,6 +242,20 @@ class ResearchDatabase(Database):
             "CREATE INDEX IF NOT EXISTS idx_feed_age_feed_day "
             "ON feed_age_history(feed, day_start_ms);"
         )
+        self._conn().execute("""
+            CREATE TABLE IF NOT EXISTS feed_age_samples (
+                feed            TEXT    NOT NULL,
+                bucket_ms       INTEGER NOT NULL,
+                max_pct         REAL    NOT NULL,
+                samples         INTEGER NOT NULL,
+                ingested_at_ms  INTEGER NOT NULL,
+                PRIMARY KEY (feed, bucket_ms)
+            ) WITHOUT ROWID;
+        """)
+        self._conn().execute(
+            "CREATE INDEX IF NOT EXISTS idx_feed_age_samples_feed "
+            "ON feed_age_samples(feed, bucket_ms);"
+        )
         self._commit()
 
     def prune_old_data(self, days: int = 30) -> Dict[str, int]:
@@ -641,6 +655,78 @@ class ResearchDatabase(Database):
         if not row:
             return None
         return (int(row[0]), float(row[1]), int(row[2]))
+
+    def save_feed_age_samples(
+        self,
+        rows: List[Tuple[str, int, float, int]],
+    ) -> int:
+        """Upsert intraday max-pct-of-threshold rows.
+
+        ``rows`` = (feed, bucket_ms, max_pct, samples). Later samples for the
+        same (feed, bucket) raise the max — the sparkline shows the true
+        peak pct reached in each 10-minute bucket.
+        """
+        if not rows:
+            return 0
+        ingested = int(time.time() * 1000)
+        sql = """
+            INSERT INTO feed_age_samples (feed, bucket_ms, max_pct, samples, ingested_at_ms)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(feed, bucket_ms) DO UPDATE SET
+                max_pct        = MAX(feed_age_samples.max_pct, excluded.max_pct),
+                samples        = feed_age_samples.samples + excluded.samples,
+                ingested_at_ms = excluded.ingested_at_ms
+        """
+        params = [
+            (str(feed), int(bucket_ms), float(max_pct), int(samples), ingested)
+            for feed, bucket_ms, max_pct, samples in rows
+        ]
+        with self._write_lock:
+            conn = self._conn()
+            conn.executemany(sql, params)
+            conn.commit()
+        return len(params)
+
+    def load_feed_age_samples(
+        self,
+        feed: str,
+        start_ms: int,
+        end_ms: int,
+    ) -> List[Tuple[int, float, int]]:
+        """Intraday max-pct rows for ``feed`` in ``[start_ms, end_ms]`` ascending.
+
+        Returns (bucket_ms, max_pct, samples).
+        """
+        sql = """
+            SELECT bucket_ms, max_pct, samples FROM feed_age_samples
+            WHERE feed = ? AND bucket_ms >= ? AND bucket_ms <= ?
+            ORDER BY bucket_ms ASC
+        """
+        rows = self._conn().execute(
+            sql, (str(feed), int(start_ms), int(end_ms))
+        ).fetchall()
+        return [(int(b), float(p), int(s)) for b, p, s in rows]
+
+    def prune_feed_age_samples(
+        self,
+        retention_ms: int = 48 * 86_400_000,
+        now_ms: Optional[int] = None,
+    ) -> int:
+        """Delete intraday sample rows older than ``retention_ms``.
+
+        The intraday table is a rolling window for the dashboard sparkline —
+        unlike the append-only daily history, stale buckets are pruned so the
+        table stays bounded. ``now_ms`` is the reference clock (defaults to
+        wall-clock) so callers replaying non-wall-clock buckets prune
+        consistently. Returns rows deleted.
+        """
+        ref = now_ms if now_ms is not None else int(time.time() * 1000)
+        cutoff = int(ref) - int(retention_ms)
+        cur = self._conn().execute(
+            "DELETE FROM feed_age_samples WHERE bucket_ms < ?", (cutoff,)
+        )
+        self._commit()
+        return cur.rowcount
 
     def load_latest_liquidation_map(
         self,

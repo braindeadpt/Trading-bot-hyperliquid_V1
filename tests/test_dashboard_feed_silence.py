@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -121,6 +122,63 @@ class TestFeedSilencePayload:
         d = self._client.get("/api/market_data_health").get_json()
         assert "feed_silence" not in d
 
+    def test_payload_carries_sparkline_series(self, monkeypatch, tmp_path) -> None:
+        """Sparkline data comes from the research DB feed_age_samples table."""
+        import src.data.research_database as rdb_mod
+        from src.data.research_database import ResearchDatabase
+
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        now = int(time.time() * 1000)
+        bucket = now - (now % 600_000)
+        rdb.save_feed_age_samples(
+            [
+                ("funding_hl", bucket - 600_000, 20.0, 2),
+                ("funding_hl", bucket, 55.0, 3),
+            ]
+        )
+
+        def fake_research_db(*a, **k):
+            return rdb
+
+        monkeypatch.setattr(rdb_mod, "ResearchDatabase", fake_research_db)
+        silence = _SilenceStub(
+            {
+                "funding_hl": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 15.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                }
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        spark = d["feed_silence_spark"]["funding_hl"]
+        assert len(spark) == 2
+        assert spark[1] == [float(bucket), 55.0]
+
+    def test_sparkline_best_effort_on_missing_db(self, monkeypatch) -> None:
+        """A broken research DB degrades to empty series, never an error."""
+        import src.data.research_database as rdb_mod
+
+        def boom(*a, **k):
+            raise RuntimeError("db broken")
+
+        monkeypatch.setattr(rdb_mod, "ResearchDatabase", boom)
+        silence = _SilenceStub(
+            {
+                "funding_hl": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 15.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                }
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        assert d["feed_silence_spark"] == {}  # best-effort empty
+
 
 class TestFeedSilenceTemplate:
     """The panel markup + JS must expose the threshold-vs-age columns."""
@@ -134,13 +192,17 @@ class TestFeedSilenceTemplate:
 
     def test_template_has_threshold_vs_age_columns(self) -> None:
         html = TEMPLATE_PATH.read_text(encoding="utf-8")
-        # the 5 columns: Feed, Age, Threshold, % of threshold, State
+        # the 6 columns: Feed, Age, Threshold, % of threshold, 24h %, State
         assert ">Age</th>" in html
         assert ">Threshold</th>" in html
         assert "% of threshold" in html
+        assert ">24h %</th>" in html
         assert ">State</th>" in html
 
     def test_template_has_render_and_poll_wiring(self) -> None:
         html = TEMPLATE_PATH.read_text(encoding="utf-8")
         assert "function renderFeedSilence(" in html
+        assert "function sparklineSvg(" in html
+        assert "feed_silence_spark" in html
+        assert "sparklineSvg(sparks[feed] || [], 92, 20)" in html
         assert 'authFetch("/api/market_data_health")' in html
