@@ -18,12 +18,15 @@ from src.backtest.engine import BacktestEngine, BacktestConfig, _OpenPosition
 from src.backtest.symbol_rounding import round_position_size
 from src.backtest.replay_data_quality import ReplayDataQualityGate, SymbolReplayAudit
 from src.core.correlation_monitor import CorrelationMonitor
+from src.core.engine import TradingEngine
 from src.core.funding_blackout import FundingBlackoutFilter
 from src.core.risk_manager import RiskManager
 from src.core.signal_pipeline import GATE_ORDER, PipelineContext, SignalPipeline
 from src.core.volatility_circuit import VolatilityCircuitBreaker
+from src.data.database import Candle as DBCandle
 from src.data.database import Database
-from src.strategies.base import MarketEvent, Signal, Strategy
+from src.strategies.base import ExitSignal, MarketEvent, Position, Signal, Strategy
+from src.strategies.checklist_meta import ChecklistMeta
 from src.strategies.indicators import Candle
 from src.utils.config import Config, load_config, resolve_kelly_enabled
 import pytest
@@ -875,6 +878,321 @@ class TestParityAgainstProductionConfig:
         assert m["shared_gate_order"] == list(GATE_ORDER)
         assert live._tca_mode == "strict"
         assert bt._tca_mode == "proxy"
+
+
+class TestExitPathParityLiveVsBacktest:
+    """Exit-path side-by-side: live engine decisions vs backtest engine.
+
+    The entry chain parity (Phase 05) covers RiskManager -> SignalPipeline
+    -> gates. This class extends the same side-by-side approach to the
+    **exit path**: hard stop-loss/take-profit resolution, the intrabar
+    conflict policy, the strategy-level trailing (EMA9) and the engine-level
+    trailing ratchet. Any divergence between the two paths is either fixed
+    or pinned here as a documented contract.
+    """
+
+    pytestmark = pytest.mark.integration_offline
+
+    # -- helpers ----------------------------------------------------------
+
+    def _live_engine(self):
+        """Minimal live TradingEngine stub: only the exit-decision surface."""
+        eng = object.__new__(TradingEngine)
+        eng._trailing_enabled = False
+        eng._mode = "paper"
+        eng._software_stop_redundancy = False
+        eng._trailing_data = {}
+        eng._trailing_exclude_strategies = set()
+        eng._executor = None
+        eng._portfolio = None  # never touched while trailing is off
+        eng._risk = None
+        eng._kelly_sizer = None
+        eng._strategy_stats = {}
+        eng._strategies = []
+        exits: List[Dict[str, Any]] = []
+
+        async def _execute_exit(position, exit_price: float, reason: str) -> None:
+            exits.append(
+                {"symbol": position.symbol, "price": exit_price, "reason": reason}
+            )
+
+        eng._execute_exit = _execute_exit  # type: ignore[method-assign]
+        return eng, exits
+
+    @staticmethod
+    def _c1m(
+        open_: float = 50_000.0,
+        high: float = 50_100.0,
+        low: float = 49_900.0,
+        close: float = 50_000.0,
+        ts: int = 60_000,
+    ) -> DBCandle:
+        return DBCandle(
+            symbol="BTC", timestamp_ms=ts, open=open_, high=high,
+            low=low, close=close, volume=10.0,
+        )
+
+    @staticmethod
+    def _bt_engine() -> BacktestEngine:
+        eng = object.__new__(BacktestEngine)
+        eng.cfg = BacktestConfig(intrabar_conflict_policy="pessimistic")
+        return eng
+
+    @staticmethod
+    def _bt_pos(sl: Optional[float] = None, tp: Optional[float] = None) -> _OpenPosition:
+        return _OpenPosition(
+            id=1, strategy="ChecklistMeta", symbol="BTC", side="long",
+            entry_price=50_000.0, entry_time_ms=0, size=0.1,
+            stop_loss_price=sl, take_profit_price=tp,
+        )
+
+    # -- hard stops: live tick-level vs backtest 1m intrabar ---------------
+
+    async def test_hard_stop_loss_long_live_matches_backtest(self) -> None:
+        """A tick through SL (live) == a 1m low through SL (backtest).
+
+        Same trigger condition, same reason. Fill convention differs by
+        design: live fills at the observed tick price (49,400 — the cross),
+        backtest fills at the exact SL level (49,500 — pessimistic level
+        fill, since the bar does not reveal intra-bar path).
+        """
+        eng, exits = self._live_engine()
+        pos = Position(
+            symbol="BTC", side="long", entry_price=50_000.0, size=0.1,
+            entry_time_ms=0, stop_loss_price=49_500.0,
+        )
+        await eng._check_hard_stops(pos, 49_400.0)
+        assert exits, "live should exit on SL cross"
+        assert exits[0]["reason"] == "stop_loss"
+        assert exits[0]["price"] == 49_400.0
+
+        bt = self._bt_engine()
+        result = bt._intrabar_stop_tp(self._bt_pos(sl=49_500.0), self._c1m(low=49_400.0))
+        assert result is not None
+        reason, fill = result
+        assert reason == "stop_loss"
+        assert fill == 49_500.0
+
+    async def test_hard_take_profit_short_live_matches_backtest(self) -> None:
+        """TP on the short side: live tick >= TP == backtest 1m high >= TP."""
+        eng, exits = self._live_engine()
+        pos = Position(
+            symbol="BTC", side="short", entry_price=50_000.0, size=0.1,
+            entry_time_ms=0, take_profit_price=49_000.0,
+        )
+        await eng._check_hard_stops(pos, 48_900.0)
+        assert exits
+        assert exits[0]["reason"] == "take_profit"
+        assert exits[0]["price"] == 48_900.0
+
+        bt = self._bt_engine()
+        bpos = _OpenPosition(
+            id=1, strategy="Test", symbol="BTC", side="short",
+            entry_price=50_000.0, entry_time_ms=0, size=0.1,
+            stop_loss_price=None, take_profit_price=49_000.0,
+        )
+        result = bt._intrabar_stop_tp(bpos, self._c1m(low=48_900.0))
+        assert result is not None
+        reason, fill = result
+        assert reason == "take_profit"
+        assert fill == 49_000.0
+
+    # -- intrabar conflict policy ------------------------------------------
+
+    def test_intrabar_conflict_pessimistic_matches_live_adverse_tick(self) -> None:
+        """Both SL and TP touched in one bar: pessimistic == adverse tick first.
+
+        Live is tick-level: whichever touch arrives first wins. The 1m bar
+        hides that order, so the backtest must pick a policy. Pessimistic
+        assumes the adverse move came first (SL), which is exactly what live
+        does when the adverse tick precedes the favorable one. The
+        ``adverse_first`` exit-path policy (P2) brackets the same assumption
+        for strategy-level exits.
+        """
+        bt = self._bt_engine()
+        # long: low <= SL (49,400) AND high >= TP (50,600) in the same bar
+        result = bt._intrabar_stop_tp(
+            self._bt_pos(sl=49_500.0, tp=50_600.0),
+            self._c1m(high=50_700.0, low=49_400.0),
+        )
+        assert result is not None
+        reason, fill = result
+        assert reason == "stop_loss"
+        assert fill == 49_500.0
+
+        # Same outcome when the optimistic policy is off and the live adverse
+        # tick arrives first (tick-level check already exits before any TP).
+        eng = object.__new__(BacktestEngine)
+        eng.cfg = BacktestConfig(intrabar_conflict_policy="optimistic")
+        result_opt = eng._intrabar_stop_tp(
+            self._bt_pos(sl=49_500.0, tp=50_600.0),
+            self._c1m(high=50_700.0, low=49_400.0),
+        )
+        assert result_opt is not None
+        assert result_opt[0] == "take_profit"  # optimistic brackets the other order
+
+    def test_exit_path_policy_brackets_live_tick_order(self) -> None:
+        """P1 (favorable_first) vs P2 (adverse_first) bracket the true tick order."""
+        c1m = self._c1m(open_=100.0, high=110.0, low=90.0, close=105.0)
+        eng = object.__new__(BacktestEngine)
+        eng.cfg = BacktestConfig(exit_path_policy="favorable_first")
+        p1_long = eng._exit_path_prices("long", c1m)
+        eng.cfg = BacktestConfig(exit_path_policy="adverse_first")
+        p2_long = eng._exit_path_prices("long", c1m)
+        assert p1_long == [100.0, 110.0, 90.0, 105.0]
+        assert p2_long == [100.0, 90.0, 110.0, 105.0]
+        # live tick order falls somewhere inside this bracket; the policies
+        # exist precisely because the 1m bar cannot know it.
+        assert set(p1_long) == set(p2_long) == {100.0, 110.0, 90.0, 105.0}
+
+    # -- strategy-level trailing (EMA9) -------------------------------------
+
+    def _cm_config(self) -> Dict[str, Any]:
+        return {
+            "use_trailing_stop": True,
+            "trailing_method": "ema9",
+            "trailing_start_r": 1.0,
+            "trailing_ema_period": 9,
+            "use_sl_to_be_after_1r": False,
+            "max_hold_hours": 24.0,
+            "score_threshold": 99.0,  # never entry-test in this unit
+        }
+
+    def test_strategy_trailing_ema9_live_vs_backtest_same_exit(self) -> None:
+        """The EMA9 trail computed in on_position is identical in both paths.
+
+        Live feeds ticks into ``strategy.on_position``; the backtest walks
+        the same ``on_position`` over the 1m OHLC path (``_process_exits``).
+        Given the same 15m candle history, the trail level and the exit
+        signal (``trailing_stop_ema9_*``) must be identical — the strategy
+        code is the single source of truth for both.
+        """
+        cm = ChecklistMeta(self._cm_config())
+        # 15m candle history rising far enough to arm the trail (> 1R) and
+        # keep the EMA9 trail ABOVE the 1R level, so a pullback below the
+        # trail still satisfies profit_r >= TRAILING_START_R (= 1.0).
+        # R = |entry - SL| = 1,000 (50,000 -> 49,000); 1R = +1,000.
+        candles: List[Candle] = []
+        ts = 1_700_000_000_000
+        for i in range(20):
+            px = 50_000.0 + i * 100.0  # 50,000 -> 51,900 (profit_r = 1.9)
+            candles.append(
+                Candle(px - 10, px + 10, px - 10, px, 100.0, ts + i * 900_000)
+            )
+        entry_ms = ts  # the position entry time is fixed for its whole life
+        for i, c in enumerate(candles):
+            cm.on_position(
+                _cm_position(entry=50_000.0, sl=49_000.0, ts=entry_ms),
+                _cm_event(price=c.close, ts=ts + i * 900_000, c15=c),
+            )
+
+        # Live side: a tick below the trail must emit trailing_stop_ema9.
+        # (profit_r >= 1.0 armed the trail at the last 15m close; a pullback
+        # below the EMA9 trail level now fires the exit.)
+        trail_level = cm._compute_trail(list(candles), "long")
+        assert trail_level is not None and trail_level > 51_000.0  # above 1R
+        assert trail_level < 51_900.0
+        live_exit = cm.on_position(
+            _cm_position(entry=50_000.0, sl=49_000.0, ts=entry_ms),
+            _cm_event(price=trail_level - 5.0, ts=ts + 20 * 900_000, c15=candles[-1]),
+        )
+        assert live_exit is not None
+        assert live_exit.reason.startswith("trailing_stop_ema9")
+
+        # Backtest side: the same position through _process_exits walking the
+        # 1m path must fire the same signal when the path touches the trail.
+        bt = self._bt_engine()
+        bt.strategy = ChecklistMeta(self._cm_config())
+        # seed identical candle history into the backtest strategy instance
+        for i, c in enumerate(candles):
+            bt.strategy.on_position(
+                _cm_position(entry=50_000.0, sl=49_000.0, ts=entry_ms),
+                _cm_event(price=c.close, ts=ts + i * 900_000, c15=c),
+            )
+        bt.positions_by_symbol = {"BTC": 1}
+        bt_pos = _OpenPosition(
+            id=1, strategy="ChecklistMeta", symbol="BTC", side="long",
+            entry_price=50_000.0, entry_time_ms=entry_ms, size=0.1,
+            stop_loss_price=49_000.0, take_profit_price=None,
+            metadata={"strategy": "ChecklistMeta"},
+        )
+        bt.positions = {1: bt_pos}
+        closed: List[Any] = []
+
+        def _close(pos_id, fill_price, ts_, reason, capital):
+            closed.append({"fill": fill_price, "reason": reason})
+            bt.positions_by_symbol.pop("BTC", None)
+            bt.positions.pop(pos_id, None)
+            return capital
+
+        bt._close_position = _close  # type: ignore[method-assign]
+        bt._intrabar_stop_tp = lambda *_a, **_k: None  # type: ignore[method-assign]
+        # 1m bar whose low touches the trail -> the adverse_first path walks
+        # [open, low, high, close] and on_position sees the trail cross.
+        event = MarketEvent(symbol="BTC", price=trail_level, timestamp_ms=ts + 20 * 900_000)
+        c1m = self._c1m(
+            open_=trail_level + 10.0,
+            high=trail_level + 20.0,
+            low=trail_level - 5.0,
+            close=trail_level + 5.0,
+            ts=ts + 20 * 900_000,
+        )
+        bt._process_exits(event, 100_000.0, c1m)  # type: ignore[arg-type]
+        assert closed, "backtest should exit via strategy trailing"
+        assert str(closed[0]["reason"]).startswith("trailing_stop_ema9")
+
+    # -- engine-level trailing ratchet (live-only) --------------------------
+
+    def test_engine_trailing_ratchet_is_live_only_and_documented(self) -> None:
+        """The peak-ratchet trailing lives ONLY in the live engine.
+
+        ``TradingEngine._maybe_update_trailing_stop`` ratchets the SL to
+        peak * (1 - trail_pct) after activation. The backtest engine has no
+        equivalent mechanism: strategy-level exits (EMA9 trail, SL-to-BE,
+        TP mirror, max_hold) run in both, but the engine ratchet is a live
+        execution-layer feature that the replay does not model. This test
+        pins that contract: the exclusion list is the single source of truth
+        for which strategies get the ratchet, and the backtest exit path
+        does not expose it.
+        """
+        # Live: production exclude list (VB, VWAP, SFP, TrendPyramid).
+        eng = object.__new__(TradingEngine)
+        eng._trailing_exclude_strategies = {
+            "VolatilityBreakout", "VWAPDeviation", "SmartMoneyFlow", "TrendPyramid",
+        }
+        excluded = Position(
+            symbol="BTC", side="long", entry_price=50_000.0, size=0.1,
+            entry_time_ms=0, stop_loss_price=49_500.0,
+            metadata={"sub_strategy": "VWAPDeviation"},
+        )
+        assert eng._trailing_excluded_for_position(excluded) is True
+        not_excluded = Position(
+            symbol="BTC", side="long", entry_price=50_000.0, size=0.1,
+            entry_time_ms=0, stop_loss_price=49_500.0,
+            metadata={"sub_strategy": "ChecklistMeta"},
+        )
+        assert eng._trailing_excluded_for_position(not_excluded) is False
+
+        # Backtest: no ratchet surface exists in the replay engine.
+        bt = self._bt_engine()
+        assert not hasattr(bt, "_trailing_data")
+        assert not hasattr(bt, "_maybe_update_trailing_stop")
+
+
+def _cm_position(entry: float, sl: float, ts: int) -> Position:
+    return Position(
+        symbol="BTC", side="long", entry_price=entry, size=0.1,
+        entry_time_ms=ts, stop_loss_price=sl,
+        metadata={"strategy": "ChecklistMeta"},
+    )
+
+
+def _cm_event(price: float, ts: int, c15: Candle) -> MarketEvent:
+    c1 = Candle(price - 5, price + 5, price - 5, price, 100.0, ts)
+    return MarketEvent(
+        symbol="BTC", price=price, timestamp_ms=ts,
+        candle_1m=c1, candle_15m=c15,
+    )
 
 
 def main() -> None:
