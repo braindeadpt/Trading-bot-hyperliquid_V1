@@ -12,13 +12,18 @@ import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from datetime import datetime, timezone
+
 from src.backtest.engine import BacktestEngine, BacktestConfig, _OpenPosition
 from src.backtest.symbol_rounding import round_position_size
 from src.backtest.replay_data_quality import ReplayDataQualityGate, SymbolReplayAudit
 from src.core.correlation_monitor import CorrelationMonitor
+from src.core.funding_blackout import FundingBlackoutFilter
 from src.core.risk_manager import RiskManager
 from src.core.signal_pipeline import GATE_ORDER, PipelineContext, SignalPipeline
-from src.strategies.base import MarketEvent, Signal
+from src.core.volatility_circuit import VolatilityCircuitBreaker
+from src.data.database import Database
+from src.strategies.base import MarketEvent, Signal, Strategy
 from src.strategies.indicators import Candle
 from src.utils.config import Config, load_config, resolve_kelly_enabled
 import pytest
@@ -455,6 +460,176 @@ def test_gate_order_feed_before_cooldown() -> None:
     assert GATE_ORDER.index("correlation") < GATE_ORDER.index("risk")
 
 
+def test_live_and_backtest_pipelines_agree_on_shared_gates() -> None:
+    """Identical inputs → identical gate decisions in live AND backtest replay.
+
+    Phase 05: SignalPipeline is the single source of truth for the entry
+    gate chain. Building both pipelines from the same config (for_backtest
+    False/True) and driving them with identical state must produce the same
+    gate outcome for every shared gate.
+    """
+    cfg = _cfg(chase_enabled=True)
+    rm = RiskManager(cfg, None)
+    vol = VolatilityCircuitBreaker.from_config_dict({
+        "enabled": True, "multiplier": 3.0, "baseline_window_bars": 20,
+        "block_duration_min": 30, "min_samples": 1,
+    })
+    fb = FundingBlackoutFilter.from_config_dict({
+        "enabled": True, "minutes_before": 5, "minutes_after": 5,
+        "resets_utc": ["08:00"],
+    })
+    monitor = CorrelationMonitor(lookback=60)
+    live = SignalPipeline(
+        cfg, rm, correlation_monitor=monitor, vol_circuit=vol,
+        funding_blackout=fb, for_backtest=False,
+    )
+    bt = SignalPipeline(
+        cfg, rm, correlation_monitor=monitor, vol_circuit=vol,
+        funding_blackout=fb, for_backtest=True,
+    )
+    ctx_live = PipelineContext()
+    ctx_bt = PipelineContext()
+
+    def _assert_same(sig, ev, port):
+        dl = live.evaluate_gates(sig, ev, port, ctx_live, skip_tca=True)
+        db = bt.evaluate_gates(sig, ev, port, ctx_bt, skip_tca=True)
+        assert dl.approved == db.approved
+        assert dl.gate == db.gate
+        assert dl.reason == db.reason
+        return dl
+
+    ts0 = 1_700_000_000_000
+
+    # 1. Fresh signal → both approve
+    d = _assert_same(_signal(), _event(ts=ts0), _PortfolioStub())
+    assert d.approved
+
+    # 2. Entry debounce
+    ctx_live.last_entry_ms["BTC"] = ts0
+    ctx_bt.last_entry_ms["BTC"] = ts0
+    d = _assert_same(_signal(), _event(ts=ts0 + 2_000), _PortfolioStub())
+    assert not d.approved and d.gate == "entry_debounce"
+    for c in (ctx_live, ctx_bt):
+        c.last_entry_ms.clear()
+
+    # 3. Cooldown
+    for c in (ctx_live, ctx_bt):
+        c.cooldown_state["VWAPDeviation:BTC"] = {
+            "last_trade_ms": ts0, "duration_ms": 30 * 60_000,
+            "consecutive_losses": 0,
+        }
+    d = _assert_same(_signal(), _event(ts=ts0 + 60_000), _PortfolioStub())
+    assert not d.approved and d.gate == "cooldown"
+    for c in (ctx_live, ctx_bt):
+        c.cooldown_state.clear()
+
+    # 4. Chase filter (TrendFollow is not exempt)
+    runup = [
+        Candle(49_000, 49_100, 48_900, 49_000, 1.0, ts0),
+        Candle(49_500, 49_600, 49_400, 49_500, 1.0, ts0 + 3_600_000),
+    ]
+    ctx_live.candles_15m_history = {"BTC": list(runup)}
+    ctx_bt.candles_15m_history = {"BTC": list(runup)}
+    d = _assert_same(_signal(strategy="TrendFollow"), _event(ts=ts0), _PortfolioStub())
+    assert not d.approved and d.gate == "chase_filter"
+    for c in (ctx_live, ctx_bt):
+        c.candles_15m_history.clear()
+
+    # 5. Correlation gate (shared monitor → identical state)
+    for i in range(30):
+        r = 0.01 + (i % 5) * 0.001
+        monitor.add_return("BTC", r)
+        monitor.add_return("ETH", r * 0.99)
+    port_corr = _PortfolioStub()
+    port_corr.positions = {
+        "BTC": type("P", (), {"entry_price": 50_000.0, "size": 0.1, "side": "long"})(),
+    }
+    d = _assert_same(_signal(symbol="ETH"), _event(symbol="ETH", ts=ts0), port_corr)
+    assert not d.approved and d.gate == "correlation"
+
+    # 6. Risk — max total positions (5/5)
+    port_full = _PortfolioStub()
+    port_full.positions = {f"X{i}": object() for i in range(5)}
+    d = _assert_same(_signal(symbol="BTC"), _event(ts=ts0), port_full)
+    assert not d.approved and d.gate == "risk"
+
+    # 7. Volatility circuit (shared instance → identical block state).
+    # Baseline = mean of the trailing window INCLUDING the current sample,
+    # so establish ~20 calm samples first, then a 3.5x spike.
+    for i in range(19):
+        vol.update("BTC", 0.01, ts0 + i)
+    vol.update("BTC", 0.04, ts0 + 1_000)  # mean=0.0115 → ratio 3.48 > 3
+    d = _assert_same(_signal(), _event(ts=ts0 + 2_000), _PortfolioStub())
+    assert not d.approved and d.gate == "vol_circuit"
+
+    # 8. Funding blackout — 07:58 UTC, 2 min before the 08:00 reset
+    blackout_ts = int(
+        datetime(2023, 11, 14, 7, 58, tzinfo=timezone.utc).timestamp() * 1000
+    )
+    d = _assert_same(
+        _signal(symbol="ETH"), _event(symbol="ETH", ts=blackout_ts), _PortfolioStub(),
+    )
+    assert not d.approved and d.gate == "funding_blackout"
+
+
+def test_gate_manifest_documents_live_backtest_parity_contract() -> None:
+    """gate_manifest() must pin the shared vs live-only gate split."""
+    cfg = _cfg()
+    rm = RiskManager(cfg, None)
+    live = SignalPipeline(cfg, rm, for_backtest=False)
+    bt = SignalPipeline(cfg, rm, for_backtest=True)
+
+    m = live.gate_manifest()
+    assert m["gate_parity_version"] == "phase05-gates-v1"
+    assert m["shared_gate_order"] == list(GATE_ORDER)
+    assert set(m["live_only_gates"]) == {
+        "execution_block", "fill_ratio", "slippage_l2",
+        "reconciliation_stale", "executor_debounce",
+    }
+    assert m["replay_substitutes"] == {"feed_health": "replay_data_quality"}
+    # Live TCA is strict (needs L2 book); backtest is proxy (candle-only).
+    assert live._tca_mode == "strict"
+    assert bt._tca_mode == "proxy"
+
+
+def test_backtest_engine_wires_real_risk_manager_and_pipeline() -> None:
+    """Backtest replay must use the SAME RiskManager + SignalPipeline as live."""
+
+    class _StubStrategy(Strategy):
+        name = "Stub"
+
+        def on_data(self, event):
+            return None
+
+        def on_position(self, position, event):
+            return None
+
+    cfg = _cfg()
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp.close()
+    db = Database(tmp.name)
+    try:
+        engine = BacktestEngine(
+            database=db,
+            strategy=_StubStrategy(),
+            config=BacktestConfig(
+                use_risk_manager=True,
+                use_volatility_circuit=False,
+                use_funding_blackout=False,
+            ),
+            symbols=["BTC"],
+            risk_config=cfg,
+        )
+    finally:
+        db.close()
+
+    assert isinstance(engine._risk_manager, RiskManager)
+    assert isinstance(engine._pipeline, SignalPipeline)
+    assert engine._pipeline._for_backtest is True
+    # The same RiskManager instance drives both gate decisions and sizing.
+    assert engine._pipeline._risk is engine._risk_manager
+
+
 def test_round_position_size_matches_floor() -> None:
     assert round_position_size("SOL", 1.239, _cfg()) == 1.23
 
@@ -475,6 +650,9 @@ def main() -> None:
     test_tca_proxy_allows_without_l2()
     test_entry_debounce_blocks_rapid_reentry()
     test_gate_order_feed_before_cooldown()
+    test_live_and_backtest_pipelines_agree_on_shared_gates()
+    test_gate_manifest_documents_live_backtest_parity_contract()
+    test_backtest_engine_wires_real_risk_manager_and_pipeline()
     test_round_position_size_matches_floor()
     print("test_backtest_live_parity: all passed")
 
