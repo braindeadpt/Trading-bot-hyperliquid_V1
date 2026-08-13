@@ -2033,6 +2033,9 @@ class TradingEngine:
                         pass
                     else:
                         best_signal = max(routed, key=lambda s: s.confidence)
+                        self._record_iv_gate_shadow(
+                            best_signal, symbol=symbol, event=event,
+                        )
                         await self._process_entry_signal(best_signal, event)
                 else:
                     weighted_signals = self._apply_regime_weights(signals, symbol)
@@ -2206,6 +2209,90 @@ class TradingEngine:
                     getattr(sig, "strategy", "?"),
                     exc,
                 )
+
+    def _record_iv_gate_shadow(
+        self,
+        signal: Signal,
+        *,
+        symbol: str,
+        event: MarketEvent,
+    ) -> None:
+        """Shadow-only IV gate: record the high/low-IV decision per routed trade.
+
+        Observability only — the IV gate is **not** enforced (the backtest
+        evidence is n=13, INCONCLUSIVE per docs/IV_HIGH_ONLY_AB_SPLIT.md). Each
+        routed trade is classified against the trailing DVOL percentile and a
+        ``iv_gate_shadow`` decision is persisted, so live can be compared with
+        the backtest gate without touching execution. ``None`` percentile (no
+        DVOL history yet) records as ``unknown`` and never blocks.
+        """
+        if not self._phase08_regime_router:
+            return
+        try:
+            dvol_enabled = bool(self._config.get("research.dvol_feed.enabled", False))
+        except Exception:  # noqa: BLE001
+            dvol_enabled = False
+        if not dvol_enabled:
+            return
+        recorder = self._ensure_shadow_recorder()
+        if recorder is None:
+            return
+        try:
+            from src.data.dvol_feed import (
+                IV_HIGH_PCT,
+                classify_iv,
+                current_dvol_percentile,
+                dvol_currency_for,
+            )
+            from src.research.shadow_recorder import (
+                ShadowDecision,
+                build_enriched_market_snapshot,
+            )
+
+            strategy_name = self._signal_strategy_name(signal)
+            currency = dvol_currency_for(symbol)
+            rdb = getattr(recorder, "_db", None)
+            pct = current_dvol_percentile(currency, ts_ms=event.timestamp_ms, db=rdb)
+            iv_class = classify_iv(pct)
+            meta = dict(signal.metadata or {})
+            meta["iv_percentile"] = None if pct is None else round(float(pct), 2)
+            meta["iv_class"] = iv_class
+            meta["iv_threshold"] = IV_HIGH_PCT
+            meta["iv_currency"] = currency
+
+            recorder.record(
+                ShadowDecision(
+                    symbol=symbol,
+                    strategy=strategy_name,
+                    variant="iv_gate_shadow",
+                    side=str(signal.side or ""),
+                    would_enter=True,
+                    reason=f"iv_gate:{iv_class}",
+                    timestamp_ms=event.timestamp_ms,
+                    market_snapshot=build_enriched_market_snapshot(
+                        price=float(event.price),
+                        confidence=float(signal.confidence),
+                        stop_loss_pct=float(signal.stop_loss_pct or 0.0),
+                        take_profit_pct=(
+                            float(signal.take_profit_pct)
+                            if signal.take_profit_pct is not None
+                            else None
+                        ),
+                        size_pct=float(signal.size_pct or 0.0),
+                        metadata=meta,
+                    ),
+                )
+            )
+            logger.info(
+                "IV gate shadow %s %s %s pct=%s class=%s (not enforced)",
+                symbol,
+                strategy_name,
+                signal.side,
+                meta["iv_percentile"],
+                iv_class,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("IV gate shadow record failed for %s: %s", symbol, exc)
 
     def _evaluate_shadow_strategies(self, event: MarketEvent, symbol: str) -> None:
         """Run Phase08 shadow strategies and log hypothetical decisions.

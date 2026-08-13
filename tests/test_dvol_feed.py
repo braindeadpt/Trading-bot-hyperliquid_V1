@@ -17,9 +17,12 @@ sys.path.insert(0, str(ROOT))
 
 from src.data.dvol_feed import (  # noqa: E402
     DVOL_WINDOW_DAYS,
+    IV_HIGH_PCT,
     DvolFeed,
     build_iv_percentile,
+    classify_iv,
     current_dvol_percentile,
+    dvol_currency_for,
     dvol_series_for,
     iv_pct_at,
     start_dvol_feed_from_config,
@@ -70,6 +73,33 @@ class TestDvolSeriesFor:
         assert dvol_series_for("ETH", btc, eth) is eth
         assert dvol_series_for("SOL", btc, eth) is btc
         assert dvol_series_for("HYPE", btc, eth) is btc
+
+
+class TestDvolCurrencyFor:
+    def test_btc_eth_native_elsewhere_proxy(self):
+        assert dvol_currency_for("BTC") == "BTC"
+        assert dvol_currency_for("ETH") == "ETH"
+        assert dvol_currency_for("SOL") == "BTC"
+        assert dvol_currency_for("HYPE") == "BTC"
+
+    def test_lowercase_and_whitespace_normalized(self):
+        assert dvol_currency_for(" btc ") == "BTC"
+        assert dvol_currency_for("eth") == "ETH"
+
+
+class TestClassifyIv:
+    def test_none_is_unknown(self):
+        assert classify_iv(None) == "unknown"
+
+    def test_strictly_above_threshold_is_high(self):
+        assert classify_iv(IV_HIGH_PCT) == "low_iv"  # not strictly above
+        assert classify_iv(IV_HIGH_PCT + 0.01) == "high_iv"
+        assert classify_iv(100.0) == "high_iv"
+        assert classify_iv(0.0) == "low_iv"
+
+    def test_custom_threshold(self):
+        assert classify_iv(50.0, threshold=50.0) == "low_iv"
+        assert classify_iv(50.1, threshold=50.0) == "high_iv"
 
 
 class TestResearchDbDvolDaily:

@@ -31,6 +31,10 @@ DERIBIT_URL = "https://www.deribit.com/api/v2/public/get_volatility_index_data"
 DVOL_WINDOW_DAYS = 30
 DVOL_CURRENCIES = ("BTC", "ETH")
 
+# Canonical high_iv cut for the IV regime gate. Matches the backtest evidence
+# exactly (docs/IV_HIGH_ONLY_AB_SPLIT.md: high_iv = DVOL percentile(30d) > 66.7).
+IV_HIGH_PCT = 66.7
+
 
 async def fetch_dvol(
     currency: str, start_ms: int, end_ms: int
@@ -99,6 +103,30 @@ def dvol_series_for(
     if sym == "ETH":
         return eth_iv
     return btc_iv
+
+
+def dvol_currency_for(symbol: str) -> str:
+    """DVOL index currency for a trade symbol (BTC/ETH native, else BTC proxy).
+
+    Mirrors ``dvol_series_for`` so production and backtest classify every
+    symbol against the same index.
+    """
+    s = str(symbol).strip().upper()
+    return s if s in DVOL_CURRENCIES else "BTC"
+
+
+def classify_iv(
+    percentile: Optional[float], threshold: float = IV_HIGH_PCT
+) -> str:
+    """Shadow-gate decision: ``high_iv`` / ``low_iv`` / ``unknown``.
+
+    ``high_iv`` = trailing-30d DVOL percentile strictly above the threshold
+    (the backtest gate in docs/IV_HIGH_ONLY_AB_SPLIT.md). ``None`` (no DVOL
+    history yet) is ``unknown`` and must never be treated as a block.
+    """
+    if percentile is None:
+        return "unknown"
+    return "high_iv" if float(percentile) > float(threshold) else "low_iv"
 
 
 class DvolFeed:

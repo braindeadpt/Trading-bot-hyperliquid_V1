@@ -621,7 +621,7 @@ async def main() -> None:
             except Exception as exc:
                 logger.warning("ResearchSampler failed to start: %s", exc)
         try:
-            from data.dvol_feed import start_dvol_feed_from_config
+            from src.data.dvol_feed import start_dvol_feed_from_config
 
             _dvol_feed = start_dvol_feed_from_config(cfg)
             if _dvol_feed is not None:
