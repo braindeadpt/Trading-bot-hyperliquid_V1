@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import IntEnum
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -410,13 +410,40 @@ class SecurityAuditor:
 
     # -- Public API ----------------------------------------------------------
 
-    def run(self) -> None:
-        """Execute the full audit scan."""
+    def _resolve_target(self, target: Union[Path, str]) -> Optional[Path]:
+        """Resolve a caller-supplied target to an absolute ``.py`` file under
+        ``src_dir``; return ``None`` for non-``.py`` paths, missing files, or
+        paths outside ``src_dir``."""
+        if isinstance(target, str):
+            target = Path(target)
+        p = target if target.is_absolute() else self.src_dir / target
+        p = p.resolve()
+        try:
+            p.relative_to(self.src_dir)
+        except ValueError:
+            return None
+        if p.suffix != ".py" or not p.is_file():
+            return None
+        return p
+
+    def run(self, targets: Optional[Sequence[Path]] = None) -> None:
+        """Execute the audit scan.
+
+        With *targets* (a list of ``.py`` paths, resolved relative to
+        ``src_dir``), only those files are scanned — the fast path used by the
+        pre-commit hook (scripts/run_git_hooks.py). The default (``None``)
+        scans the whole tree, exactly as before.
+        """
         self.findings.clear()
         self.files_scanned = 0
         self.lines_scanned = 0
 
-        for py_file in self._iter_py_files():
+        if targets is None:
+            files = self._iter_py_files()
+        else:
+            files = [p for p in (self._resolve_target(t) for t in targets) if p is not None]
+
+        for py_file in files:
             self.files_scanned += 1
             try:
                 text = _read_source(py_file)

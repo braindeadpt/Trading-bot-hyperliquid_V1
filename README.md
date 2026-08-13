@@ -181,6 +181,9 @@ python scripts/run_pre_push_gate.py --skip-hash      # skip the config_hash chec
 # CI battery — also runs the same security audit + config_hash (the full trio)
 python scripts/run_ci_tests.py
 
+# Git hooks: fast pre-commit (staged files only) + full pre-push gate
+python scripts/install_git_hooks.py
+
 # Pre-start feed delivery check (fails early instead of waiting for silence)
 python scripts/preflight_feed_check.py
 
@@ -380,6 +383,36 @@ unreachable (e.g. missing Fase 10 manifest). Note the audit default mirrors
 `main.py --audit`: it fails on CRITICAL findings; the 2 pre-existing HIGH
 (`AUDIT-005` subprocess) and 1 MEDIUM (`AUDIT-004` file write) are baseline
 and do not block unless you pass `--fail-on-high`.
+
+---
+
+## Git hooks (fast pre-commit + full pre-push)
+
+Install both hooks once (idempotent — re-running only refreshes its own
+hooks; pre-existing foreign hooks are left alone unless `--force`, which
+backs them up to `.bak`):
+
+```bash
+python scripts/install_git_hooks.py              # install both hooks
+python scripts/install_git_hooks.py --force      # replace foreign hooks (backup .bak)
+python scripts/install_git_hooks.py --list       # show current state
+python scripts/install_git_hooks.py --uninstall  # remove managed hooks only
+```
+
+- **pre-commit — fast path** (`scripts/run_git_hooks.py --hook pre-commit`):
+  runs in seconds, only over the **staged** files — a syntax check of every
+  staged `.py`, a **scoped security audit** of the staged files under `src/`
+  (CRITICAL blocks; `--fail-on-high` also blocks HIGH), and the
+  config_hash-vs-frozen check (always — catches drift even from a
+  `DEFAULT_CONFIG` change). No full pytest, no full-tree audit: those stay
+  in the pre-push hook.
+- **pre-push — full gate**: delegates to `scripts/run_pre_push_gate.py`
+  (pytest battery + full security audit + config_hash); its exit code passes
+  through.
+
+The scoped audit is the same `security.audit` rules restricted to the diff
+(`SecurityAuditor.run(targets=...)`), so new code with an `eval`/hardcoded
+secret/subprocess is caught at commit time instead of at push.
 
 ## Testing
 
