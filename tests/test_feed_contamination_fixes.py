@@ -55,6 +55,78 @@ def test_feed_silence_stale_event_ts_false_alarm_pattern() -> None:
     assert mon.snapshot()["liquidation_okx"]["degraded"] is False
 
 
+def test_feed_silence_contracts_exclude_blocked_binance_feeds() -> None:
+    """Not-contracted feeds (binance_perp without LeadLag, fstream-blocked
+    liquidation_binance) must not appear in the silence contract, so the
+    dashboard ``degraded`` state only reflects feeds that deliver here."""
+    from src.core.engine import feed_silence_contracts
+    from src.utils.config import Config
+
+    cfg = Config({
+        "market_data": {"feed_silence": {"enabled": True}},
+        "strategy": {"lead_lag": {"enabled": False, "auto_enable": False}},
+    })
+    feeds = feed_silence_contracts(cfg)
+    assert "binance_perp" not in feeds
+    assert "liquidation_binance" not in feeds
+    # Always-contracted feeds stay contracted
+    for name in ("liquidation_okx", "liquidation_bybit", "funding_cex",
+                 "funding_hl", "taker_split"):
+        assert name in feeds, name
+
+
+def test_feed_silence_contracts_lead_lag_contracts_binance_perp() -> None:
+    from src.core.engine import feed_silence_contracts
+    from src.utils.config import Config
+
+    cfg = Config({
+        "market_data": {},
+        "strategy": {"lead_lag": {"enabled": True, "auto_enable": False}},
+    })
+    feeds = feed_silence_contracts(cfg)
+    assert "binance_perp" in feeds
+
+
+def test_feed_silence_monitor_drops_uncontracted_defaults() -> None:
+    """FeedSilenceMonitor registers class-level default feeds even when
+    omitted from ``feeds`` — the engine drops non-contracted ones, so
+    ``snapshot()``/``any_degraded`` only reflect feeds that deliver here."""
+    from src.core.engine import feed_silence_contracts
+    from src.data.market_data_health import FeedSilenceMonitor
+    from src.utils.config import Config
+
+    cfg = Config({
+        "market_data": {"feed_silence": {"enabled": True}},
+        "strategy": {"lead_lag": {"enabled": False, "auto_enable": False}},
+    })
+    contracts = feed_silence_contracts(cfg)
+    mon = FeedSilenceMonitor(feeds=contracts)
+    # Same drop step the TradingEngine applies after construction.
+    for fname in list(mon._enabled_feeds):
+        if fname not in contracts:
+            mon.disable_feed(fname)
+    snap = mon.snapshot()
+    assert "binance_perp" not in snap
+    assert "liquidation_binance" not in snap
+    assert "liquidation_okx" in snap
+    assert "funding_cex" in snap
+
+
+def test_feed_silence_contracts_liquidation_binance_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.engine import feed_silence_contracts
+    from src.utils.config import Config
+
+    monkeypatch.setenv("LIQUIDATION_BINANCE_CONTRACTED", "true")
+    cfg = Config({
+        "market_data": {"feed_silence": {"enabled": True}},
+        "strategy": {"lead_lag": {"enabled": False, "auto_enable": False}},
+    })
+    feeds = feed_silence_contracts(cfg)
+    assert "liquidation_binance" in feeds
+
+
 def test_feed_silence_never_seen_waits_for_process_uptime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

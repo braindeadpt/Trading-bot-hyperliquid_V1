@@ -107,6 +107,64 @@ _FUNDING_COOLDOWN_STRATEGIES = frozenset({
 })
 
 
+def feed_silence_contracts(config: Config) -> Dict[str, float]:
+    """Decide which feeds the silence watchdog contracts for this deployment.
+
+    Returns ``{feed_name: max_silence_sec}``. Feeds that cannot deliver in
+    this deployment are excluded so ``degraded`` only reflects real
+    contracts (fstream outage lesson, 2026-06-29):
+
+    * ``binance_perp`` — published only while the LeadLag perp-price bridge
+      runs (``strategy.lead_lag.enabled`` / ``auto_enable``; the testnet
+      mode override turns it on).
+    * ``liquidation_binance`` — Binance fstream ``@forceOrder`` is blocked
+      on this network; opt the watchdog back in with
+      ``LIQUIDATION_BINANCE_CONTRACTED=true`` in ``.env`` (gitignored and
+      NOT ``BOT_``-prefixed, so the Fase 10 ``config_hash`` stays frozen).
+    * ``l2_book_recording`` — only when the research recorder is enabled.
+    """
+    _md = config.get("market_data", {}) or {}
+    _silence_cfg = _md.get("feed_silence") or {}
+    feeds: Dict[str, float] = {}
+    if os.environ.get("LIQUIDATION_BINANCE_CONTRACTED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        feeds["liquidation_binance"] = float(
+            _silence_cfg.get("liquidation_binance_max_sec", 6 * 3600)
+        )
+    _lead_lag = config.get("strategy.lead_lag", {}) or {}
+    if bool(_lead_lag.get("enabled", False)) or bool(
+        _lead_lag.get("auto_enable", False)
+    ):
+        feeds["binance_perp"] = float(
+            _silence_cfg.get("binance_perp_max_sec", 3600)
+        )
+    # Always-contracted feeds
+    feeds.update({
+        "liquidation_okx": float(
+            _silence_cfg.get("liquidation_okx_max_sec", 6 * 3600)
+        ),
+        "liquidation_bybit": float(
+            _silence_cfg.get("liquidation_bybit_max_sec", 6 * 3600)
+        ),
+        # Coinalyze is verify-only / low-freq — longer threshold
+        "liquidation_coinalyze_check": float(
+            _silence_cfg.get("liquidation_coinalyze_check_max_sec", 12 * 3600)
+        ),
+        "funding_cex": float(_silence_cfg.get("funding_cex_max_sec", 3600)),
+        "funding_hl": float(_silence_cfg.get("funding_hl_max_sec", 3600)),
+        "taker_split": float(_silence_cfg.get("taker_split_max_sec", 3600)),
+    })
+    _l2_rec = _md.get("l2_recording") or {}
+    if bool(_l2_rec.get("enabled", True)):
+        feeds["l2_book_recording"] = float(
+            _silence_cfg.get("l2_book_recording_max_sec", 120)
+        )
+    return feeds
+
+
 class TradingEngine:
     """Central orchestrator that wires data → strategies → risk → execution.
 
@@ -450,36 +508,13 @@ class TradingEngine:
         self._md_red_since: Optional[float] = None
         self._md_alert_after_sec = float(_md.get("alert_red_after_sec", 300))
         self._md_alert_cooldown_sec = float(_md.get("alert_red_cooldown_sec", 900))
-        # Silent-feed watchdog (fstream outage lesson, 2026-06-29)
+        # Silent-feed watchdog (fstream outage lesson, 2026-06-29). Contract
+        # silence only for feeds that actually deliver events in this
+        # deployment — a known-blocked venue must not raise false degraded
+        # alarms that mask a real outage elsewhere.
         _silence_cfg = _md.get("feed_silence") or {}
         _silence_enabled = bool(_silence_cfg.get("enabled", True))
-        _silence_feeds = {
-            "liquidation_binance": float(
-                _silence_cfg.get("liquidation_binance_max_sec", 6 * 3600)
-            ),
-            "liquidation_okx": float(
-                _silence_cfg.get("liquidation_okx_max_sec", 6 * 3600)
-            ),
-            "liquidation_bybit": float(
-                _silence_cfg.get("liquidation_bybit_max_sec", 6 * 3600)
-            ),
-            # Coinalyze is verify-only / low-freq — longer threshold
-            "liquidation_coinalyze_check": float(
-                _silence_cfg.get("liquidation_coinalyze_check_max_sec", 12 * 3600)
-            ),
-            # HL has no public market-wide liq channel — do NOT contract silence
-            "binance_perp": float(_silence_cfg.get("binance_perp_max_sec", 3600)),
-            "funding_cex": float(_silence_cfg.get("funding_cex_max_sec", 3600)),
-            "funding_hl": float(_silence_cfg.get("funding_hl_max_sec", 3600)),
-            "taker_split": float(_silence_cfg.get("taker_split_max_sec", 3600)),
-        }
-        # Contract L2 level recording only when the research recorder is enabled
-        # (avoid false silence alerts when deliberately off).
-        _l2_rec = _md.get("l2_recording") or {}
-        if bool(_l2_rec.get("enabled", True)):
-            _silence_feeds["l2_book_recording"] = float(
-                _silence_cfg.get("l2_book_recording_max_sec", 120)
-            )
+        _silence_feeds = feed_silence_contracts(config)
         self._feed_silence = FeedSilenceMonitor(
             alert_cooldown_sec=float(
                 _silence_cfg.get("alert_cooldown_sec", 3600)
@@ -490,6 +525,15 @@ class TradingEngine:
         if not _silence_enabled:
             for fname in list(_silence_feeds):
                 self._feed_silence.disable_feed(fname)
+        else:
+            # FeedSilenceMonitor registers class-level default feeds even when
+            # omitted from ``feeds`` — drop any this deployment does not
+            # contract (binance_perp without LeadLag, fstream-blocked
+            # liquidation_binance, recorder-off l2_book_recording) so
+            # ``degraded`` only reflects feeds that actually deliver.
+            for fname in list(self._feed_silence._enabled_feeds):
+                if fname not in _silence_feeds:
+                    self._feed_silence.disable_feed(fname)
         self._block_entries_on_feed_stale = bool(
             _md.get("block_entries_on_stale", _md.get("block_entries_on_red", True))
         )
