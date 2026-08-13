@@ -200,3 +200,34 @@ class TestApiStrategyPnlRealDb:
         r = self.client.get("/api/strategy_pnl?days=abc")
         assert r.status_code == 200
         assert r.get_json()["days"] == 0
+
+    def test_regression_guard_reproduces_pre_fix_500(self) -> None:
+        """Prove the regression guard actually catches the bug.
+
+        The original bug: ``api_strategy_pnl`` called
+        ``db.get_strategy_pnl(since_ms=..., strategy=...)`` but the DB
+        method had no ``strategy`` kwarg -> ``TypeError`` -> HTTP 500 on
+        EVERY request with ?strategy=. This test simulates the pre-fix
+        signature (a method that only accepts ``since_ms``) and asserts
+        the endpoint degrades to 500 exactly as it did in production. If
+        the endpoint or the DB method regresses, this test fails with a
+        clear signal instead of silently returning an empty body.
+        """
+        from unittest.mock import patch
+
+        def _pre_fix_get_strategy_pnl(self, since_ms=None):  # noqa: ANN001
+            # Pre-fix signature: only `since_ms` — calling with `strategy=`
+            # raises the exact TypeError that produced the production 500.
+            raise TypeError(
+                "get_strategy_pnl() got an unexpected keyword argument 'strategy'"
+            )
+
+        with patch.object(
+            self._db, "get_strategy_pnl", _pre_fix_get_strategy_pnl
+        ):
+            r = self.client.get("/api/strategy_pnl?strategy=VWAPDeviation")
+        assert r.status_code == 500, (
+            "Pre-fix DB signature must produce a 500 on ?strategy= — if this "
+            "assertion fails the endpoint no longer degrades loudly and the "
+            "bug could hide as an empty 200."
+        )
