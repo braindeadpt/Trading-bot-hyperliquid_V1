@@ -36,7 +36,18 @@ def resolve_dashboard_auth(config: Dict[str, Any]) -> DashboardAuthConfig:
         or str(config.get("dashboard_password") or "").strip()
     ) or None
 
-    explicit = config.get("auth_enabled")
+    # Hash-neutral deployment switch: DASHBOARD_AUTH_ENABLED is read directly
+    # from the environment (NOT ``BOT_``-prefixed, so it never enters the
+    # effective config and cannot trip the Fase 10 frozen ``config_hash``
+    # assert — ``auth_enabled`` is part of the hash, the token is not).
+    # Precedence: env var > ``dashboard.auth_enabled`` > token presence.
+    env_auth = os.environ.get("DASHBOARD_AUTH_ENABLED", "").strip().lower()
+    if env_auth in ("1", "true", "yes"):
+        explicit = True
+    elif env_auth in ("0", "false", "no"):
+        explicit = False
+    else:
+        explicit = config.get("auth_enabled")
     if explicit is None:
         enabled = bool(token)
     else:

@@ -206,6 +206,22 @@ Secrets live in `.env` (gitignored) or in the encrypted vault at
 
 - Paper mode is the default. Mainnet requires both the config flag and
   `HYPERLIQUID_MAINNET_ENABLED=true`.
+- **Dashboard auth is OFF by default** (localhost-only bind). Enable it in
+  `.env` (gitignored, hash-neutral — does not touch the Fase 10
+  `config_hash`):
+  ```bash
+  DASHBOARD_AUTH_ENABLED=true
+  BOT_DASHBOARD_TOKEN=<a-long-random-token>
+  ```
+  This protects every REST endpoint and the Socket.IO stream (login gate in
+  the UI; `X-Dashboard-Token` header / `?token=` for programmatic access).
+  Do **not** flip `dashboard.auth_enabled` in `config/settings.yaml`
+  mid-window — that key IS part of the frozen hash and would trip the
+  Fase 10 drift assert (the token/password keys are excluded).
+- **Per-IP rate limiting is ON by default** for REST endpoints (100
+  requests/min per client IP, sliding window — bounds brute-force attempts
+  against the dashboard token). Tune with `DASHBOARD_RATE_LIMIT_PER_MIN` in
+  `.env` (hash-neutral). Socket.IO transport and static assets are exempt.
 - `.env` and `data/vault.enc` are gitignored.
 - `python main.py --audit` runs the static security scanner (9 rules:
   eval/exec, hardcoded secrets, HTTP to unknown hosts, file writes outside

@@ -9,12 +9,18 @@ import os
 import secrets
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Dict, List, Optional, Callable, Deque
 
 from flask import Flask, jsonify, request, abort, render_template
 from flask_socketio import SocketIO, emit
 
+from src.dashboard.auth import (
+    DashboardAuthConfig,
+    resolve_dashboard_auth,
+    validate_dashboard_token,
+)
 from src.utils.helpers import safe_float
 
 logger = logging.getLogger(__name__)
@@ -56,6 +62,59 @@ def _get_db():
     if _engine is None:
         return None
     return getattr(_engine, "_db", None)
+
+
+def _socket_connect_auth(auth, enabled: bool, token: Optional[str]) -> Optional[bool]:
+    """Token gate for the Socket.IO ``connect`` event.
+
+    Returns ``False`` to reject the connection, ``None`` to accept.
+    Module-level so tests can exercise the exact runtime path
+    (flask-socketio's ``test_client`` cannot run against Flask 3.1).
+    """
+    if not enabled or not token:
+        return None
+    provided = None
+    if isinstance(auth, dict):
+        provided = auth.get("token")
+    if not provided:
+        provided = request.args.get("token")
+    if not validate_dashboard_token(provided, token):
+        logger.warning("Socket.IO connect rejected — invalid or missing token")
+        return False
+    return None
+
+
+class _IPRateLimiter:
+    """Sliding-window per-IP request limiter (thread-safe).
+
+    Bounds brute-force attempts against the dashboard auth token: each client
+    IP may issue at most ``limit_per_min`` requests per rolling 60s window.
+    Memory is bounded — idle entries are pruned opportunistically.
+    """
+
+    _WINDOW_SEC = 60.0
+
+    def __init__(self, limit_per_min: int) -> None:
+        self.limit_per_min = max(1, int(limit_per_min))
+        self._hits: Dict[str, Deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, ip: str, now: Optional[float] = None) -> bool:
+        """Record one request from ``ip``; False when over the limit."""
+        now = time.time() if now is None else now
+        with self._lock:
+            dq = self._hits.get(ip)
+            if dq is None:
+                self._hits[ip] = dq = deque()
+            while dq and now - dq[0] >= self._WINDOW_SEC:
+                dq.popleft()
+            if len(dq) >= self.limit_per_min:
+                return False
+            dq.append(now)
+            # Opportunistic prune of idle IPs to bound memory.
+            if len(self._hits) > 4096:
+                self._hits = {k: v for k, v in self._hits.items() if v}
+            return True
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -735,13 +794,38 @@ def create_app(config: Dict[str, Any]) -> tuple:
     global _socketio
     _socketio = socketio
 
-    # CRIT-003: Dashboard auth - token-based guard (REST + Socket.IO)
-    from src.dashboard.auth import (
-        DashboardAuthConfig,
-        resolve_dashboard_auth,
-        validate_dashboard_token,
-    )
+    # CRIT-004: per-IP rate limit on REST endpoints (brute-force mitigation).
+    # Resolved hash-neutrally: dashboard.rate_limit_per_min (tests) →
+    # DASHBOARD_RATE_LIMIT_PER_MIN env → 100/min default. Registered BEFORE
+    # the auth guard so failed token attempts are counted too. Socket.IO
+    # transport + static assets are exempt (realtime stream / page assets).
+    _dash_rl_cfg = (config or {}).get("dashboard", {}) or {}
+    try:
+        _rl_limit = int(_dash_rl_cfg.get("rate_limit_per_min") or 0)
+    except (TypeError, ValueError):
+        _rl_limit = 0
+    if not _rl_limit:
+        try:
+            _rl_limit = int(os.environ.get("DASHBOARD_RATE_LIMIT_PER_MIN", "") or 0)
+        except ValueError:
+            _rl_limit = 0
+    if not _rl_limit:
+        _rl_limit = 100
+    _rate_limiter = _IPRateLimiter(_rl_limit)
 
+    @app.before_request
+    def _rate_limit():
+        path = request.path
+        if path.startswith(("/static/", "/socket.io/")) or path == "/socket.io.min.js":
+            return None
+        if not _rate_limiter.allow(request.remote_addr or "unknown"):
+            resp = jsonify({"error": "rate limit exceeded", "retry_after_sec": 60})
+            resp.status_code = 429
+            resp.headers["Retry-After"] = "60"
+            return resp
+        return None
+
+    # CRIT-003: Dashboard auth - token-based guard (REST + Socket.IO)
     auth_cfg: DashboardAuthConfig = resolve_dashboard_auth(config)
     _dashboard_token = auth_cfg.token
     _auth_enabled = auth_cfg.enabled
@@ -770,18 +854,6 @@ def create_app(config: Dict[str, Any]) -> tuple:
             token = _extract_token()
             if not validate_dashboard_token(token, _dashboard_token):
                 abort(401)
-
-        @socketio.on("connect")
-        def _socket_connect(auth=None):
-            token = None
-            if isinstance(auth, dict):
-                token = auth.get("token")
-            if not token:
-                token = request.args.get("token")
-            if not validate_dashboard_token(token, _dashboard_token):
-                logger.warning("Socket.IO connect rejected — invalid or missing token")
-                return False
-            return True
 
     # Start background emitter (B9) — honor configured cadence
     _dash_cfg = (config or {}).get("dashboard", {}) or {}
@@ -1436,6 +1508,14 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
     @socketio.on("connect")
     def on_connect(auth=None):
+        """Socket.IO connect gate: auth-enabled deployments require a token.
+
+        Single registration point (CRIT: the auth check MUST live here — a
+        second @socketio.on("connect") on the same namespace silently
+        overwrites the first).
+        """
+        if _socket_connect_auth(auth, _auth_enabled, _dashboard_token) is False:
+            return False
         logger.info("Dashboard client connected")
         # Push everything immediately
         emitter._emit_all()
