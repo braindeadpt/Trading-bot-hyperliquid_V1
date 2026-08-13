@@ -538,7 +538,6 @@ strategy:
     enabled: false                  # v3.1.18: KILLED — R:R 1.25:1 needs 67% win-rate (impossible)
     auto_enable: false               # v3.1.18: KILLED — don't auto-activate
     mode: momentum                  # momentum = follow heavy book side; fade = mean-revert imbalance
-    mode: momentum                  # momentum = follow heavy book side; fade = mean-revert imbalance
     spoof_wall_proximity_pct: 0.001 # reject if supporting wall within 0.1% of mid
     # Anti-spoof (2026-08-09): wall_frac = largest_wall_size / same_side_depth_1pct.
     # Calibrated from live HL L2 (scripts/calibrate_obs_spoof_filter.py): 104 entry
@@ -897,9 +896,17 @@ market_data:
     flush_interval_sec: 1.0
   feed_silence:
     enabled: true
+    # NOT contracted by default (engine.feed_silence_contracts decides from
+    # delivery reality — comments only, no config keys, keeps Fase 10 hash):
+    #   * binance_perp        — watched only while the LeadLag perp-price
+    #                           bridge runs (strategy.lead_lag enabled /
+    #                           auto_enable; testnet override turns it on)
+    #   * liquidation_binance — fstream @forceOrder blocked on this network;
+    #                           opt the watchdog back in with
+    #                           LIQUIDATION_BINANCE_CONTRACTED=true (.env)
     liquidation_okx_max_sec: 21600          # 6h
     liquidation_bybit_max_sec: 21600        # 6h
-    liquidation_binance_max_sec: 21600      # 6h (expected degraded — fstream blocked)
+    liquidation_binance_max_sec: 21600      # 6h (only watched when contracted — see above)
     liquidation_coinalyze_check_max_sec: 43200  # 12h (low-freq verify)
     l2_book_recording_max_sec: 120          # research L2 level writer
   # Aggregate top-wallet positioning (shadow TopTraderFlow). Fill wallets via
@@ -1002,8 +1009,15 @@ dashboard:
   host: "127.0.0.1"
   port: 5000
   push_interval_sec: 2.0
-  auth_enabled: false          # set true + password/token to require login
-  password: ""                 # or BOT_DASHBOARD_PASSWORD / BOT_DASHBOARD_TOKEN env
+  # Auth is OFF by default (localhost-only dashboard). Enable per-deployment
+  # in .env (gitignored) — hash-neutral, never touches the Fase 10 config_hash:
+  #   DASHBOARD_AUTH_ENABLED=true
+  #   BOT_DASHBOARD_TOKEN=<secret>
+  # Do NOT flip auth_enabled here mid-window: auth_enabled IS part of the
+  # frozen config_hash (the token/password/secret_key are not) — flipping it
+  # in YAML would trip the Fase 10 drift assert without a window re-register.
+  auth_enabled: false          # or DASHBOARD_AUTH_ENABLED=true in .env
+  password: ""                 # or BOT_DASHBOARD_TOKEN / DASHBOARD_TOKEN env
   secret_key: ""               # Flask session secret (auto-generated if empty)
 
 # ═══════════════════════════════════════════════════════════
