@@ -37,7 +37,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -73,6 +75,7 @@ from scripts.liquidation_flush_recheck import (  # noqa: E402
     write_report as write_flush_report,
 )
 from scripts.iv_gate_shadow_recheck import (  # noqa: E402
+    IV_THRESHOLD,
     REPORT_PATH as IV_REPORT_PATH,
     TARGET_CLOSED as IV_TARGET_CLOSED,
     iv_decision_count,
@@ -90,6 +93,69 @@ LEGACY_STATE_PATHS: Dict[str, Path] = {
 
 def log(msg: str) -> None:
     print(f"[{datetime.now(timezone.utc).isoformat(timespec='seconds')}] {msg}", flush=True)
+
+
+def build_alert_notifier() -> Optional[Any]:
+    """Build the AlertNotifier from config + env (same resolution as main.py).
+
+    Returns None when alerts are disabled or unconfigured — the watchdog then
+    only logs the PROMOTE decision (never blocks the gate on a missing
+    notifier).
+    """
+    try:
+        from src.alerts.notifier import AlertConfig, AlertNotifier
+        from src.utils.config import load_config
+
+        cfg = load_config()
+        token = (cfg.get("alerts.telegram_bot_token") or "").strip()
+        if not token:
+            token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+        chat_ids: list = []
+        raw_chat = (cfg.get("alerts.telegram_chat_id") or "").strip()
+        if not raw_chat:
+            raw_chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+        if raw_chat:
+            chat_ids.append(raw_chat)
+        extra = (os.environ.get("TELEGRAM_CHAT_IDS") or "").strip()
+        if extra:
+            chat_ids.extend(c.strip() for c in extra.split(",") if c.strip())
+        alert_cfg = AlertConfig(
+            enabled=bool(cfg.get("alerts.enabled", False)),
+            telegram_bot_token=token or None,
+            telegram_chat_id=chat_ids[0] if chat_ids else None,
+            discord_webhook_url=cfg.get("alerts.discord_webhook_url"),
+            min_level=cfg.get("alerts.min_level", "info"),
+        )
+        notifier = AlertNotifier(alert_cfg)
+        if not alert_cfg.enabled:
+            log("alerts disabled (alerts.enabled=false) — PROMOTE será só logado")
+        return notifier
+    except Exception as exc:  # noqa: BLE001
+        log(f"alert notifier unavailable: {exc}")
+        return None
+
+
+def notify_iv_promote(report: Dict[str, Any], v: Dict[str, Any]) -> None:
+    """Fire the PROMOTE alert best-effort — never blocks the gate.
+
+    Builds the notifier per call (cheap, and the supervisor may run outside
+    the bot process), sends with a timeout, and swallows every failure so the
+    watchdog's own decision/state flow is unaffected.
+    """
+    notifier = build_alert_notifier()
+    if notifier is None:
+        log("iv: PROMOTE alert skipped — no notifier")
+        return
+    try:
+        asyncio.run(
+            asyncio.wait_for(
+                notifier.iv_gate_promote(report=report, verdict=v),
+                timeout=15,
+            )
+        )
+        log("iv: PROMOTE alert sent")
+    except Exception as exc:  # noqa: BLE001
+        log(f"iv: PROMOTE alert failed (best-effort): {exc}")
 
 
 def fresh_state() -> Dict[str, Dict[str, Any]]:
@@ -293,12 +359,17 @@ def check_iv_gate(
         "n_low_closed": n_low,
         "verdict": v["status"],
         "detail": v["detail"],
+        "threshold": IV_THRESHOLD,
         "report_path": str(IV_REPORT_PATH),
     }
     sub["runs"].append(run)
     if not force:
         sub["triggered"] = True
     save_shared_state(shared)
+    # Human-in-the-loop: a PROMOTE is a recommendation to flip the router
+    # from shadow to enforcement — notify the operator with the exact diff.
+    if v["status"] == "PROMOTE":
+        notify_iv_promote(report, run)
     log(f"iv: gate completo (n={n_closed}, high={n_high}, low={n_low}) -> {run['verdict']}")
     return True
 

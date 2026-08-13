@@ -100,6 +100,51 @@ class TestAlertNotifier(unittest.TestCase):
         import asyncio
         asyncio.run(notifier.send("test", "info"))
 
+    def test_iv_gate_promote_message_carries_exact_diff(self):
+        """The PROMOTE alert carries the slice numbers, the IV threshold and
+        the report path — the exact diff to flip the router from shadow to
+        enforcement (human-in-the-loop, the watchdog never touches the router)."""
+        import asyncio
+        from unittest.mock import patch
+
+        cfg = AlertConfig(enabled=True, min_level="info")
+        notifier = AlertNotifier(cfg)
+        report = {
+            "slices": {
+                "high_iv": {"n": 20, "n_closed": 20, "n_open": 0,
+                             "net_pnl_usd": 50.0, "win_rate": 0.6,
+                             "avg_pnl_usd": 2.5, "median_pnl_usd": 1.0,
+                             "best_usd": 10.0, "worst_usd": -2.0},
+                "low_iv": {"n": 10, "n_closed": 10, "n_open": 0,
+                            "net_pnl_usd": -30.0, "win_rate": 0.2,
+                            "avg_pnl_usd": -3.0, "median_pnl_usd": -1.0,
+                            "best_usd": 1.0, "worst_usd": -8.0},
+            },
+        }
+        verdict = {
+            "n_closed": 30, "threshold": 66.7,
+            "report_path": "docs/IV_GATE_SHADOW_RECHECK_RESULT.md",
+        }
+        sent: list = []
+
+        async def _fake_send(message, level="info", *, force=False):
+            sent.append((message, level, force))
+
+        with patch.object(notifier, "send", _fake_send):
+            asyncio.run(notifier.iv_gate_promote(report=report, verdict=verdict))
+
+        assert len(sent) == 1
+        msg, level, force = sent[0]
+        assert level == "warning"
+        assert force is True
+        assert "IV GATE PROMOTE" in msg
+        assert "n=30" in msg
+        assert "+50.00 USD" in msg
+        assert "-30.00 USD" in msg
+        assert "66.7" in msg
+        assert "IV_GATE_SHADOW_RECHECK_RESULT.md" in msg
+        assert "shadow → enforcement" in msg
+
 
 class TestMarketEvent(unittest.TestCase):
     def test_create(self):

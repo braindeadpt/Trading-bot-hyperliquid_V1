@@ -77,6 +77,18 @@ supervisor is the single recommended entry point.
   **recommendation + report only**: flipping the router from shadow to
   enforcement is a deliberate, reviewed change outside the watchdog's scope.
 
+### PROMOTE alert (human-in-the-loop)
+
+A `PROMOTE` verdict also fires an **alert** (Telegram/Discord, via the same
+`AlertNotifier` the bot uses — config `alerts.*` / `TELEGRAM_BOT_TOKEN` /
+`TELEGRAM_CHAT_ID` / `DISCORD_WEBHOOK_URL`, resolved the same way as
+`main.py`). The alert carries the **exact diff**: the high_iv/low_iv slice
+numbers (net PnL + WR + n), the IV threshold (66.7) and the recheck report
+path — everything an operator needs to review and flip the router from
+shadow to enforcement. The watchdog never flips anything itself; the alert is
+best-effort (a missing/disabled notifier logs and continues — it never blocks
+the gate or the state write).
+
 ## Dashboard
 
 The “Research watchdogs” panel (`GET /api/research_watchdogs`) shows, for each

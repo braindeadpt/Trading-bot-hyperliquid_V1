@@ -248,8 +248,99 @@ class TestIvGateGate:
             }
             monkeypatch.setattr(sup, "run_iv_comparison", lambda: report)
             monkeypatch.setattr(sup, "write_iv_report", lambda *a, **k: None)
+            notified: list = []
+            monkeypatch.setattr(sup, "notify_iv_promote", lambda r, v: notified.append(v["status"]))
 
             assert sup.check_iv_gate(shared, force=False) is True
             assert shared["iv_gate_shadow"]["runs"][-1]["verdict"] == "REJECT"
+            # REJECT must NOT fire the promote alert.
+            assert notified == []
+        finally:
+            sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
+
+    def test_promote_fires_alert_once_with_exact_diff(self, monkeypatch, tmp_path):
+        """PROMOTE notifies the operator with the exact diff (slices + threshold
+        + report path); the alert fires once per run — never on watch-only."""
+        shared = sup.fresh_state()
+        sup.STATE_PATH = tmp_path / "state.json"
+        try:
+            monkeypatch.setattr(sup, "iv_decision_count", lambda: (30, 20, 10))
+            report = {
+                "slices": {
+                    "high_iv": {"n": 20, "n_closed": 20, "n_open": 0,
+                                 "net_pnl_usd": 50.0, "win_rate": 0.6,
+                                 "avg_pnl_usd": 2.5, "median_pnl_usd": 1.0,
+                                 "best_usd": 10.0, "worst_usd": -2.0},
+                    "low_iv": {"n": 10, "n_closed": 10, "n_open": 0,
+                                "net_pnl_usd": -30.0, "win_rate": 0.2,
+                                "avg_pnl_usd": -3.0, "median_pnl_usd": -1.0,
+                                "best_usd": 1.0, "worst_usd": -8.0},
+                    "unknown": {"n": 0, "n_closed": 0, "n_open": 0,
+                                 "net_pnl_usd": 0.0, "win_rate": None,
+                                 "avg_pnl_usd": None, "median_pnl_usd": None,
+                                 "best_usd": None, "worst_usd": None},
+                },
+            }
+            monkeypatch.setattr(sup, "run_iv_comparison", lambda: report)
+            monkeypatch.setattr(sup, "write_iv_report", lambda *a, **k: None)
+            notified: list = []
+
+            def _fake_notify(rpt, run):
+                notified.append({
+                    "n_closed": run["n_closed"],
+                    "verdict": run["verdict"],
+                    "threshold": run.get("threshold"),
+                    "report_path": run.get("report_path"),
+                    "hi_net": rpt["slices"]["high_iv"]["net_pnl_usd"],
+                    "lo_net": rpt["slices"]["low_iv"]["net_pnl_usd"],
+                })
+
+            monkeypatch.setattr(sup, "notify_iv_promote", _fake_notify)
+
+            assert sup.check_iv_gate(shared, force=False) is True
+            assert len(notified) == 1
+            assert notified[0]["verdict"] == "PROMOTE"
+            assert notified[0]["n_closed"] == 30
+            assert notified[0]["threshold"] == 66.7
+            assert "IV_GATE_SHADOW_RECHECK_RESULT.md" in notified[0]["report_path"]
+            assert notified[0]["hi_net"] == 50.0
+            assert notified[0]["lo_net"] == -30.0
+
+            # Watch-only second call: no re-run, no second alert.
+            assert sup.check_iv_gate(shared, force=False) is False
+            assert len(notified) == 1
+        finally:
+            sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
+
+    def test_promote_without_notifier_does_not_break(self, monkeypatch, tmp_path):
+        """A missing/broken notifier must not take the gate down."""
+        shared = sup.fresh_state()
+        sup.STATE_PATH = tmp_path / "state.json"
+        try:
+            monkeypatch.setattr(sup, "iv_decision_count", lambda: (30, 20, 10))
+            report = {
+                "slices": {
+                    "high_iv": {"n": 20, "n_closed": 20, "n_open": 0,
+                                 "net_pnl_usd": 50.0, "win_rate": 0.6,
+                                 "avg_pnl_usd": 2.5, "median_pnl_usd": 1.0,
+                                 "best_usd": 10.0, "worst_usd": -2.0},
+                    "low_iv": {"n": 10, "n_closed": 10, "n_open": 0,
+                                "net_pnl_usd": -30.0, "win_rate": 0.2,
+                                "avg_pnl_usd": -3.0, "median_pnl_usd": -1.0,
+                                "best_usd": 1.0, "worst_usd": -8.0},
+                    "unknown": {"n": 0, "n_closed": 0, "n_open": 0,
+                                 "net_pnl_usd": 0.0, "win_rate": None,
+                                 "avg_pnl_usd": None, "median_pnl_usd": None,
+                                 "best_usd": None, "worst_usd": None},
+                },
+            }
+            monkeypatch.setattr(sup, "run_iv_comparison", lambda: report)
+            monkeypatch.setattr(sup, "write_iv_report", lambda *a, **k: None)
+            monkeypatch.setattr(sup, "build_alert_notifier", lambda: None)
+
+            assert sup.check_iv_gate(shared, force=False) is True
+            assert shared["iv_gate_shadow"]["runs"][-1]["verdict"] == "PROMOTE"
+            # The gate still completed and persisted its run.
+            assert len(shared["iv_gate_shadow"]["runs"]) == 1
         finally:
             sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
