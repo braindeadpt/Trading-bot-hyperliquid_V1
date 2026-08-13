@@ -215,6 +215,24 @@ Secrets live in `.env` (gitignored) or in the encrypted vault at
 `HYPERLIQUID_API_SECRET`, optional `COINALYZE_API_KEY`,
 `TELEGRAM_BOT_TOKEN`, `DISCORD_WEBHOOK_URL`.
 
+### Frozen config window (Fase 08 + Fase 10)
+
+`tests/test_config_hash_frozen.py` is the **guard of the frozen window**: it
+pins the effective `config/settings.yaml` hash to the frozen Fase 10 hash
+(`9456c6eb877b2391`) and re-runs the `assert_config_matches_preregister`
+checks — the same assert `main.py` runs at startup. **Changing any
+hash-affecting parameter in `settings.yaml` mid-window turns the CI red and
+would make the bot refuse to start.**
+
+Mid-window changes therefore require an **explicit re-freeze**: persist a new
+Fase 10 pre-registration manifest with a `reregistration_reason` (see
+`src/research/phase10_preregister.py` — `persist_preregister_manifest(
+overwrite=True, reregistration_reason=...)`), which archives the superseded
+manifest and re-freezes a new hash, then update `test_config_hash_frozen.py`
+and `docs/SECURITY.md`/`docs/GATES_REFERENCE.md` accordingly. Operational
+knobs that must NOT trip the window (e.g. `FEED_SILENCE_WARN_FRACTION`) are
+deliberately env-only and excluded from the hash.
+
 ---
 
 ## Feed Contracts (operation)
