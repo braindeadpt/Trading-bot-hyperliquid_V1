@@ -298,6 +298,104 @@ def test_feed_silence_early_warning_never_seen_uses_uptime(
     assert mon.snapshot()["funding_hl"]["degraded"] is False  # not degraded yet
 
 
+def test_feed_silence_cadence_tracks_gaps_and_fires_above_p99() -> None:
+    """beat() records inter-event gaps; check_cadence fires when the current
+    gap exceeds the historical p99 — catching subtle thinning before the 6h
+    silence threshold."""
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 6 * 3600.0},
+        cadence_min_samples=50,
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+
+    # Build history: 60 beats, mostly 1-minute gaps.
+    t0 = 1_000_000
+    mon.beat("liquidation_okx", timestamp_ms=t0)
+    t = t0
+    for i in range(1, 60):
+        gap_ms = 60_000  # 1 min
+        if i % 10 == 0:
+            gap_ms = 5 * 60_000  # occasional 5-min gap
+        t += gap_ms
+        mon.beat("liquidation_okx", timestamp_ms=t)
+    snap = mon.snapshot()["liquidation_okx"]
+    assert snap["cadence_samples"] == 59
+    assert snap["cadence_p99_sec"] is not None
+
+    # Current gap of 10 min (> p99 of ~5 min) fires the cadence alert.
+    now = t + 10 * 60_000
+    alerts = mon.check_cadence(now_ms=now)
+    assert len(alerts) == 1
+    assert "FEED CADENCE" in alerts[0]
+    assert "liquidation_okx" in alerts[0]
+    assert "p99" in alerts[0]
+
+    # Fire-once: same episode, no second alert.
+    assert mon.check_cadence(now_ms=now + 60_000) == []
+    assert mon.snapshot()["liquidation_okx"]["warned_cadence"] is True
+    # Not degraded — the 6h threshold is far away.
+    assert mon.snapshot()["liquidation_okx"]["degraded"] is False
+
+    # beat() resets the fire-once flag; a new normal gap clears the alert.
+    mon.beat("liquidation_okx", timestamp_ms=now + 60_000)
+    assert mon.snapshot()["liquidation_okx"]["warned_cadence"] is False
+    # Short gap now — no alert.
+    assert mon.check_cadence(now_ms=now + 120_000) == []
+
+
+def test_feed_silence_cadence_quiet_without_history() -> None:
+    """A feed with too few recorded gaps never fires the cadence alert — a
+    cold-start feed has no baseline to compare against."""
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 6 * 3600.0},
+        cadence_min_samples=50,
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    t0 = 1_000_000
+    mon.beat("liquidation_okx", timestamp_ms=t0)
+    for i in range(1, 5):  # only 4 gaps << 50 min_samples
+        mon.beat("liquidation_okx", timestamp_ms=t0 + i * 60_000)
+    now = t0 + 4 * 60_000 + 10 * 60_000
+    assert mon.check_cadence(now_ms=now) == []
+    assert mon.snapshot()["liquidation_okx"]["cadence_p99_sec"] is None
+
+
+def test_feed_silence_cadence_skips_degraded_and_never_seen() -> None:
+    """Degraded feeds and never-seen feeds are skipped by check_cadence."""
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 6 * 3600.0, "funding_hl": 3600.0},
+        cadence_min_samples=3,
+    )
+    for name in list(mon._enabled_feeds):
+        if name not in ("liquidation_okx", "funding_hl"):
+            mon.disable_feed(name)
+    t0 = 1_000_000
+    # funding_hl never seen — skipped.
+    # liquidation_okx builds 5 gaps of 1 min then goes quiet.
+    mon.beat("liquidation_okx", timestamp_ms=t0)
+    t = t0
+    for i in range(1, 6):
+        t += 60_000
+        mon.beat("liquidation_okx", timestamp_ms=t)
+    now = t + 10 * 60_000  # 10 min > p99(~1m)
+    alerts = mon.check_cadence(now_ms=now)
+    assert len(alerts) == 1
+    assert "liquidation_okx" in alerts[0]
+    assert not any("funding_hl" in a for a in alerts)
+    # Degrade it, then cadence goes quiet.
+    degrade_now = t + 6 * 3600 * 1000 + 1  # 6h after the last beat
+    mon.check(now_ms=degrade_now)
+    assert mon.snapshot()["liquidation_okx"]["degraded"] is True
+    assert mon.check_cadence(now_ms=degrade_now + 1) == []
+
+
 def test_feed_silence_warn_fraction_constructor_override() -> None:
     """warn_fraction set at construction moves the early-warning threshold.
 

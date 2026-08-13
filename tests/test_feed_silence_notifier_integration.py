@@ -217,3 +217,49 @@ def test_disabled_feed_silence_sends_nothing(
         assert notifier.alerts == []
 
     asyncio.run(scenario())
+
+
+def test_cadence_alert_sent_once_per_episode_via_notifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gap exceeding the historical p99 sends one warning via the notifier,
+    fire-once per episode; a beat starts a new episode."""
+
+    async def scenario() -> None:
+        clock = {"t": 1_000_000.0}
+        engine, mon, notifier = _bare_engine(clock, monkeypatch)
+        mon._cadence_min_samples = 3
+
+        # Build cadence history: 6 beats, 1-min gaps.
+        t = 1_000_000
+        mon.beat("liquidation_okx", timestamp_ms=t)
+        for _ in range(6):
+            t += 60_000
+            mon.beat("liquidation_okx", timestamp_ms=t)
+        assert mon.snapshot()["liquidation_okx"]["cadence_samples"] == 6
+
+        # 10-min gap > p99 (~1 min) — cadence alert fires via the engine.
+        clock["t"] = (t + 10 * 60_000) / 1000.0
+        await _refresh(engine)
+        assert len(notifier.alerts) == 1
+        assert _levels(notifier) == ["warning"]
+        assert "FEED CADENCE" in _messages(notifier)[0]
+        assert "liquidation_okx" in _messages(notifier)[0]
+        assert mon.snapshot()["liquidation_okx"]["warned_cadence"] is True
+        # Not degraded — 6h threshold far away.
+        assert mon.snapshot()["liquidation_okx"]["degraded"] is False
+
+        # Same episode, later refresh — fire-once, nothing new.
+        clock["t"] += 60.0
+        await _refresh(engine)
+        assert len(notifier.alerts) == 1
+
+        # New episode: beat resets, short gap stays quiet.
+        t2 = int(clock["t"] * 1000)
+        mon.beat("liquidation_okx", timestamp_ms=t2)
+        assert mon.snapshot()["liquidation_okx"]["warned_cadence"] is False
+        clock["t"] += 30.0  # 30s < p99
+        await _refresh(engine)
+        assert len(notifier.alerts) == 1
+
+    asyncio.run(scenario())

@@ -200,12 +200,30 @@ class FeedSilenceState:
     # Fire-once imminent-warning: alerted at >=90% of max_silence (before
     # degrading); reset on beat.
     warned_90_pct: bool = False
+    # Cadence tracking: rolling inter-event gaps (sec) used to detect a feed
+    # that is still delivering but far less often than its historical p99.
+    gaps: "collections.deque" = field(default_factory=collections.deque)
+    # Fire-once cadence alert (age > historical p99 gap); reset on beat.
+    warned_cadence: bool = False
 
     def age_sec(self, now_ms: Optional[int] = None) -> Optional[float]:
         if self.last_event_ms is None:
             return None
         now = now_ms if now_ms is not None else int(time.time() * 1000)
         return max(0.0, (now - self.last_event_ms) / 1000.0)
+
+    def cadence_p99_sec(self, min_samples: int = 100) -> Optional[float]:
+        """Historical p99 of inter-event gaps, or None with too few samples.
+
+        Nearest-rank percentile over the rolling gap deque — the cadence
+        the feed normally keeps. A current gap above this means delivery is
+        thinning out long before the 6h silence threshold trips.
+        """
+        if len(self.gaps) < min_samples:
+            return None
+        ordered = sorted(self.gaps)
+        idx = min(len(ordered) - 1, int(0.99 * len(ordered)))
+        return float(ordered[idx])
 
 
 class FeedSilenceMonitor:
@@ -221,6 +239,8 @@ class FeedSilenceMonitor:
         alert_cooldown_sec: float = 3600.0,
         feeds: Optional[Dict[str, float]] = None,
         warn_fraction: float = 0.5,
+        cadence_min_samples: int = 100,
+        cadence_gap_history: int = 4000,
     ) -> None:
         # feed_name -> max silence seconds
         defaults = {
@@ -242,6 +262,8 @@ class FeedSilenceMonitor:
         }
         self._alert_cooldown_sec = float(alert_cooldown_sec)
         self._warn_fraction = float(warn_fraction)
+        self._cadence_min_samples = int(cadence_min_samples)
+        self._cadence_gap_history = int(cadence_gap_history)
         self._enabled_feeds: set[str] = set(cfg.keys())
         # time.monotonic() is since an arbitrary epoch (often system boot on
         # Windows), NOT process start. Never-seen silence must use age since
@@ -265,12 +287,21 @@ class FeedSilenceMonitor:
         if feed not in self._states:
             self._states[feed] = FeedSilenceState(feed=feed)
         st = self._states[feed]
-        st.last_event_ms = (
+        ts = (
             int(timestamp_ms) if timestamp_ms is not None else int(time.time() * 1000)
         )
+        # Record the inter-event gap (cadence) when we have a prior beat.
+        if st.last_event_ms is not None:
+            gap_sec = (ts - st.last_event_ms) / 1000.0
+            if gap_sec >= 0:
+                st.gaps.append(gap_sec)
+                while len(st.gaps) > self._cadence_gap_history:
+                    st.gaps.popleft()
+        st.last_event_ms = ts
         st.degraded = False
         st.warned_50_pct = False
         st.warned_90_pct = False
+        st.warned_cadence = False
 
     def check(self, now_ms: Optional[int] = None) -> List[str]:
         """Return alert messages for newly-degraded (or re-alertable) feeds."""
@@ -371,6 +402,39 @@ class FeedSilenceMonitor:
                 )
         return warnings
 
+    def check_cadence(
+        self,
+        now_ms: Optional[int] = None,
+    ) -> List[str]:
+        """Alert when a feed's current gap exceeds its historical p99.
+
+        Catches *subtle* degradation long before the 6h silence threshold: a
+        feed that is still delivering but far less often than its usual
+        cadence. Fire-once per episode (reset on ``beat()``); requires at
+        least ``cadence_min_samples`` recorded gaps so a cold-start feed with
+        no history never fires.
+        """
+        now = now_ms if now_ms is not None else int(time.time() * 1000)
+        alerts: List[str] = []
+        for name in sorted(self._enabled_feeds):
+            st = self._states.get(name)
+            if st is None or st.degraded or st.last_event_ms is None:
+                continue
+            if st.warned_cadence:
+                continue
+            p99 = st.cadence_p99_sec(min_samples=self._cadence_min_samples)
+            if p99 is None:
+                continue  # not enough history yet — stay quiet
+            age = (now - st.last_event_ms) / 1000.0
+            if age > p99:
+                st.warned_cadence = True
+                alerts.append(
+                    f"FEED CADENCE: `{name}` quiet for {age/60:.0f}m "
+                    f"(>p99 historical gap {p99/60:.0f}m, n={len(st.gaps)}) — "
+                    f"delivery thinning out, check before it degrades"
+                )
+        return alerts
+
     def snapshot(self) -> Dict[str, Dict[str, object]]:
         now = int(time.time() * 1000)
         out: Dict[str, Dict[str, object]] = {}
@@ -384,6 +448,11 @@ class FeedSilenceMonitor:
                 "degraded": st.degraded,
                 "warned_50_pct": st.warned_50_pct,
                 "warned_90_pct": st.warned_90_pct,
+                "warned_cadence": st.warned_cadence,
+                "cadence_p99_sec": st.cadence_p99_sec(
+                    min_samples=self._cadence_min_samples
+                ),
+                "cadence_samples": len(st.gaps),
                 "warn_level": (
                     "degraded" if st.degraded
                     else "imminent" if st.warned_90_pct

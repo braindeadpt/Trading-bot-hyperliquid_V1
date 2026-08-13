@@ -1321,6 +1321,13 @@ class TradingEngine:
                 self._notify(
                     lambda m=msg, lvl=level: self._notifier.send_alert(m, lvl)
                 )
+            # Cadence alerts: current gap > historical p99 — subtle thinning
+            # long before the silence threshold. Warning level (fire-once).
+            for msg in self._feed_silence.check_cadence():
+                logger.warning("%s", msg)
+                self._notify(
+                    lambda m=msg: self._notifier.send_alert(m, "warning")
+                )
 
     async def _check_market_data_alerts(self) -> None:
         """Telegram alert when fleet health stays red beyond threshold."""
