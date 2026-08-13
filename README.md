@@ -172,10 +172,11 @@ python main.py --audit               # security audit
 python scripts/lookahead_audit.py --ci   # future-data leakage scanner
 python tests/test_cascade_simulation.py  # vol circuit stress test
 
-# Pre-commit / pre-push gate (CI battery + security audit in one command)
+# Pre-commit / pre-push gate (CI + security audit + config_hash in one command)
 python scripts/run_pre_push_gate.py
 python scripts/run_pre_push_gate.py --fail-on-high   # audit fails on HIGH too
 python scripts/run_pre_push_gate.py --skip-audit     # CI battery only
+python scripts/run_pre_push_gate.py --skip-hash      # skip the config_hash check
 
 # Maintenance
 python scripts/backfill_candles.py --symbols BTC,ETH,SOL --days 7
@@ -295,10 +296,18 @@ An uncontracted feed must never appear in the snapshot, and
 ## Pre-commit / pre-push gate
 
 `scripts/run_pre_push_gate.py` is the **single command to run before
-commit/push** — it runs the full CI battery (pytest `unit` +
-`integration_offline`, same as `scripts/run_ci_tests.py`) and then the static
-security audit (`security.audit`), stopping early with a non-zero exit code
-if either stage fails. Wire it into your hook:
+commit/push** — it runs three validations in order, stopping early with a
+non-zero exit code if any fails:
+
+1. **CI battery** — pytest `unit` + `integration_offline` (same as
+   `scripts/run_ci_tests.py`).
+2. **Security audit** — `security.audit` (static scanner).
+3. **config_hash** — the effective `config/settings.yaml` hash must equal the
+   Fase 10 frozen manifest hash — the same assert `main.py` runs at startup
+   (`assert_phase10_preregister`). A drift here means the bot would **refuse
+   to start**, so the gate catches it before commit/push.
+
+Wire it into your hook:
 
 ```bash
 # .git/hooks/pre-push
@@ -311,13 +320,14 @@ Flags:
 |------|--------|
 | `--network` / `--testnet-live` | also run those opt-in pytest suites (real endpoints) |
 | `--fail-on-high` | audit fails on HIGH findings too (default: CRITICAL only, matching `main.py --audit`) |
-| `--skip-audit` | run only the CI battery |
+| `--skip-audit` | run only the CI battery (audit + hash run separately) |
+| `--skip-hash` | skip the config_hash-vs-frozen check (runs separately) |
 
-Exit codes: `0` all stages passed · `1` CI or audit failed · `2` audit
-unreachable. Note the audit default mirrors `main.py --audit`: it fails on
-CRITICAL findings; the 2 pre-existing HIGH (`AUDIT-005` subprocess) and
-1 MEDIUM (`AUDIT-004` file write) are baseline and do not block unless you
-pass `--fail-on-high`.
+Exit codes: `0` all stages passed · `1` any stage failed · `2` a stage was
+unreachable (e.g. missing Fase 10 manifest). Note the audit default mirrors
+`main.py --audit`: it fails on CRITICAL findings; the 2 pre-existing HIGH
+(`AUDIT-005` subprocess) and 1 MEDIUM (`AUDIT-004` file write) are baseline
+and do not block unless you pass `--fail-on-high`.
 
 ## Testing
 

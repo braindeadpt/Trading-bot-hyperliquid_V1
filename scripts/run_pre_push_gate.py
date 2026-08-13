@@ -1,14 +1,18 @@
-"""Run the full pre-commit/pre-push gate: CI battery + security audit.
+"""Run the full pre-commit/pre-push gate: CI battery + security audit + config_hash.
 
-One command to run before commit/push, combining the two validations that
+One command to run before commit/push, combining the three validations that
 keep the repo green:
 
   1. CI battery  - `scripts/run_ci_tests.py` (unit + integration_offline;
                     optionally --network / --testnet-live).
-  2. Security    - `python main.py --audit` (static audit; fails on CRITICAL
-                    findings; --fail-on-high also fails on HIGH).
+  2. Security    - static audit (`security.audit`); fails on CRITICAL
+                    findings; --fail-on-high also fails on HIGH.
+  3. config_hash - effective `config/settings.yaml` hash must equal the
+                    Fase 10 frozen manifest hash (the same assert main.py
+                    runs at startup — a drift here means the bot would
+                    refuse to start).
 
-Returns non-zero (and stops early) if either stage fails. Safe to wire into
+Returns non-zero (and stops early) if any stage fails. Safe to wire into
 a git pre-commit/pre-push hook:
 
     # .git/hooks/pre-push
@@ -16,8 +20,8 @@ a git pre-commit/pre-push hook:
 
 Exit codes:
   0  all stages passed
-  1  CI or audit failed
-  2  audit unreachable (main.py --audit broken)
+  1  CI / audit / hash failed
+  2  stage unreachable (broken import / missing manifest)
 """
 
 from __future__ import annotations
@@ -29,6 +33,21 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Compare the effective config hash against the Fase 10 frozen manifest,
+# mirroring src/research/phase10_preregister.assert_config_matches_preregister
+# (the same check main.py runs at startup). Exit 1 on drift, 2 on missing
+# manifest, 0 when hashes match.
+_HASH_CHECK_SNIPPET = (
+    "import sys; "
+    "sys.stdout.reconfigure(encoding='utf-8', errors='replace'); "
+    "from src.utils.config import load_config, compute_config_hash; "
+    "from src.research.phase10_preregister import load_preregister_manifest; "
+    "cfg = load_config(); "
+    "m = load_preregister_manifest(); "
+    "sys.exit(2 if m is None else 0 if compute_config_hash(cfg) == m.get('config_hash') else 1)"
+)
+
 
 def _run(cmd: list, label: str) -> int:
     print(f"\n{'=' * 70}\n>>> {label}\n{'=' * 70}")
@@ -61,6 +80,11 @@ def main() -> int:
         "--skip-audit",
         action="store_true",
         help="run only the CI battery (audit runs separately)",
+    )
+    parser.add_argument(
+        "--skip-hash",
+        action="store_true",
+        help="skip the config_hash vs frozen-manifest check (hash runs separately)",
     )
     args = parser.parse_args()
 
@@ -101,6 +125,31 @@ def main() -> int:
             print("\n[FAIL] Security audit FAILED - GATE BLOCKED: review findings before commit/push.")
             return audit_result.returncode
         print("\n[PASS] Security audit PASSED")
+
+    # Stage 3: config_hash vs Fase 10 frozen manifest. Replicates the startup
+    # assert in main.py (assert_phase10_preregister) so a drift that would
+    # refuse to boot is caught before commit/push.
+    if not args.skip_hash:
+        sep = os.pathsep
+        hash_env = {
+            **os.environ,
+            "PYTHONPATH": f"{ROOT}{sep}{ROOT / 'src'}",
+        }
+        hash_cmd = [
+            sys.executable, "-c", _HASH_CHECK_SNIPPET,
+        ]
+        print(f"\n{'=' * 70}\n>>> config_hash vs Fase 10 frozen manifest\n{'=' * 70}")
+        hash_result = subprocess.run(
+            hash_cmd, cwd=str(ROOT), env=hash_env, check=False,
+        )
+        if hash_result.returncode != 0:
+            print(
+                "\n[FAIL] config_hash check FAILED - GATE BLOCKED: settings.yaml "
+                "drifted from the Fase 10 frozen window. Restore it or re-freeze "
+                "before commit/push."
+            )
+            return hash_result.returncode
+        print("\n[PASS] config_hash matches the frozen Fase 10 manifest")
 
     print("\n[PASS] PRE-PUSH GATE PASSED - safe to commit/push.")
     return 0
