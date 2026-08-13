@@ -1464,6 +1464,23 @@ def create_app(config: Dict[str, Any]) -> tuple:
             return jsonify([])
         try:
             rows = db.get_trades(limit=100)
+            # Enrich each executed trade with its shadow IV decision
+            # (percentile + high/low class) via the same join the recheck
+            # watchdog and CLI use — single source of truth, read-only.
+            try:
+                from scripts.iv_gate_shadow_vs_pnl import (
+                    join_decisions_to_trades,
+                    load_shadow_decisions,
+                    resolve_db_paths,
+                )
+
+                _research = resolve_db_paths()[1]
+                _decisions = load_shadow_decisions(_research)
+                rows, _matched = join_decisions_to_trades(
+                    _decisions, rows, tolerance_ms=60_000
+                )
+            except Exception:  # noqa: BLE001 — IV enrichment is best-effort
+                pass
             return jsonify(rows)
         except Exception:
             return jsonify([])

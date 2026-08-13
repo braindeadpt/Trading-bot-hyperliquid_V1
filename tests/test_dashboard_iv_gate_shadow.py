@@ -165,3 +165,85 @@ class TestIvGateShadowTemplate:
         assert "function renderIvGateShadow" in html
         assert '"/api/iv_gate_shadow"' in html
         assert "renderIvGateShadow(d)" in html
+
+    def test_trades_table_has_iv_columns(self) -> None:
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        assert "IV pct" in html
+        assert "iv_percentile" in html
+        assert "ivBadge(t.iv_class)" in html
+        assert 'function ivBadge' in html
+        assert 'colspan="14"' in html
+
+
+class TestTradesEndpointIvEnrichment:
+    """/api/trades enriches executed trades with the shadow IV decision."""
+
+    pytestmark = pytest.mark.integration_offline
+
+    def setup_method(self) -> None:
+        import src.dashboard.web as web
+
+        self._web = web
+        self._orig_engine = web._engine
+        self._tmp = tempfile.TemporaryDirectory()
+        self._research = os.path.join(self._tmp.name, "research.db")
+        self._live = os.path.join(self._tmp.name, "bot.db")
+        _make_research_db(self._research)
+        _make_live_db(self._live, n=6)
+        self._app, self._sio, _ = web.create_app({"mode": "paper"})
+        self._client = self._app.test_client()
+
+    def teardown_method(self) -> None:
+        self._web._engine = self._orig_engine
+        if getattr(self, "_db", None) is not None:
+            self._db.close()
+        self._tmp.cleanup()
+
+    def test_trades_carry_iv_class_and_percentile(self) -> None:
+        from src.data.database import Database
+
+        self._db = Database(self._live)
+        self._web._engine = type("E", (), {"_db": self._db})()
+        from scripts import iv_gate_shadow_vs_pnl as pnl
+
+        def _resolve(live_db=None, research_db=None):
+            return Path(self._live), Path(self._research)
+
+        with patch.object(pnl, "resolve_db_paths", _resolve):
+            r = self._client.get("/api/trades")
+        assert r.status_code == 200
+        rows = r.get_json()
+        assert len(rows) == 6
+        # 5 trades matched a decision (2 high_iv + 3 low_iv), 1 unmatched
+        # (join marks unmatched as "unknown", no percentile).
+        high = [t for t in rows if t["iv_class"] == "high_iv"]
+        low = [t for t in rows if t["iv_class"] == "low_iv"]
+        unknown = [t for t in rows if t["iv_class"] == "unknown"]
+        assert len(high) == 2
+        assert len(low) == 3
+        assert len(unknown) == 1
+        assert all(t["iv_percentile"] is not None for t in high + low)
+        assert high[0]["iv_percentile"] in (72.0, 80.0)
+        assert unknown[0].get("iv_percentile") is None
+
+    def test_enrichment_best_effort_no_crash(self) -> None:
+        """A broken research DB must not take the trades list down."""
+        from src.data.database import Database
+
+        self._db = Database(self._live)
+        self._web._engine = type("E", (), {"_db": self._db})()
+        empty = os.path.join(self._tmp.name, "empty2.db")
+        sqlite3.connect(empty).close()
+        from scripts import iv_gate_shadow_vs_pnl as pnl
+
+        def _resolve(live_db=None, research_db=None):
+            return Path(self._live), Path(empty)
+
+        with patch.object(pnl, "resolve_db_paths", _resolve):
+            r = self._client.get("/api/trades")
+        assert r.status_code == 200
+        rows = r.get_json()
+        assert len(rows) == 6  # still served, just unenriched
+        assert all(t.get("iv_class") in (None, "unknown") for t in rows)
