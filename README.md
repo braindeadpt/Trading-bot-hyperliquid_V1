@@ -178,6 +178,9 @@ python scripts/run_pre_push_gate.py --fail-on-high   # audit fails on HIGH too
 python scripts/run_pre_push_gate.py --skip-audit     # CI battery only
 python scripts/run_pre_push_gate.py --skip-hash      # skip the config_hash check
 
+# CI battery — also runs the same security audit + config_hash (the full trio)
+python scripts/run_ci_tests.py
+
 # Pre-start feed delivery check (fails early instead of waiting for silence)
 python scripts/preflight_feed_check.py
 
@@ -345,8 +348,11 @@ An uncontracted feed must never appear in the snapshot, and
 commit/push** — it runs three validations in order, stopping early with a
 non-zero exit code if any fails:
 
-1. **CI battery** — pytest `unit` + `integration_offline` (same as
-   `scripts/run_ci_tests.py`).
+1. **CI battery** — pytest `unit` + `integration_offline` (via
+   `scripts/run_ci_tests.py`). Since `run_ci_tests.py` itself runs the full
+   trio (CI + audit + hash), the gate passes `--skip-audit --skip-hash` so
+   each check runs **exactly once** — the trio lives in `run_ci_tests.py`;
+   the gate adds the opt-in suites and the `--fail-on-high` knob.
 2. **Security audit** — `security.audit` (static scanner).
 3. **config_hash** — the effective `config/settings.yaml` hash must equal the
    Fase 10 frozen manifest hash — the same assert `main.py` runs at startup
@@ -433,11 +439,15 @@ The two layers together pin the full contract: **minimal proves the
 machinery, production proves the calibration.**
 
 ```bash
-# Default CI battery (unit + integration_offline)
+# Default CI battery (unit + integration_offline) — after the tests pass this
+# also runs the security audit and the config_hash-vs-frozen check, i.e. the
+# same three stages as scripts/run_pre_push_gate.py in a single command
 python scripts/run_ci_tests.py
 
 # Everything including network-dependent tests
 python scripts/run_ci_tests.py --network --testnet-live
+python scripts/run_ci_tests.py --skip-audit     # CI battery only (audit + hash separately)
+python scripts/run_ci_tests.py --skip-hash      # skip the config_hash check
 
 # Ad-hoc: run a single suite directly with pytest
 python -m pytest -m unit

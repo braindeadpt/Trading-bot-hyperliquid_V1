@@ -28,14 +28,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Security audit
-        run: python -m security.audit --src-dir src
-
       - name: Component health check
         run: python audit_all.py
 
       - name: Look-ahead audit
         run: python scripts/lookahead_audit.py --ci
 
-      - name: Run test suite
+      # run_ci_tests.py runs the full trio: pytest battery + security audit +
+      # config_hash-vs-Fase-10-frozen (same stages as run_pre_push_gate.py).
+      - name: Run test suite (CI + security audit + config_hash)
         run: python scripts/run_ci_tests.py

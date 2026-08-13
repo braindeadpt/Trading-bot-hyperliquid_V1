@@ -4,7 +4,10 @@ One command to run before commit/push, combining the three validations that
 keep the repo green:
 
   1. CI battery  - `scripts/run_ci_tests.py` (unit + integration_offline;
-                    optionally --network / --testnet-live).
+                    optionally --network / --testnet-live). Since
+                    run_ci_tests.py itself runs the full trio (CI + audit +
+                    hash), the gate passes --skip-audit --skip-hash so each
+                    check runs exactly once — in this gate's own stages.
   2. Security    - static audit (`security.audit`); fails on CRITICAL
                     findings; --fail-on-high also fails on HIGH.
   3. config_hash - effective `config/settings.yaml` hash must equal the
@@ -88,8 +91,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Stage 1: CI battery
-    ci_cmd = [sys.executable, str(ROOT / "scripts" / "run_ci_tests.py")]
+    # Stage 1: CI battery. run_ci_tests.py itself runs the full trio (CI +
+    # audit + hash); pass --skip-audit --skip-hash so this gate's own audit /
+    # hash stages below run each check exactly once instead of doubling work.
+    ci_cmd = [
+        sys.executable, str(ROOT / "scripts" / "run_ci_tests.py"),
+        "--skip-audit", "--skip-hash",
+    ]
     if args.network:
         ci_cmd.append("--network")
     if args.testnet_live:
