@@ -100,14 +100,16 @@ def test_sequential_contradiction_guard_blocks_flip() -> None:
         confidence=0.6, size_pct=0.01, stop_loss_pct=0.02, take_profit_pct=0.04,
     )
     ts = 1_700_000_000_000
+    # expansion ADX (22) — post-rework VB is only eligible in expansion, so
+    # the flip test must run in the regime where VB actually passes the gate.
     routed, _ = route_phase08_signals(
-        [sig_long], adx=30.0, symbol="BTC",
+        [sig_long], adx=22.0, symbol="BTC",
         seq_guard=guard, timestamp_ms=ts,
     )[:2]
     assert len(routed) == 1
     guard.record("BTC", "long", ts)
     blocked, reason = route_phase08_signals(
-        [sig_short], adx=30.0, symbol="BTC",
+        [sig_short], adx=22.0, symbol="BTC",
         seq_guard=guard, timestamp_ms=ts + 60_000,
     )[:2]
     assert blocked == []

@@ -64,7 +64,9 @@ def test_build_backtest_config_enables_phase08_router() -> None:
     assert bt.adx_trend_threshold == pytest.approx(25.0)
 
 
-def test_backtest_collect_entry_blocks_vwap_in_trend() -> None:
+def test_backtest_collect_entry_blocks_vb_in_trend() -> None:
+    """Expansion-only rework: VB is BLOCKED in trend (ADX 30), and with only
+    VB+VWAP eligible nowhere, the batch resolves to no signal."""
     vb = _StubStrat("VolatilityBreakout", "long", 0.7)
     vwap = _StubStrat("VWAPDeviation", "short", 0.9)
     engine = BacktestEngine.__new__(BacktestEngine)
@@ -75,6 +77,24 @@ def test_backtest_collect_entry_blocks_vwap_in_trend() -> None:
 
     event = MarketEvent(
         symbol="BTC", price=100.0, timestamp_ms=1_800_000_000_000, adx_14=30.0,
+    )
+    sig = BacktestEngine._collect_entry_signal(engine, event)
+    assert sig is None  # VB blocked in trend, VWAP blocked in trend -> no route
+    assert vb.calls == 1 and vwap.calls == 1
+
+
+def test_backtest_collect_entry_passes_vb_in_expansion() -> None:
+    """Expansion-only rework: VB is eligible ONLY in expansion (ADX 20-25)."""
+    vb = _StubStrat("VolatilityBreakout", "long", 0.7)
+    vwap = _StubStrat("VWAPDeviation", "short", 0.9)
+    engine = BacktestEngine.__new__(BacktestEngine)
+    engine.strategy = MagicMock(_strategies=[vb, vwap])
+    engine.cfg = BacktestConfig(use_phase08_regime_router=True)
+    engine._phase08_seq_guard = SequentialContradictionGuard(block_ms=3_600_000)
+    engine.gate_rejections = []
+
+    event = MarketEvent(
+        symbol="BTC", price=100.0, timestamp_ms=1_800_000_000_000, adx_14=22.0,
     )
     sig = BacktestEngine._collect_entry_signal(engine, event)
     assert sig is not None

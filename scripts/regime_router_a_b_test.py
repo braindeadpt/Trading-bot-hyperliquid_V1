@@ -10,7 +10,7 @@ strategy equals its own fallback). This script produces the missing A/B:
   2. For every trade, recomputes the 15m-closed-candle ADX at entry time —
      the exact input the live engine uses (calculate_adx, period 14).
   3. Applies the router's hard gate the way the live multi-strategy batch
-     would (VB eligible in trend/expansion; VWAP in range/low_vol, with
+     would (VB eligible in expansion only; VWAP in range/low_vol, with
      fallback promoting VWAP when no strategy is eligible — i.e. unknown).
   4. Reports per-strategy and combined PnL with vs without, plus the PnL of
      the trades the router would have BLOCKED (the key evidence).
@@ -25,6 +25,7 @@ Research-only: never writes bot.db, never touches the frozen Fase 10 window.
 from __future__ import annotations
 
 import bisect
+import json
 import logging
 import sys
 import time
@@ -36,7 +37,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.backtest.engine import BacktestConfig, BacktestEngine
-from src.core.phase08_regime_router import classify_market_regime
+from src.core.phase08_regime_router import (
+    VB_REGIMES,
+    VWAP_REGIMES,
+    classify_market_regime,
+)
 from src.data.database import Database
 from src.strategies.indicators import calculate_adx
 from src.strategies.volatility_breakout import VolatilityBreakout
@@ -59,10 +64,12 @@ END_ARG = "2026-08-07"     # --end override
 SYMBOLS_ARG = ["BTC", "ETH", "SOL", "HYPE"]  # --symbols override
 
 # Router gate in the 2-strategy world (VB + VWAP, fallback VWAP):
-# VB trades pass only in trend/expansion; VWAP passes in range/low_vol and
-# is the fallback when no strategy is eligible (unknown regime).
-VB_ALLOWED_REGIMES = frozenset({"trend", "expansion"})
-VWAP_ALLOWED_REGIMES = frozenset({"range", "low_vol", "unknown"})
+# VB passes only in expansion (post-rework); VWAP passes in range/low_vol
+# and is the fallback when no strategy is eligible (unknown regime).
+# Constants are imported from the router itself so the A/B can never
+# drift from the live gate.
+VB_ALLOWED_REGIMES = VB_REGIMES
+VWAP_ALLOWED_REGIMES = frozenset(VWAP_REGIMES) | {"unknown"}
 
 
 def ms(s: str, end: bool = False) -> int:
@@ -191,13 +198,20 @@ def analyze_window(
             blocked_report.append({"strategy": name, "regime": b["_regime"],
                                    "pnl_usd": round(float(b.get("pnl_usd", 0.0)), 2)})
     blocked_pnl = sum(b["pnl_usd"] for b in blocked_report)
+    by_regime: Dict[str, Dict[str, Any]] = {}
+    for rg in sorted({b["regime"] for b in blocked_report}):
+        rg_trades = [b for b in blocked_report if b["regime"] == rg]
+        by_regime[rg] = summarize(
+            [{"net_pct": b["pnl_usd"], "pnl_usd": b["pnl_usd"]} for b in rg_trades],
+            f"blocked in {rg}",
+        )
     return {
         "window": f"{w_start}..{w_end}",
         "combined_without": summarize(combined_all, "combined without"),
         "combined_with": summarize(combined_kept, "combined with"),
         "blocked_pnl": round(blocked_pnl, 2),
         "per_strategy": results,
-        "blocked_by_regime": {},
+        "blocked_by_regime": by_regime,
     }
 
 
@@ -273,6 +287,21 @@ def main() -> None:
     print(f"\n  Router poupa {tot_blocked:+.2f} USD no total "
           f"({'CONFIRMADO' if tot_blocked < 0 else 'REJEITADO'}) — "
           f"janelas independentes, sem sobreposição")
+
+    # Persist per-window detail (regime-tagged blocked PnL) for evidence.
+    out_dir = ROOT / "data" / "backtests"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    detail = {
+        "generated": datetime.now(timezone.utc).isoformat(),
+        "window_days": args.split_days or None,
+        "vb_allowed_regimes": sorted(VB_ALLOWED_REGIMES),
+        "vwap_allowed_regimes": sorted(VWAP_ALLOWED_REGIMES),
+        "windows": per_window,
+    }
+    p = out_dir / f"regime_router_ab_split_{stamp}.json"
+    p.write_text(json.dumps(detail, indent=2, default=str), encoding="utf-8")
+    print(f"\nJSON: {p}")
 
     db.close()
 

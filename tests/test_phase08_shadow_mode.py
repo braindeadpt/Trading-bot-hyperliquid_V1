@@ -97,9 +97,12 @@ def test_regime_router_vb_trend_vwap_range() -> None:
         strategy="VWAPDeviation", symbol="BTC", side="short",
         confidence=0.8, size_pct=0.01, stop_loss_pct=0.02, take_profit_pct=0.04,
     )
-    trend_only, _, _ = route_phase08_signals([vb_sig, vwap_sig], adx=30.0, symbol="BTC")
-    assert len(trend_only) == 1
-    assert trend_only[0].strategy == "VolatilityBreakout"
+    # Expansion-only rework: VB is BLOCKED in trend (ADX 30); VWAP is also
+    # not eligible in trend -> the batch resolves to no allowed strategy.
+    trend_only, trend_reason, _ = route_phase08_signals([vb_sig, vwap_sig], adx=30.0, symbol="BTC")
+    assert trend_only == []
+    assert trend_reason == "regime_trend_no_allowed_strategies"
+    assert classify_market_regime(30.0) == "trend"
 
     range_only, _, _ = route_phase08_signals([vb_sig, vwap_sig], adx=15.0, symbol="BTC")
     assert len(range_only) == 1
@@ -108,6 +111,7 @@ def test_regime_router_vb_trend_vwap_range() -> None:
 
     expansion, _, blocked_exp = route_phase08_signals([vb_sig], adx=22.0, symbol="BTC")
     assert len(expansion) == 1
+    assert expansion[0].strategy == "VolatilityBreakout"
     assert classify_market_regime(22.0) == "expansion"
     assert blocked_exp == []
 
@@ -121,10 +125,9 @@ def test_regime_router_rejects_contradictory_signals() -> None:
         strategy="VWAPDeviation", symbol="BTC", side="short",
         confidence=0.8, size_pct=0.01, stop_loss_pct=0.02, take_profit_pct=0.04,
     )
-    # Force both through regime filter using expansion ADX (VB allowed) — inject VWAP bypass
-    # by using expansion where only VB should pass; contradictory test uses both in expansion
-    # with manual regime hack: at adx=22 only VB passes, so test contradiction in trend with
-    # two same-strategy opposite — use two VB signals instead
+    # Contradiction test: two opposite VB signals in EXPANSION (the only
+    # regime where VB is eligible post-rework) -> both pass the regime gate
+    # and the router must reject the batch as contradictory.
     a = Signal(
         strategy="VolatilityBreakout", symbol="BTC", side="long",
         confidence=0.7, size_pct=0.01, stop_loss_pct=0.02, take_profit_pct=0.04,
@@ -133,7 +136,7 @@ def test_regime_router_rejects_contradictory_signals() -> None:
         strategy="VolatilityBreakout", symbol="BTC", side="short",
         confidence=0.6, size_pct=0.01, stop_loss_pct=0.02, take_profit_pct=0.04,
     )
-    routed, reason, _blocked = route_phase08_signals([a, b], adx=30.0, symbol="BTC")
+    routed, reason, _blocked = route_phase08_signals([a, b], adx=22.0, symbol="BTC")
     assert routed == []
     assert reason == "contradictory_simultaneous_signals"
 

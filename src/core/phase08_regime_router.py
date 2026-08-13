@@ -16,7 +16,14 @@ VB_STRATEGY = "VolatilityBreakout"
 VWAP_STRATEGY = "VWAPDeviation"
 CHECKLIST_STRATEGY = "ChecklistMeta"
 
-VB_REGIMES = frozenset({"trend", "expansion"})
+# Rework 2026-08-13 (expansion-only, hash-neutral): VB forensics over the
+# full 80d window showed the trend slice is structurally negative
+# (n=51, -$73.04) while expansion is the ONLY positive slice
+# (n=8, +$17.51). Removing trend from VB's eligibility confines the
+# strategy to its surviving slice without touching config (the Fase-10
+# config_hash is computed from settings.yaml only, so this is a code-only,
+# hash-neutral change). Evidence: data/backtests/vb_forensics_*.csv.
+VB_REGIMES = frozenset({"expansion"})
 VWAP_REGIMES = frozenset({"range", "low_vol"})
 # ChecklistMeta is eligible in every classified regime (fills expansion dead-zone).
 CHECKLIST_REGIMES = frozenset({"trend", "expansion", "range", "low_vol"})
@@ -41,7 +48,7 @@ def classify_market_regime(
 
 
 def regime_allows_strategy(strategy_name: str, regime: MarketRegime) -> bool:
-    """Hard gate: VB in trend/expansion; VWAP in range/low_vol; ChecklistMeta all."""
+    """Hard gate: VB in expansion only; VWAP in range/low_vol; ChecklistMeta all."""
     if regime == "unknown":
         return False
     if strategy_name == VB_STRATEGY:
