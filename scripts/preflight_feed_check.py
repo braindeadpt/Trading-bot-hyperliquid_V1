@@ -56,16 +56,16 @@ def _db_latest(db: sqlite3.Connection, table: str, col: str,
     return int(row[0]) if row and row[0] else 0
 
 
-def _l2_books_mtime() -> int:
+def _l2_books_mtime(l2_dir: Path) -> int:
     newest = 0
-    if L2_BOOKS_DIR.exists():
-        for p in L2_BOOKS_DIR.rglob("*"):
+    if l2_dir.exists():
+        for p in l2_dir.rglob("*"):
             if p.is_file():
                 newest = max(newest, int(p.stat().st_mtime * 1000))
     return newest
 
 
-def collect_evidence(db: sqlite3.Connection) -> dict:
+def collect_evidence(db: sqlite3.Connection, *, l2_dir: Path = L2_BOOKS_DIR) -> dict:
     """Latest delivery timestamp per feed key (ms). Absent keys = no evidence."""
     ev: dict = {}
     ev["liquidation_okx"] = _db_latest(db, "liquidation_events", "timestamp_ms",
@@ -81,7 +81,7 @@ def collect_evidence(db: sqlite3.Connection) -> dict:
         "(buy_volume > 0 OR sell_volume > 0)",
     )
     ev["binance_perp"] = _db_latest(db, "binance_perp_prices", "timestamp_ms")
-    ev["l2_book_recording"] = _l2_books_mtime()
+    ev["l2_book_recording"] = _l2_books_mtime(l2_dir)
     # coinalyze_check: verify-only, no persisted evidence -> key absent
     return ev
 
@@ -92,6 +92,11 @@ def main() -> int:
                         help="bot.db path (default: data/live/bot.db)")
     parser.add_argument("--config", default=str(ROOT / "config" / "settings.yaml"),
                         help="settings.yaml path")
+    parser.add_argument(
+        "--l2-dir",
+        default=str(L2_BOOKS_DIR),
+        help="L2 book recording directory (default: data/research/l2_books)",
+    )
     parser.add_argument("--warn-fraction", type=float, default=0.5,
                         help="warn when age exceeds this fraction of threshold")
     parser.add_argument("--json", action="store_true", help="emit JSON report")
@@ -109,7 +114,8 @@ def main() -> int:
     db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
     now_ms = int(time.time() * 1000)
-    evidence = collect_evidence(db)
+    l2_dir = Path(args.l2_dir)
+    evidence = collect_evidence(db, l2_dir=l2_dir)
     db.close()
 
     report: dict = {"now_ms": now_ms, "feeds": {}}

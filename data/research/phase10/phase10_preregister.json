@@ -1,0 +1,27 @@
+{
+  "config_hash": "9456c6eb877b2391",
+  "execution_strategies": [
+    "VWAPDeviation"
+  ],
+  "experiment_id": "efb4f1fb-7dbc-463a-830e-6c00c9f24e7a",
+  "gate_note": "All four criteria must be a real PASS (not merely 'no FAIL yet due to insufficient data') for the frozen window to be considered met. Drift in execution_strategies or config_hash after freeze invalidates the window \u2014 see assert_config_matches_preregister().",
+  "gate_thresholds": {
+    "expectancy_r_gt": 0.0,
+    "max_drawdown_pct": 5.0,
+    "min_profit_factor": 1.2,
+    "min_trades": 100
+  },
+  "in_sample_selection_note": "VWAPDeviation remains the sole paper execution control (INCONCLUSIVE sample). TopTraderFlow is shadow-only swing research (aggregate bias). Mainnet still blocked.",
+  "manifest_hash": "f1db5c3ab264157c1eeb72e2405846ec1545e1f6a70bcbd09f3d8a3c765a304e",
+  "protocol": "phase10-frozen-window-v1",
+  "registered_at_ms": 1786457297619,
+  "reregistration_reason": "research shadow \u2014 TopTraderFlow hybrid swing panel (bias samples + virtual book + 5d max_hold / wider SL-TP). No execution_strategies change; OOS counter restarts because config_hash includes strategy params.",
+  "supersedes_experiment_id": "6f0b8a3b-67d8-47f0-840b-d76cd6c77418",
+  "window": {
+    "max_end_ms": 1793714897421,
+    "max_weeks": 12,
+    "min_end_ms": 1791295697421,
+    "min_weeks": 8
+  },
+  "window_start_ms": 1786457297421
+}

@@ -8,7 +8,12 @@ data/test_health.db
 data/vault.enc
 
 # Research artifacts (parity DBs, support packages, sweep outputs)
-data/research/
+# Keep the frozen-window manifests tracked — CI and clones need them.
+data/research/*
+!data/research/phase10/
+data/research/phase10/*
+!data/research/phase10/phase10_preregister.json
+!data/research/phase08_preregister.json
 data/backtests/
 data/backups/
 # scratch config overrides for parity runs

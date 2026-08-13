@@ -1,0 +1,143 @@
+{
+  "adx_contract": {
+    "closed_candles_only": true,
+    "period": 14,
+    "timeframe": "15m",
+    "timeframe_s": 900
+  },
+  "config_hash": "9456c6eb877b2391",
+  "edge_demonstrated": false,
+  "execution_scope": {
+    "mode": "paper",
+    "paper_only": true,
+    "shadow_strategies": [
+      "VolatilityBreakout",
+      "CVDOrderFlow",
+      "OrderBookScalper",
+      "FundingArbitrage",
+      "FundingMomentum",
+      "SpotPerpCarry",
+      "LeadLag",
+      "LiquidationCatcher",
+      "ChecklistMeta",
+      "TopTraderFlow"
+    ],
+    "strategies": [
+      "VWAPDeviation"
+    ]
+  },
+  "experiment_id": "61cda260-e1bb-4e40-85a5-e5cf5a44aabc",
+  "fidelity_note": "tier_a_hl_ohlc certifies Hyperliquid OHLC data availability only; it does not certify strategy edge.",
+  "in_sample_selection_note": "VWAPDeviation remains the sole paper execution control (INCONCLUSIVE sample). TopTraderFlow is shadow-only swing research (aggregate bias). Mainnet still blocked.",
+  "manifest_hash": "f8d43b824703db9572f8271d44f3d609e35bc12de340bc56e27a53812465b72f",
+  "oos_protocol": "phase06-train-val-test-v1",
+  "oos_status": "pending",
+  "protocol": "phase08-preregister-v2",
+  "regime_router": {
+    "adx_range_threshold": 20.0,
+    "adx_trend_threshold": 25.0,
+    "checklist_regimes": [
+      "trend",
+      "expansion",
+      "range",
+      "low_vol"
+    ],
+    "fallback_strategy": "VWAPDeviation",
+    "sequential_contradiction_block_ms": 3600000,
+    "vb_regimes": [
+      "trend",
+      "expansion"
+    ],
+    "vwap_regimes": [
+      "range",
+      "low_vol"
+    ]
+  },
+  "registered_at_ms": 1786457297631,
+  "reregistration_reason": "research shadow \u2014 TopTraderFlow hybrid swing panel (bias samples + virtual book + 5d max_hold / wider SL-TP). No execution_strategies change; OOS counter restarts because config_hash includes strategy params.",
+  "strategies": {
+    "ChecklistMeta": {
+      "expected_max_signals_per_symbol_per_week": 1344.0,
+      "frozen_params": {
+        "base_size_pct": 0.0075,
+        "dominance_margin": 1.5,
+        "flip_block_minutes": 60,
+        "max_hold_hours": 6,
+        "max_size_pct": 0.01875,
+        "min_adx_gate": 18.0,
+        "min_confidence": 0.6,
+        "score_threshold": 4.0,
+        "signal_throttle_ms": 1800000,
+        "sl_to_be_trigger_r": 0.6,
+        "stop_loss_atr_multiplier": 1.5,
+        "take_profit_atr_multiplier": 3.0,
+        "use_sl_to_be_after_1r": true
+      },
+      "kill_criteria": {
+        "halt_if_daily_loss_pct": 3.0,
+        "max_drawdown_pct": 10.0,
+        "min_profit_factor": 1.0,
+        "min_rolling_sharpe": 0.0,
+        "min_trades_before_eval": 30
+      },
+      "max_hold_hours": 6.0,
+      "signal_throttle_ms": 1800000
+    },
+    "VWAPDeviation": {
+      "expected_max_signals_per_symbol_per_week": 8064.0,
+      "frozen_params": {
+        "exit_z_threshold": 0.3,
+        "max_adx": 25.0,
+        "max_hold_hours": 4,
+        "min_adx": 15.0,
+        "min_confidence": 0.7,
+        "session_end_utc_h": 22,
+        "session_start_utc_h": 7,
+        "signal_throttle_ms": 300000,
+        "stop_loss_atr_multiplier": 2.0,
+        "take_profit_r_multiple": 2.0,
+        "use_session_filter": true,
+        "volume_surge": 1.5,
+        "z_threshold": 2.5
+      },
+      "kill_criteria": {
+        "halt_if_daily_loss_pct": 3.0,
+        "max_drawdown_pct": 10.0,
+        "min_profit_factor": 1.0,
+        "min_rolling_sharpe": 0.0,
+        "min_trades_before_eval": 30
+      },
+      "max_hold_hours": 4.0,
+      "signal_throttle_ms": 300000
+    },
+    "VolatilityBreakout": {
+      "expected_max_signals_per_symbol_per_week": 1344.0,
+      "frozen_params": {
+        "bb_period": 20,
+        "bb_std": 2.0,
+        "max_adx": 38.0,
+        "max_hold_hours": 6,
+        "min_adx": 12.0,
+        "min_confidence": 0.55,
+        "min_squeeze_bars": 3,
+        "require_trend_alignment": true,
+        "signal_throttle_ms": 1800000,
+        "squeeze_lookback": 20,
+        "squeeze_percentile": 25.0,
+        "stop_loss_atr_multiplier": 2.0,
+        "take_profit_atr_multiplier": 6.0,
+        "volume_surge": 1.5
+      },
+      "kill_criteria": {
+        "halt_if_daily_loss_pct": 3.0,
+        "max_drawdown_pct": 10.0,
+        "min_profit_factor": 1.0,
+        "min_rolling_sharpe": 0.0,
+        "min_trades_before_eval": 30
+      },
+      "max_hold_hours": 6.0,
+      "signal_throttle_ms": 1800000
+    }
+  },
+  "supersedes_experiment_id": "f9fe8620-87ce-4831-b4d2-09cb0312b183"
+}

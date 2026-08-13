@@ -41,13 +41,21 @@ ROOT = Path(__file__).resolve().parents[1]
 # mirroring src/research/phase10_preregister.assert_config_matches_preregister
 # (the same check main.py runs at startup). Exit 1 on drift, 2 on missing
 # manifest, 0 when hashes match.
+#
+# Reads the manifest JSON directly instead of importing phase10_preregister:
+# that module's import chain pulls numpy/pandas through src.utils.helpers,
+# which costs 10-20s+ in a cold subprocess (and is flaky under AV scans).
+# The manifest is read exactly as load_preregister_manifest() reads it
+# (DEFAULT_PATH, relative to cwd), so the check is behaviour-identical, just
+# cheap. Must stay byte-identical to the snippet in scripts/run_ci_tests.py.
 _HASH_CHECK_SNIPPET = (
-    "import sys; "
+    "import json, sys; "
     "sys.stdout.reconfigure(encoding='utf-8', errors='replace'); "
+    "from pathlib import Path; "
     "from src.utils.config import load_config, compute_config_hash; "
-    "from src.research.phase10_preregister import load_preregister_manifest; "
     "cfg = load_config(); "
-    "m = load_preregister_manifest(); "
+    "p = Path('data/research/phase10/phase10_preregister.json'); "
+    "m = json.loads(p.read_text(encoding='utf-8')) if p.exists() else None; "
     "sys.exit(2 if m is None else 0 if compute_config_hash(cfg) == m.get('config_hash') else 1)"
 )
 

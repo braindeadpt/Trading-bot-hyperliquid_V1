@@ -51,6 +51,14 @@ def _make_db(path, *, liq_okx_ms, liq_bybit_ms, funding_ms, candle_ms) -> None:
     db.close()
 
 
+def _make_l2_dir(tmp: str) -> str:
+    """Fresh L2 recording evidence so CI (no data/research/l2_books) stays green."""
+    d = Path(tmp) / "l2_books" / "BTC"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "probe.jsonl").write_text("{}\n", encoding="utf-8")
+    return str(Path(tmp) / "l2_books")
+
+
 def _run(args):
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
@@ -66,7 +74,7 @@ def test_fresh_evidence_exits_zero() -> None:
         db = os.path.join(tmp, "bot.db")
         _make_db(db, liq_okx_ms=NOW - 5_000, liq_bybit_ms=NOW - 9_000,
                  funding_ms=NOW - 5_000, candle_ms=NOW - 30_000)
-        r = _run(["--db", db])
+        r = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp)])
         assert r.returncode == 0, r.stdout + r.stderr
         assert "[PASS]" in r.stdout
 
@@ -77,7 +85,7 @@ def test_stale_feed_fails_before_threshold_would_alert_anyway() -> None:
         db = os.path.join(tmp, "bot.db")
         _make_db(db, liq_okx_ms=NOW - 7 * 3600_000, liq_bybit_ms=NOW - 5_000,
                  funding_ms=NOW - 5_000, candle_ms=NOW - 30_000)
-        r = _run(["--db", db])
+        r = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp)])
         assert r.returncode == 1, r.stdout + r.stderr
         assert "liquidation_okx" in r.stdout
         assert "FAIL" in r.stdout
@@ -90,7 +98,7 @@ def test_missing_feed_fails_immediately() -> None:
         db = os.path.join(tmp, "bot.db")
         _make_db(db, liq_okx_ms=0, liq_bybit_ms=NOW - 5_000,
                  funding_ms=NOW - 5_000, candle_ms=NOW - 30_000)
-        r = _run(["--db", db])
+        r = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp)])
         assert r.returncode == 1, r.stdout + r.stderr
         assert "liquidation_okx" in r.stdout
 
@@ -103,7 +111,7 @@ def test_warn_fraction_exits_two() -> None:
         _make_db(db, liq_okx_ms=NOW - int(0.6 * 6 * 3600_000),
                  liq_bybit_ms=NOW - 5_000,
                  funding_ms=NOW - 5_000, candle_ms=NOW - 30_000)
-        r = _run(["--db", db])
+        r = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp)])
         assert r.returncode == 2, r.stdout + r.stderr
         assert "WARN" in r.stdout
 
@@ -115,11 +123,11 @@ def test_coinalyze_skipped_by_default_gated_with_flag() -> None:
         db = os.path.join(tmp, "bot.db")
         _make_db(db, liq_okx_ms=NOW - 5_000, liq_bybit_ms=NOW - 5_000,
                  funding_ms=NOW - 5_000, candle_ms=NOW - 30_000)
-        r = _run(["--db", db])
+        r = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp)])
         assert r.returncode == 0, r.stdout + r.stderr
         assert "SKIPPED" in r.stdout
         assert "liquidation_coinalyze_check" in r.stdout
-        r2 = _run(["--db", db, "--gate-coinalyze"])
+        r2 = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp), "--gate-coinalyze"])
         assert r2.returncode == 1, r2.stdout + r2.stderr
 
 
@@ -130,7 +138,7 @@ def test_contracts_exclude_not_contracted_feeds() -> None:
         db = os.path.join(tmp, "bot.db")
         _make_db(db, liq_okx_ms=NOW - 5_000, liq_bybit_ms=NOW - 5_000,
                  funding_ms=NOW - 5_000, candle_ms=NOW - 30_000)
-        r = _run(["--db", db])
+        r = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp)])
         assert r.returncode == 0, r.stdout + r.stderr
         assert "binance_perp" not in r.stdout
         assert "liquidation_binance" not in r.stdout
