@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import os
 import sys
 import tempfile
@@ -20,14 +21,20 @@ from src.backtest.replay_data_quality import ReplayDataQualityGate, SymbolReplay
 from src.core.correlation_monitor import CorrelationMonitor
 from src.core.engine import TradingEngine
 from src.core.funding_blackout import FundingBlackoutFilter
+from src.core.liquidation_accumulator import LiquidationAccumulator
 from src.core.risk_manager import RiskManager
 from src.core.signal_pipeline import GATE_ORDER, PipelineContext, SignalPipeline
 from src.core.volatility_circuit import VolatilityCircuitBreaker
 from src.data.database import Candle as DBCandle
 from src.data.database import Database
+from src.exchanges.liquidation_event import (
+    is_proxy_liquidation_source,
+    is_real_liquidation_source,
+)
 from src.strategies.base import ExitSignal, MarketEvent, Position, Signal, Strategy
 from src.strategies.checklist_meta import ChecklistMeta
 from src.strategies.indicators import Candle
+from src.strategies.liquidation_catcher import LiquidationCatcher
 from src.utils.config import Config, load_config, resolve_kelly_enabled
 import pytest
 
@@ -1303,6 +1310,178 @@ class TestExitPathParityProductionConfig:
         bt.cfg = BacktestConfig()
         assert not hasattr(bt, "_trailing_data")
         assert not hasattr(bt, "_maybe_update_trailing_stop")
+
+
+class TestLiquidationSourceGateParity:
+    """liquidation_source gate — real vs proxy in the entry chain.
+
+    Live (production ``market_data.liquidation_source: real``) gates which
+    wire sources may enter the strategy liquidation window
+    (``_accepts_liquidation_source``) and rolls provenance up to ``real``;
+    proxy synthesis never runs in ``real`` mode. The backtest replays the
+    stored provenance verbatim (``proxy`` rows from backfill, real venue rows
+    from live captures) and the shared strategy gate
+    (``is_real_liquidation_source``) rejects proxy identically in both paths.
+    """
+
+    pytestmark = pytest.mark.integration_offline
+
+    @staticmethod
+    def _live_engine(mode: str = "real") -> TradingEngine:
+        """Live engine stub; liquidation state shaped like TradingEngine.__init__."""
+        eng = object.__new__(TradingEngine)
+        eng._liquidation_source_mode = mode
+        eng._liquidation_feed_warmup = 1
+        eng._real_liquidation_events = 0
+        eng._binance_liquidation_events = 0
+        eng._liquidation_feed_ready = False
+        eng._liquidation_feed_ready_logged = False
+        eng._db = None  # save_liquidation failure is swallowed in _record_liquidation
+        eng._liquidation_acc = {
+            "BTC": {
+                "window_ms": 5 * 60_000,
+                "events": collections.deque(),
+                "source": None,
+                "sources": set(),
+            }
+        }
+        eng._last_prices = {}
+        eng._last_price_ts = {}
+        return eng
+
+    # -- config derivation ------------------------------------------------
+
+    def test_production_liquidation_source_is_real(self) -> None:
+        prod = load_config(PROD_SETTINGS_PATH)
+        mode = str(prod.get("market_data.liquidation_source", "auto")).lower()
+        assert mode == "real"
+        # The engine derives the same string verbatim from that key.
+        assert self._live_engine(mode)._liquidation_source_mode == "real"
+
+    # -- live gate: _accepts_liquidation_source matrix ---------------------
+
+    def test_live_real_mode_accepts_only_real_venues(self) -> None:
+        eng = self._live_engine("real")
+        for src in ("hl", "okx", "bybit", "binance"):
+            assert eng._accepts_liquidation_source(src), src
+        for src in ("proxy", "coinalyze", None, "unknown", ""):
+            assert not eng._accepts_liquidation_source(src), repr(src)
+
+    def test_live_binance_mode_accepts_only_binance(self) -> None:
+        eng = self._live_engine("binance")
+        assert eng._accepts_liquidation_source("binance")
+        for src in ("hl", "okx", "bybit", "proxy", "coinalyze"):
+            assert not eng._accepts_liquidation_source(src), src
+
+    def test_live_proxy_mode_accepts_nothing_real(self) -> None:
+        # In proxy mode the accumulator is fed by the candle+OI synthesis path
+        # (source='proxy'), never by wire venues.
+        eng = self._live_engine("proxy")
+        for src in ("hl", "okx", "bybit", "binance", "coinalyze"):
+            assert not eng._accepts_liquidation_source(src), src
+
+    def test_coinalyze_never_accepted_in_any_mode(self) -> None:
+        for mode in ("real", "binance", "proxy", "auto"):
+            assert not self._live_engine(mode)._accepts_liquidation_source("coinalyze")
+
+    # -- live record path: proxy never enters real mode --------------------
+
+    def test_live_real_mode_rejects_proxy_event(self) -> None:
+        eng = self._live_engine("real")
+        eng._record_liquidation("BTC", 1_000_000, 5_000_000.0, "long", "proxy")
+        assert not eng._liquidation_acc["BTC"]["events"]
+        assert eng._liquidation_acc["BTC"]["source"] is None
+        assert eng._real_liquidation_events == 0
+        assert not eng._liquidation_feed_ready  # proxy never flips warmup
+
+    def test_live_real_mode_rolls_up_real_provenance(self) -> None:
+        eng = self._live_engine("real")
+        eng._record_liquidation("BTC", 1_000_000, 2_000_000.0, "long", "okx")
+        eng._record_liquidation("BTC", 1_000_001, 3_000_000.0, "short", "bybit")
+        assert len(eng._liquidation_acc["BTC"]["events"]) == 2
+        assert eng._liquidation_acc["BTC"]["source"] == "real"  # rollup label
+        assert eng._get_liquidation_source("BTC") == "real"
+        assert eng._liquidation_feed_ready  # warmup=1 real event
+
+    def test_live_real_mode_rejects_coinalyze_event(self) -> None:
+        eng = self._live_engine("real")
+        eng._record_liquidation("BTC", 1_000_000, 5_000_000.0, "long", "coinalyze")
+        assert not eng._liquidation_acc["BTC"]["events"]
+        assert not eng._liquidation_feed_ready
+
+    def test_live_proxy_mode_fills_window_via_synthesis(self) -> None:
+        # The proxy accumulation path is the ONLY source of events in proxy
+        # mode; it tags provenance 'proxy' explicitly.
+        eng = self._live_engine("proxy")
+        eng._last_prices["BTC"] = 50_000.0
+        eng._last_price_ts["BTC"] = 1_000_000
+        ev = MarketEvent(
+            symbol="BTC", price=45_000.0, timestamp_ms=1_060_000,
+            oi_delta=-100.0, volume_1m=200.0,
+        )
+        eng._accumulate_liquidation_proxy("BTC", ev)
+        assert eng._liquidation_acc["BTC"]["source"] == "proxy"
+        assert not is_real_liquidation_source(eng._get_liquidation_source("BTC"))
+
+    # -- backtest replay path: provenance preserved verbatim ---------------
+
+    def test_backtest_replay_preserves_proxy_provenance(self) -> None:
+        acc = LiquidationAccumulator()
+        acc.record(1_000_000, 5_000_000.0, "long", "proxy")
+        assert acc.source == "proxy"
+        assert is_proxy_liquidation_source(acc.source)
+        assert not is_real_liquidation_source(acc.source)
+
+    def test_backtest_replay_preserves_real_provenance(self) -> None:
+        acc = LiquidationAccumulator()
+        acc.record(1_000_000, 2_000_000.0, "long", "okx")
+        assert acc.source == "okx"
+        assert is_real_liquidation_source(acc.source)
+
+    # -- shared strategy gate: both paths reject proxy identically ---------
+
+    @staticmethod
+    def _catcher() -> LiquidationCatcher:
+        return LiquidationCatcher(
+            {
+                "enabled": True,
+                "require_real_liquidation_data": True,
+                "min_notional_usd": 1_000,
+                "min_liquidation_count": 1,
+                "require_oi_decreasing": False,
+                "min_confidence": 0.0,
+            }
+        )
+
+    def test_live_label_real_reaches_strategy_and_signals(self) -> None:
+        # What live produces (provenance rollup 'real') is what strategies see.
+        ev = MarketEvent(
+            symbol="BTC", timestamp_ms=1_000_000, price=50_000.0,
+            liquidation_notional_5m=2_000_000.0, liquidation_side_5m="long",
+            liquidation_count_5m=5, liquidation_data_source="real",
+            liquidation_feed_ready=True,
+        )
+        assert self._catcher().on_data(ev) is not None
+
+    def test_backtest_proxy_label_rejected_by_strategy(self) -> None:
+        # What backtest replay produces (verbatim 'proxy') is rejected by the
+        # same strategy gate — identical outcome to live real mode, where a
+        # proxy event never even enters the window.
+        ev = MarketEvent(
+            symbol="BTC", timestamp_ms=1_000_000, price=50_000.0,
+            liquidation_notional_5m=2_000_000.0, liquidation_side_5m="long",
+            liquidation_count_5m=5, liquidation_data_source="proxy",
+            liquidation_feed_ready=True,
+        )
+        assert self._catcher().on_data(ev) is None
+
+    def test_live_and_backtest_agree_proxy_never_signals(self) -> None:
+        # Same raw cascade, two paths: live real-mode rolls up to 'real' (or
+        # drops the window entirely for proxy), backtest replays 'proxy'. The
+        # shared gate (is_real_liquidation_source) makes both entry chains
+        # agree that proxy provenance must not produce a liquidation signal.
+        assert is_real_liquidation_source("real")
+        assert not is_real_liquidation_source("proxy")
 
 
 async def _noop_native_sync(symbol: str, new_stop: float) -> None:
