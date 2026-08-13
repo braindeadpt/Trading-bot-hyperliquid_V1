@@ -48,6 +48,22 @@ Returns the trailing-30d percentile of the **last completed** DVOL day (no
 lookahead) — the same value the backtest evidence attaches to a trade, so the
 gate in production reproduces the research numbers exactly.
 
+## Shadow-only IV gate (production, not enforced)
+
+The regime router now records the high/low-IV decision for every routed trade
+via `TradingEngine._record_iv_gate_shadow`, **without changing execution** —
+the backtest gate (`docs/IV_HIGH_ONLY_AB_SPLIT.md`, high_iv = DVOL
+percentile(30d) > 66.7) is still INCONCLUSIVE (n=13), so it is observability
+only. Each executed trade gets an `iv_gate_shadow` ShadowDecision with
+`iv_percentile`, `iv_class` (`high_iv` / `low_iv` / `unknown`) and the
+`IV_HIGH_PCT` threshold in the snapshot metadata, so live outcomes can be
+compared against the backtest evidence without touching the trade path.
+
+`SOL`/`HYPE` classify against the **BTC DVOL** global proxy (see
+`dvol_currency_for`), mirroring `dvol_series_for` in backtest. The record is
+skipped when `research.dvol_feed.enabled` is false, and a `None` percentile
+records as `unknown` (never blocks).
+
 ## Parity guarantee
 
 `fetch_dvol`, `build_iv_percentile`, `iv_pct_at` and `dvol_series_for` are the
@@ -67,3 +83,6 @@ assert. Pinned by `tests/test_dvol_feed.py::TestHashNeutral`.
 
 * `tests/test_dvol_feed.py` — percentile math, DB upsert/load, accessor,
   fetch→persist (mocked HTTP), factory, and hash-neutrality.
+* `tests/test_iv_gate_shadow.py` — shadow-only IV recording (high/low/unknown,
+  SOL→BTC proxy, router/DVOL-disable skip, non-raising on recorder failure,
+  hook ordering before execution).
