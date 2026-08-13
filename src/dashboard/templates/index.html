@@ -276,10 +276,12 @@ tr:hover td { background: var(--panel-hover); }
                                 <th>Sym</th><th>Side</th><th class="num">Size</th><th class="num">Entry</th>
                                 <th class="num">Current</th><th class="num">PnL%</th><th class="num">Unreal</th>
                                 <th>Strat</th><th>SL</th><th>TP</th>
+                                <th title="IV percentile at entry (shadow decision)">IV pct</th>
+                                <th title="IV class at entry — high_iv / low_iv">IV</th>
                             </tr>
                         </thead>
                         <tbody id="positions-tbody">
-                            <tr><td colspan="10" class="muted" style="text-align:center;">No positions</td></tr>
+                            <tr><td colspan="12" class="muted" style="text-align:center;">No positions</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -1800,7 +1802,7 @@ function renderDecisions(data) {
 function renderPositions(data) {
     const tbody = document.getElementById("positions-tbody");
     if (!data || data.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="10" class="muted" style="text-align:center;">No positions</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="12" class="muted" style="text-align:center;">No positions</td></tr>';
         return;
     }
     tbody.innerHTML = data.map(p => {
@@ -1820,6 +1822,8 @@ function renderPositions(data) {
             <td class="muted tiny">${p.strategy || "?"}</td>
             <td class="num tiny">${p.stop_loss != null ? "$" + fmtNum(p.stop_loss) : "—"}</td>
             <td class="num tiny">${p.take_profit != null ? "$" + fmtNum(p.take_profit) : "—"}</td>
+            <td class="num tiny">${p.iv_percentile != null ? p.iv_percentile.toFixed(1) + "%" : "<span class='muted'>—</span>"}</td>
+            <td class="tiny">${ivBadge(p.iv_class)}</td>
         </tr>`;
     }).join('');
 }

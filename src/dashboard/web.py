@@ -64,6 +64,32 @@ def _get_db():
     return getattr(_engine, "_db", None)
 
 
+def _enrich_iv(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Attach the shadow IV decision (percentile + class) to trade/position rows.
+
+    Uses the same join the recheck watchdog and CLI use
+    (``scripts/iv_gate_shadow_vs_pnl``) — single source of truth, read-only,
+    best-effort (a broken research DB leaves the rows unenriched). Shared by
+    ``/api/trades`` and ``/api/positions`` so both panels show the same IV
+    column.
+    """
+    try:
+        from scripts.iv_gate_shadow_vs_pnl import (
+            join_decisions_to_trades,
+            load_shadow_decisions,
+            resolve_db_paths,
+        )
+
+        _research = resolve_db_paths()[1]
+        _decisions = load_shadow_decisions(_research)
+        rows, _matched = join_decisions_to_trades(
+            _decisions, rows, tolerance_ms=60_000
+        )
+    except Exception:  # noqa: BLE001 — IV enrichment is best-effort
+        pass
+    return rows
+
+
 def _feed_silence_sparklines(feed_silence: Dict[str, Any]) -> Dict[str, List[List[float]]]:
     """Intraday max-pct series per feed (last 24h) for the sparkline panel.
 
@@ -190,6 +216,11 @@ def build_positions_payload(engine: Any) -> List[Dict[str, Any]]:
             "stop_loss": getattr(pos, "stop_loss_price", None),
             "take_profit": getattr(pos, "take_profit_price", None),
             "strategy": (getattr(pos, "metadata", None) or {}).get("strategy", "unknown"),
+            # IV join key (same as the trades panel): the position's entry
+            # time lets the shadow-decision join attach its IV class/pct.
+            "entry_time": int(getattr(pos, "entry_time_ms", 0) or 0),
+            "iv_class": None,
+            "iv_percentile": None,
         })
     return result
 
@@ -1553,7 +1584,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
     def api_positions():
         if _engine is None:
             return jsonify([])
-        return jsonify(build_positions_payload(_engine))
+        return jsonify(_enrich_iv(build_positions_payload(_engine)))
 
     @app.route("/api/trades")
     def api_trades():
@@ -1565,23 +1596,8 @@ def create_app(config: Dict[str, Any]) -> tuple:
         try:
             rows = db.get_trades(limit=100)
             # Enrich each executed trade with its shadow IV decision
-            # (percentile + high/low class) via the same join the recheck
-            # watchdog and CLI use — single source of truth, read-only.
-            try:
-                from scripts.iv_gate_shadow_vs_pnl import (
-                    join_decisions_to_trades,
-                    load_shadow_decisions,
-                    resolve_db_paths,
-                )
-
-                _research = resolve_db_paths()[1]
-                _decisions = load_shadow_decisions(_research)
-                rows, _matched = join_decisions_to_trades(
-                    _decisions, rows, tolerance_ms=60_000
-                )
-            except Exception:  # noqa: BLE001 — IV enrichment is best-effort
-                pass
-            return jsonify(rows)
+            # (percentile + high/low class) — same join as the positions panel.
+            return jsonify(_enrich_iv(rows))
         except Exception:
             return jsonify([])
 

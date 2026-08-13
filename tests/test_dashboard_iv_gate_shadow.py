@@ -330,6 +330,19 @@ class TestIvGateShadowTemplate:
         assert 'function ivBadge' in html
         assert 'colspan="14"' in html
 
+    def test_positions_table_has_iv_columns(self) -> None:
+        """The open-positions panel shows the same IV columns (percentile +
+        class) as the trades log."""
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        # Positions header + render use the same IV cells as trades.
+        assert 'id="positions-tbody"' in html
+        assert "p.iv_percentile != null" in html
+        assert "ivBadge(p.iv_class)" in html
+        assert 'colspan="12"' in html
+        assert html.count("IV pct") >= 2  # trades + positions headers
+
 
 class TestTradesEndpointIvEnrichment:
     """/api/trades enriches executed trades with the shadow IV decision."""
@@ -401,3 +414,117 @@ class TestTradesEndpointIvEnrichment:
         rows = r.get_json()
         assert len(rows) == 6  # still served, just unenriched
         assert all(t.get("iv_class") in (None, "unknown") for t in rows)
+
+
+class TestPositionsEndpointIvEnrichment:
+    """/api/positions enriches open positions with the shadow IV decision —
+    same join and columns as the trades log."""
+
+    pytestmark = pytest.mark.integration_offline
+
+    def setup_method(self) -> None:
+        import src.dashboard.web as web
+
+        self._web = web
+        self._orig_engine = web._engine
+        self._tmp = tempfile.TemporaryDirectory()
+        self._research = os.path.join(self._tmp.name, "research.db")
+        self._live = os.path.join(self._tmp.name, "bot.db")
+        _make_research_db(self._research)
+        _make_live_db(self._live, n=6)
+        self._app, self._sio, _ = web.create_app({"mode": "paper"})
+        self._client = self._app.test_client()
+
+    def teardown_method(self) -> None:
+        self._web._engine = self._orig_engine
+        if getattr(self, "_db", None) is not None:
+            self._db.close()
+        self._tmp.cleanup()
+
+    def test_positions_carry_iv_class_and_percentile(self) -> None:
+        """A live position (same key as its opening trade) joins the shadow
+        decision and carries iv_class / iv_percentile like the trades log."""
+        from src.data.database import Database
+
+        self._db = Database(self._live)
+        pos = type(
+            "Pos",
+            (),
+            {
+                "entry_price": 80_000.0,
+                "size": 0.1,
+                "side": "long",
+                "entry_time_ms": 1_786_600_000_000,
+                "stop_loss_price": None,
+                "take_profit_price": None,
+                "metadata": {"strategy": "VWAPDeviation"},
+            },
+        )()
+        port = type(
+            "Port",
+            (),
+            {"get_dashboard_snapshot_sync": staticmethod(
+                lambda: type("Snap", (), {"positions": {"BTC": pos}})()
+            )},
+        )()
+        self._web._engine = type("E", (), {"_db": self._db, "portfolio": port,
+                                          "get_mark_prices_sync": staticmethod(lambda: {"BTC": 81_000.0})})()
+        from scripts import iv_gate_shadow_vs_pnl as pnl
+
+        def _resolve(live_db=None, research_db=None):
+            return Path(self._live), Path(self._research)
+
+        with patch.object(pnl, "resolve_db_paths", _resolve):
+            r = self._client.get("/api/positions")
+        assert r.status_code == 200
+        rows = r.get_json()
+        assert len(rows) == 1
+        p = rows[0]
+        assert p["symbol"] == "BTC"
+        assert p["strategy"] == "VWAPDeviation"
+        # Entry at t0+0s = the first decision (high_iv, 80.0) — joined within
+        # the 60s tolerance, exactly like the trades log.
+        assert p["iv_class"] == "high_iv"
+        assert p["iv_percentile"] == 80.0
+
+    def test_positions_enrichment_best_effort_no_crash(self) -> None:
+        """A broken research DB leaves positions served, just unenriched."""
+        from src.data.database import Database
+
+        self._db = Database(self._live)
+        pos = type(
+            "Pos",
+            (),
+            {
+                "entry_price": 80_000.0,
+                "size": 0.1,
+                "side": "long",
+                "entry_time_ms": 1_786_600_000_000,
+                "stop_loss_price": None,
+                "take_profit_price": None,
+                "metadata": {"strategy": "VWAPDeviation"},
+            },
+        )()
+        port = type(
+            "Port",
+            (),
+            {"get_dashboard_snapshot_sync": staticmethod(
+                lambda: type("Snap", (), {"positions": {"BTC": pos}})()
+            )},
+        )()
+        self._web._engine = type("E", (), {"_db": self._db, "portfolio": port,
+                                          "get_mark_prices_sync": staticmethod(lambda: {"BTC": 81_000.0})})()
+        empty = os.path.join(self._tmp.name, "empty3.db")
+        sqlite3.connect(empty).close()
+        from scripts import iv_gate_shadow_vs_pnl as pnl
+
+        def _resolve(live_db=None, research_db=None):
+            return Path(self._live), Path(empty)
+
+        with patch.object(pnl, "resolve_db_paths", _resolve):
+            r = self._client.get("/api/positions")
+        assert r.status_code == 200
+        rows = r.get_json()
+        assert len(rows) == 1  # still served
+        assert rows[0].get("iv_class") in (None, "unknown")
+        assert rows[0].get("iv_percentile") is None
