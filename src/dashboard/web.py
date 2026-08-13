@@ -47,6 +47,34 @@ _shadow_panel_lock = threading.Lock()
 _SHADOW_CACHE_TTL_LIGHT_S = 15.0
 _SHADOW_CACHE_TTL_EVAL_S = 300.0
 
+# Research REST (IV join, watchdogs, DVOL, top traders) and feed-age
+# sparklines are too heavy to recompute on every dashboard poll.
+_ttl_lock = threading.Lock()
+_ttl_store: Dict[str, tuple] = {}  # key -> (expires_at, value)
+_RESEARCH_CACHE_TTL_S = 60.0
+_FEED_SPARK_TTL_S = 300.0
+_MD_HEALTH_TTL_S = 15.0
+
+
+def _ttl_get(key: str) -> Any:
+    now = time.time()
+    with _ttl_lock:
+        item = _ttl_store.get(key)
+        if item and item[0] > now:
+            return item[1]
+    return None
+
+
+def _ttl_put(key: str, value: Any, ttl: float) -> Any:
+    with _ttl_lock:
+        _ttl_store[key] = (time.time() + ttl, value)
+    return value
+
+
+def _ttl_clear() -> None:
+    with _ttl_lock:
+        _ttl_store.clear()
+
 
 def set_engine(engine: Any) -> None:
     global _engine
@@ -97,6 +125,9 @@ def _feed_silence_sparklines(feed_silence: Dict[str, Any]) -> Dict[str, List[Lis
     FeedAgeRecorder writes. Best-effort: a missing/broken research DB
     degrades to empty series, never an error.
     """
+    cached = _ttl_get("feed_silence_sparklines")
+    if cached is not None:
+        return cached
     out: Dict[str, List[List[float]]] = {}
     if not feed_silence:
         return out
@@ -111,7 +142,8 @@ def _feed_silence_sparklines(feed_silence: Dict[str, Any]) -> Dict[str, List[Lis
             out[feed] = [[float(b), float(p)] for b, p, _ in series]
     except Exception as exc:  # noqa: BLE001
         logger.warning("feed_silence_sparklines failed: %s", exc)
-    return out
+        return out
+    return _ttl_put("feed_silence_sparklines", out, _FEED_SPARK_TTL_S)
 
 
 def _socket_connect_auth(auth, enabled: bool, token: Optional[str]) -> Optional[bool]:
@@ -814,6 +846,7 @@ class DashboardEmitter:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def create_app(config: Dict[str, Any]) -> tuple:
+    _ttl_clear()
     # DASHBOARD LAYOUT FIX: Configure template and static folders so the
     # reorganized 12-column grid dashboard (index.html + dashboard.css)
     # is served correctly instead of the old inline INDEX_HTML string.
@@ -1011,6 +1044,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
     @app.route("/api/market_data_health")
     def api_market_data_health():
+        cached = _ttl_get("market_data_health")
+        if cached is not None:
+            return jsonify(cached)
         if _engine is None:
             return jsonify({"feeds": [], "overall": "red"})
         summary = getattr(_engine, "_market_data_health_summary", None)
@@ -1024,7 +1060,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
             body["feed_silence_spark"] = _feed_silence_sparklines(
                 body.get("feed_silence", {})
             )
-            return jsonify(body)
+            return jsonify(_ttl_put("market_data_health", body, _MD_HEALTH_TTL_S))
         health = getattr(_engine, "_market_data_health", {}) or {}
         rows = [h.to_dict() for h in health.values()]
         overall = "green"
@@ -1040,7 +1076,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
         body["feed_silence_spark"] = _feed_silence_sparklines(
             body.get("feed_silence", {})
         )
-        return jsonify(body)
+        return jsonify(_ttl_put("market_data_health", body, _MD_HEALTH_TTL_S))
 
     @app.route("/api/live_data")
     def api_live_data():
@@ -1207,6 +1243,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
     @app.route("/api/top_traders")
     def api_top_traders():
         """Top-wallet aggregate bias + virtual swing book (research only)."""
+        cached = _ttl_get("top_traders")
+        if cached is not None:
+            return jsonify(cached)
         from src.research.top_trader_panel import build_top_traders_panel_payload
         from src.utils.config import load_config
 
@@ -1219,7 +1258,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
                 cfg = load_config(Path("config/settings.yaml"))
             payload = build_top_traders_panel_payload(config=cfg, engine=_engine)
-            return jsonify(payload)
+            return jsonify(_ttl_put("top_traders", payload, _RESEARCH_CACHE_TTL_S))
         except Exception as exc:  # noqa: BLE001
             logger.warning("top_traders panel failed: %s", exc)
             return jsonify({"error": str(exc), "snapshots": [], "open_positions": []}), 500
@@ -1230,10 +1269,14 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
         bias screening (≥20 datas) + liquidation flush recheck (≥30 days).
         """
+        cached = _ttl_get("research_watchdogs")
+        if cached is not None:
+            return jsonify(cached)
         from src.research.research_watchdog_status import build_research_watchdogs_payload
 
         try:
-            return jsonify(build_research_watchdogs_payload())
+            payload = build_research_watchdogs_payload()
+            return jsonify(_ttl_put("research_watchdogs", payload, _RESEARCH_CACHE_TTL_S))
         except Exception as exc:  # noqa: BLE001
             logger.warning("research_watchdogs failed: %s", exc)
             return jsonify({"error": str(exc), "watchdogs": []}), 500
@@ -1246,6 +1289,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
         their own Deribit index; SOL/HYPE classify against BTC (global proxy),
         mirroring the backtest evidence (docs/IV_HIGH_ONLY_AB_SPLIT.md).
         """
+        cached = _ttl_get("dvol")
+        if cached is not None:
+            return jsonify(cached)
         try:
             from src.data.dvol_feed import (
                 DVOL_WINDOW_DAYS,
@@ -1291,13 +1337,14 @@ def create_app(config: Dict[str, Any]) -> tuple:
                         "cls": classify_iv(pct),
                         "currency": currency,
                     }
-                return jsonify({
+                payload = {
                     "series": series,
                     "current": current,
                     "threshold": IV_HIGH_PCT,
                     "window_days": DVOL_WINDOW_DAYS,
                     "asof_ms": now_ms,
-                })
+                }
+                return jsonify(_ttl_put("dvol", payload, _RESEARCH_CACHE_TTL_S))
             finally:
                 rdb.close()
         except Exception as exc:  # noqa: BLE001
@@ -1313,15 +1360,15 @@ def create_app(config: Dict[str, Any]) -> tuple:
         can never disagree about what counts as a matched IV decision. Read-only
         research data — the gate stays shadow, never touches execution.
         """
+        cached = _ttl_get("iv_gate_shadow")
+        if cached is not None:
+            return jsonify(cached)
         try:
             from scripts.iv_gate_shadow_vs_pnl import (
                 BACKTEST_EVIDENCE,
                 build_report,
             )
-            from scripts.iv_gate_shadow_recheck import (
-                TARGET_CLOSED,
-                project_decision,
-            )
+            from scripts.iv_gate_shadow_recheck import TARGET_CLOSED
 
             report = build_report()
             if report.get("error"):
@@ -1384,36 +1431,24 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
             n_dec = max(1, report["n_decisions"])
             n_total = max(1, report["n_trades"])
-            return jsonify({
+            payload = {
                 "by_class": by_class,
-                # Distribution of the shadow sample by strategy and by symbol
-                # (per IV class + aggregate) — shows WHERE the evidence lives.
                 "by_strategy": _dimension_summary(report.get("per_strategy") or {}),
                 "by_symbol": _dimension_summary(report.get("per_symbol") or {}),
-                # Projected decision from the CURRENT slices (same rule as the
-                # watchdog verdict minus the n-gate) — the tooltip the panel
-                # shows once the sample crosses the 60% warning threshold.
-                "projected": project_decision(
-                    report["slices"]["high_iv"], report["slices"]["low_iv"],
-                ),
                 "total": report["n_trades"],
                 "n_decisions": report["n_decisions"],
                 "matched": report["matched_decisions"],
                 "trades_with_decision": report["trades_with_decision"],
-                # Join coverage — how much of the decision stream matched an
-                # executed trade, and how much of the trade stream carries an
-                # IV class. A gap here is a wiring problem, not an edge signal.
                 "join_coverage_pct": round(report["matched_decisions"] / n_dec * 100, 1),
                 "trade_coverage_pct": round(report["trades_with_decision"] / n_total * 100, 1),
                 "verdict": report["verdict"],
-                # Decision count per UTC day (last 14 days) — the sparkline
-                # shows the sample accumulation rate, not just the total.
                 "decisions_per_day": report.get("decisions_per_day", []),
                 "threshold": report["iv_high_pct"],
                 "target_closed": TARGET_CLOSED,
                 "backtest": BACKTEST_EVIDENCE,
                 "asof_ms": int(time.time() * 1000),
-            })
+            }
+            return jsonify(_ttl_put("iv_gate_shadow", payload, _RESEARCH_CACHE_TTL_S))
         except Exception as exc:  # noqa: BLE001
             logger.warning("iv_gate_shadow endpoint failed: %s", exc)
             return jsonify({"error": str(exc), "by_class": {}, "total": 0}), 500

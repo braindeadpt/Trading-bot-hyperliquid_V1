@@ -116,6 +116,15 @@ tr:hover td { background: var(--panel-hover); }
 .section-system .bar { background: var(--yellow); }
 .section-intel .bar { background: var(--accent2); }
 .section-logs .bar { background: var(--dim); }
+details.research-fold { margin: 8px 0 4px 0; }
+details.research-fold > summary { cursor: pointer; list-style: none; }
+details.research-fold > summary::-webkit-details-marker { display: none; }
+details.research-fold:not([open]) > summary .text::after {
+    content: " · click to load";
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+}
 </style>
 </head>
 <body>
@@ -388,14 +397,8 @@ tr:hover td { background: var(--panel-hover); }
 <div class="panel" style="max-height:260px;">
     <div class="panel-header">Feed Silence <span class="dim" id="feed-silence-meta">threshold vs age</span></div>
     <div class="panel-body" style="padding:6px 8px; max-height:220px; overflow-y:auto;">
-        <div id="feed-silence-help" class="muted" style="font-size:10px;line-height:1.4;margin-bottom:6px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;">
-            <b>% of threshold</b> = age &divide; max-silence &times; 100 — how close each contracted feed is to
-            tripping <b>degraded</b>. Green &lt; 60% · yellow 60&ndash;90% · red &ge; 90% · <b>EARLY</b> =
-            fire-once alert at &ge;50% of threshold (warn) · <b>IMMINENT</b> = fire-once alert at &ge;90%
-            (degrade imminent) · <b>DEGRADED</b> = silence threshold crossed. <b>Alerted</b> = which fire-once
-            alert has already been sent this silence episode (early / imminent, reset on beat). <b>exp ≤</b>
-            under the age = historical p99 inter-event gap of the feed — a current age above it is anomalous
-            (cadence alert fires); below it is normal quiet. Only feeds contracted by this deployment are listed.
+        <div id="feed-silence-help" class="muted" style="font-size:10px;line-height:1.4;margin-bottom:6px;">
+            Age vs max-silence. Telegram only when a feed is <b>DEGRADED</b>. Early / cadence stay in this table.
         </div>
         <table style="width:100%; font-size:11px; border-collapse:collapse;">
             <thead>
@@ -449,6 +452,10 @@ tr:hover td { background: var(--panel-hover); }
     </div>
 </div>
 
+<details class="research-fold">
+<summary class="section-label section-intel">
+    <span class="bar"></span><span class="text">Research</span><span class="line"></span>
+</summary>
 <!-- Shadow observability (Phase08) -->
 <div class="section-label section-intel">
     <span class="bar"></span><span class="text">Shadow / Gate progress</span><span class="line"></span>
@@ -652,10 +659,7 @@ tr:hover td { background: var(--panel-hover); }
                 <div id="ivshadow-bar" style="margin-bottom:10px;">
                     <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-bottom:2px;">
                         <span id="ivshadow-progress-txt">0/0 closed com decisão</span>
-                        <span style="display:flex;gap:8px;align-items:center;">
-                            <span id="ivshadow-warn" style="display:none;padding:1px 7px;border-radius:3px;font-size:9px;font-weight:700;background:rgba(217,119,6,0.15);color:var(--yellow, #d29922);cursor:help;"></span>
-                            <span id="ivshadow-pct">0%</span>
-                        </span>
+                        <span id="ivshadow-pct">0%</span>
                     </div>
                     <div style="background:var(--border);height:8px;border-radius:4px;">
                         <div id="ivshadow-bar-fill" style="height:8px;width:0%;background:var(--accent, #4a9eff);border-radius:4px;"></div>
@@ -719,6 +723,7 @@ tr:hover td { background: var(--panel-hover); }
         </div>
     </div>
 </div>
+</details>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
 <!-- SECTION: LOGS                                                    -->
@@ -883,6 +888,7 @@ document.getElementById("auth-submit-btn").addEventListener("click", async () =>
 let socket = null;
 // Replaced inside bindSocketHandlers so REST poll can see nested render* fns.
 let pollAll = function () {};
+let pollResearch = function () {};
 function connectSocket() {
     if (socket && socket.connected) return;
     const token = getDashboardToken();
@@ -1676,26 +1682,6 @@ function renderIvGateShadow(payload) {
     const fill = document.getElementById("ivshadow-bar-fill");
     fill.style.width = pct.toFixed(0) + "%";
     fill.style.background = pct >= 100 ? "var(--up)" : (pct >= 60 ? "var(--yellow, #d29922)" : "var(--accent, #4a9eff)");
-    // Warning badge once the sample crosses 60% of the gate: the projected
-    // decision (PROMOTE/REJECT from the CURRENT slices) is in the tooltip, so
-    // the operator sees which way the gate is heading before the trigger fires.
-    const warnEl = document.getElementById("ivshadow-warn");
-    if (warnEl) {
-        if (pct >= 60 && pct < 100) {
-            const pr = payload.projected || {};
-            const prStatus = pr.status && pr.status !== "N/A" ? pr.status : "—";
-            const hi = pr.high_net_usd == null ? "—" : (pr.high_net_usd >= 0 ? "+" : "") + pr.high_net_usd.toFixed(2);
-            const lo = pr.low_net_usd == null ? "—" : (pr.low_net_usd >= 0 ? "+" : "") + pr.low_net_usd.toFixed(2);
-            warnEl.textContent = "⚠ " + pct.toFixed(0) + "% do gate — a 60%+";
-            warnEl.title = "Amostra ≥ 60% do gate de decisão (n=" + (pr.n_closed == null ? closed : pr.n_closed) +
-                " / " + target + "). Veredito projetado com os slices actuais: " + prStatus +
-                " (high_iv " + hi + " / low_iv " + lo + " USD)." +
-                (pr.provisional ? " Projeção — o gate real só decide aos " + target + "." : "");
-            warnEl.style.display = "inline-block";
-        } else {
-            warnEl.style.display = "none";
-        }
-    }
     // Decision-count-per-day sparkline (sample accumulation rate, 14d).
     const rateSvg = document.getElementById("ivshadow-rate-svg");
     const rateSum = document.getElementById("ivshadow-rate-sum");
@@ -1982,12 +1968,16 @@ pollAll = function pollAll() {
         authFetch("/api/trades").then(r => r.json()).then(d => renderTrades(d)).catch(() => {});
         authFetch("/api/positions").then(r => r.json()).then(d => renderPositions(d)).catch(() => {});
     }
+    authFetch("/api/market_data_health").then(r => r.json()).then(d => renderFeedSilence(d)).catch(() => {});
+};
+pollResearch = function pollResearch() {
+    const fold = document.querySelector("details.research-fold");
+    if (fold && !fold.open) return;
     authFetch("/api/shadow_panel?evaluate=0").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
     authFetch("/api/top_traders").then(r => r.json()).then(d => renderTopTradersPanel(d)).catch(() => {});
     authFetch("/api/research_watchdogs").then(r => r.json()).then(d => renderResearchWatchdogs(d)).catch(() => {});
     authFetch("/api/dvol").then(r => r.json()).then(d => renderDvolPanel(d)).catch(() => {});
     authFetch("/api/iv_gate_shadow").then(r => r.json()).then(d => renderIvGateShadow(d)).catch(() => {});
-    authFetch("/api/market_data_health").then(r => r.json()).then(d => renderFeedSilence(d)).catch(() => {});
 };
 
 if (!window.__hlDashTimers) {
@@ -2005,9 +1995,15 @@ if (!window.__hlDashTimers) {
         }
     }, 5000);
     setInterval(pollAll, 5000);
+    setInterval(pollResearch, 60000);
+    document.querySelectorAll("details.research-fold").forEach((el) => {
+        el.addEventListener("toggle", () => { if (el.open) pollResearch(); });
+    });
     // Full hypothetical evaluation is heavy (can block Flask for minutes on large
-    // shadow DBs). Refresh rarely; light panel already updates via pollAll.
+    // shadow DBs). Refresh rarely, and only while the research fold is open.
     setInterval(() => {
+        const fold = document.querySelector("details.research-fold");
+        if (fold && !fold.open) return;
         authFetch("/api/shadow_panel?evaluate=1").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
     }, 600000);
     setInterval(() => {

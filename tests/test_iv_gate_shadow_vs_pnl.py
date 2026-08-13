@@ -212,6 +212,108 @@ def test_report_carries_decisions_per_day() -> None:
         assert report["decisions_per_day"][-1]["n"] == 3
 
 
+def _make_age_dbs(tmp: str, *, young: int = 0, old: int = 0) -> tuple[str, str]:
+    """DBs with trades at controlled ages relative to now.
+
+    ``young`` trades sit 2 days back, ``old`` 60 days back — so a
+    ``--since-days 7`` window must keep only the young ones (plus their
+    shadow decisions).
+    """
+    import time as _time
+
+    live = os.path.join(tmp, "bot.db")
+    research = os.path.join(tmp, "hyperliquid.db")
+    db = sqlite3.connect(live)
+    db.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, symbol TEXT, side TEXT, "
+               "entry_time INTEGER, exit_time INTEGER, pnl_usd REAL, pnl_pct REAL, "
+               "strategy TEXT, status TEXT, exit_reason TEXT)")
+    rdb = sqlite3.connect(research)
+    rdb.execute("CREATE TABLE shadow_decisions (id INTEGER PRIMARY KEY, symbol TEXT, "
+                "strategy TEXT, variant TEXT, side TEXT, would_enter INTEGER, "
+                "reason TEXT, timestamp_ms INTEGER, snapshot_json TEXT, "
+                "ingested_at_ms INTEGER)")
+    now = int(_time.time() * 1000)
+    tid = 1
+    did = 1
+    for _ in range(young):
+        ts = now - 2 * 86_400_000
+        db.execute("INSERT INTO trades VALUES (?, 'BTC', 'long', ?, ?, 5.0, 0.01, "
+                   "'VWAPDeviation', 'closed', 'tp')", (tid, ts, ts + 3_600_000))
+        rdb.execute(
+            "INSERT INTO shadow_decisions VALUES (?, 'BTC', 'VWAPDeviation', "
+            "'iv_gate_shadow', 'long', 1, 'iv_gate:high_iv', ?, ?, 0)",
+            (did, ts - 100,
+             json.dumps({"metadata": {"iv_class": "high_iv", "iv_percentile": 75.0,
+                                      "iv_threshold": 66.7, "iv_currency": "BTC"}})),
+        )
+        tid += 1
+        did += 1
+    for _ in range(old):
+        ts = now - 60 * 86_400_000
+        db.execute("INSERT INTO trades VALUES (?, 'BTC', 'long', ?, ?, -3.0, -0.01, "
+                   "'VWAPDeviation', 'closed', 'tp')", (tid, ts, ts + 3_600_000))
+        rdb.execute(
+            "INSERT INTO shadow_decisions VALUES (?, 'BTC', 'VWAPDeviation', "
+            "'iv_gate_shadow', 'long', 1, 'iv_gate:low_iv', ?, ?, 0)",
+            (did, ts - 100,
+             json.dumps({"metadata": {"iv_class": "low_iv", "iv_percentile": 40.0,
+                                      "iv_threshold": 66.7, "iv_currency": "BTC"}})),
+        )
+        tid += 1
+        did += 1
+    db.commit(); db.close()
+    rdb.commit(); rdb.close()
+    return live, research
+
+
+def test_since_days_filters_to_recent_window() -> None:
+    """--since-days 7 keeps only young trades+decisions; the old sample
+    (already evaluated by the recheck) drops out of the window."""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        live, research = _make_age_dbs(tmp, young=2, old=3)
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), "--live-db", live, "--research-db", research,
+             "--since-days", "7"],
+            capture_output=True, text=True, encoding="utf-8", cwd=str(ROOT),
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "janela:       últimos 7 dias" in r.stdout
+        # Only the 2 young trades survive the window.
+        assert "decisões iv_gate_shadow: 2 | trades: 2" in r.stdout
+        assert "high_iv | 2 | 2 | 0 | 100% | +10.00" in r.stdout
+        assert "low_iv | 0 | 0 | 0" in r.stdout
+
+
+def test_full_run_prints_window_comparison_table() -> None:
+    """Without --since-days the CLI prints the 7d/30d/total window table so
+    recent accumulation is distinguishable from the already-evaluated sample."""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        live, research = _make_age_dbs(tmp, young=2, old=3)
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), "--live-db", live, "--research-db", research],
+            capture_output=True, text=True, encoding="utf-8", cwd=str(ROOT),
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "[3b] Janelas" in r.stdout
+        assert "| total |  5 |  5 |" in r.stdout
+        assert "| 30d   |  2 |  2 |" in r.stdout
+        assert "| 7d    |  2 |  2 |" in r.stdout
+
+
+def test_build_report_carries_window_fields() -> None:
+    """build_report exposes since_days + window_start_ms for JSON consumers."""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        live, research = _make_age_dbs(tmp, young=1, old=1)
+        report = pnl.build_report(live_db=live, research_db=research, since_days=7)
+        assert report["since_days"] == 7
+        assert report["window_start_ms"] is not None
+        assert report["n_trades"] == 1  # only the young trade
+        full = pnl.build_report(live_db=live, research_db=research)
+        assert full["since_days"] is None
+        assert full["window_start_ms"] is None
+        assert full["n_trades"] == 2
+
+
 def test_nearest_decision_within_tolerance_wins() -> None:
     """Two decisions 10s apart on the same key: the trade joins the nearest
     (100ms) one, not the farther one."""

@@ -1311,23 +1311,17 @@ class TradingEngine:
                 self._notify(
                     lambda m=msg: self._notifier.send_alert(m, "error")
                 )
-            # Early/imminent warnings at >=50% / >=90% of max_silence —
-            # anticipate a silence before it degrades (fire-once per episode,
-            # reset on beat). Imminent (90%) escalates to error level so the
-            # operator sees it before the feed trips degraded.
+            # Early (50%) / imminent (90%) / cadence (p99) stay in the
+            # monitor + dashboard table. Telegram only for the real outage
+            # (FEED SILENT at 100%) — the 50/90/p99 layers were paging
+            # operators on normal quiet.
             for msg in self._feed_silence.check_early_warnings():
-                level = "error" if "(imminent)" in msg else "warning"
-                (logger.error if level == "error" else logger.warning)("%s", msg)
-                self._notify(
-                    lambda m=msg, lvl=level: self._notifier.send_alert(m, lvl)
-                )
-            # Cadence alerts: current gap > historical p99 — subtle thinning
-            # long before the silence threshold. Warning level (fire-once).
+                if "(imminent)" in msg:
+                    logger.warning("%s", msg)
+                else:
+                    logger.debug("%s", msg)
             for msg in self._feed_silence.check_cadence():
-                logger.warning("%s", msg)
-                self._notify(
-                    lambda m=msg: self._notifier.send_alert(m, "warning")
-                )
+                logger.debug("%s", msg)
 
     async def _check_market_data_alerts(self) -> None:
         """Telegram alert when fleet health stays red beyond threshold."""
@@ -2339,7 +2333,7 @@ class TradingEngine:
                     ),
                 )
             )
-            logger.info(
+            logger.debug(
                 "IV gate shadow %s %s %s pct=%s class=%s (not enforced)",
                 symbol,
                 strategy_name,

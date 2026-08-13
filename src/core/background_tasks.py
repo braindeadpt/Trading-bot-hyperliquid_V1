@@ -190,7 +190,7 @@ class BackgroundTasks:
                                 ",".join(data.by_exchange.keys()),
                             )
                 stale_count = sum(1 for d in results.values() if d.stale)
-                logger.info(
+                logger.debug(
                     "FundingAggregator updated for %d symbols (exchanges=%s, stale=%d)",
                     len(results),
                     ", ".join(
@@ -211,7 +211,7 @@ class BackgroundTasks:
                     for sym, snap in hl_results.items():
                         hl = snap.predicted_funding_hl
                         hl8 = snap.predicted_funding_hl_8h
-                        level = logger.warning if snap.stale else logger.info
+                        level = logger.warning if snap.stale else logger.debug
                         level(
                             "HL predictedFundings %s%s: hl=%s hl_8h=%s venues=%s",
                             sym,

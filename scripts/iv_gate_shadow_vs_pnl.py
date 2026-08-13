@@ -82,19 +82,38 @@ def _resolve_dbs(args: argparse.Namespace) -> Tuple[Path, Path]:
     return resolve_db_paths(args.live_db, args.research_db)
 
 
-def load_shadow_decisions(db_path: Path) -> List[Dict[str, Any]]:
-    """All ``iv_gate_shadow`` rows with the IV class/percentile extracted."""
+def _window_start_ms(since_days: Optional[int]) -> Optional[int]:
+    """UTC ms cutoff for ``since_days`` (None/<=0 → no window filter)."""
+    if not since_days or since_days <= 0:
+        return None
+    return int(time.time() * 1000) - int(since_days) * 86_400_000
+
+
+def load_shadow_decisions(
+    db_path: Path, since_days: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """All ``iv_gate_shadow`` rows with the IV class/percentile extracted.
+
+    ``since_days`` restricts to decisions recorded within the last N days
+    (``None``/``<=0`` = no window filter).
+    """
     if not db_path.exists():
         return []
+    cutoff = _window_start_ms(since_days)
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
         try:
-            rows = con.execute(
+            q = (
                 "SELECT id, symbol, strategy, side, timestamp_ms, reason, snapshot_json "
                 "FROM shadow_decisions WHERE variant = 'iv_gate_shadow' "
-                "ORDER BY timestamp_ms ASC"
-            ).fetchall()
+            )
+            params: Tuple = ()
+            if cutoff is not None:
+                q += "AND timestamp_ms >= ? "
+                params = (cutoff,)
+            q += "ORDER BY timestamp_ms ASC"
+            rows = con.execute(q, params).fetchall()
         except sqlite3.OperationalError:
             # Fresh research DB without the table yet — zero decisions.
             rows = []
@@ -136,17 +155,25 @@ def _class_from_reason(reason: Optional[str]) -> str:
     return "unknown"
 
 
-def load_trades(db_path: Path) -> List[Dict[str, Any]]:
+def load_trades(db_path: Path, since_days: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Trades from the live DB, optionally restricted to the last N days."""
     if not db_path.exists():
         return []
+    cutoff = _window_start_ms(since_days)
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
         try:
-            rows = con.execute(
+            q = (
                 "SELECT id, symbol, side, entry_time, exit_time, pnl_usd, pnl_pct, "
-                "strategy, status, exit_reason FROM trades ORDER BY entry_time ASC"
-            ).fetchall()
+                "strategy, status, exit_reason FROM trades "
+            )
+            params: Tuple = ()
+            if cutoff is not None:
+                q += "WHERE entry_time >= ? "
+                params = (cutoff,)
+            q += "ORDER BY entry_time ASC"
+            rows = con.execute(q, params).fetchall()
         except sqlite3.OperationalError:
             # Fresh live DB without the trades table yet — zero trades.
             rows = []
@@ -347,16 +374,21 @@ def build_report(
     research_db: Optional[str] = None,
     tolerance_ms: int = 60_000,
     min_n: int = MIN_N_GATE,
+    since_days: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Compute the full IV shadow vs PnL report (pure, reusable).
+
+    ``since_days`` restricts decisions and trades to the last N days, so the
+    same command can separate the recent accumulation (7d) from the
+    already-evaluated sample (30d / full) without touching the DB.
 
     Returns the report dict that ``main()`` persists/prints. Used by the
     recheck watchdog (``scripts/iv_gate_shadow_recheck.py``) so the join and
     slices live in exactly one place.
     """
     live, research = resolve_db_paths(live_db, research_db)
-    decisions = load_shadow_decisions(research)
-    trades = load_trades(live)
+    decisions = load_shadow_decisions(research, since_days=since_days)
+    trades = load_trades(live, since_days=since_days)
     min_n = max(1, min_n)
 
     if not trades:
@@ -374,6 +406,8 @@ def build_report(
         "research_db": str(research),
         "tolerance_ms": tolerance_ms,
         "min_n_gate": min_n,
+        "since_days": since_days,
+        "window_start_ms": _window_start_ms(since_days),
         "n_decisions": len(decisions),
         "n_trades": len(trades),
         "matched_decisions": matched,
@@ -400,6 +434,8 @@ def main() -> int:
                     help="join window decision↔entry (default 60s)")
     ap.add_argument("--min-n", type=int, default=MIN_N_GATE,
                     help="closed-trade gate for the verdict (default 30)")
+    ap.add_argument("--since-days", type=int, default=None,
+                    help="restrict decisions/trades to the last N days (7/30)")
     ap.add_argument("--json", type=Path, help="write full report as JSON")
     args = ap.parse_args()
 
@@ -409,10 +445,13 @@ def main() -> int:
     print("  IV gate shadow vs executed PnL — high_iv vs low_iv em produção")
     print(f"  live DB:      {live}")
     print(f"  research DB:  {research}")
+    if args.since_days:
+        print(f"  janela:       últimos {args.since_days} dias (decisões + trades)")
     print("=" * 80)
 
     report = build_report(live_db=args.live_db, research_db=args.research_db,
-                          tolerance_ms=args.tolerance_ms, min_n=args.min_n)
+                          tolerance_ms=args.tolerance_ms, min_n=args.min_n,
+                          since_days=args.since_days)
     if report.get("error") == "no_trades":
         print("Sem trades no live DB — nada a comparar.")
         return 0
@@ -459,6 +498,10 @@ def main() -> int:
                   f"WR={fmt_pct(s['win_rate'])} net={fmt_money(s['net_pnl_usd'])} "
                   f"avg={fmt_money(s['avg_pnl_usd'])}")
 
+    # ── Windows (recent accumulation vs already-evaluated) ──
+    if not args.since_days:
+        _print_windows(args)
+
     # ── Verdict ──
     v = report["verdict"]
     print("\n[4] Veredito")
@@ -475,6 +518,37 @@ def main() -> int:
         args.json.write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(f"\nJSON: {args.json}")
     return 0
+
+
+def _print_windows(args: argparse.Namespace) -> None:
+    """Compare the full sample against the 7d / 30d windows side by side.
+
+    Distinguishes the recent accumulation (7d — what the router is adding
+    now) from the already-evaluated sample (30d+ — what the recheck has
+    already seen), so a verdict built on stale-heavy data is visible.
+    """
+    print("\n[3b] Janelas (acumulação recente vs já avaliada)")
+    print("| janela | n | closed | high_iv net | low_iv net | high_iv n | low_iv n |")
+    print("|---|---|---|---|---|---|---|")
+    for label, days in (("total", None), ("30d", 30), ("7d", 7)):
+        rep = build_report(
+            live_db=args.live_db, research_db=args.research_db,
+            tolerance_ms=args.tolerance_ms, min_n=args.min_n,
+            since_days=days,
+        )
+        if rep.get("error"):
+            print(f"| {label:5} | — | — | — | — | — | — |")
+            continue
+        hi = rep["slices"]["high_iv"]
+        lo = rep["slices"]["low_iv"]
+        print(
+            f"| {label:5} | {rep['n_trades']:2d} | "
+            f"{hi['n_closed'] + lo['n_closed'] + rep['slices']['unknown']['n_closed']:2d} | "
+            f"{fmt_money(hi['net_pnl_usd'])} | {fmt_money(lo['net_pnl_usd'])} | "
+            f"{hi['n_closed']:2d} | {lo['n_closed']:2d} |"
+        )
+    print("\n    high_iv net > 0 && low_iv net <= 0 em 7d mas não em 30d → o sinal")
+    print("    está a formar-se agora; o inverso → o edge vive na amostra antiga.")
 
 
 if __name__ == "__main__":
