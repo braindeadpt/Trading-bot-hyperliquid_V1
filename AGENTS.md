@@ -46,7 +46,7 @@ The bot is built around a **WebSocket-first event architecture**: real-time mark
 |-------|------------|
 | Language | Python 3.11+ (tested on 3.14) |
 | Async IO | `asyncio`, `websockets==14.2`, `aiohttp==3.11.16` |
-| Web framework | `flask==3.1.0`, `flask-socketio==5.5.1`, `python-socketio==5.13.0` |
+| Web framework | `flask==3.1.3`, `flask-socketio==5.5.1`, `python-socketio==5.13.0` |
 | Data / Calculation | `pandas==2.2.3`, `numpy==2.2.5` |
 | Persistence | SQLite (via `sqlite3`, WAL mode enabled) |
 | Configuration | YAML (`pyyaml==6.0.2`) + environment variable overrides |
