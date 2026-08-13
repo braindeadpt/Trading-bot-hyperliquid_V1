@@ -201,12 +201,70 @@ def part_b_vb_shorts(candles: Dict[str, Dict[int, Tuple[float, float, float, flo
     print(f"\n  corr(pre_drop, post_ret) = {corr:+.3f}  (negative would mean mean-reversion)")
 
 
+def part_b_failed_breakout(candles: Dict[str, Dict[int, Tuple[float, float, float, float]]]) -> None:
+    """PART C — the 20 failed_breakout trades (WR 5%, -$55.47): do they behave
+    like flush rides? Same proxy as PART B but filtered to the failed_breakout
+    exit family, split by side."""
+    print("\n" + "=" * 78)
+    print("  PART C — failed_breakout trades (20) x reversal proxy")
+    print("=" * 78)
+    if not FORENSICS_CSV.exists():
+        print("  forensics CSV missing — skipping")
+        return
+    trades = list(csv.DictReader(open(FORENSICS_CSV, encoding="utf-8")))
+    fb = [t for t in trades if "failed_breakout" in t["exit_reason"]]
+
+    rows: List[Dict[str, Any]] = []
+    for t in fb:
+        sym = t["symbol"]
+        entry_ts = int(t["entry_time"])
+        ts_list = sorted(candles[sym])
+        i = bisect.bisect_left(ts_list, entry_ts)
+        if i < 30 or i + 30 >= len(ts_list):
+            continue
+        entry_open = candles[sym][ts_list[i]][0]
+        lows = [candles[sym][ts_list[j]][2] for j in range(i - 30, i)]
+        pre_low = min(lows)
+        pre_drop = (pre_low / entry_open - 1.0) * 100.0
+        post = candles[sym][ts_list[i + 30]][3]
+        post_ret = (post / entry_open - 1.0) * 100.0
+        rows.append({"side": t["side"], "exit": t["exit_reason"],
+                     "pre_drop": pre_drop, "post_ret": post_ret,
+                     "pnl": float(t["pnl_usd"]), "regime": t["regime"]})
+
+    if not rows:
+        print("  no failed_breakout trades with candle context")
+        return
+
+    def agg(label: str, r: List[Dict[str, Any]]) -> None:
+        if not r:
+            return
+        n = len(r)
+        post = sum(x["post_ret"] for x in r) / n
+        up = sum(1 for x in r if x["post_ret"] > 0)
+        pnl = sum(x["pnl"] for x in r)
+        pd = sum(x["pre_drop"] for x in r) / n
+        print(f"  {label:22} n={n:>2} pre_drop={pd:+.2f}% post30={post:+.3f}% "
+              f"rose={100 * up / n:.0f}% PnL={pnl:+.2f}")
+
+    print(f"  all {len(rows)} failed_breakout trades:")
+    agg("shorts", [r for r in rows if r["side"] == "short"])
+    agg("longs", [r for r in rows if r["side"] == "long"])
+    agg("short+above_mid", [r for r in rows if r["side"] == "short" and r["exit"].endswith("above_mid")])
+    agg("long+below_mid", [r for r in rows if r["side"] == "long" and r["exit"].endswith("below_mid")])
+
+    in_exp = sum(1 for r in rows if r["regime"] == "expansion")
+    print(f"\n  blocked by expansion-only rework (non-expansion): {len(rows) - in_exp}/{len(rows)}")
+    print("  (implication: the rework already removes most failed_breakout trades)")
+
+
 def main() -> None:
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     cur = conn.cursor()
     candles = load_candles(cur)
     part_a_flush_reversal(cur, candles)
     part_b_vb_shorts(candles)
+    part_b_failed_breakout(candles)
     conn.close()
 
 
