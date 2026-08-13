@@ -25,6 +25,28 @@ trade com ADX 15m closed).
 | W3 07-17..08-07 | −55.23 | **−78.68** | −36.77 | **−13.30** |
 | **TOTAL** | −48.90 | **−122.00** | −55.69 | **+17.44** |
 
+### Re-corrida com dados frescos (05-18 → 08-13)
+
+Reproduzido em 08-13 08:22 com o mesmo split, mas com o feed estendido em 6 dias
+novos (08-07 → 08-13) — **out-of-sample relativo à amostra de treino do rework**.
+
+| Janela | sem router | com router | bloqueado | poupa% |
+|---|---|---|---|---|
+| W1 05-18..06-16 | 0.00 | 0.00 | 0.00 | 0% |
+| W2 06-17..07-16 | −12.61 | **+30.74** | −43.32 | 344% |
+| W3 07-17..08-13 | −100.34 | −20.02 | **−80.30** | 80% |
+| **TOTAL** | **−112.95** | **+10.72** | **−123.62** | — |
+
+* W2 é **bit-a-bit idêntica** à corrida anterior (janela inalterada → determinismo
+  do pipeline confirmado mais uma vez).
+* Os 6 dias frescos (08-07..08-13): trades bloqueados net ≈ **−1.6** (direção
+  mantém-se — o router continua a filtrar perdas), mas os trades permitidos
+  sangraram ≈ −6.7 — o residual "com router" da W3 continua negativo (−20.02),
+  honestamente reportado: o router é um **filtro de perdas**, não um gerador de
+  PnL nessa janela.
+* **TOTAL com router ainda positivo (+10.72)** e bloqueado total −123.62 (vs
+  −122.00 na corrida anterior) — a poupança global cresce com dados novos.
+
 ## Leitura
 
 1. **A W2 deixou de custar — por 7×.** Antes o router bloqueava +$6.33 de trades
@@ -44,6 +66,10 @@ trade com ADX 15m closed).
 * `VB_REGIMES = frozenset({"expansion"})` com comentário de evidência no router.
 * `regime_router_a_b_test.py` passou a importar `VB_REGIMES`/`VWAP_REGIMES` do
   router (fonte única — o A/B nunca pode divergir do gate live).
+* **VB mantém-se em shadow:** `phase08.shadow_strategies` inclui VolatilityBreakout
+  e `execution_strategies` só tem VWAPDeviation — o rework muda o gate do router,
+  não o modo de execução. Nenhuma promoção a live sem shadow-live + PASS em dados
+  novos.
 * Testes atualizados para o novo contrato: VB bloqueado em trend (P0 + shadow_mode),
   VB passa em expansion, contradição testada em expansion; novo teste
   `test_vb_expansion_only_rework.py` pinna `VB_REGIMES == {"expansion"}` e a
