@@ -245,6 +245,51 @@ markers so CI can choose what to run:
 | `network`                | Real HTTP/WebSocket calls (GoldRush, Hyperliquid, Coinalyze)              | No (opt-in) |
 | `testnet_live`           | Live Hyperliquid testnet connection / real order placement               | No (opt-in) |
 
+### Parity contract: minimal test config vs production config
+
+The parity tests deliberately run against **two** configs, because each one
+catches a different class of regression.
+
+**Minimal config** — built inline by `_cfg()` in
+`tests/test_backtest_live_parity.py`, with loose thresholds and every
+optional gate disabled. Its job is to exercise the gate *machinery* in
+isolation: deterministic, threshold-independent behaviour that fails fast
+and loudly if a gate mis-reads a config key or the ordering changes.
+
+**Production config** — the real `config/settings.yaml` (loaded by
+`TestParityAgainstProductionConfig` in `test_backtest_live_parity.py`, and
+`test_production_gate_parity.py` for feed-health / TCA strict-proxy /
+reconciliation). Its job is to verify the same chain still holds under the
+*calibration* the bot actually runs with.
+
+| Key | Minimal (unit) | Production (`config/settings.yaml`) |
+|-----|----------------|-------------------------------------|
+| `risk.max_positions` | 5 | 3 |
+| `risk.max_position_size_pct` | 5.0 | 2.0 |
+| `risk.taker_fee_pct` | 0.04 (4 bp) | 0.045 (4.5 bp) |
+| `risk.symbol_risk_multiplier.SOL` | 1.0 | 0.5 |
+| `risk.chase_filter.exempt_strategies` | `[]` | VolatilityBreakout, DonchianBreakout |
+| `strategy.portfolio_governance.max_directional_exposure_pct` | 60 | 50 |
+| Volatility circuit | off | on (3×, 30 min block, 24 bars warm-up) |
+| Funding blackout | off | on (±5 min around 00/08/16 UTC) |
+| TCA | off | strict (live) / proxy (backtest) |
+| Reconciliation / feed-health gates | not exercised | exercised (live-only + replay substitute) |
+
+**Why the contract must run against both:**
+
+- A test that only runs the **loose minimal** config proves the machinery
+  but says nothing about production. A regression that only bites at real
+  thresholds — the 3rd-position reject vs the 5th, the 2% size cap vs 5%,
+  SOL 0.5× scaling, the vol-circuit 24-bar warm-up, the funding-blackout
+  resets, or `tca_mode: strict` needing an L2 book — would pass unnoticed.
+- A test that only runs the **production** config is fragile and opaque:
+  if it fails, you cannot tell whether the *logic* broke or a *threshold*
+  drifted. The minimal config isolates the two, so a production failure is
+  immediately attributable to calibration, not code.
+
+The two layers together pin the full contract: **minimal proves the
+machinery, production proves the calibration.**
+
 ```bash
 # Default CI battery (unit + integration_offline)
 python scripts/run_ci_tests.py
