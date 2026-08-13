@@ -372,6 +372,32 @@ tr:hover td { background: var(--panel-hover); }
     </div>
 </div>
 
+<!-- Feed silence — threshold vs age per feed (anticipate silences) -->
+<div class="panel" style="max-height:260px;">
+    <div class="panel-header">Feed Silence <span class="dim" id="feed-silence-meta">threshold vs age</span></div>
+    <div class="panel-body" style="padding:6px 8px; max-height:220px; overflow-y:auto;">
+        <div id="feed-silence-help" class="muted" style="font-size:10px;line-height:1.4;margin-bottom:6px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;">
+            <b>% of threshold</b> = age &divide; max-silence &times; 100 — how close each contracted feed is to
+            tripping <b>degraded</b>. Green &lt; 60% · yellow 60&ndash;90% · red &ge; 90% (silent feeds, alerts
+            pending) · <b>DEGRADED</b> = silence threshold crossed. Only feeds contracted by this deployment are listed.
+        </div>
+        <table style="width:100%; font-size:11px; border-collapse:collapse;">
+            <thead>
+                <tr style="color:var(--muted); text-align:left;">
+                    <th title="Feed key, only feeds contracted for this deployment">Feed</th>
+                    <th title="Seconds since last event (— = never seen this process)">Age</th>
+                    <th title="Max allowed silence before degraded">Threshold</th>
+                    <th title="age / threshold — how close to degrading">% of threshold</th>
+                    <th title="Silence watchdog state">State</th>
+                </tr>
+            </thead>
+            <tbody id="feed-silence-tbody">
+                <tr><td colspan="5" class="muted">Waiting...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <!-- SECTION: INTELLIGENCE — Strategies + Signals/Decisions          -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -1315,6 +1341,57 @@ function renderResearchWatchdogs(payload) {
 }
 
 // ── DVOL / IV regime ──
+function renderFeedSilence(payload) {
+    const tbody = document.getElementById("feed-silence-tbody");
+    const meta = document.getElementById("feed-silence-meta");
+    if (!tbody) return;
+    const sil = (payload && payload.feed_silence) || {};
+    const entries = Object.entries(sil);
+    if (!entries.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="muted">No silence data (feed_silence monitor off)</td></tr>';
+        if (meta) meta.textContent = "threshold vs age";
+        return;
+    }
+    if (meta) meta.textContent = payload && payload.feed_silence_degraded
+        ? "degraded feeds present" : "all feeds healthy";
+    const rows = entries.map(([feed, st]) => {
+        const age = st.age_sec == null ? null : Number(st.age_sec);
+        const max = Number(st.max_silence_sec) || 0;
+        const degraded = !!st.degraded;
+        let pct = null, barCls = "ok", pctTxt = "—";
+        if (age != null && max > 0) {
+            pct = (age / max) * 100;
+            pctTxt = pct.toFixed(0) + "%";
+            barCls = pct >= 90 ? "crit" : pct >= 60 ? "warn" : "ok";
+        } else if (age == null) {
+            barCls = "never";
+        }
+        const ageTxt = age == null ? "—" : (age < 60 ? age.toFixed(0) + "s"
+            : age < 3600 ? (age / 60).toFixed(1) + "m"
+            : (age / 3600).toFixed(1) + "h");
+        const maxTxt = (max / 3600).toFixed(1) + "h";
+        const stateTxt = degraded ? "DEGRADED" : (pct == null ? "never seen" : "OK");
+        const stateColor = degraded ? "var(--down)" : (pct != null && pct >= 90 ? "var(--down)" : pct != null && pct >= 60 ? "var(--warn, #d29922)" : "var(--up)");
+        const barW = Math.max(2, Math.min(100, pct == null ? 0 : pct));
+        const barColor = barCls === "crit" ? "var(--down)" : barCls === "warn" ? "#d29922" : "var(--up)";
+        return '<tr style="border-top:1px solid var(--border);">' +
+            '<td style="padding:3px 4px;font-family:monospace;">' + feed + '</td>' +
+            '<td style="padding:3px 4px;">' + ageTxt + '</td>' +
+            '<td style="padding:3px 4px;">' + maxTxt + '</td>' +
+            '<td style="padding:3px 4px;width:26%;">' +
+                '<div style="display:flex;align-items:center;gap:6px;">' +
+                    '<div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;">' +
+                        '<div style="width:' + barW + '%;height:100%;background:' + barColor + ';"></div>' +
+                    '</div>' +
+                    '<span style="font-size:10px;white-space:nowrap;color:' + (pct != null && pct >= 60 ? (pct >= 90 ? "var(--down)" : "#d29922") : "var(--muted)") + ';">' + pctTxt + '</span>' +
+                '</div>' +
+            '</td>' +
+            '<td style="padding:3px 4px;font-weight:600;color:' + stateColor + ';">' + stateTxt + '</td>' +
+            '</tr>';
+    }).join("");
+    tbody.innerHTML = rows;
+}
+
 function renderDvolPanel(payload) {
     const cur = document.getElementById("dvol-current");
     const chart = document.getElementById("dvol-chart");
@@ -1551,6 +1628,7 @@ pollAll = function pollAll() {
     authFetch("/api/top_traders").then(r => r.json()).then(d => renderTopTradersPanel(d)).catch(() => {});
     authFetch("/api/research_watchdogs").then(r => r.json()).then(d => renderResearchWatchdogs(d)).catch(() => {});
     authFetch("/api/dvol").then(r => r.json()).then(d => renderDvolPanel(d)).catch(() => {});
+    authFetch("/api/market_data_health").then(r => r.json()).then(d => renderFeedSilence(d)).catch(() => {});
 };
 
 if (!window.__hlDashTimers) {

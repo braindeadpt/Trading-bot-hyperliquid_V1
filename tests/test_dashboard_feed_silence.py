@@ -1,0 +1,146 @@
+"""Tests for the dashboard Feed Silence panel (threshold vs age per feed).
+
+The panel lives under System Health and shows, per contracted feed: age,
+max-silence threshold, % of threshold (age / max) and degraded state — so
+silences are *anticipated* before the 6h/1h/12h thresholds trip. The
+endpoint (`/api/market_data_health`) already carries `feed_silence` from the
+engine's `FeedSilenceMonitor.snapshot()`; these tests pin the payload shape
+and that the template renders the columns.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+TEMPLATE_PATH = ROOT / "src" / "dashboard" / "templates" / "index.html"
+
+
+class _SilenceStub:
+    def __init__(self, entries):
+        self._entries = entries
+        self.any_degraded = any(e.get("degraded") for e in entries.values())
+
+    def snapshot(self):
+        return self._entries
+
+
+class _HealthSummaryStub:
+    def to_dict(self):
+        return {"overall": "green", "symbols": {"BTC": {"symbol": "BTC", "status": "green"}}}
+
+
+class _EngineStub:
+    def __init__(self, silence, summary=None, health=None):
+        self._feed_silence = silence
+        self._market_data_health_summary = summary
+        self._market_data_health = health or {}
+
+
+class TestFeedSilencePayload:
+    pytestmark = pytest.mark.integration_offline
+
+    def setup_method(self) -> None:
+        import src.dashboard.web as web
+
+        self._web = web
+        self._orig_engine = web._engine
+        web._engine = None
+        self._app, self._sio, _ = web.create_app({"mode": "paper"})
+        self._client = self._app.test_client()
+
+    def teardown_method(self) -> None:
+        self._web._engine = self._orig_engine
+
+    def test_no_engine_returns_empty_feeds(self) -> None:
+        r = self._client.get("/api/market_data_health")
+        assert r.status_code == 200
+        d = r.get_json()
+        assert d["feeds"] == []
+        assert d["overall"] == "red"
+
+    def test_payload_carries_feed_silence_snapshot(self) -> None:
+        silence = _SilenceStub(
+            {
+                "funding_hl": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 30.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                },
+                "liquidation_okx": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 5400.0,
+                    "max_silence_sec": 21600.0,
+                    "degraded": False,
+                },
+                "liquidation_bybit": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 22000.0,
+                    "max_silence_sec": 21600.0,
+                    "degraded": True,
+                },
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        r = self._client.get("/api/market_data_health")
+        assert r.status_code == 200
+        d = r.get_json()
+        assert d["feed_silence_degraded"] is True
+        fs = d["feed_silence"]
+        assert fs["funding_hl"]["age_sec"] == 30.0
+        assert fs["funding_hl"]["max_silence_sec"] == 3600.0
+        assert fs["funding_hl"]["degraded"] is False
+        # bybit is past its 6h threshold -> degraded
+        assert fs["liquidation_bybit"]["degraded"] is True
+
+    def test_all_healthy_no_degraded_flag(self) -> None:
+        silence = _SilenceStub(
+            {
+                "funding_hl": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 15.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                }
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        assert d["feed_silence_degraded"] is False
+
+    def test_engine_without_silence_monitor_omits_key(self) -> None:
+        self._web._engine = _EngineStub(None, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        assert "feed_silence" not in d
+
+
+class TestFeedSilenceTemplate:
+    """The panel markup + JS must expose the threshold-vs-age columns."""
+
+    pytestmark = pytest.mark.unit
+
+    def test_template_has_feed_silence_panel(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        assert "Feed Silence" in html
+        assert 'id="feed-silence-tbody"' in html
+
+    def test_template_has_threshold_vs_age_columns(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # the 5 columns: Feed, Age, Threshold, % of threshold, State
+        assert ">Age</th>" in html
+        assert ">Threshold</th>" in html
+        assert "% of threshold" in html
+        assert ">State</th>" in html
+
+    def test_template_has_render_and_poll_wiring(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        assert "function renderFeedSilence(" in html
+        assert 'authFetch("/api/market_data_health")' in html
