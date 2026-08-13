@@ -314,6 +314,212 @@ class TestDashboardRateLimit:
         assert client.get("/api/status").status_code == 429
 
 
+class TestDashboardSocketIOIntegration:
+    """Real python-socketio client against the dashboard server in a thread.
+
+    This is the true runtime path: flask-socketio 5.6.1 (session fix for
+    Flask >= 3.1.3) + WSGI server + a real ``socketio.Client``. Earlier
+    tests exercised the gate via the module-level helper because
+    flask-socketio 5.5.1's ``ctx.session`` setter crash broke both the
+    test_client AND the real runtime — the integration test below is the
+    regression guard that the server actually accepts/rejects on the wire.
+    """
+
+    pytestmark = pytest.mark.integration_offline
+
+    def setup_method(self):
+        import socket
+        import threading
+        import time
+
+        import socketio as sio_client
+
+        import src.dashboard.web as web
+
+        self._web = web
+        self._orig_engine = web._engine
+        web._engine = None
+        self._threads: list = []
+        self._sio = None
+        self._token = "integ-token-abc-123"
+
+        # Pick a free loopback port, then hand it to the server thread.
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        self._port = sock.getsockname()[1]
+        sock.close()
+
+        with patch.dict(
+            os.environ,
+            {"DASHBOARD_AUTH_ENABLED": "true", "BOT_DASHBOARD_TOKEN": self._token},
+            clear=False,
+        ):
+            self.app, self.sio, _ = web.create_app(
+                {"mode": "paper", "auth_enabled": False}
+            )
+
+        def _serve():
+            try:
+                self.sio.run(
+                    self.app,
+                    host="127.0.0.1",
+                    port=self._port,
+                    use_reloader=False,
+                    allow_unsafe_werkzeug=True,
+                    debug=False,
+                    log_output=False,
+                )
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_serve, daemon=True)
+        t.start()
+        self._threads.append(t)
+        self._wait_until_ready(time)
+        self._client_cls = sio_client.Client
+
+    def teardown_method(self):
+        if self._sio is not None:
+            try:
+                self._sio.stop()
+            except Exception:
+                pass
+        self._web._engine = self._orig_engine
+
+    def _wait_until_ready(self, time_mod, timeout: float = 10.0) -> None:
+        import urllib.request
+
+        deadline = time_mod.time() + timeout
+        while time_mod.time() < deadline:
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{self._port}/health", timeout=1.0
+                ) as r:
+                    if r.status == 200:
+                        return
+            except Exception:
+                time_mod.sleep(0.1)
+        raise AssertionError("dashboard server did not become ready")
+
+    def _url(self) -> str:
+        return f"http://127.0.0.1:{self._port}"
+
+    def _connect(self, auth=None, token_query: bool = False):
+        c = self._client_cls(logger=False, engineio_logger=False)
+        url = self._url()
+        if token_query:
+            url += f"?token={self._token}"
+        c.connect(url, auth=auth, wait_timeout=5.0, transports=["polling"])
+        return c
+
+    def test_without_token_is_rejected(self):
+        import socketio.exceptions
+
+        with pytest.raises(socketio.exceptions.ConnectionError):
+            self._connect(auth=None)
+
+    def test_with_wrong_token_is_rejected(self):
+        import socketio.exceptions
+
+        with pytest.raises(socketio.exceptions.ConnectionError):
+            self._connect(auth={"token": "wrong-token"})
+
+    def test_with_valid_token_is_accepted(self):
+        c = self._connect(auth={"token": self._token})
+        try:
+            assert c.connected is True
+        finally:
+            c.disconnect()
+
+    def test_with_valid_token_in_query_string_is_accepted(self):
+        c = self._connect(auth=None, token_query=True)
+        try:
+            assert c.connected is True
+        finally:
+            c.disconnect()
+
+
+class TestDashboardSocketIOIntegrationAuthDisabled:
+    """Auth OFF: the real server accepts a token-less connection."""
+
+    pytestmark = pytest.mark.integration_offline
+
+    def setup_method(self):
+        import socket
+        import threading
+        import time
+
+        import socketio as sio_client
+
+        import src.dashboard.web as web
+
+        self._web = web
+        self._orig_engine = web._engine
+        web._engine = None
+        self._sio = None
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        self._port = sock.getsockname()[1]
+        sock.close()
+
+        with patch.dict(os.environ, {"DASHBOARD_AUTH_ENABLED": ""}, clear=False):
+            self.app, self.sio, _ = web.create_app(
+                {"mode": "paper", "auth_enabled": False}
+            )
+
+        def _serve():
+            try:
+                self.sio.run(
+                    self.app,
+                    host="127.0.0.1",
+                    port=self._port,
+                    use_reloader=False,
+                    allow_unsafe_werkzeug=True,
+                    debug=False,
+                    log_output=False,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_serve, daemon=True).start()
+        deadline = time.time() + 10.0
+        import urllib.request
+
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{self._port}/health", timeout=1.0
+                ) as r:
+                    if r.status == 200:
+                        break
+            except Exception:
+                time.sleep(0.1)
+        else:
+            raise AssertionError("dashboard server did not become ready")
+        self._client_cls = sio_client.Client
+
+    def teardown_method(self):
+        if self._sio is not None:
+            try:
+                self._sio.stop()
+            except Exception:
+                pass
+        self._web._engine = self._orig_engine
+
+    def test_accepts_without_token_when_auth_disabled(self):
+        c = self._client_cls(logger=False, engineio_logger=False)
+        c.connect(
+            self._url(), wait_timeout=5.0, transports=["polling"]
+        )
+        try:
+            assert c.connected is True
+        finally:
+            c.disconnect()
+
+    def _url(self) -> str:
+        return f"http://127.0.0.1:{self._port}"
+
+
 if __name__ == "__main__":
     test_normalize_private_key()
     test_resolve_private_key_from_env()
