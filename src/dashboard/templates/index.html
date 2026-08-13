@@ -561,6 +561,31 @@ tr:hover td { background: var(--panel-hover); }
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
+<!-- DVOL / IV regime (Deribit vol index)                            -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="section-label section-intel">
+    <span class="bar"></span><span class="text">DVOL · IV regime</span><span class="line"></span>
+</div>
+<div class="grid">
+    <div class="g-12">
+        <div class="panel">
+            <div class="panel-header">
+                Deribit DVOL — trailing 30d percentile
+                <span class="dim" id="dvol-meta">high_iv &gt; p66.7 · BTC/ETH nativo, SOL/HYPE proxy BTC</span>
+            </div>
+            <div class="panel-body" style="padding:8px;">
+                <div class="muted" style="font-size:10px;line-height:1.4;margin-bottom:8px;">
+                    Percentil do DVOL diário (janela 30d). O gate IV corre em <b>shadow</b> — regista a
+                    decisão high/low-IV por trade (<code>variant=iv_gate_shadow</code>), nunca bloqueia execução.
+                </div>
+                <div id="dvol-current" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px;font-size:11px;">Waiting...</div>
+                <div id="dvol-chart" style="width:100%;height:150px;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
 <!-- SECTION: LOGS                                                    -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="section-label section-logs">
@@ -1289,6 +1314,59 @@ function renderResearchWatchdogs(payload) {
     }).join("");
 }
 
+// ── DVOL / IV regime ──
+function renderDvolPanel(payload) {
+    const cur = document.getElementById("dvol-current");
+    const chart = document.getElementById("dvol-chart");
+    if (!cur || !chart) return;
+    if (!payload || payload.error || !payload.current) {
+        cur.innerHTML = '<span class="muted">Unavailable</span>';
+        chart.innerHTML = "";
+        return;
+    }
+    const th = Number(payload.threshold) || 66.7;
+    const curHtml = Object.entries(payload.current || {}).map(([sym, v]) => {
+        const cls = v.cls || "unknown";
+        const color = cls === "high_iv" ? "var(--up)" : cls === "low_iv" ? "var(--down)" : "var(--muted)";
+        const pctTxt = v.pct == null ? "—" : v.pct.toFixed(1) + "%";
+        const proxy = (v.currency && v.currency !== sym)
+            ? '<div class="dim" style="font-size:8px;">' + v.currency + ' proxy</div>' : "";
+        return '<div style="text-align:center;min-width:64px;">' +
+            '<div class="highlight" style="font-size:11px;">' + sym + '</div>' +
+            '<div style="font-size:15px;font-weight:700;color:' + color + ';">' + pctTxt + '</div>' +
+            '<div class="dim" style="font-size:9px;color:' + color + ';">' + cls + '</div>' + proxy +
+            '</div>';
+    }).join("");
+    cur.innerHTML = curHtml || '<span class="muted">No symbols</span>';
+    drawDvolChart(chart, payload.series, th);
+}
+
+function drawDvolChart(container, series, threshold) {
+    const W = 760, H = 140, PAD = 24;
+    const colors = { BTC: "#58a6ff", ETH: "#bc8cff" };
+    const paths = [];
+    const legends = [];
+    for (const [k, rows] of Object.entries(series || {})) {
+        const valid = (rows || []).filter(r => r.pct != null);
+        if (valid.length < 2) continue;
+        const color = colors[k] || "#58a6ff";
+        const xs = (i, n) => PAD + i * (W - 2 * PAD) / (n - 1);
+        const ys = p => H - PAD - (Math.max(0, Math.min(100, p)) / 100) * (H - 2 * PAD);
+        const d = valid.map((r, i) => (i ? "L" : "M") + xs(i, valid.length).toFixed(1) + " " + ys(r.pct).toFixed(1)).join(" ");
+        paths.push('<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.5" opacity="0.9"/>');
+        legends.push('<span style="color:' + color + ';font-size:9px;margin-right:10px;">' + k + ' (' + valid.length + 'd)</span>');
+    }
+    const thY = H - PAD - (threshold / 100) * (H - 2 * PAD);
+    const line = '<line x1="' + PAD + '" y1="' + thY.toFixed(1) + '" x2="' + (W - PAD) + '" y2="' + thY.toFixed(1) + '" stroke="var(--yellow, #d29922)" stroke-dasharray="4,3" stroke-width="1"/>' +
+        '<text x="' + (W - PAD - 2) + '" y="' + (thY - 4).toFixed(1) + '" fill="var(--yellow, #d29922)" font-size="8" text-anchor="end">p' + threshold + '</text>';
+    if (!paths.length) {
+        container.innerHTML = '<div class="muted" style="font-size:10px;padding:8px;">No DVOL history yet — feed collecting daily closes.</div>';
+        return;
+    }
+    container.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="' + H + '" preserveAspectRatio="xMidYMid meet" style="border:1px solid var(--border);border-radius:4px;">' + line + paths.join("") + '</svg>' +
+        '<div style="margin-top:4px;">' + legends.join("") + '</div>';
+}
+
 // ── Signals ──
 function renderSignals(data) {
     const div = document.getElementById("signals-list");
@@ -1472,6 +1550,7 @@ pollAll = function pollAll() {
     authFetch("/api/shadow_panel?evaluate=0").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
     authFetch("/api/top_traders").then(r => r.json()).then(d => renderTopTradersPanel(d)).catch(() => {});
     authFetch("/api/research_watchdogs").then(r => r.json()).then(d => renderResearchWatchdogs(d)).catch(() => {});
+    authFetch("/api/dvol").then(r => r.json()).then(d => renderDvolPanel(d)).catch(() => {});
 };
 
 if (!window.__hlDashTimers) {

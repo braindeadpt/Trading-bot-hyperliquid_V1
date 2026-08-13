@@ -1177,6 +1177,72 @@ def create_app(config: Dict[str, Any]) -> tuple:
             logger.warning("research_watchdogs failed: %s", exc)
             return jsonify({"error": str(exc), "watchdogs": []}), 500
 
+    @app.route("/api/dvol")
+    def api_dvol():
+        """DVOL daily series + trailing-30d percentile per symbol (IV gate).
+
+        Read-only research-feed data — never touches execution. BTC/ETH use
+        their own Deribit index; SOL/HYPE classify against BTC (global proxy),
+        mirroring the backtest evidence (docs/IV_HIGH_ONLY_AB_SPLIT.md).
+        """
+        try:
+            from src.data.dvol_feed import (
+                DVOL_WINDOW_DAYS,
+                IV_HIGH_PCT,
+                build_iv_percentile,
+                classify_iv,
+                dvol_currency_for,
+                iv_pct_at,
+            )
+            from src.data.research_database import ResearchDatabase
+
+            rdb = ResearchDatabase()
+            try:
+                symbols = sorted(_allowed_symbols()) or ["BTC", "ETH", "SOL", "HYPE"]
+                now_ms = int(time.time() * 1000)
+                lookback = int(max(2 * DVOL_WINDOW_DAYS + 5, 45)) * 86_400_000
+
+                series: Dict[str, Any] = {}
+                current_pct: Dict[str, Optional[float]] = {}
+                for currency in ("BTC", "ETH"):
+                    closes = rdb.load_dvol_daily(currency, now_ms - lookback, now_ms)
+                    pct_series = build_iv_percentile(closes, DVOL_WINDOW_DAYS)
+                    pct_by_ts = {ts: p for ts, p in pct_series}
+                    series[currency] = [
+                        {
+                            "ts": ts,
+                            "close": round(float(c), 2),
+                            "pct": (
+                                None if pct_by_ts.get(ts) is None
+                                else round(float(pct_by_ts[ts]), 1)
+                            ),
+                        }
+                        for ts, c in closes
+                    ]
+                    current_pct[currency] = iv_pct_at(pct_series, now_ms)
+
+                current: Dict[str, Any] = {}
+                for sym in symbols:
+                    currency = dvol_currency_for(sym)
+                    pct = current_pct.get(currency)
+                    current[sym] = {
+                        "pct": None if pct is None else round(float(pct), 1),
+                        "cls": classify_iv(pct),
+                        "currency": currency,
+                    }
+                return jsonify({
+                    "series": series,
+                    "current": current,
+                    "threshold": IV_HIGH_PCT,
+                    "window_days": DVOL_WINDOW_DAYS,
+                    "asof_ms": now_ms,
+                })
+            finally:
+                rdb.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("dvol endpoint failed: %s", exc)
+            return jsonify({"error": str(exc), "series": {}, "current": {}}), 500
+
     @app.route("/api/strategy/<name>")
     def api_strategy_detail(name):
         """Drill-down endpoint for a single strategy (Task 5.3).
