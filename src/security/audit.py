@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import IntEnum
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, FrozenSet, Iterator, List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -142,6 +142,23 @@ _FILE_WRITE_RE: re.Pattern[str] = re.compile(
 # rule that actually fired at that exact location — a stray marker on a line
 # with no match does nothing.
 _SUPPRESSION_RE: re.Pattern[str] = re.compile(r"#\s*audit-ok:\s*([A-Z]+-\d+)\b")
+
+# Accepted HIGH findings baseline — the source of truth for "deliberately
+# accepted HIGH findings" (decisions in docs/SECURITY.md §2.4), tracked by
+# ``(rule_id, file)`` so line-number edits don't churn the baseline. The CLI
+# flag ``--enforce-baseline`` (always passed by run_pre_push_gate.py and
+# run_ci_tests.py) fails on any HIGH/CRITICAL finding whose pair is NOT here
+# — a new HIGH must be remediated or added here with justification — and on
+# any suppressed HIGH that is NOT mirrored here (acceptance must be
+# documented in the baseline, not only via an in-code marker).
+ACCEPTED_HIGH_BASELINE: FrozenSet[Tuple[str, str]] = frozenset({
+    ("AUDIT-005", "utils/crash_recovery.py"),
+})
+
+
+def _norm_file(path: Path) -> str:
+    """Normalize a finding's relative path to forward slashes (baseline keys)."""
+    return str(path).replace("\\", "/")
 
 # Module-level imports of urllib or requests (we flag to verify domain allowlist)
 _IMPORT_HTTP_RE: re.Pattern[str] = re.compile(
@@ -603,6 +620,31 @@ class SecurityAuditor:
         """Return ``True`` if any HIGH or CRITICAL finding was recorded."""
         return any(f.severity >= Severity.HIGH for f in self.findings)
 
+    def unaccepted_high(
+        self,
+        baseline: FrozenSet[Tuple[str, str]] = ACCEPTED_HIGH_BASELINE,
+    ) -> List[Finding]:
+        """HIGH/CRITICAL findings whose ``(rule_id, file)`` is not in the
+        accepted baseline — the "new HIGH" set the pre-push gate blocks on."""
+        return [
+            f for f in self.findings
+            if f.severity >= Severity.HIGH
+            and (f.rule_id, _norm_file(f.file)) not in baseline
+        ]
+
+    def undocumented_acceptance(
+        self,
+        baseline: FrozenSet[Tuple[str, str]] = ACCEPTED_HIGH_BASELINE,
+    ) -> List[Finding]:
+        """Suppressed HIGH/CRITICAL findings NOT mirrored in the baseline —
+        an in-code ``# audit-ok`` marker without the documented baseline
+        entry (acceptance must be recorded in both places)."""
+        return [
+            f for f in self.suppressed_findings
+            if f.severity >= Severity.HIGH
+            and (f.rule_id, _norm_file(f.file)) not in baseline
+        ]
+
 
 # ---------------------------------------------------------------------------
 # CLI entry point
@@ -630,6 +672,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--fail-on-high",
         action="store_true",
         help="Return non-zero exit code for HIGH severity as well as CRITICAL",
+    )
+    parser.add_argument(
+        "--enforce-baseline",
+        action="store_true",
+        help="fail on HIGH/CRITICAL findings not in the accepted baseline "
+             "(ACCEPTED_HIGH_BASELINE, docs/SECURITY.md §2.4) and on "
+             "suppressed HIGHs not mirrored there — the pre-push gate and "
+             "the CI trio always pass this",
     )
     parser.add_argument(
         "-v",
@@ -665,6 +715,32 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.fail_on_high and auditor.has_high_or_above():
         logging.error("High/Critical findings detected — pipeline blocked.")
         return 1
+
+    if args.enforce_baseline:
+        unaccepted = auditor.unaccepted_high()
+        if unaccepted:
+            for f in unaccepted:
+                logging.error(
+                    "UNACCEPTED HIGH %s %s:%d (%s) — not in ACCEPTED_HIGH_BASELINE; "
+                    "remediate, or add with justification to docs/SECURITY.md §2.4",
+                    f.rule_id, f.file, f.line, f.message,
+                )
+            logging.error(
+                "Pipeline blocked: new HIGH finding(s) beyond the accepted baseline."
+            )
+            return 1
+        undocumented = auditor.undocumented_acceptance()
+        if undocumented:
+            for f in undocumented:
+                logging.error(
+                    "UNDOCUMENTED ACCEPTANCE %s %s:%d — # audit-ok marker without "
+                    "a matching ACCEPTED_HIGH_BASELINE entry",
+                    f.rule_id, f.file, f.line,
+                )
+            logging.error(
+                "Pipeline blocked: acceptance not documented in the baseline."
+            )
+            return 1
 
     return 0
 

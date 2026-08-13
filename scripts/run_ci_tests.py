@@ -105,7 +105,10 @@ def main() -> int:
     print("\nAll CI tests passed.")
 
     # Stage 2: security audit — same module + flags as the pre-push gate and
-    # main.py --audit (fails on CRITICAL findings by default).
+    # main.py --audit (fails on CRITICAL findings by default). Always passes
+    # --enforce-baseline: a NEW HIGH finding beyond the accepted baseline
+    # (ACCEPTED_HIGH_BASELINE, tracked by rule/file) fails CI even without
+    # --fail-on-high.
     if not args.skip_audit:
         _banner("Security audit (security.audit)")
         audit_cmd = [
@@ -117,6 +120,7 @@ def main() -> int:
         ]
         if args.fail_on_high:
             audit_cmd.append("--fail-on-high")
+        audit_cmd.append("--enforce-baseline")
         audit_cmd.append("-v")
         audit_result = subprocess.run(audit_cmd, cwd=str(ROOT), env=env, check=False)
         if audit_result.returncode != 0:

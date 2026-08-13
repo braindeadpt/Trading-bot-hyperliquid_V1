@@ -378,6 +378,15 @@ Flags:
 | `--skip-audit` | run only the CI battery (audit + hash run separately) |
 | `--skip-hash` | skip the config_hash-vs-frozen check (runs separately) |
 
+**Baseline tracking**: the audit stage always passes `--enforce-baseline` — a
+**new HIGH finding** whose `(rule, file)` is not in the documented accepted
+baseline (`ACCEPTED_HIGH_BASELINE`, see `docs/SECURITY.md` §2.4) fails the
+gate even without `--fail-on-high`. The single accepted HIGH today is
+`AUDIT-005 @ utils/crash_recovery.py` (subprocess, hardened with
+`_validate_cmd`). Adding a new HIGH requires remediating it or extending the
+baseline with justification; an `# audit-ok` marker without a baseline entry
+is also blocked (acceptance must be documented in both places).
+
 Exit codes: `0` all stages passed · `1` any stage failed · `2` a stage was
 unreachable (e.g. missing Fase 10 manifest). The audit is **closed at 0 HIGH
 + 0 MEDIUM** (2026-08-13, see `docs/SECURITY.md` §2.4): AUDIT-004 was

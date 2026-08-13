@@ -85,7 +85,8 @@ def test_trio_runs_in_order(monkeypatch, capsys) -> None:
     calls: list = []
 
     def fake_run(cmd, **kwargs):
-        calls.append(_stage_of(cmd))
+        joined = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        calls.append((_stage_of(cmd), joined))
         return _FakeResult(0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -93,12 +94,34 @@ def test_trio_runs_in_order(monkeypatch, capsys) -> None:
 
     assert runner.main() == 0
 
-    assert calls == ["pytest", "audit", "hash"], calls
+    assert [stage for stage, _ in calls] == ["pytest", "audit", "hash"], calls
+    # The audit stage always enforces the accepted-HIGH baseline (by rule/file).
+    assert "--enforce-baseline" in calls[1][1], calls[1]
     out = capsys.readouterr().out
     assert "All CI tests passed." in out
     assert "[PASS] Security audit PASSED" in out
     assert "[PASS] config_hash matches the frozen Fase 10 manifest" in out
     assert "[PASS] CI + security audit + config_hash - all green." in out
+
+
+def test_audit_failure_short_circuits_before_hash(monkeypatch, capsys) -> None:
+    """A failing audit (e.g. a new HIGH beyond the baseline) stops the runner
+    with the audit exit code — the hash stage never runs."""
+    runner = _load_runner()
+    calls: list = []
+
+    def fake_run(cmd, **kwargs):
+        stage = _stage_of(cmd)
+        calls.append(stage)
+        return _FakeResult(1 if stage == "audit" else 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["run_ci_tests.py"])
+
+    assert runner.main() == 1
+    assert calls == ["pytest", "audit"], calls
+    out = capsys.readouterr().out
+    assert "[FAIL] Security audit FAILED" in out
 
 
 def test_pytest_failure_short_circuits(monkeypatch) -> None:

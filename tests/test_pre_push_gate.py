@@ -100,11 +100,34 @@ def test_main_drives_three_stages_in_order(monkeypatch, capsys) -> None:
     assert gate.main() == 0
 
     assert [_stage_of(c) for c in calls] == ["ci", "audit", "hash"], calls
+    # The audit stage always enforces the accepted-HIGH baseline (by rule/file).
+    assert "--enforce-baseline" in " ".join(calls[1]), calls[1]
     out = capsys.readouterr().out
     assert "[PASS] CI battery (pytest) PASSED" in out
     assert "[PASS] Security audit PASSED" in out
     assert "[PASS] config_hash matches the frozen Fase 10 manifest" in out
     assert "[PASS] PRE-PUSH GATE PASSED" in out
+
+
+def test_audit_failure_blocks_gate_before_hash(monkeypatch, capsys) -> None:
+    """A failing audit (e.g. a new HIGH beyond the baseline) stops the gate
+    with the audit exit code — the hash stage never runs."""
+    gate = _load_gate()
+    calls: list = []
+
+    def fake_run(cmd, **kwargs):
+        stage = _stage_of(cmd)
+        calls.append(stage)
+        return _FakeResult(1 if stage == "audit" else 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["run_pre_push_gate.py"])
+
+    assert gate.main() == 1
+    assert calls == ["ci", "audit"], calls
+    out = capsys.readouterr().out
+    assert "[FAIL] Security audit FAILED" in out
+    assert "[PASS] PRE-PUSH GATE PASSED" not in out
 
 
 def test_ci_failure_short_circuits_before_audit_and_hash(monkeypatch, capsys) -> None:

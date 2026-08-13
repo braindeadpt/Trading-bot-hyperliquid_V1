@@ -29,7 +29,12 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from security.audit import SecurityAuditor, Severity  # noqa: E402
+from security.audit import (  # noqa: E402
+    ACCEPTED_HIGH_BASELINE,
+    SecurityAuditor,
+    Severity,
+    main as audit_main,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -188,3 +193,79 @@ def test_allowlisted_files_pass_without_new_findings() -> None:
     assert [(f.rule_id, f.file) for f in auditor.suppressed_findings] == [
         ("AUDIT-005", Path("utils") / "crash_recovery.py"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Baseline tracking (ACCEPTED_HIGH_BASELINE, --enforce-baseline)
+# ---------------------------------------------------------------------------
+
+def test_baseline_contains_crash_recovery_acceptance() -> None:
+    """The accepted HIGH baseline tracks the documented decision by rule/file."""
+    assert ("AUDIT-005", "utils/crash_recovery.py") in ACCEPTED_HIGH_BASELINE
+
+
+def test_unaccepted_high_flags_new_high(tmp_path) -> None:
+    """A HIGH finding whose (rule, file) is not in the baseline is 'new'."""
+    auditor = _audit_dir(tmp_path, {
+        "exchanges/new_mod.py": "import subprocess\nsubprocess.run(['cmd'])\n",
+    })
+    flagged = auditor.unaccepted_high()
+    assert [(f.rule_id, _norm(f.file)) for f in flagged] == [
+        ("AUDIT-005", "exchanges/new_mod.py"),
+    ]
+
+
+def test_unaccepted_high_empty_for_baseline_entry() -> None:
+    """The accepted crash_recovery subprocess is NOT an unaccepted high."""
+    auditor = SecurityAuditor(src_dir=ROOT / "src")
+    auditor.run(targets=[ROOT / "src" / "utils" / "crash_recovery.py"])
+    assert auditor.unaccepted_high() == []
+
+
+def test_undocumented_acceptance_flags_unlisted_marker(tmp_path) -> None:
+    """An # audit-ok marker on a rule/file NOT in the baseline is flagged."""
+    auditor = _audit_dir(tmp_path, {
+        "exchanges/evil.py": (
+            "import subprocess\n"
+            "subprocess.run(['cmd'])  # audit-ok: AUDIT-005\n"
+        ),
+    })
+    flagged = auditor.undocumented_acceptance()
+    assert [(f.rule_id, _norm(f.file)) for f in flagged] == [
+        ("AUDIT-005", "exchanges/evil.py"),
+    ]
+
+
+def test_cli_enforce_baseline_blocks_new_high(tmp_path) -> None:
+    src = tmp_path / "src"
+    (src / "exchanges").mkdir(parents=True)
+    (src / "exchanges" / "new_mod.py").write_text(
+        "import subprocess\nsubprocess.run(['cmd'])\n", encoding="utf-8"
+    )
+    rc = audit_main(["--src-dir", str(src), "--output", str(tmp_path / "r.log"), "--enforce-baseline"])
+    assert rc == 1
+
+
+def test_cli_without_enforce_passes_new_high(tmp_path) -> None:
+    """Default (CRITICAL-only) behaviour is unchanged without the flag."""
+    src = tmp_path / "src"
+    (src / "exchanges").mkdir(parents=True)
+    (src / "exchanges" / "new_mod.py").write_text(
+        "import subprocess\nsubprocess.run(['cmd'])\n", encoding="utf-8"
+    )
+    rc = audit_main(["--src-dir", str(src), "--output", str(tmp_path / "r.log")])
+    assert rc == 0
+
+
+def test_cli_enforce_baseline_passes_closed_tree(tmp_path) -> None:
+    """The gate's enforcement passes on the current (closed) tree."""
+    rc = audit_main([
+        "--src-dir", str(ROOT / "src"),
+        "--output", str(tmp_path / "r.log"),
+        "--enforce-baseline",
+    ])
+    assert rc == 0
+
+
+def _norm(path: Path) -> str:
+    return str(path).replace("\\", "/")

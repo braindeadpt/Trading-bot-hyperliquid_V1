@@ -133,6 +133,16 @@ the blocking counts. The marker is self-validating: it only suppresses a rule
 that actually fired at that exact location; a stray marker on a clean line
 does nothing. `--fail-on-high` therefore passes on the current tree.
 
+**Baseline tracking by rule/file**: the accepted HIGH set is also recorded in
+`ACCEPTED_HIGH_BASELINE` (`src/security/audit.py`), keyed by
+`(rule_id, file)` so line edits don't churn it. The audit CLI flag
+`--enforce-baseline` — always passed by `run_pre_push_gate.py` and
+`run_ci_tests.py` — fails the pipeline on **any HIGH/CRITICAL finding whose
+pair is not in the baseline** (a new HIGH must be remediated or added to the
+baseline with justification) **and on any suppressed HIGH that is not
+mirrored there** (acceptance must be documented in both places, not only via
+the in-code marker).
+
 Tests: `tests/test_subprocess_remediation.py` (validation layer) +
 `tests/test_security_audit_suppression.py` (marker contract + closed baseline).
 

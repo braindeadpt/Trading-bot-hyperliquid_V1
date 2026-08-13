@@ -9,7 +9,10 @@ keep the repo green:
                     hash), the gate passes --skip-audit --skip-hash so each
                     check runs exactly once — in this gate's own stages.
   2. Security    - static audit (`security.audit`); fails on CRITICAL
-                    findings; --fail-on-high also fails on HIGH.
+                    findings; --fail-on-high also fails on HIGH; always
+                    fails on NEW HIGH findings beyond the accepted baseline
+                    (ACCEPTED_HIGH_BASELINE, tracked by rule/file — see
+                    docs/SECURITY.md §2.4).
   3. config_hash - effective `config/settings.yaml` hash must equal the
                     Fase 10 frozen manifest hash (the same assert main.py
                     runs at startup — a drift here means the bot would
@@ -132,6 +135,10 @@ def main() -> int:
         ]
         if args.fail_on_high:
             audit_cmd.append("--fail-on-high")
+        # Baseline tracking by rule/file: a NEW HIGH finding beyond the
+        # documented accepted baseline (ACCEPTED_HIGH_BASELINE) blocks the
+        # gate even without --fail-on-high.
+        audit_cmd.append("--enforce-baseline")
         audit_cmd.append("-v")
         print(f"\n{'=' * 70}\n>>> Security audit (security.audit)\n{'=' * 70}")
         audit_result = subprocess.run(
