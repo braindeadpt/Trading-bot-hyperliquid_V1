@@ -134,6 +134,47 @@ class TestTradesChartEndpoint:
         assert r.status_code == 200
 
 
+class TestStrategyPnlEndpoint:
+    def setup_method(self):
+        self._orig_engine = web._engine
+        self._engine = _make_mock_engine()
+        self._rows = [
+            {"strategy": "VWAPDeviation", "trades": 5, "wins": 3,
+             "total_pnl_usd": 120.0, "win_rate": 0.6},
+        ]
+        self._engine._db.get_strategy_pnl.return_value = self._rows
+        web._engine = self._engine
+        config = {"mode": "paper"}
+        self.app, self.sio, self._emit = web.create_app(config)
+        self.client = self.app.test_client()
+
+    def teardown_method(self):
+        web._engine = self._orig_engine
+
+    def test_default(self):
+        r = self.client.get("/api/strategy_pnl")
+        assert r.status_code == 200
+        data = json.loads(r.data)
+        assert data["rows"] == self._rows
+        self._engine._db.get_strategy_pnl.assert_called_once_with(
+            since_ms=None, strategy=None
+        )
+
+    def test_strategy_filter(self):
+        r = self.client.get("/api/strategy_pnl?strategy=VWAPDeviation")
+        assert r.status_code == 200
+        self._engine._db.get_strategy_pnl.assert_called_once_with(
+            since_ms=None, strategy="VWAPDeviation"
+        )
+
+    def test_days_filter(self):
+        r = self.client.get("/api/strategy_pnl?days=7")
+        assert r.status_code == 200
+        args, kwargs = self._engine._db.get_strategy_pnl.call_args
+        assert kwargs["since_ms"] is not None
+        assert kwargs["strategy"] is None
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

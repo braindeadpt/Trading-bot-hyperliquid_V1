@@ -1071,17 +1071,23 @@ class Database:
     def get_strategy_pnl(
         self,
         since_ms: Optional[int] = None,
+        strategy: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Return per-strategy aggregate stats.
 
         When ``since_ms`` is provided only closed trades with
         ``exit_time >= since_ms`` are considered (default: all time).
+        When ``strategy`` is provided only that strategy's closed trades
+        are considered (default: all strategies).
         """
         where: List[str] = []
         params: List[Any] = []
         if since_ms is not None:
             where.append("exit_time >= ?")
             params.append(since_ms)
+        if strategy:
+            where.append("strategy = ?")
+            params.append(strategy)
         where.append("status = 'closed'")
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         sql = f"""
