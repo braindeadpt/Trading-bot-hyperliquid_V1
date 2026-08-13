@@ -202,6 +202,60 @@ Secrets live in `.env` (gitignored) or in the encrypted vault at
 
 ---
 
+## Feed Contracts (operation)
+
+The feed-silence watchdog (`FeedSilenceMonitor` +
+`feed_silence_contracts()` in `src/core/engine.py`) raises a `degraded`
+flag when a feed stops delivering for longer than its threshold. The
+operating rule is strict: **only feeds this deployment actually contracts
+can light up `degraded`** — a feed that is disabled, blocked or absent here
+must never force a false alarm. This is the direct lesson of the
+2026-06-29 Binance fstream outage, which ran silent for six weeks and
+contaminated research because nobody was told the pipe was empty.
+
+| Feed | Contracted when | Default threshold |
+|------|------------------|-------------------|
+| `liquidation_okx` / `liquidation_bybit` | always | 6h |
+| `funding_cex` / `funding_hl` / `taker_split` | always | 1h |
+| `liquidation_coinalyze_check` | always (verify-only) | 12h |
+| `l2_book_recording` | `market_data.l2_recording.enabled` | 2m |
+| `binance_perp` | `strategy.lead_lag.enabled` / `auto_enable` | 1h |
+| `liquidation_binance` | operator opt-in (below) | 6h |
+
+### Enabling `liquidation_binance` where fstream is accessible
+
+On this network Binance **fstream `@forceOrder` delivers 0 messages**, so
+`liquidation_binance` is **not** contracted by default — contracting it
+would make `degraded` permanently true. In a deployment where the channel
+is reachable, opt the watchdog back in **before** starting the bot:
+
+```bash
+# .env (gitignored) — re-contract liquidation_binance for THIS deployment
+LIQUIDATION_BINANCE_CONTRACTED=true
+```
+
+Why `.env` and not `config/settings.yaml`:
+
+- `.env` is **gitignored** — the contract decision stays deployment-local
+  and never leaks into the repository.
+- The variable is deliberately **not** `BOT_`-prefixed, so the Fase 10
+  `config_hash` (frozen window) stays intact — the hash pins
+  `settings.yaml` only, and this opt-in is an operator-side switch, not a
+  strategy change.
+- Accepted truthy values: `1`, `true`, `yes` (case-insensitive).
+
+`binance_perp` needs no opt-in: it is contracted automatically whenever
+the LeadLag perp-price bridge runs (`strategy.lead_lag.enabled` /
+`auto_enable`; the testnet mode override turns it on).
+
+**Verify after start:** `GET /api/market_data_health` returns
+`feed_silence` (per-feed age + `degraded`) and `feed_silence_degraded`.
+An uncontracted feed must never appear in the snapshot, and
+`feed_silence_degraded` must reflect only real contracts. Full detail:
+`docs/FEED_CONTAMINATION_AUDIT.md` §0.1 and `docs/SECURITY.md` §3.6.
+
+---
+
 ## Security
 
 - Paper mode is the default. Mainnet requires both the config flag and
