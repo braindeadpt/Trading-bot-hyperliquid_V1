@@ -279,6 +279,16 @@ def by_strategy(trades: List[Dict[str, Any]], iv_class: str) -> Dict[str, Dict[s
     return out
 
 
+def by_symbol(trades: List[Dict[str, Any]], iv_class: str) -> Dict[str, Dict[str, Any]]:
+    """Per-symbol slice stats within an IV class (mirror of ``by_strategy``)."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for sym in sorted({t["symbol"] for t in trades}):
+        out[sym] = slice_stats(
+            [t for t in trades if t["symbol"] == sym], iv_class
+        )
+    return out
+
+
 def verdict(hi: Dict[str, Any], lo: Dict[str, Any]) -> Dict[str, Any]:
     n_closed = (hi["n_closed"] or 0) + (lo["n_closed"] or 0)
     if n_closed < MIN_N_GATE:
@@ -369,6 +379,9 @@ def build_report(
         "slices": {"high_iv": hi, "low_iv": lo, "unknown": unk},
         "per_strategy": {
             cls: by_strategy(joined, cls) for cls in ("high_iv", "low_iv", "unknown")
+        },
+        "per_symbol": {
+            cls: by_symbol(joined, cls) for cls in ("high_iv", "low_iv", "unknown")
         },
         "verdict": v,
         "backtest_evidence": BACKTEST_EVIDENCE,

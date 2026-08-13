@@ -168,6 +168,68 @@ class TestIvGateShadowEndpoint:
         assert d["trades_with_decision"] == 0
         assert d["n_decisions"] == 0
 
+    def test_distribution_by_strategy_and_symbol(self, tmp_path) -> None:
+        """The endpoint exposes where the sample lives: per strategy and per
+        symbol, with the per-class mix and aggregate n/closed."""
+        from scripts import iv_gate_shadow_vs_pnl as pnl
+
+        live = os.path.join(tmp_path, "live.db")
+        research = os.path.join(tmp_path, "research.db")
+
+        db = sqlite3.connect(live)
+        db.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, symbol TEXT, side TEXT, "
+                   "entry_time INTEGER, exit_time INTEGER, pnl_usd REAL, pnl_pct REAL, "
+                   "strategy TEXT, status TEXT, exit_reason TEXT)")
+        rdb = sqlite3.connect(research)
+        rdb.execute("CREATE TABLE shadow_decisions (id INTEGER PRIMARY KEY, symbol TEXT, "
+                    "strategy TEXT, variant TEXT, side TEXT, would_enter INTEGER, "
+                    "reason TEXT, timestamp_ms INTEGER, snapshot_json TEXT, "
+                    "ingested_at_ms INTEGER)")
+        t0 = 1_786_600_000_000
+        # BTC + VWAPDeviation (high_iv) and ETH + VolatilityBreakout (low_iv).
+        rows = [
+            ("BTC", "VWAPDeviation", "high_iv", 80.0, t0, 5.0),
+            ("ETH", "VolatilityBreakout", "low_iv", 40.0, t0 + 60_000, -3.0),
+        ]
+        for i, (sym, strat, cls, pct, ts, pnl_) in enumerate(rows, start=1):
+            db.execute(
+                "INSERT INTO trades VALUES (?, ?, 'long', ?, ?, ?, 0.01, "
+                "?, 'closed', 'tp')",
+                (i, sym, ts, ts + 3_600_000, pnl_, strat),
+            )
+            snap = json.dumps({"metadata": {"iv_class": cls, "iv_percentile": pct,
+                                            "iv_threshold": 66.7, "iv_currency": sym}})
+            rdb.execute(
+                "INSERT INTO shadow_decisions VALUES (?, ?, ?, "
+                "'iv_gate_shadow', 'long', 1, ?, ?, ?, 0)",
+                (i, sym, strat, f"iv_gate:{cls}", ts, snap),
+            )
+        db.commit(); db.close()
+        rdb.commit(); rdb.close()
+
+        def _resolve(live_db=None, research_db=None):
+            return Path(live), Path(research)
+
+        with patch.object(pnl, "resolve_db_paths", _resolve):
+            r = self._client.get("/api/iv_gate_shadow")
+        d = r.get_json()
+
+        by_strat = d["by_strategy"]
+        assert set(by_strat) == {"VWAPDeviation", "VolatilityBreakout"}
+        vw = by_strat["VWAPDeviation"]
+        assert vw["n"] == 1 and vw["n_closed"] == 1
+        assert vw["classes"]["high_iv"]["net_pnl_usd"] == 5.0
+        assert vw["classes"]["low_iv"]["n"] == 0
+        vb = by_strat["VolatilityBreakout"]
+        assert vb["classes"]["low_iv"]["net_pnl_usd"] == -3.0
+
+        by_sym = d["by_symbol"]
+        assert set(by_sym) == {"BTC", "ETH"}
+        assert by_sym["BTC"]["classes"]["high_iv"]["n"] == 1
+        assert by_sym["ETH"]["classes"]["low_iv"]["n"] == 1
+        assert by_sym["BTC"]["n_closed"] == 1
+        assert by_sym["ETH"]["n_closed"] == 1
+
 
 class TestIvGateShadowTemplate:
     """The panel markup + JS wiring are present in the dashboard template."""
@@ -216,6 +278,20 @@ class TestIvGateShadowTemplate:
         assert "Decisões por dia" in html
         assert "decisions_per_day" in html
         assert "taxa de acumulação" in html
+
+    def test_panel_renders_strategy_and_symbol_distribution(self) -> None:
+        """The panel shows where the sample lives: per-strategy and per-symbol
+        tables with the high/low/unknown mix and net PnL."""
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        assert 'id="ivshadow-strat-tbody"' in html
+        assert 'id="ivshadow-sym-tbody"' in html
+        assert "Por estratégia" in html
+        assert "Por símbolo" in html
+        assert "high/low/unk" in html
+        assert "payload.by_strategy" in html
+        assert "payload.by_symbol" in html
 
     def test_trades_table_has_iv_columns(self) -> None:
         html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(

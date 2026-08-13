@@ -1310,10 +1310,52 @@ def create_app(config: Dict[str, Any]) -> tuple:
                     "best_usd": s.get("best_usd"),
                     "worst_usd": s.get("worst_usd"),
                 }
+            def _slice_summary(s):
+                return {
+                    "n": s.get("n", 0),
+                    "n_closed": s.get("n_closed", 0),
+                    "n_open": s.get("n_open", 0),
+                    "n_pct": s.get("n_pct", 0),
+                    "avg_pct": s.get("avg_pct"),
+                    "net_pnl_usd": s.get("net_pnl_usd"),
+                    "win_rate": s.get("win_rate"),
+                    "avg_pnl_usd": s.get("avg_pnl_usd"),
+                }
+
+            def _dimension_summary(per_class):
+                """Transpose {cls: {key: slice}} → {key: {classes, n, n_closed}}.
+
+                The report groups slices by IV class; the panel wants the
+                strategy/symbol distribution WITHIN each class, so the
+                dimension key is the outer row and the IV class the inner
+                columns, plus the aggregate across classes."""
+                keys: set = set()
+                for by_key in (per_class or {}).values():
+                    keys.update(by_key.keys())
+                out = {}
+                for key in sorted(keys):
+                    classes = {
+                        cls: _slice_summary(
+                            (per_class.get(cls) or {}).get(key) or {}
+                        )
+                        for cls in ("high_iv", "low_iv", "unknown")
+                    }
+                    out[key] = {
+                        "classes": classes,
+                        "n": sum((classes[c]["n"] or 0) for c in classes),
+                        "n_closed": sum((classes[c]["n_closed"] or 0) for c in classes),
+                        "n_open": sum((classes[c]["n_open"] or 0) for c in classes),
+                    }
+                return out
+
             n_dec = max(1, report["n_decisions"])
             n_total = max(1, report["n_trades"])
             return jsonify({
                 "by_class": by_class,
+                # Distribution of the shadow sample by strategy and by symbol
+                # (per IV class + aggregate) — shows WHERE the evidence lives.
+                "by_strategy": _dimension_summary(report.get("per_strategy") or {}),
+                "by_symbol": _dimension_summary(report.get("per_symbol") or {}),
                 "total": report["n_trades"],
                 "n_decisions": report["n_decisions"],
                 "matched": report["matched_decisions"],
