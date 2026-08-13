@@ -49,6 +49,11 @@ class TopTraderTracker:
     request_delay_sec: float = 0.15
     enabled: bool = True
     min_publish_wallets: int = 3
+    # Forced-liquidation hypothesis (idea #2): a top-wallet position that
+    # collapses between consecutive polls is a candidate forced liquidation.
+    collapse_drop_pct: float = 0.9          # |notional| falls by >= this
+    collapse_min_from_notional_usd: float = 50_000.0
+    persist_collapses: bool = True
 
     def __post_init__(self) -> None:
         self._snapshots: Dict[str, TopTraderSymbolSnapshot] = {}
@@ -58,6 +63,7 @@ class TopTraderTracker:
         self._last_poll_ms: int = 0
         self._last_error: Optional[str] = None
         self._on_poll: Optional[Any] = None  # sync callback(snaps) after poll
+        self._prev_wallet_positions: Dict[str, Dict[str, float]] = {}
         self._persist_samples: bool = True
         self._wallets_path: str = "data/research/top_traders.json"
         self._auto_from_leaderboard: bool = False
@@ -270,6 +276,41 @@ class TopTraderTracker:
     def get_snapshot(self, symbol: str) -> Optional[TopTraderSymbolSnapshot]:
         return self._snapshots.get(symbol.upper())
 
+    def detect_collapses(
+        self,
+        prev: Dict[str, Dict[str, float]],
+        cur: Dict[str, Dict[str, float]],
+        now_ms: int,
+    ) -> List[Dict[str, Any]]:
+        """Return wallet-position collapses between two polls.
+
+        A collapse is a per-wallet per-coin |notional| drop of at least
+        ``collapse_drop_pct`` from a size of at least
+        ``collapse_min_from_notional_usd`` (longs signed +, shorts -).
+        Pure function — unit-testable without the async poll loop.
+        """
+        events: List[Dict[str, Any]] = []
+        min_from = float(self.collapse_min_from_notional_usd)
+        for wallet, prev_positions in prev.items():
+            cur_positions = cur.get(wallet, {})
+            for coin, prev_notional in prev_positions.items():
+                abs_prev = abs(float(prev_notional))
+                if abs_prev < min_from:
+                    continue
+                cur_notional = float(cur_positions.get(coin, 0.0))
+                abs_cur = abs(cur_notional)
+                if abs_cur <= abs_prev * (1.0 - float(self.collapse_drop_pct)):
+                    events.append({
+                        "ts_ms": int(now_ms),
+                        "wallet": str(wallet).lower(),
+                        "symbol": str(coin).upper(),
+                        "side": "long" if prev_notional > 0 else "short",
+                        "from_notional": round(abs_prev, 2),
+                        "to_notional": round(abs_cur, 2),
+                        "drop_pct": round(1.0 - abs_cur / abs_prev, 4),
+                    })
+        return events
+
     def all_snapshots(self) -> Dict[str, TopTraderSymbolSnapshot]:
         return dict(self._snapshots)
 
@@ -293,6 +334,8 @@ class TopTraderTracker:
         short_n: Dict[str, float] = {}
         n_long: Dict[str, int] = {}
         n_short: Dict[str, int] = {}
+        # Signed per-wallet positions for collapse detection (long +, short -).
+        wallet_positions: Dict[str, Dict[str, float]] = {}
         now_ms = int(time.time() * 1000)
         errors = 0
 
@@ -309,6 +352,9 @@ class TopTraderTracker:
                 notional = pos["notional"]
                 if notional < self.min_notional_usd:
                     continue
+                signed = notional if pos["side"] == "long" else -notional
+                wp = wallet_positions.setdefault(addr, {})
+                wp[coin] = wp.get(coin, 0.0) + signed
                 if pos["side"] == "long":
                     long_n[coin] = long_n.get(coin, 0.0) + notional
                     n_long[coin] = n_long.get(coin, 0) + 1
@@ -316,6 +362,28 @@ class TopTraderTracker:
                     short_n[coin] = short_n.get(coin, 0.0) + notional
                     n_short[coin] = n_short.get(coin, 0) + 1
             await asyncio.sleep(self.request_delay_sec)
+
+        # Forced-liquidation candidates: wallet position collapses between polls.
+        collapses = self.detect_collapses(
+            self._prev_wallet_positions, wallet_positions, now_ms
+        )
+        self._prev_wallet_positions = wallet_positions
+        if collapses and self.persist_collapses and self._persist_samples:
+            try:
+                from src.research.top_trader_store import TopTraderStore
+
+                store = TopTraderStore()
+                for c in collapses:
+                    store.persist_collapse_event(**c)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("collapse persist skipped: %s", exc)
+        for c in collapses:
+            logger.info(
+                "TopTrader COLLAPSE %s %s wallet=%s from=$%.0f to=$%.0f (%.0f%% drop) — "
+                "candidate forced liquidation",
+                c["symbol"], c["side"], c["wallet"][:10],
+                c["from_notional"], c["to_notional"], c["drop_pct"] * 100,
+            )
 
         snaps: Dict[str, TopTraderSymbolSnapshot] = {}
         coins = set(long_n) | set(short_n)

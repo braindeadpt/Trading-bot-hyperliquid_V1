@@ -81,6 +81,25 @@ class TopTraderStore:
                         "CREATE INDEX IF NOT EXISTS idx_tt_virt_status "
                         "ON top_trader_virtual_trades(status, entry_ts_ms);"
                     )
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS top_trader_collapse_events (
+                            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                            ts_ms           INTEGER NOT NULL,
+                            wallet          TEXT    NOT NULL,
+                            symbol          TEXT    NOT NULL,
+                            side            TEXT,
+                            from_notional   REAL    NOT NULL,
+                            to_notional     REAL    NOT NULL,
+                            drop_pct        REAL    NOT NULL,
+                            ingested_at_ms  INTEGER NOT NULL
+                        );
+                        """
+                    )
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_tt_collapse_sym_ts "
+                        "ON top_trader_collapse_events(symbol, ts_ms);"
+                    )
                     conn.commit()
             except sqlite3.Error as exc:
                 logger.warning("TopTraderStore schema init failed: %s", exc)
@@ -151,6 +170,83 @@ class TopTraderStore:
                 return [dict(zip(cols, row)) for row in cur.fetchall()]
             except sqlite3.Error as exc:
                 logger.debug("load_bias_samples failed: %s", exc)
+                return []
+
+    def persist_collapse_event(
+        self,
+        *,
+        ts_ms: int,
+        wallet: str,
+        symbol: str,
+        side: Optional[str],
+        from_notional: float,
+        to_notional: float,
+        drop_pct: float,
+    ) -> bool:
+        """Record a suspected forced-liquidation (position collapse) event."""
+        sql = """
+            INSERT INTO top_trader_collapse_events
+            (ts_ms, wallet, symbol, side, from_notional, to_notional,
+             drop_pct, ingested_at_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        ingested = int(time.time() * 1000)
+        with self._lock:
+            try:
+                with self._db._write_lock:
+                    conn = self._db._conn()
+                    conn.execute(
+                        sql,
+                        (
+                            int(ts_ms),
+                            str(wallet).lower(),
+                            str(symbol).upper(),
+                            str(side) if side else None,
+                            float(from_notional),
+                            float(to_notional),
+                            float(drop_pct),
+                            ingested,
+                        ),
+                    )
+                    conn.commit()
+                    return True
+            except sqlite3.Error as exc:
+                logger.debug("persist_collapse_event failed: %s", exc)
+                return False
+
+    def collapse_events(
+        self,
+        *,
+        symbol: Optional[str] = None,
+        since_ms: Optional[int] = None,
+        limit: int = 10_000,
+    ) -> List[Dict[str, Any]]:
+        """Recent collapse events (ascending), optionally filtered."""
+        clauses: List[str] = []
+        params: List[Any] = []
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(str(symbol).upper())
+        if since_ms is not None:
+            clauses.append("ts_ms >= ?")
+            params.append(int(since_ms))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = f"""
+            SELECT ts_ms, wallet, symbol, side, from_notional, to_notional, drop_pct
+            FROM top_trader_collapse_events
+            {where}
+            ORDER BY ts_ms ASC
+            LIMIT ?
+        """
+        params.append(int(limit))
+        with self._lock:
+            try:
+                conn = self._db._conn()
+                cur = conn.execute(sql, params)
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+            except sqlite3.Error as exc:
+                logger.debug("collapse_events failed: %s", exc)
                 return []
 
     def insert_virtual_trade_open(self, trade: Dict[str, Any]) -> Optional[int]:
