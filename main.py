@@ -557,7 +557,7 @@ async def main() -> None:
             _liquidation_aggregator.stats().get("coinalyze_budget_note"),
         )
 
-    global _research_sampler, _research_microstructure, _l2_book_recorder, _dvol_feed
+    global _research_sampler, _research_microstructure, _l2_book_recorder, _dvol_feed, _feed_age_recorder
     if not args.backtest and not args.audit:
         try:
             from data.research_microstructure import start_microstructure_recorder_from_config
@@ -629,6 +629,24 @@ async def main() -> None:
                 logger.info("DvolFeed active — Deribit DVOL daily → research DB")
         except Exception as exc:
             logger.warning("DvolFeed failed to start: %s", exc)
+        try:
+            from src.data.feed_age_history import (
+                start_feed_age_recorder_from_config,
+            )
+
+            _feed_age_recorder = start_feed_age_recorder_from_config(
+                cfg,
+                lambda: getattr(engine, "_feed_silence", None).snapshot()
+                if getattr(engine, "_feed_silence", None)
+                else {},
+            )
+            if _feed_age_recorder is not None:
+                await _feed_age_recorder.start()
+                logger.info(
+                    "FeedAgeRecorder active — daily max feed age → research DB"
+                )
+        except Exception as exc:
+            logger.warning("FeedAgeRecorder failed to start: %s", exc)
 
     # -----------------------------------------------------------------------
     # 9. Start Dashboard (optional)
@@ -736,6 +754,11 @@ async def main() -> None:
                 await _dvol_feed.stop()
         except Exception:
             logger.exception("DvolFeed stop failed")
+        try:
+            if _feed_age_recorder is not None:
+                await _feed_age_recorder.stop()
+        except Exception:
+            logger.exception("FeedAgeRecorder stop failed")
         try:
             if _binance_futures_feed is not None:
                 await _binance_futures_feed.stop()

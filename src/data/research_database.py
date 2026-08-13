@@ -228,6 +228,20 @@ class ResearchDatabase(Database):
                 PRIMARY KEY (currency, timestamp_ms)
             ) WITHOUT ROWID;
         """)
+        self._conn().execute("""
+            CREATE TABLE IF NOT EXISTS feed_age_history (
+                feed            TEXT    NOT NULL,
+                day_start_ms    INTEGER NOT NULL,
+                max_age_sec     REAL    NOT NULL,
+                samples         INTEGER NOT NULL,
+                ingested_at_ms  INTEGER NOT NULL,
+                PRIMARY KEY (feed, day_start_ms)
+            ) WITHOUT ROWID;
+        """)
+        self._conn().execute(
+            "CREATE INDEX IF NOT EXISTS idx_feed_age_feed_day "
+            "ON feed_age_history(feed, day_start_ms);"
+        )
         self._commit()
 
     def prune_old_data(self, days: int = 30) -> Dict[str, int]:
@@ -561,6 +575,72 @@ class ResearchDatabase(Database):
             sql, (str(currency).upper(), int(start_ms), int(end_ms))
         ).fetchall()
         return [(int(ts), float(close)) for ts, close in rows]
+
+    def save_feed_age_history(
+        self,
+        rows: List[Tuple[str, int, float, int]],
+    ) -> int:
+        """Upsert daily max-age-per-feed rows.
+
+        ``rows`` = (feed, day_start_ms, max_age_sec, samples). Later samples
+        for the same (feed, day) raise the max to the observed peak — a
+        feed that was quiet mid-day but recovered still keeps its true daily
+        max, which is exactly the signal "age growing between resets".
+        """
+        if not rows:
+            return 0
+        ingested = int(time.time() * 1000)
+        sql = """
+            INSERT INTO feed_age_history (feed, day_start_ms, max_age_sec, samples, ingested_at_ms)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(feed, day_start_ms) DO UPDATE SET
+                max_age_sec    = MAX(feed_age_history.max_age_sec, excluded.max_age_sec),
+                samples        = feed_age_history.samples + excluded.samples,
+                ingested_at_ms = excluded.ingested_at_ms
+        """
+        params = [
+            (str(feed), int(day_ms), float(max_age), int(samples), ingested)
+            for feed, day_ms, max_age, samples in rows
+        ]
+        with self._write_lock:
+            conn = self._conn()
+            conn.executemany(sql, params)
+            conn.commit()
+        return len(params)
+
+    def load_feed_age_history(
+        self,
+        feed: str,
+        start_ms: int,
+        end_ms: int,
+    ) -> List[Tuple[int, float, int]]:
+        """Daily max-age rows for ``feed`` in ``[start_ms, end_ms]`` ascending.
+
+        Returns (day_start_ms, max_age_sec, samples).
+        """
+        sql = """
+            SELECT day_start_ms, max_age_sec, samples FROM feed_age_history
+            WHERE feed = ? AND day_start_ms >= ? AND day_start_ms <= ?
+            ORDER BY day_start_ms ASC
+        """
+        rows = self._conn().execute(
+            sql, (str(feed), int(start_ms), int(end_ms))
+        ).fetchall()
+        return [(int(day), float(max_age), int(samples)) for day, max_age, samples in rows]
+
+    def load_latest_feed_age(
+        self,
+        feed: str,
+    ) -> Optional[Tuple[int, float, int]]:
+        """Most recent daily max-age row for ``feed`` or None."""
+        row = self._conn().execute(
+            "SELECT day_start_ms, max_age_sec, samples FROM feed_age_history "
+            "WHERE feed = ? ORDER BY day_start_ms DESC LIMIT 1",
+            (str(feed),),
+        ).fetchone()
+        if not row:
+            return None
+        return (int(row[0]), float(row[1]), int(row[2]))
 
     def load_latest_liquidation_map(
         self,

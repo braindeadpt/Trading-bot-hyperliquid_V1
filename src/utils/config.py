@@ -127,6 +127,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "window_days": 30,
             "currencies": ["BTC", "ETH"],
         },
+        "feed_age_history": {
+            "enabled": True,
+            "interval_sec": 300.0,
+        },
         "sampler_interval_sec": 60.0,
         "l2_min_interval_ms": 250.0,
         "tape_gap_threshold_ms": 5_000,
@@ -516,15 +520,16 @@ def get_sizing_version(config: Union[Config, Dict[str, Any]]) -> str:
 def _sanitize_config_for_hash(data: Dict[str, Any]) -> Dict[str, Any]:
     """Drop secret-like keys before hashing.
 
-    ``dvol_feed`` is a research data-collection feed (Deribit DVOL → research
-    DB); its schedule affects no trading/risk parameter, so it is excluded
-    from the frozen Fase-10 window hash — toggling the feed must not trip the
-    mid-window drift assert.
+    ``dvol_feed`` and ``feed_age_history`` are research data-collection
+    feeds (Deribit DVOL → research DB; daily max feed age → research DB);
+    their schedules affect no trading/risk parameter, so they are excluded
+    from the frozen Fase-10 window hash — toggling the feeds must not trip
+    the mid-window drift assert.
     """
     skip_keys = {
         "password", "token", "secret", "secret_key", "api_key", "api_secret",
         "telegram_bot_token", "telegram_chat_id", "coinalyze_api_key",
-        "dvol_feed",
+        "dvol_feed", "feed_age_history",
     }
 
     def _walk(node: Any) -> Any:

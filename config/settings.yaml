@@ -986,6 +986,9 @@ research:
     lookback_days: 60
     window_days: 30
     currencies: ["BTC", "ETH"]
+  feed_age_history:                  # daily max age per feed → research DB
+    enabled: true
+    interval_sec: 300
   l2_min_interval_ms: 250            # ~4 L2 snapshots/sec per symbol
   tape_gap_threshold_ms: 5000
   l2_stale_threshold_ms: 10000
