@@ -167,3 +167,81 @@ def test_feed_silence_never_seen_waits_for_process_uptime(
     assert "never produced" in alerts[0]
     assert mon.snapshot()["binance_perp"]["degraded"] is True
     assert mon.snapshot()["liquidation_binance"]["degraded"] is False
+
+
+def test_feed_silence_early_warning_at_50_pct_before_degrade() -> None:
+    """A contracted feed crossing 50% of max_silence alerts once (early),
+    before it degrades; beat() resets the fire-once flag."""
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    mon.beat("liquidation_okx", timestamp_ms=1_000_000)
+
+    # 40% of 1h — no early warning yet
+    assert mon.check_early_warnings(now_ms=1_000_000 + int(0.4 * 3600_000)) == []
+    assert mon.snapshot()["liquidation_okx"]["degraded"] is False
+
+    # 50% — early warning fires once
+    warns = mon.check_early_warnings(now_ms=1_000_000 + int(0.5 * 3600_000))
+    assert len(warns) == 1
+    assert "FEED QUIET (early)" in warns[0]
+    assert "liquidation_okx" in warns[0]
+    assert "50%" in warns[0]
+
+    # Fire-once: same age, no second warning
+    assert mon.check_early_warnings(now_ms=1_000_000 + int(0.6 * 3600_000)) == []
+
+    # beat() resets the flag — a new silence episode warns again
+    mon.beat("liquidation_okx", timestamp_ms=1_000_000 + int(0.6 * 3600_000))
+    warns2 = mon.check_early_warnings(now_ms=1_000_000 + int(1.1 * 3600_000))
+    assert len(warns2) == 1
+
+
+def test_feed_silence_early_warning_skips_degraded() -> None:
+    """Once a feed is degraded, check_early_warnings stays quiet (check() owns
+    the degrade alert) and does not double-alert."""
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_bybit": 3600.0},
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_bybit":
+            mon.disable_feed(name)
+    mon.beat("liquidation_bybit", timestamp_ms=1_000_000)
+    now = 1_000_000 + int(1.5 * 3600_000)  # 1.5h > 1h threshold
+    deg_alerts = mon.check(now_ms=now)
+    assert deg_alerts and mon.snapshot()["liquidation_bybit"]["degraded"] is True
+    assert mon.check_early_warnings(now_ms=now) == []
+
+
+def test_feed_silence_early_warning_never_seen_uses_uptime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A feed that never produced an event warns at 50% of threshold from
+    monitor start (not wall-clock monotonic, which is huge on Windows)."""
+    clock = {"t": 1_000_000.0}
+
+    def fake_mono() -> float:
+        return clock["t"]
+
+    monkeypatch.setattr(
+        "src.data.market_data_health.time.monotonic", fake_mono
+    )
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"funding_hl": 3600.0},
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "funding_hl":
+            mon.disable_feed(name)
+
+    assert mon.check_early_warnings() == []
+    clock["t"] = 1_000_000.0 + 1801.0  # > 50% of 1h, < 1h
+    warns = mon.check_early_warnings()
+    assert len(warns) == 1
+    assert "never produced" in warns[0]
+    assert mon.snapshot()["funding_hl"]["degraded"] is False  # not degraded yet

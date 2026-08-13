@@ -1284,6 +1284,13 @@ class TradingEngine:
                 self._notify(
                     lambda m=msg: self._notifier.send_alert(m, "error")
                 )
+            # Early-warning at >=50% of max_silence — anticipate a silence
+            # before it degrades (fire-once per episode, reset on beat).
+            for msg in self._feed_silence.check_early_warnings():
+                logger.warning("%s", msg)
+                self._notify(
+                    lambda m=msg: self._notifier.send_alert(m, "warning")
+                )
 
     async def _check_market_data_alerts(self) -> None:
         """Telegram alert when fleet health stays red beyond threshold."""

@@ -195,6 +195,8 @@ class FeedSilenceState:
     max_silence_sec: float = 3600.0
     degraded: bool = False
     last_alert_mono: float = 0.0
+    # Fire-once early-warning: alerted at >=50% of max_silence; reset on beat.
+    warned_50_pct: bool = False
 
     def age_sec(self, now_ms: Optional[int] = None) -> Optional[float]:
         if self.last_event_ms is None:
@@ -262,6 +264,7 @@ class FeedSilenceMonitor:
             int(timestamp_ms) if timestamp_ms is not None else int(time.time() * 1000)
         )
         st.degraded = False
+        st.warned_50_pct = False
 
     def check(self, now_ms: Optional[int] = None) -> List[str]:
         """Return alert messages for newly-degraded (or re-alertable) feeds."""
@@ -299,6 +302,48 @@ class FeedSilenceMonitor:
             else:
                 st.degraded = False
         return alerts
+
+    def check_early_warnings(
+        self,
+        now_ms: Optional[int] = None,
+        warn_fraction: float = 0.5,
+    ) -> List[str]:
+        """Return fire-once early-warning messages before a feed degrades.
+
+        Alerts once per silence episode when a contracted feed's age crosses
+        ``warn_fraction`` (default 50%) of its ``max_silence_sec`` — while
+        still below the degrade threshold — so operators can react before
+        the feed trips ``degraded``. ``beat()`` resets the fire-once flag.
+        Already-degraded feeds are skipped (``check()`` owns those alerts).
+        """
+        now = now_ms if now_ms is not None else int(time.time() * 1000)
+        mono = time.monotonic()
+        uptime_sec = mono - self._started_mono
+        warnings: List[str] = []
+        for name in sorted(self._enabled_feeds):
+            st = self._states.get(name)
+            if st is None or st.degraded or st.warned_50_pct:
+                continue
+            if st.last_event_ms is None:
+                # Never seen — warn once uptime crosses the fraction, before
+                # the never-produced degrade threshold.
+                if uptime_sec >= st.max_silence_sec * warn_fraction:
+                    st.warned_50_pct = True
+                    warnings.append(
+                        f"FEED QUIET (early): `{name}` never produced an event "
+                        f"for {uptime_sec/3600:.1f}h "
+                        f"(≥{warn_fraction * 100:.0f}% of {st.max_silence_sec/3600:.1f}h threshold)"
+                    )
+                continue
+            age = (now - st.last_event_ms) / 1000.0
+            if age >= st.max_silence_sec * warn_fraction:
+                st.warned_50_pct = True
+                warnings.append(
+                    f"FEED QUIET (early): `{name}` quiet for {age/3600:.1f}h "
+                    f"(≥{warn_fraction * 100:.0f}% of {st.max_silence_sec/3600:.1f}h threshold) — "
+                    f"check delivery path before it degrades"
+                )
+        return warnings
 
     def snapshot(self) -> Dict[str, Dict[str, object]]:
         now = int(time.time() * 1000)
