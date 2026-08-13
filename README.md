@@ -280,6 +280,22 @@ Coinalyze (verify-only, never persisted) is reported but not gated unless
 `--gate-coinalyze`. `liquidation_binance`/`binance_perp` are skipped when
 not contracted, exactly like the watchdog.
 
+It also validates **per-symbol candle freshness** (1m/15m for every trading
+symbol): a 1m candle older than `--candle-1m-max-age-sec` (default 5 min,
+15m: 30 min) means the collector fell behind — a data backlog. Two modes:
+
+* **freshness** (default, used at boot): candles must be within the max age
+  of now;
+* **coverage** (`--min-latest-ms`, used before backtests): the latest candle
+  must REACH the requested end-of-window timestamp — catches a backlog at
+  the end of the window without blocking historical windows.
+
+The check runs **automatically at boot** (`main.py` step 4b) before the
+engine starts and blocks on exit 1; the **backtest path** runs the candle
+coverage check against the target DB before reading the data. Use
+`--skip-preflight` (first deployment / fresh DB) or `--candles-only`
+(backtest-only) as needed.
+
 ### Enabling `liquidation_binance` where fstream is accessible
 
 On this network Binance **fstream `@forceOrder` delivers 0 messages**, so

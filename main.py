@@ -127,12 +127,21 @@ def _resolve_path(path_str: str) -> Path:
     return p.resolve()
 
 
-def _preflight_feed_check(db_path: Path, config_path: Path, l2_dir: Optional[Path] = None) -> int:
-    """Run scripts/preflight_feed_check.py at boot; return its exit code.
+def _preflight_feed_check(
+    db_path: Path,
+    config_path: Path,
+    l2_dir: Optional[Path] = None,
+    *,
+    candles_only: bool = False,
+    min_latest_ms: Optional[int] = None,
+) -> int:
+    """Run scripts/preflight_feed_check.py at boot / before backtest; return
+    its exit code.
 
-    0 = all contracted feeds have fresh evidence · 1 = a contracted feed is
-    not delivering (or has none) · 2 = past the warn fraction but still
-    delivering.
+    0 = all contracted feeds have fresh evidence AND candles are
+    fresh/covered · 1 = a contracted feed is not delivering (or has none), or
+    a symbol's candles failed (backlog / window end not covered) · 2 = past
+    the warn fraction but still delivering.
     """
     cmd = [
         sys.executable,
@@ -140,6 +149,10 @@ def _preflight_feed_check(db_path: Path, config_path: Path, l2_dir: Optional[Pat
         "--db", str(db_path),
         "--config", str(config_path),
     ]
+    if candles_only:
+        cmd.append("--candles-only")
+    if min_latest_ms is not None:
+        cmd += ["--min-latest-ms", str(min_latest_ms)]
     if l2_dir is not None:
         cmd += ["--l2-dir", str(l2_dir)]
     result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=False)
@@ -403,6 +416,37 @@ async def main() -> None:
     # 4. Backtest mode (early exit after run)
     # -----------------------------------------------------------------------
     if args.backtest:
+        # Preflight candle backlog check: before the backtest silently reads
+        # the candles, verify each symbol's 1m/15m data reaches the requested
+        # window end (or is fresh when no --to-date is given). Catches a
+        # collector backlog that would truncate the window's final days.
+        bt_db = db_path
+        if args.research_db:
+            from data.research_database import ResearchDatabase
+            bt_db = ResearchDatabase.resolve_path(cfg)
+        to_ms: Optional[int] = None
+        if args.to_date:
+            from datetime import datetime, timedelta, timezone
+            end = (
+                datetime.strptime(args.to_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                + timedelta(days=1)
+            )
+            to_ms = int(end.timestamp() * 1000)
+        bt_rc = _preflight_feed_check(
+            bt_db, config_path, candles_only=True, min_latest_ms=to_ms,
+        )
+        if bt_rc == 1:
+            print(
+                "[FATAL] Preflight candle check FAILED — 1m/15m candles do not "
+                "cover the requested window end. Data backlog — fix the "
+                "collector before backtesting.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        if bt_rc == 2:
+            logger.warning("Preflight candle check WARN — backlog forming; continuing.")
+        else:
+            logger.info("Preflight candle check PASSED — candles cover the window end.")
         metrics = await _run_backtest(
             cfg, db, logger, args.from_date, args.to_date,
             use_research_db=args.research_db,

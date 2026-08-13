@@ -44,8 +44,11 @@ def _log() -> logging.Logger:
     return logging.getLogger("test_preflight_boot_wiring")
 
 
+SYMBOLS = ("BTC", "ETH", "SOL", "HYPE")
+
+
 def _make_db(path: Path, *, liq_okx_ms: int, liq_bybit_ms: int,
-             funding_ms: int, candle_ms: int) -> None:
+             funding_ms: int, candle_ms: int, candle_15m_ms: int = 0) -> None:
     """bot.db with the schema preflight reads (same helper as
     tests/test_preflight_feed_check.py)."""
     db = sqlite3.connect(path)
@@ -54,6 +57,10 @@ def _make_db(path: Path, *, liq_okx_ms: int, liq_bybit_ms: int,
     db.execute("CREATE TABLE funding_history (symbol TEXT, current REAL, "
                "predicted REAL, timestamp INTEGER)")
     db.execute("CREATE TABLE candles_1m (symbol TEXT, timestamp_ms INTEGER, "
+               "open REAL, high REAL, low REAL, close REAL, volume REAL, "
+               "funding_rate REAL, oi_total REAL, oi_delta REAL, "
+               "buy_volume REAL, sell_volume REAL, trade_count INTEGER)")
+    db.execute("CREATE TABLE candles_15m (symbol TEXT, timestamp_ms INTEGER, "
                "open REAL, high REAL, low REAL, close REAL, volume REAL, "
                "funding_rate REAL, oi_total REAL, oi_delta REAL, "
                "buy_volume REAL, sell_volume REAL, trade_count INTEGER)")
@@ -67,14 +74,22 @@ def _make_db(path: Path, *, liq_okx_ms: int, liq_bybit_ms: int,
     if funding_ms:
         db.execute("INSERT INTO funding_history VALUES ('BTC', 0.001, 0.001, ?)",
                    (funding_ms,))
-    if candle_ms:
-        db.execute("INSERT INTO candles_1m VALUES ('BTC', ?, 1,2,0,1,10,0,100,0,5,5,100)",
-                   (candle_ms,))
+    for table, ts in (("candles_1m", candle_ms), ("candles_15m", candle_15m_ms)):
+        if ts:
+            for symbol in SYMBOLS:
+                db.execute(f"INSERT INTO {table} VALUES (?, ?,1,2,0,1,10,0,100,0,5,5,100)",
+                           (symbol, ts))
     db.commit()
     db.close()
 
 
 NOW = int(time.time() * 1000)
+
+
+def _now() -> int:
+    """Fresh 'now' at call time — candle freshness thresholds (150s warn)
+    mean import-time NOW ages out of range in a long suite run."""
+    return int(time.time() * 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +118,29 @@ def test_preflight_invokes_script_with_resolved_paths(tmp_path, monkeypatch) -> 
     assert "--config" in cmd and str(cfg) in cmd
     assert "--l2-dir" in cmd and str(l2) in cmd
     assert cwd == str(main_mod.PROJECT_ROOT)
+
+
+def test_preflight_candles_only_passes_flags(tmp_path, monkeypatch) -> None:
+    """The backtest path requests candles-only + window-end coverage."""
+    db = tmp_path / "bot.db"
+    cfg = tmp_path / "settings.yaml"
+    calls: list = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return _FakeResult(0)
+
+    monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+
+    rc = main_mod._preflight_feed_check(
+        db, cfg, candles_only=True, min_latest_ms=1787000000000,
+    )
+    assert rc == 0
+    cmd = calls[0]
+    assert "--candles-only" in cmd
+    assert "--min-latest-ms" in cmd
+    assert "1787000000000" in cmd
+    assert "--l2-dir" not in cmd
 
 
 def test_preflight_rc1_blocks_boot(monkeypatch, capsys) -> None:
@@ -145,7 +183,8 @@ def test_preflight_skip_does_not_invoke(monkeypatch) -> None:
 def test_real_preflight_passes_with_fresh_evidence(tmp_path) -> None:
     db = tmp_path / "bot.db"
     _make_db(db, liq_okx_ms=NOW - 5_000, liq_bybit_ms=NOW - 9_000,
-             funding_ms=NOW - 5_000, candle_ms=NOW - 30_000)
+             funding_ms=NOW - 5_000, candle_ms=_now() - 30_000,
+             candle_15m_ms=_now() - 60_000)
     l2 = tmp_path / "l2"
     l2.mkdir()
     (l2 / "book.json").write_text("{}", encoding="utf-8")
@@ -164,11 +203,36 @@ def test_real_preflight_blocks_with_no_evidence(tmp_path) -> None:
     assert rc == 1
 
 
+def test_real_preflight_backtest_candles_blocks_backlog(tmp_path) -> None:
+    """Backtest path (candles-only + min-latest-ms): a window end the data
+    does not reach returns 1 — the pre-backtest backlog guard."""
+    db = tmp_path / "bot.db"
+    _make_db(db, liq_okx_ms=0, liq_bybit_ms=0, funding_ms=0,
+             candle_ms=_now() - 30_000, candle_15m_ms=_now() - 60_000)
+    # Window end 2h in the future — candles don't cover it.
+    rc = main_mod._preflight_feed_check(
+        db, ROOT / "config" / "settings.yaml",
+        candles_only=True, min_latest_ms=NOW + 2 * 3600_000,
+    )
+    assert rc == 1
+
+    # Same DB, window end already covered -> passes (coverage, not freshness).
+    # Use a target well below both candles (30 min back) — a min_latest too
+    # close to _now() races the 15m candle (inserted at _now()-60s) ageing past
+    # it during the test's own runtime.
+    rc = main_mod._preflight_feed_check(
+        db, ROOT / "config" / "settings.yaml",
+        candles_only=True, min_latest_ms=_now() - 30 * 60_000,
+    )
+    assert rc == 0
+
+
 def test_real_preflight_blocks_with_stale_evidence(tmp_path) -> None:
     """A contracted feed past its silence threshold blocks boot (rc 1)."""
     db = tmp_path / "bot.db"
     _make_db(db, liq_okx_ms=NOW - 7 * 3600_000, liq_bybit_ms=NOW - 5_000,
-             funding_ms=NOW - 5_000, candle_ms=NOW - 30_000)
+             funding_ms=NOW - 5_000, candle_ms=_now() - 30_000,
+             candle_15m_ms=_now() - 60_000)
     l2 = tmp_path / "l2"
     l2.mkdir()
     (l2 / "book.json").write_text("{}", encoding="utf-8")
