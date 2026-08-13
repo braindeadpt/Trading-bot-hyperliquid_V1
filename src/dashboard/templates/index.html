@@ -1853,7 +1853,10 @@ function renderTrades(data) {
         const fund = typeof t.funding_paid === "number" ? t.funding_paid : 0;
         const fundDisplay = fund === 0 ? "<span class='muted'>0.00</span>" : ((fund >= 0 ? "+" : "") + "$" + Math.abs(fund).toFixed(2));
         const fundClass = fund > 0 ? "down" : (fund < 0 ? "up" : "muted");
-        return `<tr style="${isOpen ? 'background:rgba(0,229,255,0.03);' : ''}" title="Funding paid: $${fund.toFixed(4)}">
+        const ivTip = t.iv_percentile != null
+            ? `IV ${t.iv_percentile.toFixed(1)}% (threshold ${t.iv_threshold != null ? t.iv_threshold : 66.7}) → ${t.iv_class}`
+            : "IV: sem decisão shadow";
+        return `<tr style="${isOpen ? 'background:rgba(0,229,255,0.03);' : ''}" title="Funding paid: $${fund.toFixed(4)} · ${ivTip}">
             <td class="muted tiny">${entryTime}</td>
             <td><span class="highlight">${t.symbol}</span></td>
             <td class="${sideClass}">${t.side ? t.side.toUpperCase() : "--"}</td>

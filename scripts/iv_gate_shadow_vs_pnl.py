@@ -201,6 +201,7 @@ def join_decisions_to_trades(
         if best is not None:
             t["iv_class"] = best["iv_class"]
             t["iv_percentile"] = best["iv_percentile"]
+            t["iv_threshold"] = best.get("iv_threshold")
             t["shadow_id"] = best["id"]
             t["shadow_ts_ms"] = best["timestamp_ms"]
             used.add(best["id"])
@@ -208,6 +209,7 @@ def join_decisions_to_trades(
         else:
             t["iv_class"] = "unknown"
             t["iv_percentile"] = None
+            t["iv_threshold"] = None
             t["shadow_id"] = None
             t["shadow_ts_ms"] = None
     return trades, matched

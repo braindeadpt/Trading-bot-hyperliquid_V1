@@ -330,6 +330,18 @@ class TestIvGateShadowTemplate:
         assert 'function ivBadge' in html
         assert 'colspan="14"' in html
 
+    def test_trades_tooltip_shows_exact_percentile_and_threshold(self) -> None:
+        """Each trade row's tooltip carries the exact IV percentile and the
+        classification threshold (66.7), not just the class badge."""
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        assert "ivTip" in html
+        assert "IV ${t.iv_percentile.toFixed(1)}%" in html
+        assert "threshold ${t.iv_threshold != null ? t.iv_threshold : 66.7}" in html
+        assert "→ ${t.iv_class}" in html
+        assert 'title="Funding paid: $${fund.toFixed(4)} · ${ivTip}"' in html
+
     def test_positions_table_has_iv_columns(self) -> None:
         """The open-positions panel shows the same IV columns (percentile +
         class) as the trades log."""
@@ -394,6 +406,9 @@ class TestTradesEndpointIvEnrichment:
         assert all(t["iv_percentile"] is not None for t in high + low)
         assert high[0]["iv_percentile"] in (72.0, 80.0)
         assert unknown[0].get("iv_percentile") is None
+        # The recorded decision threshold rides along on matched rows.
+        assert all(t["iv_threshold"] == 66.7 for t in high + low)
+        assert unknown[0].get("iv_threshold") is None
 
     def test_enrichment_best_effort_no_crash(self) -> None:
         """A broken research DB must not take the trades list down."""
