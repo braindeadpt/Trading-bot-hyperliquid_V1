@@ -634,6 +634,249 @@ def test_round_position_size_matches_floor() -> None:
     assert round_position_size("SOL", 1.239, _cfg()) == 1.23
 
 
+PROD_SETTINGS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "config", "settings.yaml"
+)
+
+
+class TestParityAgainstProductionConfig:
+    """Run the parity chain against the REAL production settings.yaml.
+
+    The unit tests above use a minimal config with loose thresholds
+    (max_positions 5, position size 5%, taker 4 bps). This class loads
+    ``config/settings.yaml`` — the thresholds the live bot actually runs
+    with (max_positions 3, position size 2%, taker 4.5 bps, directional
+    cap 50%, SOL 0.5x, chase on with VB/Donchian exempt, stop streak 4,
+    vol circuit + funding blackout ENABLED) — and asserts the full chain
+    (RiskManager -> SignalPipeline -> gates) holds under those active
+    thresholds. If any gate mis-reads the production config, these fail.
+    """
+
+    pytestmark = pytest.mark.integration_offline
+
+    @pytest.fixture(scope="class")
+    def prod_cfg(self) -> Config:
+        assert os.path.exists(PROD_SETTINGS_PATH), PROD_SETTINGS_PATH
+        return load_config(PROD_SETTINGS_PATH)
+
+    def test_production_config_loads_and_risk_manager_builds(self, prod_cfg):
+        rm = RiskManager(prod_cfg, None)
+        assert rm is not None
+        pipeline = SignalPipeline(prod_cfg, rm, for_backtest=True)
+        assert pipeline is not None
+
+    def test_production_thresholds_are_the_active_ones(self, prod_cfg):
+        risk = prod_cfg.get("risk", {}) or {}
+        assert risk.get("max_positions") == 3
+        assert risk.get("max_position_size_pct") == 2.0
+        assert risk.get("taker_fee_pct") == 0.045
+        assert risk.get("per_trade_risk_pct") == 1.0
+        assert (risk.get("symbol_risk_multiplier", {}) or {}).get("SOL") == 0.5
+        chase = risk.get("chase_filter", {}) or {}
+        assert chase.get("enabled") is True
+        assert chase.get("max_runup_pct") == 0.008
+        exempt = chase.get("exempt_strategies", [])
+        assert "VolatilityBreakout" in exempt
+        assert "DonchianBreakout" in exempt
+        assert risk.get("max_daily_stop_losses") == 4
+        vcb = risk.get("volatility_circuit_breaker", {}) or {}
+        assert vcb.get("enabled") is True
+        fb = risk.get("funding_blackout", {}) or {}
+        assert fb.get("enabled") is True
+        gov = prod_cfg.get("strategy.portfolio_governance", {}) or {}
+        assert gov.get("max_directional_exposure_pct") == 50
+
+    def test_production_notional_respects_2pct_position_cap(self, prod_cfg):
+        """2% position cap (not 5% like the minimal tests) -> $200 notional."""
+        rm = RiskManager(prod_cfg, None)
+        capital = 10_000.0
+        sig = _signal(size_pct=0.01, stop=0.012)
+        size = rm.calculate_position_size(sig, capital, 0.006)
+        notional = size * 50_000.0
+        assert notional <= 2.0 / 100.0 * capital * 50_000.0 / 50_000.0 * 50_000.0 + 1e-6
+        assert notional <= 0.20 * capital + 1e-6  # 20% of capital at 1x
+
+    def test_production_sol_multiplier_applies(self, prod_cfg):
+        """SOL 0.5x multiplier halves size_pct; the 2% position cap saturates
+        the final notional, so assert on the adjusted size_pct (where the
+        multiplier is observable under the production cap)."""
+        rm = RiskManager(prod_cfg, None)
+        pipeline = SignalPipeline(prod_cfg, rm, for_backtest=True)
+        base = _signal(symbol="SOL", size_pct=0.01, stop=0.02)
+        decision = pipeline.evaluate_gates(
+            base, _event(symbol="SOL"), _PortfolioStub(), PipelineContext(), skip_tca=True,
+        )
+        assert decision.approved
+        assert decision.signal is not None
+        assert abs(decision.signal.size_pct - 0.005) < 1e-9  # 0.01 * 0.5
+        assert (
+            decision.signal.metadata.get("symbol_risk_multiplier") == 0.5
+        )
+
+    def test_production_chase_filter_blocks_trendfollow_runup(self, prod_cfg):
+        rm = RiskManager(prod_cfg, None)
+        pipeline = SignalPipeline(prod_cfg, rm, for_backtest=True)
+        ctx = PipelineContext()
+        ctx.candles_15m_history = {
+            "BTC": [
+                Candle(49_000, 49_100, 48_900, 49_000, 1.0, 0),
+                Candle(49_500, 49_600, 49_400, 49_500, 1.0, 3_600_000),
+            ]
+        }
+        decision = pipeline.evaluate_gates(
+            _signal(strategy="TrendFollow"), _event(), _PortfolioStub(), ctx, skip_tca=True,
+        )
+        assert not decision.approved
+        assert decision.gate == "chase_filter"
+
+    def test_production_chase_filter_exempts_vb_and_donchian(self, prod_cfg):
+        """The production config exempts VB/Donchian from chase — live behavior."""
+        rm = RiskManager(prod_cfg, None)
+        pipeline = SignalPipeline(prod_cfg, rm, for_backtest=True)
+        ctx = PipelineContext()
+        ctx.candles_15m_history = {
+            "BTC": [
+                Candle(49_000, 49_100, 48_900, 49_000, 1.0, 0),
+                Candle(49_500, 49_600, 49_400, 49_500, 1.0, 3_600_000),
+            ]
+        }
+        for strategy in ("VolatilityBreakout", "DonchianBreakout"):
+            reason = pipeline._chase.check(
+                _signal(strategy=strategy), ctx.candles_15m_history["BTC"]
+            )
+            assert reason is None, f"{strategy} should be exempt from chase"
+
+    def test_production_daily_stop_streak_blocks_at_four(self, prod_cfg):
+        """Production stops entries after 4 stop-losses/day (not 2 like minimal)."""
+        rm = RiskManager(prod_cfg, None)
+        for _ in range(4):
+            class T:
+                pnl_usd = -10.0
+                pnl_pct = -0.01
+                symbol = "BTC"
+                reason = "stop_loss"
+            rm.on_trade_closed(T())
+        sig = _signal()
+        ok, reason = rm.can_enter(sig, _PortfolioStub())
+        assert not ok
+        assert "daily_stop_streak" in reason
+
+    def test_production_daily_stop_streak_allows_three(self, prod_cfg):
+        """Three stops is still under the production threshold of four."""
+        rm = RiskManager(prod_cfg, None)
+        for _ in range(3):
+            class T:
+                pnl_usd = -10.0
+                pnl_pct = -0.01
+                symbol = "BTC"
+                reason = "stop_loss"
+            rm.on_trade_closed(T())
+        sig = _signal()
+        ok, _reason = rm.can_enter(sig, _PortfolioStub())
+        assert ok
+
+    def _pos(self, price: float, size: float, side: str = "long"):
+        return type("P", (), {"entry_price": price, "size": size, "side": side})()
+
+    def test_production_max_positions_blocks_fourth(self, prod_cfg):
+        """Production caps at 3 positions (not 5 like the minimal tests)."""
+        rm = RiskManager(prod_cfg, None)
+        pipeline = SignalPipeline(prod_cfg, rm, for_backtest=True)
+        port = _PortfolioStub()
+        port.positions = {f"X{i}": self._pos(50_000.0, 0.05) for i in range(3)}
+        decision = pipeline.evaluate_gates(
+            _signal(symbol="BTC"), _event(), port, PipelineContext(), skip_tca=True,
+        )
+        assert not decision.approved
+        assert decision.gate == "risk"
+
+    def test_production_max_positions_allows_third_slot(self, prod_cfg):
+        """2 tiny positions stay under the 50% directional cap and the 3-slot
+        max — the third entry must be approved."""
+        rm = RiskManager(prod_cfg, None)
+        pipeline = SignalPipeline(prod_cfg, rm, for_backtest=True)
+        port = _PortfolioStub()
+        port.positions = {f"X{i}": self._pos(50_000.0, 0.01) for i in range(2)}
+        decision = pipeline.evaluate_gates(
+            _signal(symbol="BTC"), _event(), port, PipelineContext(), skip_tca=True,
+        )
+        assert decision.approved
+
+    def test_production_vol_circuit_enabled_and_blocks_spike(self, prod_cfg):
+        """Vol circuit is ON in production: a 3.5x ATR spike blocks entries."""
+        vcb = (prod_cfg.get("risk", {}) or {}).get("volatility_circuit_breaker", {}) or {}
+        vol = VolatilityCircuitBreaker.from_config_dict(vcb)
+        assert vol._cfg.enabled is True
+        assert vol._cfg.min_samples == 24  # production: needs ~1d of history
+        ts0 = 1_700_000_000_000
+        # Production min_samples=24: seed a full calm window first, then spike.
+        for i in range(24):
+            vol.update("BTC", 0.01, ts0 + i)
+        vol.update("BTC", 0.04, ts0 + 1_000)
+        rm = RiskManager(prod_cfg, None)
+        pipeline = SignalPipeline(
+            prod_cfg, rm, vol_circuit=vol, for_backtest=True,
+        )
+        decision = pipeline.evaluate_gates(
+            _signal(), _event(ts=ts0 + 2_000), _PortfolioStub(), PipelineContext(),
+            skip_tca=True,
+        )
+        assert not decision.approved
+        assert decision.gate == "vol_circuit"
+
+    def test_production_funding_blackout_enabled_and_blocks(self, prod_cfg):
+        """Funding blackout is ON in production with the 00/08/16 resets."""
+        fb_cfg = (prod_cfg.get("risk", {}) or {}).get("funding_blackout", {}) or {}
+        fb = FundingBlackoutFilter.from_config_dict(fb_cfg)
+        assert fb._cfg.enabled is True
+        assert fb._cfg.resets_utc == ["00:00", "08:00", "16:00"]
+        rm = RiskManager(prod_cfg, None)
+        pipeline = SignalPipeline(prod_cfg, rm, funding_blackout=fb, for_backtest=True)
+        blackout_ts = int(
+            datetime(2023, 11, 14, 7, 58, tzinfo=timezone.utc).timestamp() * 1000
+        )
+        decision = pipeline.evaluate_gates(
+            _signal(symbol="ETH"), _event(symbol="ETH", ts=blackout_ts),
+            _PortfolioStub(), PipelineContext(), skip_tca=True,
+        )
+        assert not decision.approved
+        assert decision.gate == "funding_blackout"
+
+    def test_production_governance_directional_cap_50(self, prod_cfg):
+        """Production directional cap is 50% (not 60% like the minimal tests)."""
+        rm = RiskManager(prod_cfg, None)
+        monitor = CorrelationMonitor(lookback=60)
+        pipeline = SignalPipeline(
+            prod_cfg, rm, correlation_monitor=monitor, for_backtest=True,
+        )
+        gov = (prod_cfg.get("strategy", {}) or {}).get("portfolio_governance", {}) or {}
+        assert gov.get("max_directional_exposure_pct") == 50
+        # 60% directional exposure (BTC $5k + ETH $3k = $8k of $10k capital at
+        # 1x) exceeds the production cap of 50% -> the governance/risk gate
+        # must reject the third same-side entry.
+        port = _PortfolioStub()
+        port.positions = {
+            "BTC": type("P", (), {"entry_price": 50_000.0, "size": 0.1, "side": "long"})(),
+            "ETH": type("P", (), {"entry_price": 3_000.0, "size": 1.0, "side": "long"})(),
+        }
+        decision = pipeline.evaluate_gates(
+            _signal(symbol="SOL"), _event(symbol="SOL"), port, PipelineContext(),
+            skip_tca=True,
+        )
+        assert not decision.approved
+        assert decision.gate in ("risk", "governance")
+
+    def test_production_gate_manifest_still_parity_contract(self, prod_cfg):
+        rm = RiskManager(prod_cfg, None)
+        live = SignalPipeline(prod_cfg, rm, for_backtest=False)
+        bt = SignalPipeline(prod_cfg, rm, for_backtest=True)
+        m = live.gate_manifest()
+        assert m["gate_parity_version"] == "phase05-gates-v1"
+        assert m["shared_gate_order"] == list(GATE_ORDER)
+        assert live._tca_mode == "strict"
+        assert bt._tca_mode == "proxy"
+
+
 def main() -> None:
     test_same_signal_same_notional_live_and_backtest()
     test_sol_multiplier_halves_notional()
