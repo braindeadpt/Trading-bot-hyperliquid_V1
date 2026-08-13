@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import sys
 import time
@@ -115,6 +116,37 @@ def attach_bias_features(
     out["tt_bias_delta_1h"] = out.groupby("symbol")["tt_bias_level"].diff(4)
     out["tt_bias_delta_4h"] = out.groupby("symbol")["tt_bias_level"].diff(16)
     return out
+
+
+def write_json(
+    rows: List[Dict[str, Any]],
+    meta: Dict[str, Any],
+    out_path: Path,
+) -> None:
+    """Persist the machine-readable screening output.
+
+    Written alongside the markdown report so the auto recheck watchdog
+    (`scripts/top_trader_bias_recheck.py`) can read the verdict without
+    parsing prose. NaN/Inf floats are coerced to null for strict JSON.
+    """
+
+    def _safe(v: Any) -> Any:
+        if isinstance(v, float):
+            return v if math.isfinite(v) else None
+        if isinstance(v, list):
+            return [_safe(x) for x in v]
+        if isinstance(v, dict):
+            return {str(k): _safe(x) for k, x in v.items()}
+        return v
+
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "meta": _safe(meta),
+        "cells": _safe(rows),
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"JSON: {out_path}")
 
 
 def write_report(
@@ -207,6 +239,12 @@ def main() -> int:
     ap.add_argument(
         "--out", type=Path, default=ROOT / "docs" / "FEATURE_SCREENING_TOP_TRADER_BIAS.md"
     )
+    ap.add_argument(
+        "--json-out",
+        type=Path,
+        default=ROOT / "data" / "backtests" / "top_trader_bias_screening_latest.json",
+        help="machine-readable output (consumed by scripts/top_trader_bias_recheck.py)",
+    )
     args = ap.parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
@@ -268,6 +306,7 @@ def main() -> int:
         "n_dates": n_dates,
     }
     write_report(rows, meta, args.out)
+    write_json(rows, meta, args.json_out)
 
     print("\nCélulas candidatas (por |IC|):")
     print(f"{'feature':22} {'h':5} {'IC':>6} {'p_NW':>9} {'p_raw':>9} {'n':>5} {'mono':>5} "

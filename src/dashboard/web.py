@@ -1163,6 +1163,20 @@ def create_app(config: Dict[str, Any]) -> tuple:
             logger.warning("top_traders panel failed: %s", exc)
             return jsonify({"error": str(exc), "snapshots": [], "open_positions": []}), 500
 
+    @app.route("/api/research_watchdogs")
+    def api_research_watchdogs():
+        """Read-only status of the auto-rerun research watchdogs.
+
+        bias screening (≥20 datas) + liquidation flush recheck (≥30 days).
+        """
+        from src.research.research_watchdog_status import build_research_watchdogs_payload
+
+        try:
+            return jsonify(build_research_watchdogs_payload())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("research_watchdogs failed: %s", exc)
+            return jsonify({"error": str(exc), "watchdogs": []}), 500
+
     @app.route("/api/strategy/<name>")
     def api_strategy_detail(name):
         """Drill-down endpoint for a single strategy (Task 5.3).

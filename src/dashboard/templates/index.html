@@ -526,6 +526,41 @@ tr:hover td { background: var(--panel-hover); }
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- Research watchdogs (auto re-run gates) -->
+<div class="section-label section-intel">
+    <span class="bar"></span><span class="text">Research watchdogs</span><span class="line"></span>
+</div>
+<div class="grid">
+    <div class="g-12">
+        <div class="panel">
+            <div class="panel-header">
+                Auto re-run gates
+                <span class="dim" id="wd-meta">bias ≥20 datas · flush ≥30 dias</span>
+            </div>
+            <div class="panel-body" style="padding:6px 8px;">
+                <div id="wd-help" class="muted" style="font-size:10px;line-height:1.4;margin-bottom:8px;">
+                    Background watchdogs re-run research probes once enough out-of-sample data accumulates
+                    (bias screening ≥20 datas, liquidation flush ≥30 dias). Evidence gates only — nothing here trades.
+                </div>
+                <table style="width:100%; font-size:11px; border-collapse:collapse;">
+                    <thead>
+                        <tr style="color:var(--muted); text-align:left;">
+                            <th>Watchdog</th>
+                            <th>Progress</th>
+                            <th>Status</th>
+                            <th>Last run</th>
+                        </tr>
+                    </thead>
+                    <tbody id="wd-tbody">
+                        <tr><td colspan="4" class="muted">Waiting...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
 <!-- SECTION: LOGS                                                    -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="section-label section-logs">
@@ -1221,6 +1256,39 @@ function renderTopTradersPanel(payload) {
     }
 }
 
+// ── Research watchdogs ──
+function renderResearchWatchdogs(payload) {
+    const tbody = document.getElementById("wd-tbody");
+    if (!tbody) return;
+    if (!payload || payload.error || !Array.isArray(payload.watchdogs)) {
+        tbody.innerHTML = '<tr><td colspan="4" class="muted">Unavailable</td></tr>';
+        return;
+    }
+    tbody.innerHTML = payload.watchdogs.map(w => {
+        if (w && w.error) {
+            return '<tr><td colspan="4" class="muted">error: ' + w.error + '</td></tr>';
+        }
+        const pct = Math.max(0, Math.min(100, Number(w.progress_pct) || 0));
+        const barCol = pct >= 100 ? "var(--up)" : "var(--accent, #4a9eff)";
+        let status = w.triggered
+            ? (w.last_run && w.last_run.verdict ? w.last_run.verdict : "triggered")
+            : (pct >= 100 ? "due — next check runs it" : "accumulating");
+        const last = w.last_run
+            ? (String(w.last_run.ts || "").slice(0, 16).replace("T", " ") + " · " + (w.last_run.verdict || ""))
+            : "—";
+        const unit = w.unit === "datas" ? " datas" : " dias";
+        const samples = w.samples != null ? " · " + w.samples + " amostras" : "";
+        return '<tr style="border-top:1px solid var(--border);">' +
+            '<td class="highlight" title="' + (w.script || "") + '">' + (w.label || "") +
+                '<div class="dim" style="font-size:9px;">' + w.current + unit + " / " + w.target + unit + samples + '</div></td>' +
+            '<td><div style="background:var(--border);height:8px;width:120px;border-radius:4px;display:inline-block;vertical-align:middle;">' +
+                '<div style="height:8px;width:' + pct + '%;background:' + barCol + ';border-radius:4px;"></div></div>' +
+                '<span class="dim" style="margin-left:6px;">' + pct.toFixed(0) + '%</span></td>' +
+            '<td>' + status + '</td>' +
+            '<td class="muted" style="font-size:10px;">' + last + '</td></tr>';
+    }).join("");
+}
+
 // ── Signals ──
 function renderSignals(data) {
     const div = document.getElementById("signals-list");
@@ -1403,6 +1471,7 @@ pollAll = function pollAll() {
     }
     authFetch("/api/shadow_panel?evaluate=0").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
     authFetch("/api/top_traders").then(r => r.json()).then(d => renderTopTradersPanel(d)).catch(() => {});
+    authFetch("/api/research_watchdogs").then(r => r.json()).then(d => renderResearchWatchdogs(d)).catch(() => {});
 };
 
 if (!window.__hlDashTimers) {

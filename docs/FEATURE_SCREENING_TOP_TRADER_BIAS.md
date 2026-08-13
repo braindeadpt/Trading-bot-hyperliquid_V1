@@ -49,4 +49,4 @@ Bias samples: 6155 (BTC=1965, ETH=1930, SOL=272, HYPE=1988) · janela 2026-08-11
 
 Nenhuma célula passou `survives_strict`. Motivo dominante: amostra insuficiente (datas < 20 ⇒ p_boot indefinido ⇒ FDR sem rejeições). Nenhuma estratégia deve ser construída sobre este sinal até a janela de bias ≥ 20 datas.
 
-**Requisitos para o gate:** re-correr quando `top_trader_bias_samples` cobrir ≥20 datas (≈3 semanas de polling a 60s). O script é idempotente — basta relançar com mais dados.
+**Requisitos para o gate:** re-correr quando `top_trader_bias_samples` cobrir ≥20 datas (≈3 semanas de polling a 60s). O script é idempotente e o re-run é **automático** — o watchdog `scripts/top_trader_bias_recheck.py` relança o probe sozinho ao atingir 20 datas e escreve `docs/TOP_TRADER_BIAS_RECHECK_RESULT.md` (status visível no painel “Research watchdogs” do dashboard).
