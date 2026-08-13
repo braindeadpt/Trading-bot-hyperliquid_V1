@@ -175,6 +175,30 @@ Production fees/buffer pinned in tests: taker 4.5 bp, slip 2 bp, buffer 5 bp.
 
 ---
 
+## 5b. Liquidation stop-out exit — parity by construction
+
+The liquidation stop-out (`liquidation_stop_out`) is an **exit-side** parity
+invariant: when the rolling 5m liquidation window *validates the position
+side* (dominant notional on the SAME side as the position — longs liquidated
+under a long, shorts under a short — meaning forced unwinds run against the
+open position), the position is stopped out before price stops are evaluated.
+
+| | live | backtest |
+|--|------|----------|
+| decision function | `liquidation_stopout_decision` (`src/core/liquidation_stopout.py`) | **the same function** |
+| window state | `TradingEngine._get_liquidation_stats` (rolling accumulator) | `_advance_liquidation_replay` → `LiquidationAccumulator.stats()` |
+| floor | `LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD = 5_000_000` (code, hash-neutral) | same |
+| provenance | window entry gated by `liquidation_source` (proxy rejected in `real` mode) | stored label replayed verbatim; decision is provenance-agnostic |
+
+Because both paths call the **same pure function** on the same accumulator
+math, live and replay cannot diverge on window state — real or proxy
+provenance, same numbers → same stop-out decision, by construction. Pinned by
+`tests/test_backtest_live_parity.py::TestLiquidationStopoutParity` (pure
+decision, live stats path, replay replication, all four side combos, and the
+end-to-end `_process_exits` close).
+
+---
+
 ## 6. Config values that gate the contract
 
 | key | minimal test config | production (`config/settings.yaml`) |

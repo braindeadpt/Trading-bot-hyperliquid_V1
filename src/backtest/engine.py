@@ -1452,6 +1452,25 @@ class BacktestEngine:
             },
         )
 
+        # Liquidation stop-out first — the shared pure decision on the replay
+        # window (identical to TradingEngine._maybe_liquidation_stop_out, which
+        # calls the same function on the live accumulator). Same numbers from
+        # real or proxy provenance → same stop-out, by construction.
+        from src.core.liquidation_stopout import (
+            STOPOUT_REASON,
+            liquidation_stopout_decision,
+        )
+
+        if liquidation_stopout_decision(
+            pos.side,
+            event.liquidation_side_5m,
+            event.liquidation_notional_5m,
+        ):
+            fill = float(event.price) if event.price and event.price > 0 else float(c1m.close)
+            return self._close_position(
+                pos_id, fill, event.timestamp_ms, STOPOUT_REASON, capital,
+            )
+
         # Walk 1m OHLC so ChecklistMeta BE/trailing see wicks (live is tick-level).
         # Hard SL/TP still resolved after via high/low + pessimistic policy.
         for px in self._exit_path_prices(pos.side, c1m):

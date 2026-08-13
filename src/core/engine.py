@@ -2083,7 +2083,19 @@ class TradingEngine:
                                 "Strategy %s exit error on %s: %s", strategy.name, symbol, exc
                             )
 
-            # --- 3. Stop-loss / take-profit hard exits ---
+            # --- 3. Liquidation stop-out (real window validates the side) ---
+            # Same shared decision as the backtest replay — never diverges on
+            # window state. Runs before price stops: a validated flush exit is
+            # informational (window-based), price stops remain the hard floor.
+            if not exit_triggered:
+                positions = await self._portfolio.positions
+                position = positions.get(symbol)
+                if position is not None:
+                    exit_triggered = await self._maybe_liquidation_stop_out(
+                        position, event
+                    )
+
+            # --- 4. Stop-loss / take-profit hard exits ---
             if not exit_triggered:
                 positions = await self._portfolio.positions
                 position = positions.get(symbol)
@@ -3742,6 +3754,44 @@ class TradingEngine:
             return
 
         await self._execute_exit(position, last_price.mid, reason=exit_signal.reason)
+
+    async def _maybe_liquidation_stop_out(
+        self,
+        position: Position,
+        event: MarketEvent,
+    ) -> bool:
+        """Stop out when the real liquidation window validates the position side.
+
+        A liquidation flush of the **same side** as the position (longs
+        liquidated under a long, shorts under a short) is forced unwinds
+        running against the open position. Uses the shared pure decision
+        (``liquidation_stopout_decision``) on the rolling 5m stats — the exact
+        same function the backtest replay calls, so live and replay cannot
+        diverge on window state (real or proxy provenance, same numbers → same
+        decision). Returns True when a stop-out fired.
+        """
+        try:
+            from src.core.liquidation_stopout import (
+                STOPOUT_REASON,
+                liquidation_stopout_decision,
+            )
+
+            liq_notional, liq_side, _count = self._get_liquidation_stats(position.symbol)
+            if liquidation_stopout_decision(
+                position.side, liq_side, liq_notional
+            ):
+                logger.warning(
+                    "LIQUIDATION STOP-OUT %s %s — %s window %.1fM validates side",
+                    position.symbol,
+                    position.side,
+                    liq_side,
+                    (liq_notional or 0.0) / 1_000_000,
+                )
+                await self._execute_exit(position, event.price, reason=STOPOUT_REASON)
+                return True
+        except Exception as exc:  # noqa: BLE001 — stop-out must never raise
+            logger.debug("liquidation stop-out check failed: %s", exc)
+        return False
 
     async def _check_hard_stops(self, position: Position, current_price: float) -> None:
         """Check trailing stop, stop-loss and take-profit levels.

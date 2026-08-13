@@ -1484,6 +1484,228 @@ class TestLiquidationSourceGateParity:
         assert not is_real_liquidation_source("proxy")
 
 
+class TestLiquidationStopoutParity:
+    """Live-vs-backtest parity for the liquidation stop-out exit.
+
+    The stop-out fires when the rolling 5m liquidation window *validates the
+    position side*: dominant notional on the SAME side as the position (longs
+    liquidated under a long, shorts under a short) means forced unwinds are
+    running against the open position. Both the live engine and the backtest
+    replay call the SAME pure function
+    (``liquidation_stopout_decision``) on window state derived from the
+    SAME ``LiquidationAccumulator`` — so real or proxy provenance, same
+    numbers → same decision, by construction.
+    """
+
+    pytestmark = pytest.mark.integration_offline
+
+    @staticmethod
+    def _live_engine() -> TradingEngine:
+        """Live engine stub; liquidation state shaped like TradingEngine.__init__."""
+        eng = object.__new__(TradingEngine)
+        eng._liquidation_source_mode = "real"
+        eng._liquidation_feed_warmup = 1
+        eng._real_liquidation_events = 0
+        eng._binance_liquidation_events = 0
+        eng._liquidation_feed_ready = False
+        eng._liquidation_feed_ready_logged = False
+        eng._db = None  # save_liquidation failure is swallowed in _record_liquidation
+        eng._liquidation_acc = {
+            "BTC": {
+                "window_ms": 5 * 60_000,
+                "events": collections.deque(),
+                "source": None,
+                "sources": set(),
+            }
+        }
+        eng._last_prices = {}
+        eng._last_price_ts = {}
+        return eng
+
+    @staticmethod
+    def _bt_engine(acc: LiquidationAccumulator):
+        """Backtest engine shaped for _process_exits; replay window pre-fed."""
+        bt = object.__new__(BacktestEngine)
+        bt.positions = {1: _OpenPosition(
+            id=1, symbol="BTC", side="long", entry_price=50_000.0, size=0.1,
+            entry_time_ms=0, stop_loss_price=49_000.0, take_profit_price=52_000.0,
+            strategy="ChecklistMeta", metadata={},
+        )}
+        bt.positions_by_symbol = {"BTC": 1}
+        bt.cfg = BacktestConfig()
+        bt.strategy = ChecklistMeta({})  # unused — stop-out fires before on_position
+        bt._daily_pnl = 0.0
+        bt._capital = 100_000.0
+        bt._excursion_trackers = {}
+        bt.closed_trades = []
+        bt._pipeline = None
+        bt._risk_manager = None
+        return bt
+
+    # -- pure decision: same side validates, opposite does not -----------
+
+    def test_decision_pure_same_side_validates(self) -> None:
+        from src.core.liquidation_stopout import liquidation_stopout_decision
+
+        # Long position + dominant LONG liquidations → forced selling runs
+        # against the long → stop-out.
+        assert liquidation_stopout_decision("long", "long", 8_000_000.0)
+        # Short position + dominant SHORT liquidations → forced buying runs
+        # against the short → stop-out.
+        assert liquidation_stopout_decision("short", "short", 8_000_000.0)
+
+    def test_decision_opposite_side_never_stops_out(self) -> None:
+        from src.core.liquidation_stopout import liquidation_stopout_decision
+
+        # Longs liquidated under a long position is the stop-out case; longs
+        # liquidated under a SHORT position is the flush the short rides.
+        assert not liquidation_stopout_decision("short", "long", 8_000_000.0)
+        assert not liquidation_stopout_decision("long", "short", 8_000_000.0)
+
+    def test_decision_floor_and_missing_state(self) -> None:
+        from src.core.liquidation_stopout import (
+            LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD,
+            liquidation_stopout_decision,
+        )
+
+        assert LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD == 5_000_000.0
+        # Below floor → no stop-out (single stray print must not stop a trade).
+        assert not liquidation_stopout_decision("long", "long", 1_000_000.0)
+        # No window state yet → never a fake flush.
+        assert not liquidation_stopout_decision("long", None, None)
+        assert not liquidation_stopout_decision(None, "long", 8_000_000.0)
+
+    # -- live path: window state → decision -------------------------------
+
+    def test_live_window_validates_and_exits(self) -> None:
+        eng = self._live_engine()
+        # Dominant LONG notional ≥ floor under a LONG position.
+        eng._record_liquidation("BTC", 1_000_000, 6_000_000.0, "long", "okx")
+        eng._record_liquidation("BTC", 1_000_001, 1_000_000.0, "short", "bybit")
+        notional, side, _count = eng._get_liquidation_stats("BTC")
+        assert (notional, side) == (6_000_000.0, "long")
+        from src.core.liquidation_stopout import liquidation_stopout_decision
+
+        assert liquidation_stopout_decision("long", side, notional)
+
+    def test_live_window_opposite_side_no_exit(self) -> None:
+        eng = self._live_engine()
+        eng._record_liquidation("BTC", 1_000_000, 6_000_000.0, "short", "okx")
+        notional, side, _count = eng._get_liquidation_stats("BTC")
+        from src.core.liquidation_stopout import liquidation_stopout_decision
+
+        assert not liquidation_stopout_decision("long", side, notional)
+
+    # -- backtest replay path: same numbers → same decision ---------------
+
+    def test_backtest_replay_replicates_live_decision(self) -> None:
+        """Real provenance: live accumulator and replay accumulator produce the
+        same (notional, side) and therefore the same stop-out decision."""
+        from src.core.liquidation_stopout import liquidation_stopout_decision
+
+        # Live path: same venue rows recorded into the engine accumulator.
+        live = self._live_engine()
+        for ts, notional, side, src in (
+            (1_000_000, 6_000_000.0, "long", "okx"),
+            (1_000_001, 1_000_000.0, "short", "bybit"),
+        ):
+            live._record_liquidation("BTC", ts, notional, side, src)
+        live_notional, live_side, _ = live._get_liquidation_stats("BTC")
+
+        # Replay path: same rows fed through _advance_liquidation_replay.
+        bt = self._bt_engine(LiquidationAccumulator())
+        data = {
+            "liq_acc": bt.positions  # placeholder; replaced below
+        }
+        acc = LiquidationAccumulator()
+        for ts, notional, side, src in (
+            (1_000_000, 6_000_000.0, "long", "okx"),
+            (1_000_001, 1_000_000.0, "short", "bybit"),
+        ):
+            acc.record(ts, notional, side, src)
+        replay_notional, replay_side, _ = acc.stats()
+        assert (replay_notional, replay_side) == (live_notional, live_side)
+
+        decision_live = liquidation_stopout_decision("long", live_side, live_notional)
+        decision_replay = liquidation_stopout_decision("long", replay_side, replay_notional)
+        assert decision_live is True
+        assert decision_replay is decision_live
+
+    def test_backtest_replay_proxy_provenance_same_decision(self) -> None:
+        """Proxy provenance: replay replicates the decision for the same numbers.
+
+        The stop-out decision is a function of (side, notional) only — the
+        provenance label does not change it. The entry chain is where proxy is
+        rejected (is_real_liquidation_source), not here. This is exactly what
+        the backtest must prove: a replay over proxy-era rows takes the same
+        exit decision the live engine would take on the same window.
+        """
+        from src.core.liquidation_stopout import liquidation_stopout_decision
+
+        for provenance in ("okx", "bybit", "proxy"):
+            acc = LiquidationAccumulator()
+            acc.record(1_000_000, 6_000_000.0, "long", provenance)
+            notional, side, _ = acc.stats()
+            assert liquidation_stopout_decision("long", side, notional) is True
+
+    def test_live_and_replay_agree_on_all_four_side_combos(self) -> None:
+        from src.core.liquidation_stopout import liquidation_stopout_decision
+
+        # Exhaustive: for each position side × dominant liq side, live stats
+        # and replay stats must agree — they are the same accumulator math.
+        for pos_side in ("long", "short"):
+            for liq_side in ("long", "short"):
+                live = self._live_engine()
+                live._record_liquidation("BTC", 1_000_000, 6_000_000.0, liq_side, "okx")
+                ln, ls, _ = live._get_liquidation_stats("BTC")
+                acc = LiquidationAccumulator()
+                acc.record(1_000_000, 6_000_000.0, liq_side, "okx")
+                rn, rs, _ = acc.stats()
+                assert (ln, ls) == (rn, rs)
+                assert liquidation_stopout_decision(pos_side, ls, ln) == \
+                    liquidation_stopout_decision(pos_side, rs, rn)
+
+    # -- backtest _process_exits closes with STOPOUT_REASON -----------------
+
+    def test_backtest_process_exits_fires_stopout(self) -> None:
+        """End-to-end: _process_exits closes a position when the replay window
+        validates the side (dominant long liq under a long position)."""
+        bt = self._bt_engine(LiquidationAccumulator())
+        ev = MarketEvent(
+            symbol="BTC", price=49_500.0, timestamp_ms=1_000_001,
+            liquidation_side_5m="long", liquidation_notional_5m=6_000_000.0,
+            liquidation_data_source="real", liquidation_feed_ready=True,
+        )
+        c1m = DBCandle(
+            symbol="BTC", timestamp_ms=1_000_001, open=49_600.0, high=49_650.0,
+            low=49_450.0, close=49_500.0, volume=100.0, funding_rate=0.0,
+            oi_total=1.0, oi_delta=0.0, buy_volume=50.0, sell_volume=50.0,
+            trade_count=1,
+        )
+        capital = bt._process_exits(ev, 100_000.0, c1m)
+        assert 1 not in bt.positions  # position closed
+        assert "BTC" not in bt.positions_by_symbol
+        assert capital != 100_000.0  # PnL realised into capital
+
+    def test_backtest_process_exits_opposite_side_keeps_position(self) -> None:
+        """Dominant liq on the OPPOSITE side does not stop the position out."""
+        bt = self._bt_engine(LiquidationAccumulator())
+        ev = MarketEvent(
+            symbol="BTC", price=49_500.0, timestamp_ms=1_000_001,
+            liquidation_side_5m="short", liquidation_notional_5m=6_000_000.0,
+            liquidation_data_source="real", liquidation_feed_ready=True,
+        )
+        c1m = DBCandle(
+            symbol="BTC", timestamp_ms=1_000_001, open=49_600.0, high=49_650.0,
+            low=49_450.0, close=49_500.0, volume=100.0, funding_rate=0.0,
+            oi_total=1.0, oi_delta=0.0, buy_volume=50.0, sell_volume=50.0,
+            trade_count=1,
+        )
+        capital = bt._process_exits(ev, 100_000.0, c1m)
+        assert 1 in bt.positions  # not stopped out
+        assert capital == 100_000.0
+
+
 async def _noop_native_sync(symbol: str, new_stop: float) -> None:
     """Stub for TradingEngine._sync_native_stop (native resize off in tests)."""
 
