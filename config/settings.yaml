@@ -980,6 +980,12 @@ research:
   continuous_sampling_enabled: true
   ws_microstructure_enabled: true    # DataBus trade + orderbook → research DB
   rest_sampling_enabled: false       # 60s REST poll — NOT Tier A; do not enable
+  dvol_feed:                         # Deribit DVOL daily → research DB (IV gate)
+    enabled: true
+    interval_hours: 24.0
+    lookback_days: 60
+    window_days: 30
+    currencies: ["BTC", "ETH"]
   l2_min_interval_ms: 250            # ~4 L2 snapshots/sec per symbol
   tape_gap_threshold_ms: 5000
   l2_stale_threshold_ms: 10000

@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 import time
@@ -40,7 +41,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts.iv_high_only_ab_split import IV_ONLY_PCT, SPECS  # noqa: E402
-from scripts.iv_percentile_regime_gate_test import (  # noqa: E402
+from src.data.dvol_feed import (  # noqa: E402
     DVOL_WINDOW_DAYS,
     build_iv_percentile,
     dvol_series_for,
@@ -139,8 +140,8 @@ def main() -> int:
     # ── Both signals, full span ──
     print("\n[0] Deribit DVOL + ADX(14) precompute...", flush=True)
     t0 = time.time()
-    btc_raw = fetch_dvol("BTC", fetch_lo, e_ms)
-    eth_raw = fetch_dvol("ETH", fetch_lo, e_ms)
+    btc_raw = asyncio.run(fetch_dvol("BTC", fetch_lo, e_ms))
+    eth_raw = asyncio.run(fetch_dvol("ETH", fetch_lo, e_ms))
     btc_iv = build_iv_percentile(btc_raw, DVOL_WINDOW_DAYS)
     eth_iv = build_iv_percentile(eth_raw, DVOL_WINDOW_DAYS)
     iv_by_sym = {sym: dvol_series_for(sym, btc_iv, eth_iv) for sym in symbols}

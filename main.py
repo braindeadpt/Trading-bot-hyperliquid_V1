@@ -93,6 +93,7 @@ _liquidation_aggregator: Optional[MultiVenueLiquidationAggregator] = None
 _research_sampler: Optional[Any] = None
 _research_microstructure: Optional[Any] = None
 _l2_book_recorder: Optional[Any] = None
+_dvol_feed: Optional[Any] = None
 _logger = None
 
 
@@ -556,7 +557,7 @@ async def main() -> None:
             _liquidation_aggregator.stats().get("coinalyze_budget_note"),
         )
 
-    global _research_sampler, _research_microstructure, _l2_book_recorder
+    global _research_sampler, _research_microstructure, _l2_book_recorder, _dvol_feed
     if not args.backtest and not args.audit:
         try:
             from data.research_microstructure import start_microstructure_recorder_from_config
@@ -619,6 +620,15 @@ async def main() -> None:
                     )
             except Exception as exc:
                 logger.warning("ResearchSampler failed to start: %s", exc)
+        try:
+            from data.dvol_feed import start_dvol_feed_from_config
+
+            _dvol_feed = start_dvol_feed_from_config(cfg)
+            if _dvol_feed is not None:
+                await _dvol_feed.start()
+                logger.info("DvolFeed active — Deribit DVOL daily → research DB")
+        except Exception as exc:
+            logger.warning("DvolFeed failed to start: %s", exc)
 
     # -----------------------------------------------------------------------
     # 9. Start Dashboard (optional)
@@ -721,6 +731,11 @@ async def main() -> None:
                 await _research_sampler.stop()
         except Exception:
             logger.exception("ResearchSampler stop failed")
+        try:
+            if _dvol_feed is not None:
+                await _dvol_feed.stop()
+        except Exception:
+            logger.exception("DvolFeed stop failed")
         try:
             if _binance_futures_feed is not None:
                 await _binance_futures_feed.stop()

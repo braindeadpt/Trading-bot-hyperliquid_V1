@@ -26,12 +26,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import bisect
-import json
+import asyncio
 import logging
 import sys
 import time
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -41,6 +39,13 @@ sys.path.insert(0, str(ROOT))
 
 from src.backtest.engine import BacktestConfig, BacktestEngine
 from src.data.database import Database
+from src.data.dvol_feed import (
+    DVOL_WINDOW_DAYS,
+    build_iv_percentile,
+    dvol_series_for,
+    fetch_dvol,
+    iv_pct_at,
+)
 from src.strategies.volatility_breakout import VolatilityBreakout
 from src.strategies.vwap_deviation import VWAPDeviation
 from src.utils.config import load_config
@@ -56,8 +61,6 @@ FULL_START, FULL_END = "2026-05-18", "2026-08-07"
 SYMBOLS = ["BTC", "ETH", "SOL", "HYPE"]
 START_ARG = "2026-07-08"
 END_ARG = "2026-08-07"
-DERIBIT_URL = "https://www.deribit.com/api/v2/public/get_volatility_index_data"
-DVOL_WINDOW_DAYS = 30
 
 # Gate: VB allowed when IV percentile >= IV_HIGH_PCT; VWAP when <= IV_LOW_PCT.
 # Between the two thresholds both are allowed (mid regime) — matches the
@@ -71,51 +74,6 @@ def ms(s: str, end: bool = False) -> int:
     if end:
         d = d.replace(hour=23, minute=59, second=59)
     return int(d.timestamp() * 1000)
-
-
-def fetch_dvol(currency: str, start_ms: int, end_ms: int) -> List[Tuple[int, float]]:
-    """Daily DVOL/vol index closes: [(ts_ms, close), ...]."""
-    url = (f"{DERIBIT_URL}?currency={currency}&start_timestamp={start_ms}"
-           f"&end_timestamp={end_ms}&resolution=86400")
-    req = urllib.request.Request(url, headers={"User-Agent": "research/1.0"})
-    with urllib.request.urlopen(req, timeout=25) as r:
-        payload = json.load(r)
-    data = payload.get("result", {}).get("data", [])
-    return [(int(row[0]), float(row[4])) for row in data]
-
-
-def build_iv_percentile(
-    closes: List[Tuple[int, float]], window_days: int = DVOL_WINDOW_DAYS
-) -> List[Tuple[int, Optional[float]]]:
-    """Asof percentile of each day's close within the trailing window.
-
-    Percentile at day t uses only closes on [t - window, t] (all <= t), so
-    it is known by the close of day t. A trade entering during day t+1 uses
-    the percentile of day t (see iv_pct_at).
-    """
-    out: List[Tuple[int, Optional[float]]] = []
-    ts_list = [t for t, _ in closes]
-    vals = [c for _, c in closes]
-    for i, (t, c) in enumerate(closes):
-        lo = bisect.bisect_left(ts_list, t - window_days * 86_400_000)
-        window = vals[lo : i + 1]
-        if len(window) < 20:
-            out.append((t, None))
-            continue
-        pct = 100.0 * sum(1 for v in window if v <= c) / len(window)
-        out.append((t, pct))
-    return out
-
-
-def iv_pct_at(series: List[Tuple[int, Optional[float]]], ts: int) -> Optional[float]:
-    """IV percentile of the last completed DVOL day before ``ts``."""
-    if not series:
-        return None
-    # last DVOL close strictly before the trade day (end-of-day known value)
-    idx = bisect.bisect_left([t for t, _ in series], ts - 86_400_000) - 1
-    if idx < 0:
-        return None
-    return series[idx][1]
 
 
 def build_cfg(cfg: Any) -> BacktestConfig:
@@ -169,16 +127,6 @@ def summarize(trades: List[Dict[str, Any]], label: str) -> Dict[str, Any]:
     }
 
 
-def dvol_series_for(sym: str, btc_iv: List[Tuple[int, Optional[float]]],
-                    eth_iv: List[Tuple[int, Optional[float]]]) -> List[Tuple[int, Optional[float]]]:
-    """BTC/ETH use their own DVOL; SOL/HYPE use BTC IV as the global proxy."""
-    if sym == "BTC":
-        return btc_iv
-    if sym == "ETH":
-        return eth_iv
-    return btc_iv
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--start", default=START_ARG)
@@ -203,8 +151,8 @@ def main() -> int:
     fetch_lo = ms(args.start) - 60 * 86_400_000  # 60d lookback for the percentile
 
     print("\n[0] Fetching Deribit DVOL...")
-    btc_raw = fetch_dvol("BTC", fetch_lo, e_ms)
-    eth_raw = fetch_dvol("ETH", fetch_lo, e_ms)
+    btc_raw = asyncio.run(fetch_dvol("BTC", fetch_lo, e_ms))
+    eth_raw = asyncio.run(fetch_dvol("ETH", fetch_lo, e_ms))
     print(f"    BTC DVOL: {len(btc_raw)} dias | ETH vol index: {len(eth_raw)} dias")
     btc_iv = build_iv_percentile(btc_raw)
     eth_iv = build_iv_percentile(eth_raw)

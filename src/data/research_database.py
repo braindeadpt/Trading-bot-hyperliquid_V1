@@ -219,6 +219,15 @@ class ResearchDatabase(Database):
             "CREATE INDEX IF NOT EXISTS idx_liq_map_snapshot_id "
             "ON liquidation_map_snapshots(snapshot_id);"
         )
+        self._conn().execute("""
+            CREATE TABLE IF NOT EXISTS dvol_daily (
+                currency        TEXT    NOT NULL,
+                timestamp_ms    INTEGER NOT NULL,
+                close           REAL    NOT NULL,
+                ingested_at_ms  INTEGER NOT NULL,
+                PRIMARY KEY (currency, timestamp_ms)
+            ) WITHOUT ROWID;
+        """)
         self._commit()
 
     def prune_old_data(self, days: int = 30) -> Dict[str, int]:
@@ -516,6 +525,42 @@ class ResearchDatabase(Database):
             conn.executemany(sql, params)
             conn.commit()
         return len(params)
+
+    def save_dvol_daily(self, rows: List[Tuple[str, int, float]]) -> int:
+        """Upsert daily DVOL closes. ``rows`` = (currency, timestamp_ms, close)."""
+        if not rows:
+            return 0
+        ingested = int(time.time() * 1000)
+        sql = """
+            INSERT OR REPLACE INTO dvol_daily (currency, timestamp_ms, close, ingested_at_ms)
+            VALUES (?, ?, ?, ?)
+        """
+        params = [
+            (str(currency).upper(), int(ts), float(close), ingested)
+            for currency, ts, close in rows
+        ]
+        with self._write_lock:
+            conn = self._conn()
+            conn.executemany(sql, params)
+            conn.commit()
+        return len(params)
+
+    def load_dvol_daily(
+        self,
+        currency: str,
+        start_ms: int,
+        end_ms: int,
+    ) -> List[Tuple[int, float]]:
+        """Daily DVOL closes for ``currency`` in ``[start_ms, end_ms]`` ascending."""
+        sql = """
+            SELECT timestamp_ms, close FROM dvol_daily
+            WHERE currency = ? AND timestamp_ms >= ? AND timestamp_ms <= ?
+            ORDER BY timestamp_ms ASC
+        """
+        rows = self._conn().execute(
+            sql, (str(currency).upper(), int(start_ms), int(end_ms))
+        ).fetchall()
+        return [(int(ts), float(close)) for ts, close in rows]
 
     def load_latest_liquidation_map(
         self,

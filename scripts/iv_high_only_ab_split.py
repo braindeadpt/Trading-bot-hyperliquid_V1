@@ -28,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 import time
@@ -38,7 +39,7 @@ from typing import Any, Dict, List
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.iv_percentile_regime_gate_test import (  # noqa: E402
+from src.data.dvol_feed import (  # noqa: E402
     DVOL_WINDOW_DAYS,
     build_iv_percentile,
     dvol_series_for,
@@ -138,8 +139,8 @@ def main() -> int:
     e_ms = ms(args.end, True)
     fetch_lo = ms(args.start) - 60 * 86_400_000
     print("\n[0] Fetching Deribit DVOL (full span + lookback)...")
-    btc_raw = fetch_dvol("BTC", fetch_lo, e_ms)
-    eth_raw = fetch_dvol("ETH", fetch_lo, e_ms)
+    btc_raw = asyncio.run(fetch_dvol("BTC", fetch_lo, e_ms))
+    eth_raw = asyncio.run(fetch_dvol("ETH", fetch_lo, e_ms))
     print(f"    BTC DVOL: {len(btc_raw)} dias | ETH vol index: {len(eth_raw)} dias")
     btc_iv = build_iv_percentile(btc_raw, DVOL_WINDOW_DAYS)
     eth_iv = build_iv_percentile(eth_raw, DVOL_WINDOW_DAYS)
