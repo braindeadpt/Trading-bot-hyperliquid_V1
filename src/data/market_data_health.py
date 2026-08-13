@@ -197,6 +197,9 @@ class FeedSilenceState:
     last_alert_mono: float = 0.0
     # Fire-once early-warning: alerted at >=50% of max_silence; reset on beat.
     warned_50_pct: bool = False
+    # Fire-once imminent-warning: alerted at >=90% of max_silence (before
+    # degrading); reset on beat.
+    warned_90_pct: bool = False
 
     def age_sec(self, now_ms: Optional[int] = None) -> Optional[float]:
         if self.last_event_ms is None:
@@ -265,6 +268,7 @@ class FeedSilenceMonitor:
         )
         st.degraded = False
         st.warned_50_pct = False
+        st.warned_90_pct = False
 
     def check(self, now_ms: Optional[int] = None) -> List[str]:
         """Return alert messages for newly-degraded (or re-alertable) feeds."""
@@ -307,14 +311,16 @@ class FeedSilenceMonitor:
         self,
         now_ms: Optional[int] = None,
         warn_fraction: float = 0.5,
+        imminent_fraction: float = 0.9,
     ) -> List[str]:
-        """Return fire-once early-warning messages before a feed degrades.
+        """Return fire-once early/imminent warning messages before degrading.
 
-        Alerts once per silence episode when a contracted feed's age crosses
-        ``warn_fraction`` (default 50%) of its ``max_silence_sec`` — while
-        still below the degrade threshold — so operators can react before
-        the feed trips ``degraded``. ``beat()`` resets the fire-once flag.
-        Already-degraded feeds are skipped (``check()`` owns those alerts).
+        Two escalation levels, each firing once per silence episode and reset
+        on ``beat()``: ``early`` when age crosses ``warn_fraction`` (default
+        50%) of ``max_silence_sec``, and ``imminent`` when it crosses
+        ``imminent_fraction`` (default 90%) — the last checkpoint before the
+        feed trips ``degraded`` at 100%. Already-degraded feeds are skipped
+        (``check()`` owns those alerts).
         """
         now = now_ms if now_ms is not None else int(time.time() * 1000)
         mono = time.monotonic()
@@ -322,26 +328,41 @@ class FeedSilenceMonitor:
         warnings: List[str] = []
         for name in sorted(self._enabled_feeds):
             st = self._states.get(name)
-            if st is None or st.degraded or st.warned_50_pct:
+            if st is None or st.degraded:
                 continue
             if st.last_event_ms is None:
-                # Never seen — warn once uptime crosses the fraction, before
-                # the never-produced degrade threshold.
-                if uptime_sec >= st.max_silence_sec * warn_fraction:
+                # Never seen — escalate on uptime before the never-produced
+                # degrade threshold. Fire early then imminent, independently.
+                if not st.warned_50_pct and uptime_sec >= st.max_silence_sec * warn_fraction:
                     st.warned_50_pct = True
                     warnings.append(
                         f"FEED QUIET (early): `{name}` never produced an event "
                         f"for {uptime_sec/3600:.1f}h "
                         f"(≥{warn_fraction * 100:.0f}% of {st.max_silence_sec/3600:.1f}h threshold)"
                     )
+                if not st.warned_90_pct and uptime_sec >= st.max_silence_sec * imminent_fraction:
+                    st.warned_90_pct = True
+                    warnings.append(
+                        f"FEED QUIET (imminent): `{name}` still no events after "
+                        f"{uptime_sec/3600:.1f}h "
+                        f"(≥{imminent_fraction * 100:.0f}% of {st.max_silence_sec/3600:.1f}h "
+                        f"threshold) — degrade iminente"
+                    )
                 continue
             age = (now - st.last_event_ms) / 1000.0
-            if age >= st.max_silence_sec * warn_fraction:
+            if not st.warned_50_pct and age >= st.max_silence_sec * warn_fraction:
                 st.warned_50_pct = True
                 warnings.append(
                     f"FEED QUIET (early): `{name}` quiet for {age/3600:.1f}h "
                     f"(≥{warn_fraction * 100:.0f}% of {st.max_silence_sec/3600:.1f}h threshold) — "
                     f"check delivery path before it degrades"
+                )
+            if not st.warned_90_pct and age >= st.max_silence_sec * imminent_fraction:
+                st.warned_90_pct = True
+                warnings.append(
+                    f"FEED QUIET (imminent): `{name}` quiet for {age/3600:.1f}h "
+                    f"(≥{imminent_fraction * 100:.0f}% of {st.max_silence_sec/3600:.1f}h "
+                    f"threshold) — verificar já, degrade iminente"
                 )
         return warnings
 
@@ -356,6 +377,12 @@ class FeedSilenceMonitor:
                 "age_sec": None if age is None else round(age, 1),
                 "max_silence_sec": st.max_silence_sec,
                 "degraded": st.degraded,
+                "warn_level": (
+                    "degraded" if st.degraded
+                    else "imminent" if st.warned_90_pct
+                    else "early" if st.warned_50_pct
+                    else "none"
+                ),
             }
         return out
 

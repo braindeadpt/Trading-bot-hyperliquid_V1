@@ -1284,12 +1284,15 @@ class TradingEngine:
                 self._notify(
                     lambda m=msg: self._notifier.send_alert(m, "error")
                 )
-            # Early-warning at >=50% of max_silence — anticipate a silence
-            # before it degrades (fire-once per episode, reset on beat).
+            # Early/imminent warnings at >=50% / >=90% of max_silence —
+            # anticipate a silence before it degrades (fire-once per episode,
+            # reset on beat). Imminent (90%) escalates to error level so the
+            # operator sees it before the feed trips degraded.
             for msg in self._feed_silence.check_early_warnings():
-                logger.warning("%s", msg)
+                level = "error" if "(imminent)" in msg else "warning"
+                (logger.error if level == "error" else logger.warning)("%s", msg)
                 self._notify(
-                    lambda m=msg: self._notifier.send_alert(m, "warning")
+                    lambda m=msg, lvl=level: self._notifier.send_alert(m, lvl)
                 )
 
     async def _check_market_data_alerts(self) -> None:

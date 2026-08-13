@@ -201,6 +201,51 @@ def test_feed_silence_early_warning_at_50_pct_before_degrade() -> None:
     assert len(warns2) == 1
 
 
+def test_feed_silence_imminent_warning_at_90_pct() -> None:
+    """A contracted feed crossing 90% of max_silence fires a second-level
+    imminent warning (degrade imminent), independent of the 50% fire-once
+    flag; snapshot reports the escalation level."""
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    mon.beat("liquidation_okx", timestamp_ms=1_000_000)
+
+    # 50% — early warning fires; level = early
+    warns = mon.check_early_warnings(now_ms=1_000_000 + int(0.5 * 3600_000))
+    assert len(warns) == 1
+    assert "FEED QUIET (early)" in warns[0]
+    assert mon.snapshot()["liquidation_okx"]["warn_level"] == "early"
+
+    # 70% — neither level fires (fire-once at 50% already consumed)
+    assert mon.check_early_warnings(now_ms=1_000_000 + int(0.7 * 3600_000)) == []
+
+    # 90% — imminent warning fires independently, escalate to 90%
+    warns2 = mon.check_early_warnings(now_ms=1_000_000 + int(0.9 * 3600_000))
+    assert len(warns2) == 1
+    assert "FEED QUIET (imminent)" in warns2[0]
+    assert "90%" in warns2[0]
+    assert mon.snapshot()["liquidation_okx"]["warn_level"] == "imminent"
+
+    # Fire-once at imminent: same age, no second warning
+    assert mon.check_early_warnings(now_ms=1_000_000 + int(0.95 * 3600_000)) == []
+
+    # Not degraded yet (threshold is 1h)
+    assert mon.snapshot()["liquidation_okx"]["degraded"] is False
+
+    # beat() resets both flags — a new silence episode re-warns in order:
+    # early first (50%), then imminent (90%)
+    beat_at = 1_000_000 + int(0.95 * 3600_000)
+    mon.beat("liquidation_okx", timestamp_ms=beat_at)
+    warns3 = mon.check_early_warnings(now_ms=beat_at + int(0.6 * 3600_000))
+    assert len(warns3) == 1 and "FEED QUIET (early)" in warns3[0]
+    warns4 = mon.check_early_warnings(now_ms=beat_at + int(0.9 * 3600_000))
+    assert len(warns4) == 1 and "FEED QUIET (imminent)" in warns4[0]
+
+
 def test_feed_silence_early_warning_skips_degraded() -> None:
     """Once a feed is degraded, check_early_warnings stays quiet (check() owns
     the degrade alert) and does not double-alert."""

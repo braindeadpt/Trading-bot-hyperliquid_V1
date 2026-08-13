@@ -378,8 +378,10 @@ tr:hover td { background: var(--panel-hover); }
     <div class="panel-body" style="padding:6px 8px; max-height:220px; overflow-y:auto;">
         <div id="feed-silence-help" class="muted" style="font-size:10px;line-height:1.4;margin-bottom:6px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;">
             <b>% of threshold</b> = age &divide; max-silence &times; 100 — how close each contracted feed is to
-            tripping <b>degraded</b>. Green &lt; 60% · yellow 60&ndash;90% · red &ge; 90% (silent feeds, alerts
-            pending) · <b>DEGRADED</b> = silence threshold crossed. Only feeds contracted by this deployment are listed.
+            tripping <b>degraded</b>. Green &lt; 60% · yellow 60&ndash;90% · red &ge; 90% · <b>EARLY</b> =
+            fire-once alert at &ge;50% of threshold (warn) · <b>IMMINENT</b> = fire-once alert at &ge;90%
+            (degrade imminent) · <b>DEGRADED</b> = silence threshold crossed. Only feeds contracted by this
+            deployment are listed.
         </div>
         <table style="width:100%; font-size:11px; border-collapse:collapse;">
             <thead>
@@ -1421,8 +1423,15 @@ function renderFeedSilence(payload) {
             : age < 3600 ? (age / 60).toFixed(1) + "m"
             : (age / 3600).toFixed(1) + "h");
         const maxTxt = (max / 3600).toFixed(1) + "h";
-        const stateTxt = degraded ? "DEGRADED" : (pct == null ? "never seen" : "OK");
-        const stateColor = degraded ? "var(--down)" : (pct != null && pct >= 90 ? "var(--down)" : pct != null && pct >= 60 ? "var(--warn, #d29922)" : "var(--up)");
+        const warnLvl = st.warn_level || (degraded ? "degraded" : "none");
+        const stateTxt = degraded ? "DEGRADED"
+            : warnLvl === "imminent" ? "IMMINENT"
+            : warnLvl === "early" ? "EARLY"
+            : (pct == null ? "never seen" : "OK");
+        const stateColor = degraded ? "var(--down)"
+            : warnLvl === "imminent" ? "var(--down)"
+            : warnLvl === "early" ? "var(--warn, #d29922)"
+            : (pct != null && pct >= 90 ? "var(--down)" : pct != null && pct >= 60 ? "var(--warn, #d29922)" : "var(--up)");
         const barW = Math.max(2, Math.min(100, pct == null ? 0 : pct));
         const barColor = barCls === "crit" ? "var(--down)" : barCls === "warn" ? "#d29922" : "var(--up)";
         return '<tr style="border-top:1px solid var(--border);">' +
