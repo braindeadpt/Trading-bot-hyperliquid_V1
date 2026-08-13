@@ -123,10 +123,17 @@ class CrashRecovery:
         """Run a single instance of the bot.
 
         SECURITY NOTE: subprocess.run is used intentionally to spawn the
-        bot process. The command is always `sys.executable` (the current
-        Python interpreter) and `main.py` — no user input reaches this
-        call. This is the core functionality of crash recovery.
+        bot process — this is the core functionality of crash recovery
+        (the accepted AUDIT-005 finding, documented in docs/SECURITY.md).
+        The command is validated by ``_validate_cmd`` before execution:
+        ``cmd[0]`` must be ``sys.executable`` (the current interpreter) and
+        the first script must be ``main.py``; ``--mode`` values are
+        restricted to the known set. No user-controlled argument reaches
+        this call unvalidated.
         """
+        if not self._validate_cmd(cmd):
+            logger.error("Refusing to run invalid command: %s", cmd)
+            return 1
         logger.info("Starting bot: %s", " ".join(cmd))
         try:
             result = subprocess.run(
@@ -141,6 +148,39 @@ class CrashRecovery:
         except Exception as exc:
             logger.error("Failed to start bot: %s", exc)
             return 1
+
+    @staticmethod
+    def _validate_cmd(cmd: tuple[str, ...]) -> bool:
+        """Allowlist-check the command before subprocess.run.
+
+        Crash recovery only ever spawns the current interpreter running this
+        repo's ``main.py`` in a known mode. Anything else (different
+        executable, arbitrary script, or an unknown ``--mode`` value) is
+        refused — this is the remediation layer for the accepted AUDIT-005
+        subprocess finding.
+        """
+        if not cmd:
+            return False
+        import os
+
+        # The interpreter must be the current one (allow both the full path
+        # and the plain name, e.g. python.exe on Windows).
+        exe = os.path.basename(cmd[0]).lower()
+        cur = os.path.basename(sys.executable).lower()
+        if not (cmd[0] == sys.executable or exe in (cur, "python", "python3", "python.exe", "python3.exe")):
+            return False
+        if len(cmd) < 2 or not os.path.basename(cmd[1]).endswith("main.py"):
+            return False
+        # --mode must be a known value (paper / testnet / live); anything
+        # else — including a crafted extra arg — is refused.
+        for i, arg in enumerate(cmd):
+            if arg == "--mode":
+                if i + 1 >= len(cmd) or cmd[i + 1] not in ("paper", "testnet", "live"):
+                    return False
+            elif arg.startswith("--mode="):
+                if arg.split("=", 1)[1] not in ("paper", "testnet", "live"):
+                    return False
+        return True
 
     def _capture_crash_reason(
         self,

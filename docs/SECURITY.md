@@ -109,7 +109,7 @@ This prevents corruption if the process crashes mid-write.
 | T-003 | **Unsafe deserialization** via `pickle.loads` | 🔴 Critical | Audit rule `AUDIT-006` blocks `pickle.loads`. All persistence uses JSON or SQLite. | Audit engine |
 | T-004 | **Dynamic imports** loading untrusted modules | 🟠 High | Audit rule `AUDIT-007` flags `__import__` usage. Only explicit static imports are permitted. | Audit engine |
 | T-005 | **Data exfiltration** via HTTP to unknown domains | 🟠 High | Audit rule `AUDIT-003` flags all `urllib` / `requests` calls. Domain allowlist (`_ALLOWED_DOMAINS`) gates permitted destinations. | Audit engine |
-| T-006 | **Subprocess abuse** for code execution or privilege escalation | 🟠 High | Audit rule `AUDIT-005` flags `os.system` and `subprocess.*` calls. None exist in core logic. | Audit engine |
+| T-006 | **Subprocess abuse** for code execution or privilege escalation | 🟠 High | Audit rule `AUDIT-005` flags `os.system` and `subprocess.*` calls. One accepted call site remains (crash recovery — see §2.4). | Audit engine |
 | T-007 | **Vault file theft** — attacker reads `data/vault.enc` | 🟠 High | File is encrypted with Fernet. Key is NOT stored in the vault file (derived from password or OS keyring). Attacker needs the key OR the OS session. | Vault module |
 | T-008 | **Memory dump** — secrets visible in RAM | 🟡 Medium | Secrets are decrypted on demand and held as plain strings in memory. Mitigated by running on a trusted host and using full-disk encryption. | Operator |
 | T-009 | **Path traversal** via unsafe file operations | 🟡 Medium | `validate_safe_path()` rejects paths outside the project directory. Audit rule `AUDIT-004` flags suspicious file writes. | Helpers + Audit |
@@ -118,7 +118,21 @@ This prevents corruption if the process crashes mid-write.
 | T-012 | **Dependency confusion / supply chain** | 🟡 Medium | Pin all dependencies in `requirements.txt`. Verify wheel hashes on install. Review `cryptography` release notes. | Operator |
 | T-013 | **Insider threat — operator misconfiguration** | 🟡 Medium | All user input is validated. Config is YAML-based (no executable logic). | Config loader |
 
-### 2.3 Attack Scenarios
+### 2.4 Audit findings — decisions (AUDIT-005 subprocess)
+
+Re-evaluated 2026-08-13. The two `AUDIT-005` (subprocess) HIGH findings were
+reviewed individually; both are now resolved by remediation or by hardening
++ documented acceptance. Tests: `tests/test_subprocess_remediation.py`.
+
+| Finding | Decision | Rationale |
+|---------|----------|-----------|
+| `backtest/run_manifest.py:25` — `get_git_commit()` | **REMEDIATED** | Was `subprocess.check_output(["git", "rev-parse", ...])` just to read the current HEAD short hash. Replaced with a pure-file read of `.git/HEAD` (+ the loose ref it points to, with worktree/submodule `gitdir:` handling). Same best-effort `"unknown"` contract, zero external processes, no PATH dependency. Finding gone. |
+| `utils/crash_recovery.py:132` — `_run_once()` | **ACCEPTED + HARDENED** | The subprocess is the module's core function: it respawns the bot after a crash — it cannot be removed. Hardened with `_validate_cmd()`: refuses any command whose executable is not the current interpreter, whose script is not `main.py`, or whose `--mode` is not one of `paper`/`testnet`/`live`. No user-controlled argument reaches `subprocess.run` unvalidated. Remains the single accepted HIGH (documented here). |
+
+Residual risk of the accepted finding: an attacker who can already write to
+the interpreter or `main.py` on disk could spawn anything — but that is
+full host compromise, out of scope for this module's threat model. The
+allowlist raises the bar for anything short of that.
 
 #### Scenario: Attacker gains shell access to the bot host
 

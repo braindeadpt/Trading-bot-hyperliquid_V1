@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import subprocess
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from src.core.signal_pipeline import GATE_PARITY_VERSION, GATE_ORDER, LIVE_ONLY_GATES
@@ -20,15 +20,34 @@ PRE_PARITY_SIZING_VERSIONS = frozenset({
 
 
 def get_git_commit() -> str:
-    """Best-effort current git HEAD (short hash)."""
+    """Best-effort current git HEAD (short hash), without subprocess.
+
+    Reads ``.git/HEAD`` directly (and the ref it points to). Handles both a
+    ``.git`` directory and a ``.git`` *file* (worktrees/submodules, where the
+    file contains ``gitdir: <path>``). Never raises — any read failure yields
+    ``"unknown"``. This replaced a ``git rev-parse`` subprocess call (the
+    original AUDIT-005 finding) with a pure-file read: no external process,
+    no PATH dependency, same best-effort contract.
+    """
     try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-        )
-        return out.strip() or "unknown"
+        git_dir = Path(".git")
+        if git_dir.is_file():
+            # Worktree / submodule: .git is a file pointing at the real gitdir.
+            marker = git_dir.read_text(encoding="utf-8", errors="replace").strip()
+            if marker.startswith("gitdir:"):
+                git_dir = Path(marker.split(":", 1)[1].strip())
+        head_file = git_dir / "HEAD"
+        if not head_file.exists():
+            return "unknown"
+        ref = head_file.read_text(encoding="utf-8", errors="replace").strip()
+        if ref.startswith("ref:"):
+            ref_path = git_dir / ref.split(":", 1)[1].strip()
+            if not ref_path.exists():
+                # Packed refs or detached ref — no loose file to read.
+                return "unknown"
+            ref = ref_path.read_text(encoding="utf-8", errors="replace").strip()
+        short = ref.strip()[:7]
+        return short or "unknown"
     except Exception:
         return "unknown"
 
