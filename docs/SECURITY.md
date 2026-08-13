@@ -204,6 +204,68 @@ Use this checklist before every production deployment.
   ```
 - [ ] Review GitHub / GitLab security advisories for `cryptography`, `pandas`, `numpy`, `websockets`.
 
+### 3.6 Feed Silence Contracts — Decision by Deployment
+
+The feed-silence watchdog raises a `degraded` flag when a feed goes silent
+past its threshold. Which feeds are actually **contracted** is decided per
+deployment by `feed_silence_contracts()` (`src/core/engine.py`), so
+`degraded` reflects only feeds that are expected to deliver in **this**
+deployment — never feeds that are disabled, blocked or absent here. A feed
+that cannot deliver must never be able to force a false `degraded` state
+(fstream outage lesson, 2026-06-29).
+
+#### 3.6.1 Contract rules
+
+| Feed | Contracted when | Opt-in mechanism | Default threshold |
+|---|---|---|---|
+| `binance_perp` | `strategy.lead_lag.enabled` OR `auto_enable` is true (testnet mode override turns it on) | config `strategy.lead_lag` | `binance_perp_max_sec` (1h) |
+| `liquidation_binance` | only when the operator opts in | `LIQUIDATION_BINANCE_CONTRACTED=true` in `.env` | `liquidation_binance_max_sec` (6h) |
+| `l2_book_recording` | `market_data.l2_recording.enabled` (default true) | config `market_data.l2_recording` | `l2_book_recording_max_sec` (2m) |
+| `liquidation_okx`, `liquidation_bybit`, `funding_cex`, `funding_hl`, `taker_split`, `liquidation_coinalyze_check` | **always** — hard contracts | n/a | 6h / 1h / 1h / 1h / 1h / 12h |
+
+#### 3.6.2 The opt-in mechanism (`liquidation_binance`)
+
+Binance's fstream `@forceOrder` channel is blocked on this network, so the
+feed cannot deliver here. Contracting it by default would make `degraded`
+permanently true. The operator opts the watchdog back in with an env var:
+
+```bash
+# .env (gitignored) — re-contract liquidation_binance for THIS deployment
+LIQUIDATION_BINANCE_CONTRACTED=true
+```
+
+Why `.env` and not `settings.yaml`:
+
+- `.env` is **gitignored** — the contract decision stays deployment-local and
+  never leaks into the repository.
+- The variable is deliberately **not** `BOT_`-prefixed, so the Fase 10
+  `config_hash` (frozen window) stays intact — the hash pins `settings.yaml`
+  only, and this opt-in is an operator-side switch, not a strategy change.
+- Accepted truthy values: `1`, `true`, `yes` (case-insensitive).
+
+#### 3.6.3 `binance_perp` and the LeadLag bridge
+
+`binance_perp` prices are published only while the LeadLag perp-price bridge
+runs (`strategy.lead_lag.enabled` / `auto_enable`; the testnet mode override
+enables it). Without the bridge the feed has no writer, so it is contracted
+**only** when the bridge is active. If you enable LeadLag in a deployment,
+the watchdog automatically starts watching `binance_perp` — no extra step.
+
+#### 3.6.4 What this means operationally
+
+- [ ] Before deploying, confirm which feeds deliver in the target
+      environment (network reachability, exchange channel availability).
+- [ ] If Binance fstream is reachable and `@forceOrder` is expected:
+      set `LIQUIDATION_BINANCE_CONTRACTED=true` in `.env` **before** start.
+- [ ] If LeadLag is enabled, verify `binance_perp` appears in the silence
+      contract (it will — automatically).
+- [ ] After start, check the dashboard `degraded` state reflects only
+      contracted feeds; an uncontracted feed must never light it up.
+- [ ] The mechanism is covered by tests
+      (`tests/test_feed_contamination_fixes.py`) — the contract function is
+      the single source of truth; the engine drops uncontracted feeds from
+      the monitor at construction.
+
 ---
 
 ## 4. Incident Response Guide
