@@ -205,6 +205,18 @@ class TestIvGateShadowTemplate:
         assert "verdict" in html
         assert 'id="ivshadow-coverage"' in html
 
+    def test_panel_renders_decision_rate_sparkline(self) -> None:
+        """The panel shows the decision-count-per-day sparkline (sample
+        accumulation rate) fed by decisions_per_day from the endpoint."""
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        assert 'id="ivshadow-rate-svg"' in html
+        assert 'id="ivshadow-rate-sum"' in html
+        assert "Decisões por dia" in html
+        assert "decisions_per_day" in html
+        assert "taxa de acumulação" in html
+
     def test_trades_table_has_iv_columns(self) -> None:
         html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
             encoding="utf-8"

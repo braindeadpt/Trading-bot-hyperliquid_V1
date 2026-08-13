@@ -1324,6 +1324,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 "join_coverage_pct": round(report["matched_decisions"] / n_dec * 100, 1),
                 "trade_coverage_pct": round(report["trades_with_decision"] / n_total * 100, 1),
                 "verdict": report["verdict"],
+                # Decision count per UTC day (last 14 days) — the sparkline
+                # shows the sample accumulation rate, not just the total.
+                "decisions_per_day": report.get("decisions_per_day", []),
                 "threshold": report["iv_high_pct"],
                 "target_closed": TARGET_CLOSED,
                 "backtest": BACKTEST_EVIDENCE,

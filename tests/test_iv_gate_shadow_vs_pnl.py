@@ -26,6 +26,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts import iv_gate_shadow_vs_pnl as pnl  # noqa: E402
+
 SCRIPT = ROOT / "scripts" / "iv_gate_shadow_vs_pnl.py"
 
 pytestmark = pytest.mark.unit
@@ -171,6 +174,42 @@ def test_unmatched_decision_reported_as_coverage_loss() -> None:
     r = _make([], n_low=1, with_unmatched_decision=True)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "decisões consumidas: 1/2" in r.stdout
+
+
+def test_decisions_per_day_returns_14_days_zero_filled() -> None:
+    """The per-day series spans exactly 14 days, oldest first, 0-filled for
+    empty days — the dashboard sparkline reads it as a rate, not a sparse set."""
+    from datetime import datetime, timezone
+
+    # Fix "now" at UTC midday — a day-boundary-fixed now (e.g. 00:00:05)
+    # would shift "yesterday minus 5s" into the day before.
+    now = int(datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    decisions = [
+        {"timestamp_ms": now - 1_000},                      # today
+        {"timestamp_ms": now - 86_400_000 - 5_000},        # yesterday
+        {"timestamp_ms": now - 13 * 86_400_000},           # 13 days ago
+        {"timestamp_ms": now - 20 * 86_400_000},           # outside window
+    ]
+    rows = pnl.decisions_per_day(decisions, now_ms=now)
+    assert len(rows) == 14
+    assert rows[0]["date"] <= rows[-1]["date"]
+    assert rows[-1]["n"] == 1  # today
+    assert rows[-2]["n"] == 1  # yesterday
+    assert rows[0]["n"] == 1   # 13 days ago (oldest in window)
+    assert sum(r["n"] for r in rows) == 3  # the outside-window one excluded
+    assert all(r["n"] == 0 for r in rows[1:-2])  # middle days zero-filled
+
+
+def test_report_carries_decisions_per_day() -> None:
+    """build_report exposes the per-day series for the dashboard panel."""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        live, research = _make_dbs(tmp, n_high=2, n_low=1)
+        report = pnl.build_report(live_db=live, research_db=research)
+        assert "decisions_per_day" in report
+        assert isinstance(report["decisions_per_day"], list)
+        assert len(report["decisions_per_day"]) == 14
+        # The 3 synthetic decisions all land on the same (today) bucket.
+        assert report["decisions_per_day"][-1]["n"] == 3
 
 
 def test_nearest_decision_within_tolerance_wins() -> None:

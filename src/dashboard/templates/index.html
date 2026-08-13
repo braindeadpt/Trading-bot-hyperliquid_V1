@@ -664,6 +664,13 @@ tr:hover td { background: var(--panel-hover); }
                         <tr><td colspan="9" class="muted">Waiting...</td></tr>
                     </tbody>
                 </table>
+                <div id="ivshadow-rate" style="margin-top:10px;">
+                    <div class="dim" style="font-size:10px;margin-bottom:3px;">
+                        <b>Decisões por dia</b> — taxa de acumulação da amostra (últimas 2 semanas)
+                        <span class="dim" id="ivshadow-rate-sum"></span>
+                    </div>
+                    <div id="ivshadow-rate-svg"></div>
+                </div>
                 <div id="ivshadow-coverage" class="dim" style="font-size:10px;margin-top:8px;"></div>
             </div>
         </div>
@@ -1626,6 +1633,31 @@ function renderIvGateShadow(payload) {
     const fill = document.getElementById("ivshadow-bar-fill");
     fill.style.width = pct.toFixed(0) + "%";
     fill.style.background = pct >= 100 ? "var(--up)" : (pct >= 60 ? "var(--yellow, #d29922)" : "var(--accent, #4a9eff)");
+    // Decision-count-per-day sparkline (sample accumulation rate, 14d).
+    const rateSvg = document.getElementById("ivshadow-rate-svg");
+    const rateSum = document.getElementById("ivshadow-rate-sum");
+    const perDay = (payload.decisions_per_day || []).map(d => ({ date: d.date, n: Number(d.n) || 0 }));
+    if (rateSvg && perDay.length) {
+        const maxN = Math.max.apply(null, perDay.map(d => d.n).concat([1]));
+        const lastN = perDay[perDay.length - 1].n;
+        const total14 = perDay.reduce((a, d) => a + d.n, 0);
+        const bw = Math.max(2, Math.floor(520 / perDay.length) - 2);
+        const bars = perDay.map(d => {
+            const h = Math.max(1, Math.round((d.n / maxN) * 34));
+            const color = d.n === 0 ? "var(--border)" : "var(--accent, #4a9eff)";
+            const title = d.date + ": " + d.n + " decisões";
+            return '<div title="' + title + '" style="display:inline-block;width:' + bw + 'px;height:38px;margin-right:2px;vertical-align:bottom;">' +
+                '<div style="height:' + h + 'px;background:' + color + ';border-radius:2px 2px 0 0;"></div>' +
+                '<div style="font-size:8px;color:var(--dim);text-align:center;">' + (d.n > 0 ? d.n : "") + '</div>' +
+                '</div>';
+        }).join("");
+        rateSvg.innerHTML = bars;
+        if (rateSum) {
+            rateSum.textContent = " · total 14d: " + total14 + " · hoje: " + lastN;
+        }
+    } else if (rateSvg) {
+        rateSvg.innerHTML = '<span class="muted">—</span>';
+    }
     const cov = document.getElementById("ivshadow-coverage");
     const jc = payload.join_coverage_pct == null ? null : Number(payload.join_coverage_pct);
     const tc = payload.trade_coverage_pct == null ? null : Number(payload.trade_coverage_pct);

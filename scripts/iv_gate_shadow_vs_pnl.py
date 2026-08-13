@@ -26,6 +26,7 @@ import argparse
 import json
 import sqlite3
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -212,6 +213,38 @@ def join_decisions_to_trades(
     return trades, matched
 
 
+def decisions_per_day(
+    decisions: List[Dict[str, Any]],
+    *,
+    days: int = 14,
+    now_ms: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Decision count per UTC day over the last ``days`` days.
+
+    Returns ascending ``[{date, n}]`` rows — every day present (0-filled),
+    oldest first. The dashboard sparkline reads this to show the sample
+    ACCUMULATION RATE: a flat/declining tail means the router stopped
+    routing (wiring problem), a growing one means the sample is filling.
+    """
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    # ``days`` entries: the oldest is (days-1) UTC days back, the newest is
+    # today — a window anchored at now, not shifted a full day into the past.
+    start_ms = now - (days - 1) * 86_400_000
+    counts: Dict[str, int] = {}
+    for d in decisions:
+        ts = int(d.get("timestamp_ms") or 0)
+        if ts < start_ms or ts > now:
+            continue
+        day = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+        counts[day] = counts.get(day, 0) + 1
+    rows: List[Dict[str, Any]] = []
+    for i in range(days):
+        day = datetime.fromtimestamp((start_ms + i * 86_400_000) / 1000.0, tz=timezone.utc)
+        key = day.strftime("%Y-%m-%d")
+        rows.append({"date": key, "n": counts.get(key, 0)})
+    return rows
+
+
 def slice_stats(trades: List[Dict[str, Any]], iv_class: str) -> Dict[str, Any]:
     sl = [t for t in trades if t["iv_class"] == iv_class]
     closed = [t for t in sl if t["status"] == "closed" and t["pnl_usd"] is not None]
@@ -340,6 +373,7 @@ def build_report(
         "verdict": v,
         "backtest_evidence": BACKTEST_EVIDENCE,
         "iv_high_pct": IV_HIGH_PCT,
+        "decisions_per_day": decisions_per_day(decisions),
     }
 
 
