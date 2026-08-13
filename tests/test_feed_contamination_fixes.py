@@ -290,3 +290,67 @@ def test_feed_silence_early_warning_never_seen_uses_uptime(
     assert len(warns) == 1
     assert "never produced" in warns[0]
     assert mon.snapshot()["funding_hl"]["degraded"] is False  # not degraded yet
+
+
+def test_feed_silence_warn_fraction_constructor_override() -> None:
+    """warn_fraction set at construction moves the early-warning threshold.
+
+    Default 0.5 fires early at 50% of threshold; a constructor override of
+    0.2 fires at 20% (earlier, more conservative).
+    """
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+        warn_fraction=0.2,
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    mon.beat("liquidation_okx", timestamp_ms=1_000_000)
+
+    # 10% of 1h — below the 20% override: no warning
+    assert mon.check_early_warnings(now_ms=1_000_000 + int(0.1 * 3600_000)) == []
+    # 30% of 1h — past 20%: early warning fires
+    warns = mon.check_early_warnings(now_ms=1_000_000 + int(0.3 * 3600_000))
+    assert len(warns) == 1
+    assert "FEED QUIET (early)" in warns[0]
+    assert "20%" in warns[0]
+
+
+def test_feed_silence_warn_fraction_default_still_50() -> None:
+    """Default construction keeps the 50% threshold (message reflects it)."""
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    mon.beat("liquidation_okx", timestamp_ms=1_000_000)
+    warns = mon.check_early_warnings(now_ms=1_000_000 + int(0.5 * 3600_000))
+    assert len(warns) == 1
+    assert "50%" in warns[0]
+
+
+def test_feed_silence_warn_fraction_env_wiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine reads FEED_SILENCE_WARN_FRACTION and clamps it into (0,1)."""
+    from src.core.engine import feed_silence_warn_fraction
+
+    assert feed_silence_warn_fraction() == 0.5  # no env
+
+    monkeypatch.setenv("FEED_SILENCE_WARN_FRACTION", "0.7")
+    assert feed_silence_warn_fraction() == 0.7
+
+    monkeypatch.setenv("FEED_SILENCE_WARN_FRACTION", "0.01")  # below floor
+    assert feed_silence_warn_fraction() == 0.05
+
+    monkeypatch.setenv("FEED_SILENCE_WARN_FRACTION", "0.99")  # above imminent
+    assert feed_silence_warn_fraction() == 0.95
+
+    monkeypatch.setenv("FEED_SILENCE_WARN_FRACTION", "not-a-float")
+    assert feed_silence_warn_fraction() == 0.5
+
+    monkeypatch.delenv("FEED_SILENCE_WARN_FRACTION", raising=False)
+    assert feed_silence_warn_fraction() == 0.5

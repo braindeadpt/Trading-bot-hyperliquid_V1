@@ -107,6 +107,32 @@ _FUNDING_COOLDOWN_STRATEGIES = frozenset({
 })
 
 
+def feed_silence_warn_fraction() -> float:
+    """Early-warning threshold as a fraction of max_silence (default 0.5).
+
+    Configurable via ``FEED_SILENCE_WARN_FRACTION`` in ``.env`` — NOT
+    ``BOT_``-prefixed, so it never enters the Fase-10 ``config_hash``
+    (same contract as ``LIQUIDATION_BINANCE_CONTRACTED``). Clamped to
+    (0.05, 0.95) so it stays below the 90% imminent level.
+    """
+    raw = os.environ.get("FEED_SILENCE_WARN_FRACTION", "").strip()
+    if not raw:
+        return 0.5
+    try:
+        frac = float(raw)
+    except ValueError:
+        logger.warning(
+            "FEED_SILENCE_WARN_FRACTION=%r not a float — using 0.5", raw
+        )
+        return 0.5
+    if not (0.0 < frac < 1.0):
+        logger.warning(
+            "FEED_SILENCE_WARN_FRACTION=%s out of (0,1) — using 0.5", frac
+        )
+        return 0.5
+    return max(0.05, min(0.95, frac))
+
+
 def feed_silence_contracts(config: Config) -> Dict[str, float]:
     """Decide which feeds the silence watchdog contracts for this deployment.
 
@@ -520,6 +546,7 @@ class TradingEngine:
                 _silence_cfg.get("alert_cooldown_sec", 3600)
             ),
             feeds=_silence_feeds if _silence_enabled else {},
+            warn_fraction=feed_silence_warn_fraction(),
         )
         self._feed_silence_enabled = _silence_enabled
         if not _silence_enabled:

@@ -278,6 +278,28 @@ Why `.env` and not `config/settings.yaml`:
 the LeadLag perp-price bridge runs (`strategy.lead_lag.enabled` /
 `auto_enable`; the testnet mode override turns it on).
 
+### Tuning the early-warning threshold
+
+The watchdog fires a `FEED QUIET (early)` warning when a feed's silence
+crosses **50%** of its threshold (fire-once per episode, reset on beat),
+then `FEED QUIET (imminent)` at **90%** before degrading at 100%. The
+early-warning level is operator-configurable via env — e.g. to alert
+earlier (30%) on a critical deployment:
+
+```bash
+# .env (gitignored) — early-warning at 30% of the silence threshold
+FEED_SILENCE_WARN_FRACTION=0.3
+```
+
+- Accepted: any float in `(0, 1)`; values below `0.05` clamp to `0.05` and
+  above `0.95` clamp to `0.95` (so it can never sit at/above the 90%
+  imminent level). Unparseable values fall back to `0.5` with a warning.
+- Like `LIQUIDATION_BINANCE_CONTRACTED`, the variable is deliberately
+  **not** `BOT_`-prefixed — it is an operator-side switch read at startup,
+  never enters `settings.yaml`, and therefore never moves the Fase 10
+  `config_hash`. It is a monitoring sensitivity knob, not a strategy
+  parameter.
+
 **Verify after start:** `GET /api/market_data_health` returns
 `feed_silence` (per-feed age + `degraded`) and `feed_silence_degraded`.
 An uncontracted feed must never appear in the snapshot, and

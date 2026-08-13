@@ -220,6 +220,7 @@ class FeedSilenceMonitor:
         *,
         alert_cooldown_sec: float = 3600.0,
         feeds: Optional[Dict[str, float]] = None,
+        warn_fraction: float = 0.5,
     ) -> None:
         # feed_name -> max silence seconds
         defaults = {
@@ -240,6 +241,7 @@ class FeedSilenceMonitor:
             for name, max_sec in cfg.items()
         }
         self._alert_cooldown_sec = float(alert_cooldown_sec)
+        self._warn_fraction = float(warn_fraction)
         self._enabled_feeds: set[str] = set(cfg.keys())
         # time.monotonic() is since an arbitrary epoch (often system boot on
         # Windows), NOT process start. Never-seen silence must use age since
@@ -310,18 +312,21 @@ class FeedSilenceMonitor:
     def check_early_warnings(
         self,
         now_ms: Optional[int] = None,
-        warn_fraction: float = 0.5,
+        warn_fraction: Optional[float] = None,
         imminent_fraction: float = 0.9,
     ) -> List[str]:
         """Return fire-once early/imminent warning messages before degrading.
 
         Two escalation levels, each firing once per silence episode and reset
         on ``beat()``: ``early`` when age crosses ``warn_fraction`` (default
-        50%) of ``max_silence_sec``, and ``imminent`` when it crosses
-        ``imminent_fraction`` (default 90%) — the last checkpoint before the
-        feed trips ``degraded`` at 100%. Already-degraded feeds are skipped
-        (``check()`` owns those alerts).
+        ``self._warn_fraction`` — 50%, configurable via
+        ``FEED_SILENCE_WARN_FRACTION``) of ``max_silence_sec``, and
+        ``imminent`` when it crosses ``imminent_fraction`` (default 90%) —
+        the last checkpoint before the feed trips ``degraded`` at 100%.
+        Already-degraded feeds are skipped (``check()`` owns those alerts).
         """
+        if warn_fraction is None:
+            warn_fraction = self._warn_fraction
         now = now_ms if now_ms is not None else int(time.time() * 1000)
         mono = time.monotonic()
         uptime_sec = mono - self._started_mono
