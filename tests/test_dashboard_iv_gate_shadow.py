@@ -118,6 +118,31 @@ class TestIvGateShadowEndpoint:
         assert d["n_decisions"] == 5
         assert d["matched"] == 5
 
+    def test_pnl_fields_per_class(self) -> None:
+        """The endpoint exposes the accumulated PnL of each IV slice — the
+        live-vs-backtest evidence the gate will be decided on."""
+        d = self._get().get_json()
+        hi = d["by_class"]["high_iv"]
+        lo = d["by_class"]["low_iv"]
+        assert hi["net_pnl_usd"] is not None
+        assert lo["net_pnl_usd"] is not None
+        assert 0 <= hi["win_rate"] <= 1
+        assert hi["avg_pnl_usd"] is not None
+        assert hi["median_pnl_usd"] is not None
+        assert hi["best_usd"] is not None
+        assert hi["worst_usd"] is not None
+        # All 5 matched trades are closed in this fixture — every slice PnL is
+        # a real number, and the high/low sum covers exactly the 5 matched.
+        assert hi["n_closed"] == 2
+        assert lo["n_closed"] == 3
+        # Join coverage: 5/5 decisions matched, 5/6 trades carry a class.
+        assert d["join_coverage_pct"] == pytest.approx(100.0)
+        assert d["trade_coverage_pct"] == pytest.approx(100.0 * 5 / 6, abs=0.1)
+        assert d["verdict"]["status"] in (
+            "INCONCLUSIVE", "CONSISTENTE", "CONSISTENTE (parcial)",
+            "CONTRADIZ", "EMPATE",
+        )
+
     def test_gate_progress_fields(self) -> None:
         d = self._get().get_json()
         # closed with decision = 2 high + 3 low = 5, target 30
@@ -165,6 +190,20 @@ class TestIvGateShadowTemplate:
         assert "function renderIvGateShadow" in html
         assert '"/api/iv_gate_shadow"' in html
         assert "renderIvGateShadow(d)" in html
+
+    def test_panel_shows_pnl_and_join_coverage(self) -> None:
+        """The panel renders the accumulated PnL columns (Net PnL / WR / Avg)
+        and the join-coverage bars (decisões matched / trades com decisão)."""
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        assert "Net PnL" in html
+        assert "WR" in html
+        assert "Cobertura do join" in html
+        assert "join_coverage_pct" in html
+        assert "trade_coverage_pct" in html
+        assert "verdict" in html
+        assert 'id="ivshadow-coverage"' in html
 
     def test_trades_table_has_iv_columns(self) -> None:
         html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(

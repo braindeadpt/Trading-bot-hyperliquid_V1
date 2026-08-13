@@ -655,10 +655,13 @@ tr:hover td { background: var(--panel-hover); }
                             <th>open</th>
                             <th>% amostra</th>
                             <th>avg pct</th>
+                            <th title="Accumulated PnL of closed trades in this IV class">Net PnL</th>
+                            <th title="Win rate of closed trades in this IV class">WR</th>
+                            <th title="Average PnL per closed trade">Avg</th>
                         </tr>
                     </thead>
                     <tbody id="ivshadow-tbody">
-                        <tr><td colspan="6" class="muted">Waiting...</td></tr>
+                        <tr><td colspan="9" class="muted">Waiting...</td></tr>
                     </tbody>
                 </table>
                 <div id="ivshadow-coverage" class="dim" style="font-size:10px;margin-top:8px;"></div>
@@ -1578,10 +1581,17 @@ function renderIvGateShadow(payload) {
     const labels = { high_iv: "high_iv", low_iv: "low_iv", unknown: "unknown (sem decisão)" };
     const colors = { high_iv: "var(--up)", low_iv: "var(--down)", unknown: "var(--muted)" };
     const rowsHtml = order.map(cls => {
-        const s = rows[cls] || { n: 0, n_closed: 0, n_open: 0, n_pct: 0, avg_pct: null };
+        const s = rows[cls] || { n: 0, n_closed: 0, n_open: 0, n_pct: 0, avg_pct: null, net_pnl_usd: null, win_rate: null, avg_pnl_usd: null };
         const pctShare = total > 0 ? (s.n / total * 100) : 0;
         const avgPct = s.avg_pct == null ? "—" : s.avg_pct.toFixed(1) + "%";
         const nPctNote = s.n_pct ? ' <span class="dim" style="font-size:9px;">(' + s.n_pct + " com pct)</span>" : "";
+        const net = s.net_pnl_usd == null ? "—" :
+            '<span class="' + (s.net_pnl_usd >= 0 ? "up" : "down") + '">' +
+            (s.net_pnl_usd >= 0 ? "+" : "") + s.net_pnl_usd.toFixed(2) + '</span>';
+        const wr = s.win_rate == null ? "—" : (s.win_rate * 100).toFixed(0) + "%";
+        const avg = s.avg_pnl_usd == null ? "—" :
+            '<span class="' + (s.avg_pnl_usd >= 0 ? "up" : "down") + '">' +
+            (s.avg_pnl_usd >= 0 ? "+" : "") + s.avg_pnl_usd.toFixed(2) + '</span>';
         return '<tr>' +
             '<td style="color:' + (colors[cls] || "") + ';font-weight:600;">' + (labels[cls] || cls) + '</td>' +
             '<td>' + s.n + '</td>' +
@@ -1589,6 +1599,9 @@ function renderIvGateShadow(payload) {
             '<td>' + s.n_open + '</td>' +
             '<td>' + pctShare.toFixed(0) + '%</td>' +
             '<td>' + avgPct + nPctNote + '</td>' +
+            '<td class="num">' + net + '</td>' +
+            '<td class="num">' + wr + '</td>' +
+            '<td class="num">' + avg + '</td>' +
             '</tr>';
     }).join("");
     tbody.innerHTML = rowsHtml;
@@ -1602,10 +1615,24 @@ function renderIvGateShadow(payload) {
     fill.style.width = pct.toFixed(0) + "%";
     fill.style.background = pct >= 100 ? "var(--up)" : (pct >= 60 ? "var(--yellow, #d29922)" : "var(--accent, #4a9eff)");
     const cov = document.getElementById("ivshadow-coverage");
-    cov.innerHTML = "decisões registadas: " + (payload.n_decisions || 0) +
-        " · matched a trades: " + (payload.matched || 0) +
+    const jc = payload.join_coverage_pct == null ? null : Number(payload.join_coverage_pct);
+    const tc = payload.trade_coverage_pct == null ? null : Number(payload.trade_coverage_pct);
+    const covBar = (label, pct, color) => pct == null ? "" :
+        '<div style="display:flex;align-items:center;gap:6px;margin:2px 0;">' +
+        '<span style="min-width:150px;">' + label + '</span>' +
+        '<div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden;">' +
+        '<div style="width:' + Math.max(0, Math.min(100, pct)).toFixed(0) + '%;height:100%;background:' + color + ';"></div></div>' +
+        '<span style="min-width:44px;text-align:right;">' + pct.toFixed(1) + '%</span></div>';
+    cov.innerHTML =
+        '<div style="margin-bottom:4px;"><b>Cobertura do join</b> — decisões→trades (wiring, não edge):</div>' +
+        covBar("decisões matched a trades", jc, jc >= 90 ? "var(--up)" : jc >= 60 ? "var(--warn, #d29922)" : "var(--down)") +
+        covBar("trades com decisão IV", tc, tc >= 90 ? "var(--up)" : tc >= 60 ? "var(--warn, #d29922)" : "var(--down)") +
+        '<div style="margin-top:4px;">decisões: ' + (payload.n_decisions || 0) +
+        " · matched: " + (payload.matched || 0) +
         " · trades com decisão: " + withDec + " / " + (payload.total || 0) +
-        " · backtest referência: " + (payload.backtest ? "+" + payload.backtest.net_high_iv_only_usd + " USD (n=" + payload.backtest.n + ")" : "—");
+        (payload.verdict && payload.verdict.status ? " · veredito: <b>" + payload.verdict.status + "</b>" : "") +
+        " · backtest ref: " + (payload.backtest ? "+" + payload.backtest.net_high_iv_only_usd + " USD (n=" + payload.backtest.n + ")" : "—") +
+        '</div>';
 }
 
 // ── Signals ──

@@ -1301,13 +1301,29 @@ def create_app(config: Dict[str, Any]) -> tuple:
                     "n_open": s["n_open"],
                     "n_pct": s.get("n_pct", 0),
                     "avg_pct": s.get("avg_pct"),
+                    # Accumulated PnL of closed trades in the slice — the
+                    # live-vs-backtest evidence the gate will be decided on.
+                    "net_pnl_usd": s.get("net_pnl_usd"),
+                    "win_rate": s.get("win_rate"),
+                    "avg_pnl_usd": s.get("avg_pnl_usd"),
+                    "median_pnl_usd": s.get("median_pnl_usd"),
+                    "best_usd": s.get("best_usd"),
+                    "worst_usd": s.get("worst_usd"),
                 }
+            n_dec = max(1, report["n_decisions"])
+            n_total = max(1, report["n_trades"])
             return jsonify({
                 "by_class": by_class,
                 "total": report["n_trades"],
                 "n_decisions": report["n_decisions"],
                 "matched": report["matched_decisions"],
                 "trades_with_decision": report["trades_with_decision"],
+                # Join coverage — how much of the decision stream matched an
+                # executed trade, and how much of the trade stream carries an
+                # IV class. A gap here is a wiring problem, not an edge signal.
+                "join_coverage_pct": round(report["matched_decisions"] / n_dec * 100, 1),
+                "trade_coverage_pct": round(report["trades_with_decision"] / n_total * 100, 1),
+                "verdict": report["verdict"],
                 "threshold": report["iv_high_pct"],
                 "target_closed": TARGET_CLOSED,
                 "backtest": BACKTEST_EVIDENCE,
