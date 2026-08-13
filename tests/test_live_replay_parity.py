@@ -149,6 +149,53 @@ def test_config_parity_mode_default_true() -> None:
     assert gate._parity_mode is True
 
 
+def test_sparse_funding_rejects_all_entries_fresh_funding_passes() -> None:
+    """Root cause of the VB 05-24..06-25 gap: sparse funding (2.9 rows/day)
+    is always stale vs the 5-min freshness contract, so every signal is
+    rejected with replay_funding_stale; dense funding passes.
+
+    Reproduces the exact mechanism found in the gap trace (63/64 VB signals
+    blocked) so the contract is pinned without needing the historical DB.
+    """
+    audit = SymbolReplayAudit(
+        symbol="BTC",
+        coverage_pct=1.0,
+        max_gap_ms=60_000,
+        bar_count=1000,
+        expected_bars=1000,
+        funding_available=True,
+        oi_available=False,
+    )
+    gate = ReplayDataQualityGate(
+        min_coverage_pct=0.95,
+        max_bar_gap_ms=120_000,
+        max_funding_stale_ms=300_000,  # production value (settings.yaml)
+        require_funding=True,
+        require_oi=False,
+    )
+    # Sparse funding: last funding point 8h before the entry -> stale -> reject.
+    stale_ts = 1_700_000_000_000
+    funding_8h_ago = stale_ts - 8 * 3_600_000
+    reason = gate.check_entry(
+        "BTC", _event(stale_ts), audit=audit, last_bar_ts=stale_ts - 60_000,
+        funding_ts_at=funding_8h_ago, oi_ts_at=None,
+    )
+    assert reason is not None
+    assert reason.startswith("replay_funding_stale")
+
+    # Dense funding: last point 60s ago -> fresh -> passes.
+    assert gate.check_entry(
+        "BTC", _event(stale_ts), audit=audit, last_bar_ts=stale_ts - 60_000,
+        funding_ts_at=stale_ts - 60_000, oi_ts_at=None,
+    ) is None
+
+    # No funding series at all -> no_series variant.
+    assert gate.check_entry(
+        "BTC", _event(stale_ts), audit=audit, last_bar_ts=stale_ts - 60_000,
+        funding_ts_at=None, oi_ts_at=None,
+    ) == "replay_funding_stale:no_series"
+
+
 @pytest.mark.skipif(
     not (ROOT / "data" / "live" / "bot.db").exists()
     and not (ROOT / "data" / "live" / "bot_ruleset_validate.db").exists(),
