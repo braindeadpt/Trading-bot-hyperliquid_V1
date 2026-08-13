@@ -14,6 +14,10 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List
 
+from scripts.iv_gate_shadow_recheck import (
+    TARGET_CLOSED as IV_TARGET_CLOSED,
+    iv_decision_count,
+)
 from scripts.liquidation_flush_recheck import (
     TARGET_DAYS as FLUSH_TARGET_DAYS,
 )
@@ -72,12 +76,33 @@ def _flush_watchdog() -> Dict[str, Any]:
     }
 
 
+def _iv_gate_watchdog() -> Dict[str, Any]:
+    n_closed, n_high, n_low = iv_decision_count()
+    state = load_shared_state()["iv_gate_shadow"]
+    runs = state.get("runs") or []
+    return {
+        "id": "iv_gate_shadow",
+        "label": "IV gate shadow recheck",
+        "script": "scripts/research_watchdog_supervisor.py",
+        "metric_label": "closed trades com decisão IV",
+        "unit": "trades",
+        "current": n_closed,
+        "target": IV_TARGET_CLOSED,
+        "progress_pct": _progress_pct(n_closed, IV_TARGET_CLOSED),
+        "samples": n_high + n_low,
+        "triggered": bool(state.get("triggered")),
+        "last_run": runs[-1] if runs else None,
+        "report_path": "docs/IV_GATE_SHADOW_RECHECK_RESULT.md",
+    }
+
+
 def build_research_watchdogs_payload() -> Dict[str, Any]:
-    """Assemble the read-only watchdog status (bias + flush)."""
+    """Assemble the read-only watchdog status (bias + flush + iv gate)."""
     watchdogs: List[Dict[str, Any]] = []
     builders = [
         ("top_trader_bias", _bias_watchdog),
         ("liquidation_flush", _flush_watchdog),
+        ("iv_gate_shadow", _iv_gate_watchdog),
     ]
     for wd_id, builder in builders:
         try:

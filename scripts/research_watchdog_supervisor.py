@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Research watchdog supervisor — one process, one shared state, two gates.
+"""Research watchdog supervisor — one process, one shared state, three gates.
 
-Unifies the two auto-rerun evidence gates that previously ran as separate
+Unifies the three auto-rerun evidence gates that previously ran as separate
 ``nohup`` processes:
 
   * **Top-trader bias screening** re-runs
@@ -10,8 +10,11 @@ Unifies the two auto-rerun evidence gates that previously ran as separate
     bootstrap gate is structurally unreachable below that).
   * **Liquidation flush recheck** re-runs ``scripts/liquidation_flush_shadow.py``
     once the real okx/bybit feed spans ≥30 days.
+  * **IV gate shadow recheck** re-runs the high_iv vs low_iv comparison
+    (``scripts/iv_gate_shadow_recheck.py``) once ≥30 closed executed trades
+    carry an IV decision, and decides shadow vs enforcement (threshold 66.7).
 
-Both are **read-only evidence gates**: they run probes and write decision
+All three are **read-only evidence gates**: they run probes and write decision
 reports; nothing here trades or touches the OMS.
 
 State is held in ONE gitignored file (``data/research/research_watchdogs_state.json``)
@@ -49,7 +52,7 @@ STATE_PATH = STATE_DIR / "research_watchdogs_state.json"
 
 CHECK_HOURS = 6.0
 
-WATCHDOG_IDS = ("top_trader_bias", "liquidation_flush")
+WATCHDOG_IDS = ("top_trader_bias", "liquidation_flush", "iv_gate_shadow")
 
 # ── helpers reused from the per-gate scripts (single source of truth) ──
 from scripts.top_trader_bias_recheck import (  # noqa: E402
@@ -69,6 +72,14 @@ from scripts.liquidation_flush_recheck import (  # noqa: E402
     verdict as flush_verdict,
     write_report as write_flush_report,
 )
+from scripts.iv_gate_shadow_recheck import (  # noqa: E402
+    REPORT_PATH as IV_REPORT_PATH,
+    TARGET_CLOSED as IV_TARGET_CLOSED,
+    iv_decision_count,
+    run_comparison as run_iv_comparison,
+    verdict as iv_verdict,
+    write_report as write_iv_report,
+)
 
 # Legacy per-watchdog state files (migration source on first run).
 LEGACY_STATE_PATHS: Dict[str, Path] = {
@@ -86,6 +97,7 @@ def fresh_state() -> Dict[str, Dict[str, Any]]:
     return {
         "top_trader_bias": {"triggered": False, "runs": []},
         "liquidation_flush": {"triggered": False, "runs": []},
+        "iv_gate_shadow": {"triggered": False, "runs": []},
     }
 
 
@@ -244,11 +256,61 @@ def check_flush(
     return True
 
 
-def check_all(shared: Dict[str, Dict[str, Any]], *, force: bool = False) -> Tuple[bool, bool]:
-    """Run both gates once. Returns (bias_ran, flush_ran)."""
+# ── IV gate shadow gate ───────────────────────────────────────────────
+
+def check_iv_gate(
+    shared: Dict[str, Dict[str, Any]],
+    *,
+    force: bool = False,
+) -> bool:
+    """Re-run the IV comparison when ≥30 closed trades carry an IV decision.
+
+    Decides shadow vs enforcement (threshold 66.7) via the recheck verdict.
+    """
+    sub = shared["iv_gate_shadow"]
+    if sub.get("triggered") and not force:
+        n_closed, _h, _l = iv_decision_count()
+        log(f"iv: watch-only — already triggered ({n_closed} closed com decisão IV)")
+        return False
+    n_closed, n_high, n_low = iv_decision_count()
+    log(f"iv: {n_closed}/{IV_TARGET_CLOSED} closed com decisão IV "
+        f"(high_iv={n_high}, low_iv={n_low})")
+    if not force and n_closed < IV_TARGET_CLOSED:
+        log(f"iv: abaixo de {IV_TARGET_CLOSED} closed — a saltar "
+            f"({n_closed / IV_TARGET_CLOSED * 100:.0f}%)")
+        return False
+
+    report = run_iv_comparison()
+    if report is None:
+        log("iv: recheck abortado — sem relatório de comparação")
+        return False
+    v = iv_verdict(report)
+    write_iv_report(report, v, n_closed, n_high, n_low)
+    run = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "n_closed": n_closed,
+        "n_high_closed": n_high,
+        "n_low_closed": n_low,
+        "verdict": v["status"],
+        "detail": v["detail"],
+        "report_path": str(IV_REPORT_PATH),
+    }
+    sub["runs"].append(run)
+    if not force:
+        sub["triggered"] = True
+    save_shared_state(shared)
+    log(f"iv: gate completo (n={n_closed}, high={n_high}, low={n_low}) -> {run['verdict']}")
+    return True
+
+
+def check_all(
+    shared: Dict[str, Dict[str, Any]], *, force: bool = False
+) -> Tuple[bool, bool, bool]:
+    """Run all three gates once. Returns (bias_ran, flush_ran, iv_ran)."""
     bias_ran = check_bias(shared, force=force)
     flush_ran = check_flush(shared, force=force)
-    return bias_ran, flush_ran
+    iv_ran = check_iv_gate(shared, force=force)
+    return bias_ran, flush_ran, iv_ran
 
 
 def main() -> int:
@@ -263,6 +325,7 @@ def main() -> int:
 
     log("=== research watchdog supervisor "
         f"(bias >= {BIAS_TARGET_DATES} datas, flush >= {FLUSH_TARGET_DAYS}d real, "
+        f"iv >= {IV_TARGET_CLOSED} closed com decisão, "
         f"check a cada {args.hours:.0f}h) ===")
     shared = load_shared_state()
     # Always persist the canonical shared file (fresh or migrated) so the

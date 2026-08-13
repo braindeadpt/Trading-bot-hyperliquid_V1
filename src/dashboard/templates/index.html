@@ -561,12 +561,13 @@ tr:hover td { background: var(--panel-hover); }
         <div class="panel">
             <div class="panel-header">
                 Auto re-run gates
-                <span class="dim" id="wd-meta">bias ≥20 datas · flush ≥30 dias</span>
+                <span class="dim" id="wd-meta">bias ≥20 datas · flush ≥30 dias · IV ≥30 trades</span>
             </div>
             <div class="panel-body" style="padding:6px 8px;">
                 <div id="wd-help" class="muted" style="font-size:10px;line-height:1.4;margin-bottom:8px;">
                     Background watchdogs re-run research probes once enough out-of-sample data accumulates
-                    (bias screening ≥20 datas, liquidation flush ≥30 dias). Evidence gates only — nothing here trades.
+                    (bias screening ≥20 datas, liquidation flush ≥30 dias, IV gate shadow ≥30 trades com decisão).
+                    Evidence gates only — nothing here trades.
                 </div>
                 <table style="width:100%; font-size:11px; border-collapse:collapse;">
                     <thead>
@@ -1327,7 +1328,8 @@ function renderResearchWatchdogs(payload) {
         const last = w.last_run
             ? (String(w.last_run.ts || "").slice(0, 16).replace("T", " ") + " · " + (w.last_run.verdict || ""))
             : "—";
-        const unit = w.unit === "datas" ? " datas" : " dias";
+        const unit = w.unit === "datas" ? " datas"
+            : (w.unit === "trades" ? " trades" : " dias");
         const samples = w.samples != null ? " · " + w.samples + " amostras" : "";
         return '<tr style="border-top:1px solid var(--border);">' +
             '<td class="highlight" title="' + (w.script || "") + '">' + (w.label || "") +

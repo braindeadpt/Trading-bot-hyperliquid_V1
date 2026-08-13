@@ -74,10 +74,7 @@ class TestSharedState:
 
 
 def _shared_with_flush_state() -> Dict[str, Any]:
-    return {
-        "top_trader_bias": {"triggered": False, "runs": []},
-        "liquidation_flush": {"triggered": False, "runs": []},
-    }
+    return sup.fresh_state()
 
 
 class TestBiasGate:
@@ -173,5 +170,86 @@ class TestFlushGate:
 
             assert sup.check_flush(shared, force=False) is False
             assert len(shared["liquidation_flush"]["runs"]) == 1
+        finally:
+            sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
+
+
+class TestIvGateGate:
+    def test_skips_below_target_closed(self, monkeypatch, tmp_path):
+        shared = sup.fresh_state()
+        sup.STATE_PATH = tmp_path / "state.json"
+        try:
+            monkeypatch.setattr(sup, "iv_decision_count", lambda: (10, 4, 6))
+            assert sup.check_iv_gate(shared, force=False) is False
+            assert shared["iv_gate_shadow"]["triggered"] is False
+            assert shared["iv_gate_shadow"]["runs"] == []
+        finally:
+            sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
+
+    def test_fires_at_target_and_is_idempotent(self, monkeypatch, tmp_path):
+        shared = sup.fresh_state()
+        sup.STATE_PATH = tmp_path / "state.json"
+        try:
+            monkeypatch.setattr(sup, "iv_decision_count", lambda: (30, 20, 10))
+            report = {
+                "slices": {
+                    "high_iv": {"n": 20, "n_closed": 20, "n_open": 0,
+                                 "net_pnl_usd": 50.0, "win_rate": 0.6,
+                                 "avg_pnl_usd": 2.5, "median_pnl_usd": 1.0,
+                                 "best_usd": 10.0, "worst_usd": -2.0},
+                    "low_iv": {"n": 10, "n_closed": 10, "n_open": 0,
+                                "net_pnl_usd": -30.0, "win_rate": 0.2,
+                                "avg_pnl_usd": -3.0, "median_pnl_usd": -1.0,
+                                "best_usd": 1.0, "worst_usd": -8.0},
+                    "unknown": {"n": 0, "n_closed": 0, "n_open": 0,
+                                 "net_pnl_usd": 0.0, "win_rate": None,
+                                 "avg_pnl_usd": None, "median_pnl_usd": None,
+                                 "best_usd": None, "worst_usd": None},
+                },
+            }
+            monkeypatch.setattr(sup, "run_iv_comparison", lambda: report)
+            monkeypatch.setattr(sup, "write_iv_report", lambda *a, **k: None)
+
+            assert sup.check_iv_gate(shared, force=False) is True
+            assert shared["iv_gate_shadow"]["triggered"] is True
+            run = shared["iv_gate_shadow"]["runs"][-1]
+            assert run["verdict"] == "PROMOTE"
+            assert run["n_closed"] == 30
+            assert run["n_high_closed"] == 20
+            assert run["n_low_closed"] == 10
+
+            # second call: watch-only, no re-fire
+            assert sup.check_iv_gate(shared, force=False) is False
+            assert len(shared["iv_gate_shadow"]["runs"]) == 1
+        finally:
+            sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
+
+    def test_reject_keeps_shadow(self, monkeypatch, tmp_path):
+        """high_iv not positive => REJECT: never silently enforce."""
+        shared = sup.fresh_state()
+        sup.STATE_PATH = tmp_path / "state.json"
+        try:
+            monkeypatch.setattr(sup, "iv_decision_count", lambda: (40, 20, 20))
+            report = {
+                "slices": {
+                    "high_iv": {"n": 20, "n_closed": 20, "n_open": 0,
+                                 "net_pnl_usd": -10.0, "win_rate": 0.2,
+                                 "avg_pnl_usd": -0.5, "median_pnl_usd": -1.0,
+                                 "best_usd": 5.0, "worst_usd": -8.0},
+                    "low_iv": {"n": 20, "n_closed": 20, "n_open": 0,
+                                "net_pnl_usd": 10.0, "win_rate": 0.6,
+                                "avg_pnl_usd": 0.5, "median_pnl_usd": 1.0,
+                                "best_usd": 8.0, "worst_usd": -2.0},
+                    "unknown": {"n": 0, "n_closed": 0, "n_open": 0,
+                                 "net_pnl_usd": 0.0, "win_rate": None,
+                                 "avg_pnl_usd": None, "median_pnl_usd": None,
+                                 "best_usd": None, "worst_usd": None},
+                },
+            }
+            monkeypatch.setattr(sup, "run_iv_comparison", lambda: report)
+            monkeypatch.setattr(sup, "write_iv_report", lambda *a, **k: None)
+
+            assert sup.check_iv_gate(shared, force=False) is True
+            assert shared["iv_gate_shadow"]["runs"][-1]["verdict"] == "REJECT"
         finally:
             sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")

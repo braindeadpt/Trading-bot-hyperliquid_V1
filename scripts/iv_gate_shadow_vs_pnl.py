@@ -67,11 +67,18 @@ def _load_config() -> Dict[str, Any]:
         return {}
 
 
-def _resolve_dbs(args: argparse.Namespace) -> Tuple[Path, Path]:
+def resolve_db_paths(
+    live_db: Optional[str] = None, research_db: Optional[str] = None
+) -> Tuple[Path, Path]:
+    """Resolve the live/research DB paths (CLI override → config → default)."""
     cfg = _load_config()
-    live = args.live_db or cfg.get("database.path", str(DEFAULT_LIVE_DB))
-    research = args.research_db or str(ResearchDatabase.resolve_path(cfg))
+    live = live_db or cfg.get("database.path", str(DEFAULT_LIVE_DB))
+    research = research_db or str(ResearchDatabase.resolve_path(cfg))
     return Path(live), Path(research)
+
+
+def _resolve_dbs(args: argparse.Namespace) -> Tuple[Path, Path]:
+    return resolve_db_paths(args.live_db, args.research_db)
 
 
 def load_shadow_decisions(db_path: Path) -> List[Dict[str, Any]]:
@@ -277,6 +284,53 @@ def _row(cls: str, s: Dict[str, Any]) -> str:
     )
 
 
+def build_report(
+    *,
+    live_db: Optional[str] = None,
+    research_db: Optional[str] = None,
+    tolerance_ms: int = 60_000,
+    min_n: int = MIN_N_GATE,
+) -> Dict[str, Any]:
+    """Compute the full IV shadow vs PnL report (pure, reusable).
+
+    Returns the report dict that ``main()`` persists/prints. Used by the
+    recheck watchdog (``scripts/iv_gate_shadow_recheck.py``) so the join and
+    slices live in exactly one place.
+    """
+    live, research = resolve_db_paths(live_db, research_db)
+    decisions = load_shadow_decisions(research)
+    trades = load_trades(live)
+    min_n = max(1, min_n)
+
+    if not trades:
+        return {"error": "no_trades", "live_db": str(live), "research_db": str(research)}
+
+    joined, matched = join_decisions_to_trades(decisions, trades, tolerance_ms)
+    with_dec = sum(1 for t in joined if t["iv_class"] != "unknown")
+    hi = slice_stats(joined, "high_iv")
+    lo = slice_stats(joined, "low_iv")
+    unk = slice_stats(joined, "unknown")
+    v = verdict(hi, lo)
+    return {
+        "generated": datetime.now(timezone.utc).isoformat(),
+        "live_db": str(live),
+        "research_db": str(research),
+        "tolerance_ms": tolerance_ms,
+        "min_n_gate": min_n,
+        "n_decisions": len(decisions),
+        "n_trades": len(trades),
+        "matched_decisions": matched,
+        "trades_with_decision": with_dec,
+        "slices": {"high_iv": hi, "low_iv": lo, "unknown": unk},
+        "per_strategy": {
+            cls: by_strategy(joined, cls) for cls in ("high_iv", "low_iv", "unknown")
+        },
+        "verdict": v,
+        "backtest_evidence": BACKTEST_EVIDENCE,
+        "iv_high_pct": IV_HIGH_PCT,
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--live-db", help="live bot DB (default: config database.path)")
@@ -287,44 +341,44 @@ def main() -> int:
                     help="closed-trade gate for the verdict (default 30)")
     ap.add_argument("--json", type=Path, help="write full report as JSON")
     args = ap.parse_args()
-    MIN_N = max(1, args.min_n)
 
     live, research = _resolve_dbs(args)
-    decisions = load_shadow_decisions(research)
-    trades = load_trades(live)
 
     print("=" * 80)
     print("  IV gate shadow vs executed PnL — high_iv vs low_iv em produção")
     print(f"  live DB:      {live}")
     print(f"  research DB:  {research}")
-    print(f"  decisões iv_gate_shadow: {len(decisions)} | trades: {len(trades)}")
     print("=" * 80)
 
-    if not trades:
+    report = build_report(live_db=args.live_db, research_db=args.research_db,
+                          tolerance_ms=args.tolerance_ms, min_n=args.min_n)
+    if report.get("error") == "no_trades":
         print("Sem trades no live DB — nada a comparar.")
         return 0
-    if not decisions:
+
+    decisions_n = report["n_decisions"]
+    trades_n = report["n_trades"]
+    matched = report["matched_decisions"]
+    with_dec = report["trades_with_decision"]
+    joined_n = trades_n
+    print(f"  decisões iv_gate_shadow: {decisions_n} | trades: {trades_n}")
+    if not decisions_n:
         print(
             "Sem decisões iv_gate_shadow (DVOL ainda não wired no router, ou "
             "feed desligado). O slice high/low_iv fica vazio — só cobertura unknown."
         )
 
-    joined, matched = join_decisions_to_trades(decisions, trades, args.tolerance_ms)
-
     # ── Coverage ──
-    with_dec = sum(1 for t in joined if t["iv_class"] != "unknown")
     print(f"\n[1] Cobertura do join (decisão → trade, tol {args.tolerance_ms}ms)")
-    print(f"    trades com decisão IV: {with_dec}/{len(joined)} | "
-          f"decisões consumidas: {matched}/{len(decisions)} | "
-          f"sem decisão (pré-DVOL/fora do shadow): {len(joined) - with_dec}")
+    print(f"    trades com decisão IV: {with_dec}/{joined_n} | "
+          f"decisões consumidas: {matched}/{decisions_n} | "
+          f"sem decisão (pré-DVOL/fora do shadow): {joined_n - with_dec}")
 
     # ── Slices ──
     print("\n[2] Slice high_iv vs low_iv (PnL realizado)")
     print("| classe | n | closed | open | WR | net | avg | mediana | best / worst |")
     print("|---|---|---|---|---|---|---|---|---|")
-    hi = slice_stats(joined, "high_iv")
-    lo = slice_stats(joined, "low_iv")
-    unk = slice_stats(joined, "unknown")
+    hi, lo, unk = (report["slices"][k] for k in ("high_iv", "low_iv", "unknown"))
     print(_row("high_iv", hi))
     print(_row("low_iv", lo))
     print(_row("unknown", unk))
@@ -333,7 +387,7 @@ def main() -> int:
     # ── Per strategy ──
     print("\n[3] Por estratégia")
     for cls in ("high_iv", "low_iv", "unknown"):
-        rows = by_strategy(joined, cls)
+        rows = report["per_strategy"][cls]
         if not any(s["n"] for s in rows.values()):
             continue
         print(f"  --- {cls} ---")
@@ -345,7 +399,7 @@ def main() -> int:
                   f"avg={fmt_money(s['avg_pnl_usd'])}")
 
     # ── Verdict ──
-    v = verdict(hi, lo)
+    v = report["verdict"]
     print("\n[4] Veredito")
     print(f"    {v['status']} — {v['detail']}")
     print(f"    Referência backtest: +{BACKTEST_EVIDENCE['net_high_iv_only_usd']:.2f} "
@@ -357,24 +411,6 @@ def main() -> int:
 
     # ── Persist ──
     if args.json:
-        report = {
-            "generated": datetime.now(timezone.utc).isoformat(),
-            "live_db": str(live),
-            "research_db": str(research),
-            "tolerance_ms": args.tolerance_ms,
-            "min_n_gate": MIN_N,
-            "n_decisions": len(decisions),
-            "n_trades": len(trades),
-            "matched_decisions": matched,
-            "trades_with_decision": with_dec,
-            "slices": {"high_iv": hi, "low_iv": lo, "unknown": unk},
-            "per_strategy": {
-                cls: by_strategy(joined, cls) for cls in ("high_iv", "low_iv", "unknown")
-            },
-            "verdict": v,
-            "backtest_evidence": BACKTEST_EVIDENCE,
-            "iv_high_pct": IV_HIGH_PCT,
-        }
         args.json.write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(f"\nJSON: {args.json}")
     return 0

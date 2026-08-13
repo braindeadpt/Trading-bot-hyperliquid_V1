@@ -1,7 +1,8 @@
 """Unit tests for src/research/research_watchdog_status.py.
 
-Verifies the dashboard payload shapes both watchdogs and keeps their
-thresholds consistent with the scripts they report on.
+Verifies the dashboard payload shapes all three watchdogs (bias, flush,
+IV gate shadow) and keeps their thresholds consistent with the scripts
+they report on.
 """
 
 import sys
@@ -29,12 +30,20 @@ def _stub_metrics(monkeypatch):
         lambda: (12.3, 10000),
     )
     monkeypatch.setattr(
+        wd, "iv_decision_count",
+        lambda: (7, 3, 4),
+    )
+    monkeypatch.setattr(
         wd, "load_shared_state",
         lambda: {
             "top_trader_bias": {"triggered": False, "runs": []},
             "liquidation_flush": {
                 "triggered": True,
                 "runs": [{"ts": "2026-08-13T00:00:00", "verdict": "INCONCLUSIVE — marginal"}],
+            },
+            "iv_gate_shadow": {
+                "triggered": False,
+                "runs": [{"ts": "2026-08-13T01:00:00", "verdict": "INCONCLUSIVE"}],
             },
         },
     )
@@ -44,10 +53,10 @@ def _by_id(payload):
     return {w.get("id"): w for w in payload["watchdogs"]}
 
 
-def test_two_watchdogs_present(_stub_metrics):
+def test_three_watchdogs_present(_stub_metrics):
     payload = wd.build_research_watchdogs_payload()
     by_id = _by_id(payload)
-    assert set(by_id) == {"top_trader_bias", "liquidation_flush"}
+    assert set(by_id) == {"top_trader_bias", "liquidation_flush", "iv_gate_shadow"}
     assert payload["generated_ms"] > 0
 
 
@@ -84,9 +93,24 @@ def test_progress_clamped_at_100(_stub_metrics, monkeypatch):
 def test_thresholds_match_scripts():
     from scripts.top_trader_bias_recheck import TARGET_DATES
     from scripts.liquidation_flush_recheck import TARGET_DAYS
+    from scripts.iv_gate_shadow_recheck import TARGET_CLOSED
 
     assert wd.BIAS_TARGET_DATES == TARGET_DATES == 20
     assert wd.FLUSH_TARGET_DAYS == TARGET_DAYS == 30
+    assert wd.IV_TARGET_CLOSED == TARGET_CLOSED == 30
+
+
+def test_iv_gate_progress_and_trigger(_stub_metrics):
+    by_id = _by_id(wd.build_research_watchdogs_payload())
+    iv = by_id["iv_gate_shadow"]
+    assert iv["current"] == 7
+    assert iv["target"] == 30
+    assert iv["progress_pct"] == pytest.approx(23.3, abs=0.1)
+    assert iv["samples"] == 7  # n_high + n_low
+    assert iv["triggered"] is False
+    assert iv["last_run"]["verdict"] == "INCONCLUSIVE"
+    assert iv["unit"] == "trades"
+    assert iv["report_path"] == "docs/IV_GATE_SHADOW_RECHECK_RESULT.md"
 
 
 def test_broken_builder_is_isolated(_stub_metrics, monkeypatch):
@@ -118,8 +142,8 @@ class TestResearchWatchdogsEndpoint:
     def teardown_method(self):
         self._web._engine = self._orig_engine
 
-    def test_endpoint_returns_both_watchdog_ids(self):
+    def test_endpoint_returns_all_watchdog_ids(self):
         r = self.client.get("/api/research_watchdogs")
         assert r.status_code == 200
         ids = {w.get("id") for w in r.get_json()["watchdogs"]}
-        assert ids == {"top_trader_bias", "liquidation_flush"}
+        assert ids == {"top_trader_bias", "liquidation_flush", "iv_gate_shadow"}
