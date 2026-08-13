@@ -60,6 +60,8 @@ class _FakeResult:
 def _stage_of(cmd) -> str:
     """Classify a gate subprocess command by its stage."""
     joined = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+    if "preflight_feed_check.py" in joined:
+        return "preflight"
     if "run_ci_tests.py" in joined:
         return "ci"
     if "security.audit" in joined:
@@ -165,6 +167,98 @@ def test_skip_flags_remove_stages(monkeypatch) -> None:
 
     assert gate.main() == 0
     assert calls == ["ci"], calls
+
+
+# ---------------------------------------------------------------------------
+# 2b. Optional preflight stage (--preflight)
+# ---------------------------------------------------------------------------
+
+def test_preflight_runs_before_ci_battery(monkeypatch, capsys) -> None:
+    """--preflight adds a stage 0 (preflight feed check) before the CI
+    battery; on rc 0 all four stages run in order and the gate passes."""
+    gate = _load_gate()
+    calls: list = []
+    cmds: list = []
+
+    def fake_run(cmd, **kwargs):
+        cmds.append(list(cmd) if isinstance(cmd, list) else [str(cmd)])
+        calls.append(_stage_of(cmd))
+        return _FakeResult(0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["run_pre_push_gate.py", "--preflight"])
+
+    assert gate.main() == 0
+
+    assert calls == ["preflight", "ci", "audit", "hash"], calls
+    # The preflight stage invokes the script itself, cwd = repo root (so the
+    # script's ROOT-relative default db/config resolve to the deployment).
+    assert "preflight_feed_check.py" in " ".join(cmds[0]), cmds[0]
+    out = capsys.readouterr().out
+    assert "[PASS] Preflight feed check PASSED" in out
+    assert "[PASS] PRE-PUSH GATE PASSED" in out
+
+
+def test_preflight_failure_blocks_before_ci(monkeypatch, capsys) -> None:
+    """A stale/missing contracted feed (preflight exit 1) blocks the gate
+    before the CI battery runs — fail fast on deployment problems."""
+    gate = _load_gate()
+    calls: list = []
+
+    def fake_run(cmd, **kwargs):
+        stage = _stage_of(cmd)
+        calls.append(stage)
+        return _FakeResult(1 if stage == "preflight" else 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["run_pre_push_gate.py", "--preflight"])
+
+    assert gate.main() == 1
+    assert calls == ["preflight"], calls
+    out = capsys.readouterr().out
+    assert "[FAIL] Preflight feed check FAILED" in out
+    assert "GATE BLOCKED" in out
+    assert "[PASS] PRE-PUSH GATE PASSED" not in out
+
+
+def test_preflight_warn_continues(monkeypatch, capsys) -> None:
+    """Preflight exit 2 (past the warn fraction, still delivering) warns and
+    continues — the remaining stages still run and the gate passes."""
+    gate = _load_gate()
+    calls: list = []
+
+    def fake_run(cmd, **kwargs):
+        stage = _stage_of(cmd)
+        calls.append(stage)
+        return _FakeResult(2 if stage == "preflight" else 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["run_pre_push_gate.py", "--preflight"])
+
+    assert gate.main() == 0
+    assert calls == ["preflight", "ci", "audit", "hash"], calls
+    out = capsys.readouterr().out
+    assert "[WARN] Preflight feed check WARN" in out
+    assert "[PASS] PRE-PUSH GATE PASSED" in out
+
+
+def test_no_preflight_flag_skips_stage(monkeypatch, capsys) -> None:
+    """Without --preflight the preflight stage never runs — the default gate
+    stays exactly three stages (CI, audit, hash)."""
+    gate = _load_gate()
+    calls: list = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(_stage_of(cmd))
+        return _FakeResult(0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["run_pre_push_gate.py"])
+
+    assert gate.main() == 0
+    assert calls == ["ci", "audit", "hash"], calls
+    out = capsys.readouterr().out
+    assert "Preflight feed check" not in out
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,13 @@
 One command to run before commit/push, combining the three validations that
 keep the repo green:
 
+  0. Preflight (optional, --preflight) - `scripts/preflight_feed_check.py`
+                    against the deployment state (contracted feeds + per-
+                    symbol candle freshness). Deployment concern, not code:
+                    a stale feed here blocks the gate before the CI battery
+                    spends minutes. Exit 1 blocks; exit 2 (past the warn
+                    fraction but still delivering) warns and continues — the
+                    same semantics as the boot-time integration in main.py.
   1. CI battery  - `scripts/run_ci_tests.py` (unit + integration_offline;
                     optionally --network / --testnet-live). Since
                     run_ci_tests.py itself runs the full trio (CI + audit +
@@ -26,7 +33,7 @@ a git pre-commit/pre-push hook:
 
 Exit codes:
   0  all stages passed
-  1  CI / audit / hash failed
+  1  CI / audit / hash failed (or preflight exit 1 — feed/candle stale)
   2  stage unreachable (broken import / missing manifest)
 """
 
@@ -100,7 +107,47 @@ def main() -> int:
         action="store_true",
         help="skip the config_hash vs frozen-manifest check (hash runs separately)",
     )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="also run scripts/preflight_feed_check.py against the deployment "
+             "state (contracted feeds + per-symbol candle freshness) before "
+             "the CI battery — validate feeds before a deploy commit. Exit 1 "
+             "blocks the gate; exit 2 (past the warn fraction, still "
+             "delivering) warns and continues.",
+    )
     args = parser.parse_args()
+
+    # Stage 0 (optional): preflight feed check against the deployment state.
+    # Deployment concern, not code — a stale contracted feed here should stop
+    # the gate before the CI battery spends minutes on code that is fine. Same
+    # exit-code semantics as the boot-time wiring in main.py: 1 blocks, 2
+    # (past the warn fraction but still delivering) warns and continues.
+    if args.preflight:
+        preflight_cmd = [
+            sys.executable,
+            str(ROOT / "scripts" / "preflight_feed_check.py"),
+        ]
+        print(f"\n{'=' * 70}\n>>> Preflight feed check (deployment feeds + candles)\n{'=' * 70}")
+        preflight_result = subprocess.run(
+            preflight_cmd, cwd=str(ROOT), check=False,
+        )
+        if preflight_result.returncode == 1:
+            print(
+                "\n[FAIL] Preflight feed check FAILED - GATE BLOCKED: a "
+                "contracted feed or candle is stale/missing. Fix the "
+                "deployment before commit/push (or drop --preflight for a "
+                "code-only gate)."
+            )
+            return 1
+        if preflight_result.returncode == 2:
+            print(
+                "\n[WARN] Preflight feed check WARN - a feed is past the warn "
+                "fraction of its silence threshold but still delivering; "
+                "continuing."
+            )
+        else:
+            print("\n[PASS] Preflight feed check PASSED")
 
     # Stage 1: CI battery. run_ci_tests.py itself runs the full trio (CI +
     # audit + hash); pass --skip-audit --skip-hash so this gate's own audit /

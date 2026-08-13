@@ -177,6 +177,7 @@ python scripts/run_pre_push_gate.py
 python scripts/run_pre_push_gate.py --fail-on-high   # audit fails on HIGH too
 python scripts/run_pre_push_gate.py --skip-audit     # CI battery only
 python scripts/run_pre_push_gate.py --skip-hash      # skip the config_hash check
+python scripts/run_pre_push_gate.py --preflight      # also validate deployment feeds (stage 0)
 
 # CI battery — also runs the same security audit + config_hash (the full trio)
 python scripts/run_ci_tests.py
@@ -296,6 +297,11 @@ coverage check against the target DB before reading the data. Use
 `--skip-preflight` (first deployment / fresh DB) or `--candles-only`
 (backtest-only) as needed.
 
+It is also available as an **optional stage of the pre-push gate**:
+`python scripts/run_pre_push_gate.py --preflight` validates the deployment
+feeds before the CI battery — a stale contracted feed blocks the push, a
+feed past the warn fraction (exit 2) warns and continues.
+
 ### Enabling `liquidation_binance` where fstream is accessible
 
 On this network Binance **fstream `@forceOrder` delivers 0 messages**, so
@@ -386,9 +392,15 @@ An uncontracted feed must never appear in the snapshot, and
 ## Pre-commit / pre-push gate
 
 `scripts/run_pre_push_gate.py` is the **single command to run before
-commit/push** — it runs three validations in order, stopping early with a
+commit/push** — it runs its validations in order, stopping early with a
 non-zero exit code if any fails:
 
+0. **Preflight (optional, `--preflight`)** — `scripts/preflight_feed_check.py`
+   against the **deployment state** (contracted feeds + per-symbol candle
+   freshness). A deployment concern, not code: a stale contracted feed blocks
+   the gate here, before the CI battery spends minutes. Exit 1 blocks; exit 2
+   (past the warn fraction but still delivering) warns and continues — the
+   same semantics as the boot-time wiring in `main.py` step 4b.
 1. **CI battery** — pytest `unit` + `integration_offline` (via
    `scripts/run_ci_tests.py`). Since `run_ci_tests.py` itself runs the full
    trio (CI + audit + hash), the gate passes `--skip-audit --skip-hash` so
@@ -411,6 +423,7 @@ Flags:
 
 | flag | effect |
 |------|--------|
+| `--preflight` | also run the deployment feed/candle check (stage 0, before CI); exit 1 blocks, exit 2 warns-and-continues |
 | `--network` / `--testnet-live` | also run those opt-in pytest suites (real endpoints) |
 | `--fail-on-high` | audit fails on HIGH findings too (default: CRITICAL only, matching `main.py --audit`) |
 | `--skip-audit` | run only the CI battery (audit + hash run separately) |
