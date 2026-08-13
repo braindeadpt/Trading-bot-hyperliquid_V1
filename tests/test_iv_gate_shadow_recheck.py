@@ -99,6 +99,47 @@ def test_iv_decision_count_zero_on_error(monkeypatch):
     assert rc.iv_decision_count() == (0, 0, 0)
 
 
+# ── projected decision (dashboard panel, before the trigger fires) ──
+
+def test_project_decision_promote_below_gate():
+    """The projection shows PROMOTE from the current slices even with n<30,
+    flagged provisional — the operator sees the direction forming."""
+    p = rc.project_decision(_slice(20, 50.0), _slice(5, -30.0))
+    assert p["status"] == "PROMOTE"
+    assert p["provisional"] is True
+    assert p["n_closed"] == 25
+    assert p["high_net_usd"] == 50.0
+    assert p["low_net_usd"] == -30.0
+    assert "enforcement" in p["detail"] and "66.7" in p["detail"]
+
+
+def test_project_decision_reject_below_gate():
+    p = rc.project_decision(_slice(10, -5.0), _slice(10, 9.0))
+    assert p["status"] == "REJECT"
+    assert p["provisional"] is True
+    assert p["n_closed"] == 20
+    assert "manter shadow" in p["detail"]
+
+
+def test_project_decision_na_without_closed_pnl():
+    """No closed PnL yet => N/A, never a false PROMOTE/REJECT."""
+    p = rc.project_decision({"n": 1, "n_closed": 0, "net_pnl_usd": None},
+                            {"n": 1, "n_closed": 0, "net_pnl_usd": None})
+    assert p["status"] == "N/A"
+    assert p["provisional"] is True
+    assert p["n_closed"] == 0
+
+
+def test_project_decision_matches_verdict_at_gate():
+    """At n>=30 the projection and the verdict agree — the panel and the
+    watchdog can never disagree about the direction."""
+    hi = _slice(20, 50.0)
+    lo = _slice(10, -30.0)
+    assert rc.project_decision(hi, lo)["status"] == rc.verdict(
+        _report(20, 50.0, 10, -30.0)
+    )["status"] == "PROMOTE"
+
+
 def test_state_roundtrip(tmp_path):
     p = tmp_path / "state.json"
     rc.STATE_PATH = p

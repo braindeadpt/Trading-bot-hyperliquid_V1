@@ -98,6 +98,16 @@ shared state file the supervisor writes, so the panel always reflects the
 live evidence position. A broken DB/state degrades that one row, never the
 whole panel.
 
+The IV gate row also shows the **projected decision** (`projected` in the
+payload, rendered under the Status column): the direction the current slices
+point to **before the n>=30 trigger fires** — `→ PROMOTE` or `→ REJECT` with
+the high/low net PnL, flagged `(proj)` while provisional (n<30). The
+projection reuses the exact same rule as the watchdog verdict
+(`project_decision` in `scripts/iv_gate_shadow_recheck.py`, minus the
+n-gate), so the panel and the watchdog can never disagree about the
+direction — the operator watches the decision form instead of waiting for
+the run.
+
 ## Tests
 
 * `tests/test_research_watchdog_supervisor.py` — shared-state round-trip,

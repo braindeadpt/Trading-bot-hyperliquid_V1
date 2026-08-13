@@ -139,6 +139,46 @@ def verdict(report: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def project_decision(hi: Dict[str, Any], lo: Dict[str, Any]) -> Dict[str, Any]:
+    """Project the shadow→enforcement decision from the CURRENT slices,
+    before the n>=30 trigger fires (dashboard panel).
+
+    Pure — the same rule as ``verdict()`` but WITHOUT the evidence gate:
+    whatever the direction the live sample points to today is shown as a
+    projection, flagged ``provisional`` when n < TARGET_CLOSED. Lets the
+    operator watch PROMOTE/REJECT form while the sample is still small,
+    instead of waiting for the watchdog run.
+    """
+    n_closed = (hi.get("n_closed") or 0) + (lo.get("n_closed") or 0)
+    hi_net = hi.get("net_pnl_usd")
+    lo_net = lo.get("net_pnl_usd")
+    if hi_net is None or lo_net is None:
+        direction = "N/A"
+        detail = "slices ainda sem PnL fechado."
+    elif hi_net > 0 and lo_net <= 0:
+        direction = "PROMOTE"
+        detail = (
+            f"high_iv {hi_net:+.2f} USD (n={hi.get('n_closed') or 0}) e low_iv "
+            f"{lo_net:+.2f} USD (n={lo.get('n_closed') or 0}) — aponta a "
+            f"enforcement (high_iv-only, threshold {IV_THRESHOLD})."
+        )
+    else:
+        direction = "REJECT"
+        detail = (
+            f"high_iv {hi_net:+.2f} USD (n={hi.get('n_closed') or 0}) e low_iv "
+            f"{lo_net:+.2f} USD (n={lo.get('n_closed') or 0}) — não confirma o "
+            f"backtest; manter shadow."
+        )
+    return {
+        "status": direction,
+        "provisional": n_closed < TARGET_CLOSED,
+        "n_closed": n_closed,
+        "high_net_usd": hi_net,
+        "low_net_usd": lo_net,
+        "detail": detail,
+    }
+
+
 def _fmt_money(v: Optional[float]) -> str:
     return f"{v:+.2f}" if v is not None else "—"
 

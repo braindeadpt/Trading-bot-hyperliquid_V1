@@ -16,7 +16,8 @@ from typing import Any, Dict, List
 
 from scripts.iv_gate_shadow_recheck import (
     TARGET_CLOSED as IV_TARGET_CLOSED,
-    iv_decision_count,
+    project_decision,
+    run_comparison as run_iv_comparison,
 )
 from scripts.liquidation_flush_recheck import (
     TARGET_DAYS as FLUSH_TARGET_DAYS,
@@ -77,9 +78,32 @@ def _flush_watchdog() -> Dict[str, Any]:
 
 
 def _iv_gate_watchdog() -> Dict[str, Any]:
-    n_closed, n_high, n_low = iv_decision_count()
+    """IV gate watchdog with the projected decision from the CURRENT slices.
+
+    One ``run_iv_comparison()`` call feeds both the progress counters and the
+    projection (PROMOTE/REJECT before the n>=30 trigger fires). A broken DB
+    degrades to zero counters + an N/A projection — never an error.
+    """
     state = load_shared_state()["iv_gate_shadow"]
     runs = state.get("runs") or []
+    report = run_iv_comparison()
+    if report is None or report.get("error"):
+        n_closed = n_high = n_low = 0
+        projected = {
+            "status": "N/A",
+            "provisional": True,
+            "n_closed": 0,
+            "high_net_usd": None,
+            "low_net_usd": None,
+            "detail": "sem relatório de comparação (DB em falta?).",
+        }
+    else:
+        hi = report["slices"]["high_iv"]
+        lo = report["slices"]["low_iv"]
+        n_high = hi["n_closed"] or 0
+        n_low = lo["n_closed"] or 0
+        n_closed = n_high + n_low
+        projected = project_decision(hi, lo)
     return {
         "id": "iv_gate_shadow",
         "label": "IV gate shadow recheck",
@@ -90,6 +114,7 @@ def _iv_gate_watchdog() -> Dict[str, Any]:
         "target": IV_TARGET_CLOSED,
         "progress_pct": _progress_pct(n_closed, IV_TARGET_CLOSED),
         "samples": n_high + n_low,
+        "projected": projected,
         "triggered": bool(state.get("triggered")),
         "last_run": runs[-1] if runs else None,
         "report_path": "docs/IV_GATE_SHADOW_RECHECK_RESULT.md",

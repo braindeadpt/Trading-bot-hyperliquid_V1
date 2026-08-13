@@ -30,8 +30,23 @@ def _stub_metrics(monkeypatch):
         lambda: (12.3, 10000),
     )
     monkeypatch.setattr(
-        wd, "iv_decision_count",
-        lambda: (7, 3, 4),
+        wd, "run_iv_comparison",
+        lambda: {
+            "slices": {
+                "high_iv": {"n": 3, "n_closed": 3, "n_open": 0,
+                             "net_pnl_usd": 12.0, "win_rate": 0.67,
+                             "avg_pnl_usd": 4.0, "median_pnl_usd": 3.0,
+                             "best_usd": 9.0, "worst_usd": 0.5},
+                "low_iv": {"n": 4, "n_closed": 4, "n_open": 0,
+                            "net_pnl_usd": -8.0, "win_rate": 0.25,
+                            "avg_pnl_usd": -2.0, "median_pnl_usd": -1.5,
+                            "best_usd": 2.0, "worst_usd": -7.0},
+                "unknown": {"n": 0, "n_closed": 0, "n_open": 0,
+                             "net_pnl_usd": 0.0, "win_rate": None,
+                             "avg_pnl_usd": None, "median_pnl_usd": None,
+                             "best_usd": None, "worst_usd": None},
+            },
+        },
     )
     monkeypatch.setattr(
         wd, "load_shared_state",
@@ -113,6 +128,59 @@ def test_iv_gate_progress_and_trigger(_stub_metrics):
     assert iv["report_path"] == "docs/IV_GATE_SHADOW_RECHECK_RESULT.md"
 
 
+def test_iv_gate_projected_decision_before_trigger(_stub_metrics):
+    """The panel projects PROMOTE/REJECT from the CURRENT slices before the
+    n>=30 trigger fires — high_iv +12.00 / low_iv -8.00 points to PROMOTE,
+    flagged provisional (n=7 < 30)."""
+    by_id = _by_id(wd.build_research_watchdogs_payload())
+    iv = by_id["iv_gate_shadow"]
+    proj = iv["projected"]
+    assert proj["status"] == "PROMOTE"
+    assert proj["provisional"] is True
+    assert proj["n_closed"] == 7
+    assert proj["high_net_usd"] == 12.0
+    assert proj["low_net_usd"] == -8.0
+    assert "high_iv" in proj["detail"] and "low_iv" in proj["detail"]
+
+
+def test_iv_gate_projected_reject(_stub_metrics, monkeypatch):
+    """Slices that do not confirm the backtest direction project REJECT."""
+    monkeypatch.setattr(
+        wd, "run_iv_comparison",
+        lambda: {
+            "slices": {
+                "high_iv": {"n": 10, "n_closed": 10, "n_open": 0,
+                             "net_pnl_usd": -5.0, "win_rate": 0.2,
+                             "avg_pnl_usd": -0.5, "median_pnl_usd": -1.0,
+                             "best_usd": 2.0, "worst_usd": -6.0},
+                "low_iv": {"n": 10, "n_closed": 10, "n_open": 0,
+                            "net_pnl_usd": 9.0, "win_rate": 0.6,
+                            "avg_pnl_usd": 0.9, "median_pnl_usd": 1.0,
+                            "best_usd": 4.0, "worst_usd": -1.0},
+                "unknown": {"n": 0, "n_closed": 0, "n_open": 0,
+                             "net_pnl_usd": 0.0, "win_rate": None,
+                             "avg_pnl_usd": None, "median_pnl_usd": None,
+                             "best_usd": None, "worst_usd": None},
+            },
+        },
+    )
+    by_id = _by_id(wd.build_research_watchdogs_payload())
+    proj = by_id["iv_gate_shadow"]["projected"]
+    assert proj["status"] == "REJECT"
+    assert proj["provisional"] is True
+    assert proj["n_closed"] == 20
+
+
+def test_iv_gate_projected_na_on_broken_db(_stub_metrics, monkeypatch):
+    """A broken comparison report degrades to an N/A projection, never an error."""
+    monkeypatch.setattr(wd, "run_iv_comparison", lambda: None)
+    by_id = _by_id(wd.build_research_watchdogs_payload())
+    iv = by_id["iv_gate_shadow"]
+    assert iv["projected"]["status"] == "N/A"
+    assert iv["current"] == 0
+    assert iv["progress_pct"] == 0.0
+
+
 def test_broken_builder_is_isolated(_stub_metrics, monkeypatch):
     def boom():
         raise RuntimeError("db down")
@@ -147,3 +215,20 @@ class TestResearchWatchdogsEndpoint:
         assert r.status_code == 200
         ids = {w.get("id") for w in r.get_json()["watchdogs"]}
         assert ids == {"top_trader_bias", "liquidation_flush", "iv_gate_shadow"}
+
+
+class TestResearchWatchdogsTemplate:
+    """The panel markup renders the projected IV decision."""
+
+    pytestmark = pytest.mark.unit
+
+    def test_panel_renders_projected_iv_decision(self) -> None:
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        assert "w.id === \"iv_gate_shadow\"" in html
+        assert "w.projected" in html
+        assert "pr.status === \"PROMOTE\"" in html
+        assert "→ " in html and "(proj)" in html
+        assert "high_net_usd" in html
+        assert "low_net_usd" in html

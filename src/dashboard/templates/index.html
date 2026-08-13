@@ -1383,6 +1383,18 @@ function renderResearchWatchdogs(payload) {
         let status = w.triggered
             ? (w.last_run && w.last_run.verdict ? w.last_run.verdict : "triggered")
             : (pct >= 100 ? "due — next check runs it" : "accumulating");
+        // Projected decision for the IV gate: the direction the current slices
+        // point to BEFORE the n>=30 trigger fires (provisional while small).
+        let projected = null;
+        if (w.id === "iv_gate_shadow" && w.projected && w.projected.status && w.projected.status !== "N/A") {
+            const pr = w.projected;
+            const prColor = pr.status === "PROMOTE" ? "var(--up)" : "var(--down)";
+            const prTxt = "→ " + pr.status + (pr.provisional ? " (proj)" : "");
+            const prTip = (pr.detail || "") + (pr.provisional ? " · n=" + pr.n_closed + " < 30 — projeção, não decisão." : "");
+            projected = '<div title="' + prTip.replace(/"/g, "&quot;") + '" style="font-size:10px;color:' + prColor + ';font-weight:600;">' + prTxt +
+                '<span class="dim" style="font-weight:400;"> · hi ' + (pr.high_net_usd == null ? "—" : (pr.high_net_usd >= 0 ? "+" : "") + pr.high_net_usd.toFixed(2)) +
+                ' / lo ' + (pr.low_net_usd == null ? "—" : (pr.low_net_usd >= 0 ? "+" : "") + pr.low_net_usd.toFixed(2)) + ' USD</span></div>';
+        }
         const last = w.last_run
             ? (String(w.last_run.ts || "").slice(0, 16).replace("T", " ") + " · " + (w.last_run.verdict || ""))
             : "—";
@@ -1395,7 +1407,7 @@ function renderResearchWatchdogs(payload) {
             '<td><div style="background:var(--border);height:8px;width:120px;border-radius:4px;display:inline-block;vertical-align:middle;">' +
                 '<div style="height:8px;width:' + pct + '%;background:' + barCol + ';border-radius:4px;"></div></div>' +
                 '<span class="dim" style="margin-left:6px;">' + pct.toFixed(0) + '%</span></td>' +
-            '<td>' + status + '</td>' +
+            '<td>' + status + (projected ? '<div>' + projected + '</div>' : '') + '</td>' +
             '<td class="muted" style="font-size:10px;">' + last + '</td></tr>';
     }).join("");
 }
