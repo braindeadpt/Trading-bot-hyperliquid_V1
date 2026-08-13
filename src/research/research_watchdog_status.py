@@ -1,17 +1,12 @@
 """Dashboard payload for the research watchdog auto-rerun gates.
 
-Two background watchdogs re-run research probes once enough out-of-sample
-data accumulates (they run as separate processes; see their scripts):
-
-  * top-trader bias screening  -> re-runs at ≥20 distinct UTC dates of
-    ``top_trader_bias_samples`` (scripts/top_trader_bias_recheck.py).
-  * liquidation flush recheck  -> re-runs at ≥30 days of real-feed span
-    (scripts/liquidation_flush_recheck.py).
-
-This module reads the live DBs + the (gitignored) state files the watchdogs
-write, and shapes them into a small read-only payload for the dashboard.
-It imports the watchdogs' pure metric/state helpers so the thresholds and
-queries stay single-source-of-truth.
+One supervisor process runs both evidence gates (bias screening + liquidation
+flush) and writes a SINGLE shared state file
+(``scripts/research_watchdog_supervisor.py`` ->
+``data/research/research_watchdogs_state.json``). This module reads the live
+DBs + that shared state and shapes them into a small read-only payload for
+the dashboard. It imports the supervisors'/scripts' pure metric helpers so
+the thresholds and queries stay single-source-of-truth.
 """
 
 from __future__ import annotations
@@ -22,19 +17,12 @@ from typing import Any, Dict, List
 from scripts.liquidation_flush_recheck import (
     TARGET_DAYS as FLUSH_TARGET_DAYS,
 )
-from scripts.liquidation_flush_recheck import (
-    load_state as load_flush_state,
-)
 from scripts.liquidation_flush_recheck import real_span_days
+from scripts.research_watchdog_supervisor import load_shared_state
 from scripts.top_trader_bias_recheck import (
     TARGET_DATES as BIAS_TARGET_DATES,
 )
-from scripts.top_trader_bias_recheck import (
-    bias_date_count,
-)
-from scripts.top_trader_bias_recheck import (
-    load_state as load_bias_state,
-)
+from scripts.top_trader_bias_recheck import bias_date_count
 
 
 def _progress_pct(current: float, target: int) -> float:
@@ -45,12 +33,12 @@ def _progress_pct(current: float, target: int) -> float:
 
 def _bias_watchdog() -> Dict[str, Any]:
     n_dates, n_samples, _mn, _mx = bias_date_count()
-    state = load_bias_state()
+    state = load_shared_state()["top_trader_bias"]
     runs = state.get("runs") or []
     return {
         "id": "top_trader_bias",
         "label": "Top-trader bias screening",
-        "script": "scripts/top_trader_bias_recheck.py",
+        "script": "scripts/research_watchdog_supervisor.py",
         "metric_label": "datas de bias cobertas",
         "unit": "datas",
         "current": n_dates,
@@ -66,12 +54,12 @@ def _bias_watchdog() -> Dict[str, Any]:
 
 def _flush_watchdog() -> Dict[str, Any]:
     span_days, n_events = real_span_days()
-    state = load_flush_state()
+    state = load_shared_state()["liquidation_flush"]
     runs = state.get("runs") or []
     return {
         "id": "liquidation_flush",
         "label": "Liquidation flush recheck",
-        "script": "scripts/liquidation_flush_recheck.py",
+        "script": "scripts/research_watchdog_supervisor.py",
         "metric_label": "dias do feed real (okx/bybit)",
         "unit": "dias",
         "current": round(span_days, 2),

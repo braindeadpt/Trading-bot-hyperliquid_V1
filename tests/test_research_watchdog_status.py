@@ -25,18 +25,17 @@ def _stub_metrics(monkeypatch):
         lambda: (15, 7000, 100, 200),
     )
     monkeypatch.setattr(
-        wd, "load_bias_state",
-        lambda: {"triggered": False, "runs": []},
-    )
-    monkeypatch.setattr(
         wd, "real_span_days",
         lambda: (12.3, 10000),
     )
     monkeypatch.setattr(
-        wd, "load_flush_state",
+        wd, "load_shared_state",
         lambda: {
-            "triggered": True,
-            "runs": [{"ts": "2026-08-13T00:00:00", "verdict": "INCONCLUSIVE — marginal"}],
+            "top_trader_bias": {"triggered": False, "runs": []},
+            "liquidation_flush": {
+                "triggered": True,
+                "runs": [{"ts": "2026-08-13T00:00:00", "verdict": "INCONCLUSIVE — marginal"}],
+            },
         },
     )
 
