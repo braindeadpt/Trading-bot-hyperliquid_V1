@@ -342,6 +342,19 @@ class TestIvGateShadowTemplate:
         assert "→ ${t.iv_class}" in html
         assert 'title="Funding paid: $${fund.toFixed(4)} · ${ivTip}"' in html
 
+    def test_trades_log_has_iv_class_filter(self) -> None:
+        """The trades log can isolate high_iv / low_iv / undecided rows."""
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        assert 'id="trades-iv-filter"' in html
+        assert 'value="high_iv"' in html
+        assert 'value="low_iv"' in html
+        assert 'value="unknown"' in html
+        assert 'onchange="setTradesIvFilter(this.value)"' in html
+        assert "_tradesIvFilter" in html
+        assert '(t.iv_class || "unknown") === _tradesIvFilter' in html
+
     def test_positions_table_has_iv_columns(self) -> None:
         """The open-positions panel shows the same IV columns (percentile +
         class) as the trades log."""

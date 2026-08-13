@@ -290,7 +290,17 @@ tr:hover td { background: var(--panel-hover); }
     </div>
     <div class="g-6">
         <div class="panel" style="max-height:180px;">
-            <div class="panel-header">Trade History <span class="dim">Last 50</span></div>
+            <div class="panel-header">Trade History <span class="dim">Last 50</span>
+                <span style="float:right;">
+                    <label class="dim tiny" for="trades-iv-filter">IV</label>
+                    <select id="trades-iv-filter" onchange="setTradesIvFilter(this.value)" style="font-size:11px;padding:1px 4px;background:var(--panel-bg);color:var(--text);border:1px solid var(--border);border-radius:3px;">
+                        <option value="all">all</option>
+                        <option value="high_iv">high_iv</option>
+                        <option value="low_iv">low_iv</option>
+                        <option value="unknown">sem decisão</option>
+                    </select>
+                </span>
+            </div>
             <div class="panel-body" style="padding:0;">
                 <div style="overflow:auto; max-height:156px;">
                     <table>
@@ -1835,13 +1845,28 @@ function ivBadge(cls) {
     return '<span style="color:' + color + ';font-weight:600;">' + cls.replace("_", " ") + '</span>';
 }
 
+let _tradesIvFilter = "all";
+let _tradesAll = [];
+
+function setTradesIvFilter(v) {
+    _tradesIvFilter = v;
+    renderTrades(_tradesAll);
+}
+
 function renderTrades(data) {
+    _tradesAll = data || [];
     const tbody = document.getElementById("trades-tbody");
-    if (!data || data.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="14" class="muted" style="text-align:center;">No trades yet</td></tr>';
+    const filtered = _tradesIvFilter === "all"
+        ? _tradesAll
+        : _tradesAll.filter(t => (t.iv_class || "unknown") === _tradesIvFilter);
+    if (filtered.length === 0) {
+        const empty = _tradesAll.length === 0
+            ? "No trades yet"
+            : `No ${_tradesIvFilter.replace("_", " ")} trades (${_tradesAll.length} total)`;
+        tbody.innerHTML = `<tr><td colspan="14" class="muted" style="text-align:center;">${empty}</td></tr>`;
         return;
     }
-    tbody.innerHTML = data.map(t => {
+    tbody.innerHTML = filtered.map(t => {
         const isOpen = t.status === "open";
         const pnl = typeof t.pnl_usd === "number" ? t.pnl_usd : 0;
         const pnlClass = isOpen ? "" : (pnl > 0 ? "up" : pnl < 0 ? "down" : "");
