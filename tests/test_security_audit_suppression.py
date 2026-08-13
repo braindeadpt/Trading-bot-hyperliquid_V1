@@ -157,3 +157,34 @@ def test_full_tree_audit_is_closed() -> None:
         f"found: {[(f.rule_id, str(f.file), f.line) for f in blocking]}"
     )
     assert any(f.rule_id == "AUDIT-005" for f in auditor.suppressed_findings)
+
+
+def test_allowlisted_files_pass_without_new_findings() -> None:
+    """The audit allowlist stays clean under the auditor.
+
+    The two allowlisted files are the whole AUDIT-005 decision:
+
+      * ``backtest/run_manifest.py`` — REMEDIATED: must contribute **zero**
+        findings and zero suppressed entries (no subprocess call anywhere).
+      * ``utils/crash_recovery.py`` — ACCEPTED + HARDENED: must contribute
+        zero findings and exactly **one** suppressed entry — the documented
+        ``AUDIT-005`` subprocess, nothing else.
+
+    A scoped run over exactly these two files is the focused regression
+    guard for the closure: a subprocess call creeping back into
+    run_manifest, or any rule firing in crash_recovery beyond the accepted
+    marker, turns CI red and forces an explicit decision.
+    """
+    auditor = SecurityAuditor(src_dir=ROOT / "src")
+    auditor.run(targets=[
+        ROOT / "src" / "backtest" / "run_manifest.py",
+        ROOT / "src" / "utils" / "crash_recovery.py",
+    ])
+    assert not auditor.findings, [
+        (f.rule_id, str(f.file), f.line) for f in auditor.findings
+    ]
+    # The only accepted finding in the allowlist is crash_recovery's
+    # documented subprocess — run_manifest contributes nothing at all.
+    assert [(f.rule_id, f.file) for f in auditor.suppressed_findings] == [
+        ("AUDIT-005", Path("utils") / "crash_recovery.py"),
+    ]
