@@ -57,8 +57,7 @@ def resolve_dashboard_auth(config: Dict[str, Any]) -> DashboardAuthConfig:
         token = secrets.token_urlsafe(24)
         logger.info(
             "Dashboard auth ON — ephemeral token generated (set BOT_DASHBOARD_TOKEN "
-            "or dashboard.password in config for persistence): %s",
-            token,
+            "or dashboard.password for a stable token). Token is NOT logged."
         )
     elif enabled and token:
         logger.info("Dashboard auth ON — token configured, paste at login prompt")

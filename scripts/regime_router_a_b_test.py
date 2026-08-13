@@ -28,7 +28,7 @@ import bisect
 import logging
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -150,47 +150,27 @@ def summarize(trades: List[Dict[str, Any]], label: str) -> Dict[str, Any]:
     }
 
 
-def main() -> None:
-    import argparse
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--start", default=START_ARG)
-    ap.add_argument("--end", default=END_ARG)
-    ap.add_argument("--symbols", default=",".join(SYMBOLS_ARG))
-    args = ap.parse_args()
-    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
-    cfg = load_config(str(ROOT / "config" / "settings.yaml"))
-    db = Database(cfg.get("database.path", "data/live/bot.db"))
-    s_ms, e_ms = ms(args.start), ms(args.end, True)
+STRATEGY_SPECS = [
+    ("VolatilityBreakout", VolatilityBreakout, "strategy.volatility_breakout", VB_ALLOWED_REGIMES),
+    ("VWAPDeviation", VWAPDeviation, "strategy.vwap_deviation", VWAP_ALLOWED_REGIMES),
+]
 
-    print("=" * 78)
-    print("  REGIME ROUTER A/B — with vs without (Phase-08, trade-level)")
-    print(f"  {args.start} -> {args.end} | symbols: {','.join(symbols)}")
-    print("=" * 78)
 
-    print("\n[0] Precomputing ADX(14) on 15m closed candles...")
-    t0 = time.time()
-    adx_series = precompute_adx(db, SYMBOLS, s_ms, e_ms)
-    print(f"    done in {time.time()-t0:.0f}s")
-
-    adx_range = float((cfg.get("strategy.phase08", {}) or {}).get("regime_router", {})
-                      .get("adx_range_threshold", cfg.get("strategy.adx_range_threshold", 20.0)))
-    adx_trend = float((cfg.get("strategy.phase08", {}) or {}).get("regime_router", {})
-                      .get("adx_trend_threshold", cfg.get("strategy.adx_trend_threshold", 25.0)))
-
+def analyze_window(
+    cfg: Any, db: Database, adx_series: Dict[str, List[Tuple[int, Optional[float]]]],
+    w_start: str, w_end: str, symbols: List[str], adx_range: float, adx_trend: float,
+) -> Dict[str, Any]:
+    """Run both raw backtests over one window and apply the router post-hoc."""
+    s_ms, e_ms = ms(w_start), ms(w_end, True)
     results: List[Dict[str, Any]] = []
     blocked_report: List[Dict[str, Any]] = []
     combined_kept: List[Dict[str, Any]] = []
     combined_all: List[Dict[str, Any]] = []
-
-    for name, cls, path, allowed in [
-        ("VolatilityBreakout", VolatilityBreakout, "strategy.volatility_breakout", VB_ALLOWED_REGIMES),
-        ("VWAPDeviation", VWAPDeviation, "strategy.vwap_deviation", VWAP_ALLOWED_REGIMES),
-    ]:
-        print(f"\n[{name}] running raw backtest...")
+    for name, cls, path, allowed in STRATEGY_SPECS:
+        print(f"\n  [{name}] raw backtest {w_start}..{w_end}...")
         t1 = time.time()
         trades = run_strategy(cfg, db, cls, path, s_ms, e_ms, symbols)
         print(f"    {len(trades)} trades in {time.time()-t1:.0f}s")
-
         kept, blocked = [], []
         for t in trades:
             adx = adx_at(adx_series.get(t["symbol"], []), int(t["entry_time"]))
@@ -198,56 +178,101 @@ def main() -> None:
                 adx, adx_range_threshold=adx_range, adx_trend_threshold=adx_trend
             )
             t["_regime"] = regime
-            t["_adx"] = adx
             if regime in allowed:
                 kept.append(t)
             else:
                 blocked.append(t)
-
-        no_router = summarize(trades, f"{name} (without router)")
-        with_router = summarize(kept, f"{name} (with router)")
-        results.append(no_router)
-        results.append(with_router)
+        results.append(summarize(trades, f"{name} without"))
+        results.append(summarize(kept, f"{name} with"))
+        results.append(summarize(blocked, f"{name} blocked"))
         combined_all.extend(trades)
         combined_kept.extend(kept)
-
         for b in blocked:
-            blocked_report.append({
-                "strategy": name, "symbol": b["symbol"], "side": b.get("side"),
-                "regime": b["_regime"], "adx": b["_adx"],
-                "pnl_usd": round(float(b.get("pnl_usd", 0.0)), 2),
-            })
+            blocked_report.append({"strategy": name, "regime": b["_regime"],
+                                   "pnl_usd": round(float(b.get("pnl_usd", 0.0)), 2)})
+    blocked_pnl = sum(b["pnl_usd"] for b in blocked_report)
+    return {
+        "window": f"{w_start}..{w_end}",
+        "combined_without": summarize(combined_all, "combined without"),
+        "combined_with": summarize(combined_kept, "combined with"),
+        "blocked_pnl": round(blocked_pnl, 2),
+        "per_strategy": results,
+        "blocked_by_regime": {},
+    }
 
-        print(f"    without router: {no_router}")
-        print(f"    with router:    {with_router}")
-        print(f"    BLOCKED:        {summarize(blocked, 'blocked')}")
+
+def split_windows(start: str, end: str, days: int) -> List[Tuple[str, str]]:
+    d0 = datetime.strptime(start, "%Y-%m-%d")
+    d1 = datetime.strptime(end, "%Y-%m-%d")
+    out: List[Tuple[str, str]] = []
+    cur = d0
+    while cur <= d1:
+        w_end = min(cur + timedelta(days=days - 1), d1)
+        out.append((cur.strftime("%Y-%m-%d"), w_end.strftime("%Y-%m-%d")))
+        cur = w_end + timedelta(days=1)
+    return out
+
+
+def main() -> None:
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--start", default=START_ARG)
+    ap.add_argument("--end", default=END_ARG)
+    ap.add_argument("--symbols", default=",".join(SYMBOLS_ARG))
+    ap.add_argument("--split-days", type=int, default=0,
+                    help="split [start,end] into non-overlapping N-day windows and A/B each")
+    args = ap.parse_args()
+    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    cfg = load_config(str(ROOT / "config" / "settings.yaml"))
+    db = Database(cfg.get("database.path", "data/live/bot.db"))
+
+    print("=" * 78)
+    print("  REGIME ROUTER A/B — with vs without (Phase-08, trade-level)")
+    print(f"  {args.start} -> {args.end} | symbols: {','.join(symbols)}"
+          + (f" | split: {args.split_days}d windows" if args.split_days else ""))
+    print("=" * 78)
+
+    s_ms, e_ms = ms(args.start), ms(args.end, True)
+    print("\n[0] Precomputing ADX(14) on 15m closed candles...")
+    t0 = time.time()
+    adx_series = precompute_adx(db, symbols, s_ms, e_ms)
+    print(f"    done in {time.time()-t0:.0f}s")
+    adx_range = float((cfg.get("strategy.phase08", {}) or {}).get("regime_router", {})
+                      .get("adx_range_threshold", cfg.get("strategy.adx_range_threshold", 20.0)))
+    adx_trend = float((cfg.get("strategy.phase08", {}) or {}).get("regime_router", {})
+                      .get("adx_trend_threshold", cfg.get("strategy.adx_trend_threshold", 25.0)))
+
+    if args.split_days:
+        windows = split_windows(args.start, args.end, args.split_days)
+    else:
+        windows = [(args.start, args.end)]
+
+    per_window: List[Dict[str, Any]] = []
+    for w_start, w_end in windows:
+        print("\n" + "=" * 78)
+        print(f"  JANELA {w_start} -> {w_end}")
+        print("=" * 78)
+        per_window.append(analyze_window(cfg, db, adx_series, w_start, w_end,
+                                         symbols, adx_range, adx_trend))
 
     print("\n" + "=" * 78)
-    print("  RESULTADO")
+    print("  SUMÁRIO — janelas independentes")
     print("=" * 78)
-    hdr = f"{'':28}{'n':>5}{'WR%':>7}{'PF':>7}{'E[x]':>8}{'net':>10}"
+    hdr = f"{'janela':24}{'sem':>10}{'com':>10}{'bloqueado':>10}{'poupa%':>8}"
     print(hdr)
-    for r in results:
-        print(f"{r['label']:28}{r['n']:>5}{r['win_rate']:>7}{r['profit_factor']:>7}"
-              f"{r['expectancy']:>8}{r['net_pnl']:>10}")
-
-    print("\n--- Combined (indicative) ---")
-    for r in (summarize(combined_all, "combined without"), summarize(combined_kept, "combined with")):
-        print(f"{r['label']:28}{r['n']:>5}{r['win_rate']:>7}{r['profit_factor']:>7}"
-              f"{r['expectancy']:>8}{r['net_pnl']:>10}")
-
-    print("\n--- Blocked trades by regime ---")
-    by_regime: Dict[str, List[Dict[str, Any]]] = {}
-    for b in blocked_report:
-        by_regime.setdefault(f"{b['regime']} | {b['strategy']}", []).append(b)
-    for key, rows in sorted(by_regime.items()):
-        pnl = sum(r["pnl_usd"] for r in rows)
-        wins = sum(1 for r in rows if r["pnl_usd"] > 0)
-        print(f"  {key:34} n={len(rows):>4}  wins={wins:>3}  pnl={pnl:>9.2f}")
-
-    blocked_pnl = sum(b["pnl_usd"] for b in blocked_report)
-    print(f"\n  TOTAL blocked PnL: {blocked_pnl:+.2f} USD  "
-          f"({'router SAVES money' if blocked_pnl < 0 else 'router DESTROYS money'})")
+    tot_without = tot_with = tot_blocked = 0.0
+    for w in per_window:
+        wo, wi = w["combined_without"], w["combined_with"]
+        tot_without += wo["net_pnl"]
+        tot_with += wi["net_pnl"]
+        tot_blocked += w["blocked_pnl"]
+        pct = (100.0 * w["blocked_pnl"] / wo["net_pnl"]) if wo["net_pnl"] else 0.0
+        print(f"{w['window']:24}{wo['net_pnl']:>10.2f}{wi['net_pnl']:>10.2f}"
+              f"{w['blocked_pnl']:>10.2f}{pct:>7.0f}%")
+    print(f"{'TOTAL':24}{tot_without:>10.2f}{tot_with:>10.2f}{tot_blocked:>10.2f}")
+    print(f"\n  Router poupa {tot_blocked:+.2f} USD no total "
+          f"({'CONFIRMADO' if tot_blocked < 0 else 'REJEITADO'}) — "
+          f"janelas independentes, sem sobreposição")
 
     db.close()
 

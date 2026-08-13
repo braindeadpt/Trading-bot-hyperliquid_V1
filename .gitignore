@@ -34,10 +34,11 @@ env/
 # Environment variables (secrets)
 .env
 
-# IDE
+# IDE / local agent tooling
 .vscode/
 .idea/
 .claude/
+.freebuff/
 *.swp
 *.swo
 
