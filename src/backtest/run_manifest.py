@@ -138,6 +138,20 @@ def build_run_manifest(
         manifest["gates"] = gate_manifest
     if data_contract_summary:
         manifest["data_contract"] = data_contract_summary
+        sf = data_contract_summary.get("strategy_fidelity")
+        if sf:
+            # Effective tier per strategy (tier + liquidation provenance), so
+            # every run manifest carries the per-strategy fidelity label even
+            # when the data_contract subtree is consumed separately.
+            manifest["strategy_fidelity"] = {
+                k: {
+                    "fidelity_tier": v.get("fidelity_tier"),
+                    "tier_a_eligible": v.get("tier_a_eligible"),
+                    "missing_feeds": list(v.get("missing_feeds") or []),
+                    "liquidation_provenance": v.get("liquidation_provenance"),
+                }
+                for k, v in sf.items()
+            }
     if extra:
         manifest.update(extra)
     return manifest

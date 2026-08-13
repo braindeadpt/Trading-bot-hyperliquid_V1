@@ -28,6 +28,7 @@ from src.backtest.mfe_mae import (
     strip_post_exit_from_trades,
 )
 from src.backtest.strategy_feed_requirements import (
+    RequiredFeeds,
     TIER_A_OHLC,
     TIER_A_CVD,
     TIER_B_MISSING,
@@ -206,6 +207,157 @@ def test_strategy_fidelity_ohlc_vs_cvd() -> None:
     assert not cvd.tier_a_eligible
     assert "taker_split" in cvd.missing_feeds
     assert cvd.tier == TIER_B_MISSING
+
+
+def _liq_avail(provenance: str) -> FeedAvailability:
+    return FeedAvailability(
+        symbol="BTC",
+        hl_candles=True,
+        hl_venue=True,
+        liquidation=True,
+        liquidation_provenance=provenance,
+        candle_coverage_pct=0.99,
+    )
+
+
+def test_liquidation_catcher_tier_a_with_real_provenance() -> None:
+    avail = _liq_avail("real")
+    fid = resolve_strategy_tier("LiquidationCatcher", avail)
+    assert fid.tier_a_eligible
+    assert fid.tier == TIER_A_OHLC
+    assert fid.liquidation_provenance == "real"
+    assert fid.missing_feeds == []
+
+
+def test_liquidation_catcher_tier_b_when_proxy_only() -> None:
+    """Liquidation rows exist but only as proxy synthesis — LiquidationCatcher
+    requires real provenance, so this must NOT be production-grade."""
+    from src.backtest.strategy_feed_requirements import TIER_B_LIQUIDATION_PROXY
+
+    avail = _liq_avail("proxy")
+    fid = resolve_strategy_tier("LiquidationCatcher", avail)
+    assert not fid.tier_a_eligible
+    assert fid.tier == TIER_B_LIQUIDATION_PROXY
+    assert fid.liquidation_provenance == "proxy"
+    assert "liquidation_proxy_only" in fid.missing_feeds
+    # has() must also treat proxy-only as not-present
+    assert not avail.has(RequiredFeeds.LIQUIDATION)
+
+
+def test_liquidation_catcher_mixed_provenance_is_tier_a() -> None:
+    """Mixed real+proxy replay still counts as Tier A (real rows exist)."""
+    avail = _liq_avail("mixed")
+    fid = resolve_strategy_tier("LiquidationCatcher", avail)
+    assert fid.tier_a_eligible
+    assert fid.tier == TIER_A_OHLC
+    assert fid.liquidation_provenance == "mixed"
+
+
+def test_liquidation_absent_stays_missing() -> None:
+    avail = FeedAvailability(
+        symbol="BTC", hl_candles=True, hl_venue=True, candle_coverage_pct=0.99,
+    )
+    fid = resolve_strategy_tier("LiquidationCatcher", avail)
+    assert not fid.tier_a_eligible
+    assert fid.tier == TIER_B_MISSING
+    assert "liquidation" in fid.missing_feeds
+    assert fid.liquidation_provenance == "none"
+
+
+def test_liquidation_provenance_reported_in_to_dict() -> None:
+    fid = resolve_strategy_tier("LiquidationCatcher", _liq_avail("proxy"))
+    d = fid.to_dict()
+    assert d["liquidation_provenance"] == "proxy"
+    assert d["fidelity_tier"] == "tier_b_liquidation_proxy_not_production"
+    # non-liquidation strategies never carry the field
+    ohlc = resolve_strategy_tier("VolatilityBreakout", _liq_avail("real"))
+    assert "liquidation_provenance" not in ohlc.to_dict()
+
+
+def test_probe_classifies_real_vs_proxy_rows() -> None:
+    """probe_feed_availability classifies replayed liquidation rows by source:
+    real venues → real/mixed, proxy-only → proxy."""
+    from src.backtest.strategy_feed_requirements import probe_feed_availability
+
+    from src.data.database import LiquidationRecord
+
+    db = _research_db()
+    start = 1_700_000_000_000
+    _seed_hl_candles(db, "BTC", start, 30)
+    db.save_liquidation(LiquidationRecord(
+        symbol="BTC", timestamp_ms=start + 60_000,
+        notional_usd=2_000_000.0, side="long", source="proxy",
+    ))
+
+    avail = probe_feed_availability(
+        db, "BTC", start_ms=start, end_ms=start + 29 * 60_000,
+    )
+    assert avail.liquidation is True
+    assert avail.liquidation_provenance == "proxy"
+    assert not avail.liquidation_real
+
+    # add a real-venue row → mixed
+    db.save_liquidation(LiquidationRecord(
+        symbol="BTC", timestamp_ms=start + 120_000,
+        notional_usd=3_000_000.0, side="short", source="okx",
+    ))
+    avail2 = probe_feed_availability(
+        db, "BTC", start_ms=start, end_ms=start + 29 * 60_000,
+    )
+    assert avail2.liquidation_provenance == "mixed"
+    assert avail2.liquidation_real is True
+    db.close()
+
+
+def test_run_manifest_reports_effective_tier_per_strategy() -> None:
+    """build_run_manifest carries per-strategy effective fidelity + liquidation
+    provenance when the data contract summary provides it."""
+    from src.backtest.run_manifest import build_run_manifest
+
+    summary = {
+        "data_source": "sqlite_hl_research",
+        "venue": "hyperliquid",
+        "fidelity_tier": "tier_a_hl_ohlc",
+        "refused": False,
+        "degraded": False,
+        "reasons": [],
+        "coverage": {},
+        "strategy_fidelity": {
+            "LiquidationCatcher": {
+                "strategy": "LiquidationCatcher",
+                "fidelity_tier": "tier_b_liquidation_proxy_not_production",
+                "required_feeds": ["hl_candles", "liquidation"],
+                "missing_feeds": ["liquidation_proxy_only"],
+                "tier_a_eligible": False,
+                "liquidation_provenance": "proxy",
+            },
+            "VolatilityBreakout": {
+                "strategy": "VolatilityBreakout",
+                "fidelity_tier": "tier_a_hl_ohlc",
+                "required_feeds": ["hl_candles"],
+                "missing_feeds": [],
+                "tier_a_eligible": True,
+            },
+        },
+        "research_protocol_version": "v1",
+    }
+    m = build_run_manifest(
+        Config({}),
+        symbols=["BTC"],
+        data_source="sqlite_hl_research",
+        tca_mode="proxy",
+        data_contract_summary=summary,
+    )
+    sf = m["strategy_fidelity"]
+    assert sf["LiquidationCatcher"]["fidelity_tier"] == \
+        "tier_b_liquidation_proxy_not_production"
+    assert sf["LiquidationCatcher"]["liquidation_provenance"] == "proxy"
+    assert not sf["LiquidationCatcher"]["tier_a_eligible"]
+    assert sf["VolatilityBreakout"]["fidelity_tier"] == "tier_a_hl_ohlc"
+    assert sf["VolatilityBreakout"]["tier_a_eligible"] is True
+    # the data_contract subtree still carries the full per-strategy detail
+    assert m["data_contract"]["strategy_fidelity"]["LiquidationCatcher"][
+        "liquidation_provenance"] == "proxy"
 
 
 def test_strict_research_refuses_funding_strategy_without_feeds() -> None:

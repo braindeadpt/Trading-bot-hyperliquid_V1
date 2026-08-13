@@ -60,6 +60,7 @@ TIER_A_CVD = "tier_a_hl_cvd"
 TIER_A_OIR = "tier_a_hl_oir"
 TIER_A_FUNDING = "tier_a_hl_funding"
 TIER_B_PROXY = "tier_b_binance_proxy_not_production"
+TIER_B_LIQUIDATION_PROXY = "tier_b_liquidation_proxy_not_production"
 TIER_B_MISSING = "tier_b_missing_feeds"
 TIER_B_DEGRADED = "tier_b_degraded_coverage"
 TIER_B_PHASE08_SHADOW = "tier_b_phase08_shadow_only"
@@ -88,6 +89,7 @@ class FeedAvailability:
     funding: bool = False
     oi: bool = False
     liquidation: bool = False
+    liquidation_provenance: str = "none"  # none | proxy | real | mixed
     binance_perp: bool = False
     candle_coverage_pct: float = 0.0
 
@@ -99,13 +101,21 @@ class FeedAvailability:
             RequiredFeeds.TRADE_TAPE: self.trade_tape,
             RequiredFeeds.FUNDING: self.funding,
             RequiredFeeds.OI: self.oi,
-            RequiredFeeds.LIQUIDATION: self.liquidation,
+            # Liquidation counts as *present* only when at least one real-venue
+            # row is replayed. Proxy-only liquidations are the candle+OI
+            # heuristic — never production-grade for a liquidation strategy.
+            RequiredFeeds.LIQUIDATION: self.liquidation and self.liquidation_real,
             RequiredFeeds.BINANCE_PERP: self.binance_perp,
         }
         for flag in RequiredFeeds:
             if feed & flag and not checks.get(flag, False):
                 return False
         return True
+
+    @property
+    def liquidation_real(self) -> bool:
+        """True when at least one replayed liquidation row has real provenance."""
+        return self.liquidation_provenance in ("real", "mixed")
 
     def missing_labels(self, required: RequiredFeeds) -> List[str]:
         out: List[str] = []
@@ -123,6 +133,8 @@ class FeedAvailability:
             out.append("oi")
         if required & RequiredFeeds.LIQUIDATION and not self.liquidation:
             out.append("liquidation")
+        elif required & RequiredFeeds.LIQUIDATION and not self.liquidation_real:
+            out.append("liquidation_proxy_only")
         if required & RequiredFeeds.BINANCE_PERP and not self.binance_perp:
             out.append("binance_perp")
         return out
@@ -137,15 +149,19 @@ class StrategyFidelity:
     required_feeds: List[str] = field(default_factory=list)
     missing_feeds: List[str] = field(default_factory=list)
     tier_a_eligible: bool = False
+    liquidation_provenance: Optional[str] = None  # none|proxy|real|mixed (if req.)
 
     def to_dict(self) -> Dict[str, object]:
-        return {
+        d: Dict[str, object] = {
             "strategy": self.strategy,
             "fidelity_tier": self.tier,
             "required_feeds": self.required_feeds,
             "missing_feeds": self.missing_feeds,
             "tier_a_eligible": self.tier_a_eligible,
         }
+        if self.liquidation_provenance is not None:
+            d["liquidation_provenance"] = self.liquidation_provenance
+        return d
 
 
 def _required_feed_labels(flags: RequiredFeeds) -> List[str]:
@@ -193,10 +209,22 @@ def resolve_strategy_tier(
             required_feeds=labels,
             missing_feeds=[],
             tier_a_eligible=True,
+            liquidation_provenance=(
+                availability.liquidation_provenance
+                if required & RequiredFeeds.LIQUIDATION else None
+            ),
         )
 
     if not availability.hl_venue:
         tier = TIER_B_PROXY
+    elif (
+        required & RequiredFeeds.LIQUIDATION
+        and availability.liquidation
+        and not availability.liquidation_real
+    ):
+        # Liquidations exist but only as proxy synthesis — never production-
+        # grade for a liquidation strategy (LiquidationCatcher requires real).
+        tier = TIER_B_LIQUIDATION_PROXY
     else:
         tier = TIER_B_MISSING
 
@@ -206,6 +234,10 @@ def resolve_strategy_tier(
         required_feeds=labels,
         missing_feeds=missing,
         tier_a_eligible=False,
+        liquidation_provenance=(
+            availability.liquidation_provenance
+            if required & RequiredFeeds.LIQUIDATION else None
+        ),
     )
 
 
@@ -269,6 +301,24 @@ def probe_feed_availability(
         liq_rows = db.get_liquidation_events(
             symbol, limit=100, start_ms=start_ms, end_ms=end_ms,
         )
+    # Distinguish real-venue rows (hl/okx/bybit/binance — production-grade
+    # provenance) from proxy synthesis rows (candle+OI heuristic). A
+    # liquidation strategy can only be Tier A when at least one real row is
+    # replayed in the window.
+    from src.exchanges.liquidation_event import is_real_liquidation_source
+
+    n_real_liq = sum(
+        1 for r in liq_rows if is_real_liquidation_source(r.get("source"))
+    )
+    n_proxy_liq = len(liq_rows) - n_real_liq
+    if n_real_liq > 0 and n_proxy_liq > 0:
+        liq_provenance = "mixed"
+    elif n_real_liq > 0:
+        liq_provenance = "real"
+    elif n_proxy_liq > 0:
+        liq_provenance = "proxy"
+    else:
+        liq_provenance = "none"
     bn_rows = []
     if hasattr(db, "get_binance_perp_prices"):
         try:
@@ -286,6 +336,7 @@ def probe_feed_availability(
         funding=funding_pts >= min_funding_points,
         oi=oi_pts >= min_oi_points,
         liquidation=len(liq_rows) > 0,
+        liquidation_provenance=liq_provenance,
         binance_perp=len(bn_rows) > 0,
         candle_coverage_pct=cov,
     )

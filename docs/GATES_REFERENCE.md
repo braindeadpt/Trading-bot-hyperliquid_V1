@@ -199,6 +199,29 @@ end-to-end `_process_exits` close).
 
 ---
 
+## 5c. Liquidation provenance in replay fidelity (Tier A/B)
+
+`strategy_feed_requirements` now distinguishes **real vs proxy** provenance in
+replayed liquidation rows when assigning a strategy's fidelity tier:
+
+| `FeedAvailability.liquidation_provenance` | meaning | LiquidationCatcher tier |
+|---|---|---|
+| `none` | no liquidation rows in the window | `tier_b_missing_feeds` (`liquidation` missing) |
+| `proxy` | rows exist but only candle+OI synthesis | **`tier_b_liquidation_proxy_not_production`** (never Tier A) |
+| `real` / `mixed` | at least one real-venue row (hl/okx/bybit/binance) replayed | `tier_a_hl_ohlc` |
+
+Classification reuses `is_real_liquidation_source` (the same provenance gate
+as the live entry chain), so the replay can never certify production-grade
+fidelity for a liquidation strategy on proxy-only rows. The run manifest
+(`build_run_manifest`) reports the **effective tier per strategy** —
+`strategy_fidelity` at manifest top-level with `fidelity_tier`,
+`tier_a_eligible`, `missing_feeds` and `liquidation_provenance`, plus the
+full detail under `data_contract.strategy_fidelity`. Pinned by
+`tests/test_phase07_data_contract.py::test_liquidation_catcher_tier_b_when_proxy_only`
+and `test_run_manifest_reports_effective_tier_per_strategy`.
+
+---
+
 ## 6. Config values that gate the contract
 
 | key | minimal test config | production (`config/settings.yaml`) |

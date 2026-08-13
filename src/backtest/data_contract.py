@@ -63,6 +63,18 @@ class DataContractResult:
             "research_protocol_version": RESEARCH_PROTOCOL_VERSION,
         }
 
+    def effective_tier_per_strategy(self) -> Dict[str, Dict[str, Any]]:
+        """Per-strategy effective fidelity (tier + provenance), for the manifest."""
+        return {
+            k: {
+                "fidelity_tier": v.tier,
+                "tier_a_eligible": v.tier_a_eligible,
+                "missing_feeds": list(v.missing_feeds),
+                "liquidation_provenance": v.liquidation_provenance,
+            }
+            for k, v in self.strategy_fidelity.items()
+        }
+
 
 def _detect_venue(db: Database, symbol: str) -> tuple[str, str]:
     if isinstance(db, ResearchDatabase):
