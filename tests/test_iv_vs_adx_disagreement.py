@@ -78,3 +78,11 @@ class TestDisagreementVerdict:
         v = disagreement_verdict(iv_keep_adx_block_pnl=0.0,
                                  iv_block_adx_keep_pnl=0.0)
         assert "empate" in v
+
+    def test_oos_one_sided_cell_iv_wins(self):
+        """OOS 08-07..08-13: no high_iv trades, so the only populated
+        disagreement cell is IV blocks / ADX keeps (n=4, -6.76). IV was
+        right to block -> IV vence, even with zero keep-side evidence."""
+        v = disagreement_verdict(iv_keep_adx_block_pnl=0.0,
+                                 iv_block_adx_keep_pnl=-6.76)
+        assert "IV" in v
