@@ -148,6 +148,21 @@ class TestIvGateShadowEndpoint:
         # closed with decision = 2 high + 3 low = 5, target 30
         assert d["target_closed"] == 30
 
+    def test_projected_decision_in_payload(self) -> None:
+        """The endpoint carries the projected PROMOTE/REJECT decision (same
+        rule as the watchdog verdict minus the n-gate) — the tooltip source
+        for the 60% warning badge."""
+        d = self._get().get_json()
+        pr = d["projected"]
+        # Fixture: all trades +5.00 pnl -> high +10.00, low +15.00, n=5 < 30.
+        assert pr["n_closed"] == 5
+        assert pr["provisional"] is True
+        # low_iv also positive (+15) -> REJECT direction (not PROMOTE).
+        assert pr["status"] == "REJECT"
+        assert pr["high_net_usd"] == pytest.approx(10.0)
+        assert pr["low_net_usd"] == pytest.approx(15.0)
+        assert "high_iv" in pr["detail"] and "low_iv" in pr["detail"]
+
     def test_empty_research_db(self) -> None:
         empty = os.path.join(self._tmp.name, "empty.db")
         sqlite3.connect(empty).close()
@@ -292,6 +307,18 @@ class TestIvGateShadowTemplate:
         assert "high/low/unk" in html
         assert "payload.by_strategy" in html
         assert "payload.by_symbol" in html
+
+    def test_panel_renders_60pct_warning_badge(self) -> None:
+        """The panel shows a warning badge once the sample crosses 60% of the
+        gate, with the projected decision in the tooltip."""
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        assert 'id="ivshadow-warn"' in html
+        assert "pct >= 60 && pct < 100" in html
+        assert "60% do gate" in html
+        assert "payload.projected" in html
+        assert "Veredito projetado" in html
 
     def test_trades_table_has_iv_columns(self) -> None:
         html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(

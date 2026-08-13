@@ -640,7 +640,10 @@ tr:hover td { background: var(--panel-hover); }
                 <div id="ivshadow-bar" style="margin-bottom:10px;">
                     <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-bottom:2px;">
                         <span id="ivshadow-progress-txt">0/0 closed com decisão</span>
-                        <span id="ivshadow-pct">0%</span>
+                        <span style="display:flex;gap:8px;align-items:center;">
+                            <span id="ivshadow-warn" style="display:none;padding:1px 7px;border-radius:3px;font-size:9px;font-weight:700;background:rgba(217,119,6,0.15);color:var(--yellow, #d29922);cursor:help;"></span>
+                            <span id="ivshadow-pct">0%</span>
+                        </span>
                     </div>
                     <div style="background:var(--border);height:8px;border-radius:4px;">
                         <div id="ivshadow-bar-fill" style="height:8px;width:0%;background:var(--accent, #4a9eff);border-radius:4px;"></div>
@@ -1661,6 +1664,26 @@ function renderIvGateShadow(payload) {
     const fill = document.getElementById("ivshadow-bar-fill");
     fill.style.width = pct.toFixed(0) + "%";
     fill.style.background = pct >= 100 ? "var(--up)" : (pct >= 60 ? "var(--yellow, #d29922)" : "var(--accent, #4a9eff)");
+    // Warning badge once the sample crosses 60% of the gate: the projected
+    // decision (PROMOTE/REJECT from the CURRENT slices) is in the tooltip, so
+    // the operator sees which way the gate is heading before the trigger fires.
+    const warnEl = document.getElementById("ivshadow-warn");
+    if (warnEl) {
+        if (pct >= 60 && pct < 100) {
+            const pr = payload.projected || {};
+            const prStatus = pr.status && pr.status !== "N/A" ? pr.status : "—";
+            const hi = pr.high_net_usd == null ? "—" : (pr.high_net_usd >= 0 ? "+" : "") + pr.high_net_usd.toFixed(2);
+            const lo = pr.low_net_usd == null ? "—" : (pr.low_net_usd >= 0 ? "+" : "") + pr.low_net_usd.toFixed(2);
+            warnEl.textContent = "⚠ " + pct.toFixed(0) + "% do gate — a 60%+";
+            warnEl.title = "Amostra ≥ 60% do gate de decisão (n=" + (pr.n_closed == null ? closed : pr.n_closed) +
+                " / " + target + "). Veredito projetado com os slices actuais: " + prStatus +
+                " (high_iv " + hi + " / low_iv " + lo + " USD)." +
+                (pr.provisional ? " Projeção — o gate real só decide aos " + target + "." : "");
+            warnEl.style.display = "inline-block";
+        } else {
+            warnEl.style.display = "none";
+        }
+    }
     // Decision-count-per-day sparkline (sample accumulation rate, 14d).
     const rateSvg = document.getElementById("ivshadow-rate-svg");
     const rateSum = document.getElementById("ivshadow-rate-sum");

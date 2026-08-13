@@ -1287,7 +1287,10 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 BACKTEST_EVIDENCE,
                 build_report,
             )
-            from scripts.iv_gate_shadow_recheck import TARGET_CLOSED
+            from scripts.iv_gate_shadow_recheck import (
+                TARGET_CLOSED,
+                project_decision,
+            )
 
             report = build_report()
             if report.get("error"):
@@ -1356,6 +1359,12 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 # (per IV class + aggregate) — shows WHERE the evidence lives.
                 "by_strategy": _dimension_summary(report.get("per_strategy") or {}),
                 "by_symbol": _dimension_summary(report.get("per_symbol") or {}),
+                # Projected decision from the CURRENT slices (same rule as the
+                # watchdog verdict minus the n-gate) — the tooltip the panel
+                # shows once the sample crosses the 60% warning threshold.
+                "projected": project_decision(
+                    report["slices"]["high_iv"], report["slices"]["low_iv"],
+                ),
                 "total": report["n_trades"],
                 "n_decisions": report["n_decisions"],
                 "matched": report["matched_decisions"],
