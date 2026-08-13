@@ -42,6 +42,7 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -124,6 +125,65 @@ def _resolve_path(path_str: str) -> Path:
     if not p.is_absolute():
         p = PROJECT_ROOT / p
     return p.resolve()
+
+
+def _preflight_feed_check(db_path: Path, config_path: Path, l2_dir: Optional[Path] = None) -> int:
+    """Run scripts/preflight_feed_check.py at boot; return its exit code.
+
+    0 = all contracted feeds have fresh evidence · 1 = a contracted feed is
+    not delivering (or has none) · 2 = past the warn fraction but still
+    delivering.
+    """
+    cmd = [
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "preflight_feed_check.py"),
+        "--db", str(db_path),
+        "--config", str(config_path),
+    ]
+    if l2_dir is not None:
+        cmd += ["--l2-dir", str(l2_dir)]
+    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=False)
+    return result.returncode
+
+
+def _run_preflight_at_boot(
+    db_path: Path,
+    config_path: Path,
+    *,
+    skip: bool = False,
+    logger: Optional[logging.Logger] = None,
+    l2_dir: Optional[Path] = None,
+) -> Optional[int]:
+    """Preflight feed-delivery check at boot: fail early instead of waiting
+    for the watchdog silence threshold (the 2026-06-29 fstream outage lesson).
+
+    Returns the process exit code to terminate with, or ``None`` to continue
+    booting. Blocks (exit 1) when a contracted feed is not delivering;
+    warns and continues on exit 2 (past warn fraction — feeds refresh on
+    start).
+    """
+    log = logger or _logger
+    if skip:
+        log.info("Preflight feed check skipped (--skip-preflight).")
+        return None
+    rc = _preflight_feed_check(db_path, config_path, l2_dir=l2_dir)
+    if rc == 1:
+        print(
+            "[FATAL] Preflight feed check FAILED — contracted feed(s) not "
+            "delivering. Refusing to start (silence would only degrade later). "
+            "Fix the feeds or boot with --skip-preflight.",
+            file=sys.stderr,
+        )
+        log.error("Preflight feed check FAILED — boot blocked.")
+        return 1
+    if rc == 2:
+        log.warning(
+            "Preflight feed check WARN — feed(s) past warn fraction; "
+            "continuing (feeds refresh on start)."
+        )
+        return None
+    log.info("Preflight feed check PASSED — all contracted feeds fresh.")
+    return None
 
 
 _shutdown_requested = False
@@ -235,6 +295,12 @@ async def main() -> None:
     parser.add_argument("--to-date", dest="to_date", help="Backtest end date (YYYY-MM-DD)")
     parser.add_argument("--audit", action="store_true", help="Run security audit and exit")
     parser.add_argument("--no-dashboard", action="store_true", help="Disable web dashboard")
+    parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="skip the preflight feed-delivery check (use on first deployment / "
+        "fresh DB where no delivery evidence exists yet)",
+    )
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, _request_shutdown)
@@ -349,6 +415,17 @@ async def main() -> None:
             print(f"  {k:20s}: {v}")
         print("=" * 60)
         return
+
+    # -----------------------------------------------------------------------
+    # 4b. Preflight feed-delivery check — fail early, not at the silence
+    #     threshold. Blocks boot when a contracted feed is not delivering.
+    # -----------------------------------------------------------------------
+    l2_dir = _resolve_path(str(cfg.get("market_data.l2_recording.path", "data/research/l2_books")))
+    boot_exit = _run_preflight_at_boot(
+        db_path, config_path, skip=args.skip_preflight, logger=logger, l2_dir=l2_dir,
+    )
+    if boot_exit is not None:
+        raise SystemExit(boot_exit)
 
     # -----------------------------------------------------------------------
     # 5. Initialize WebSocket / API clients

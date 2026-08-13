@@ -187,6 +187,10 @@ python scripts/install_git_hooks.py
 # Pre-start feed delivery check (fails early instead of waiting for silence)
 python scripts/preflight_feed_check.py
 
+# Runs automatically at boot (main.py step 4b) before the engine starts and
+# blocks if a contracted feed is not delivering. First deployment / fresh DB?
+python main.py --skip-preflight
+
 # Maintenance
 python scripts/backfill_candles.py --symbols BTC,ETH,SOL --days 7
 python tests/test_basic.py
