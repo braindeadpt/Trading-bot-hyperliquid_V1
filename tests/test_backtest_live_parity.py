@@ -1179,6 +1179,136 @@ class TestExitPathParityLiveVsBacktest:
         assert not hasattr(bt, "_maybe_update_trailing_stop")
 
 
+class TestExitPathParityProductionConfig:
+    """Exit path under the REAL production trailing config (not synthetic).
+
+    ``TestExitPathParityLiveVsBacktest`` pins the exit surface with trailing
+    OFF. This class derives the engine's trailing config from
+    ``config/settings.yaml`` — activation 1%, trail 0.8%, exclude list
+    (VB / VWAP / SmartMoneyFlow / TrendPyramid) — and asserts both the config
+    derivation and the ratchet math hold under the values the bot actually
+    runs with. The replay engine has no ratchet surface (pinned here too).
+    """
+
+    pytestmark = pytest.mark.integration_offline
+
+    @pytest.fixture
+    def prod_cfg(self) -> Config:
+        return load_config(PROD_SETTINGS_PATH)
+
+    # -- helpers ----------------------------------------------------------
+
+    @staticmethod
+    def _trailing_engine(cfg: Config):
+        """Live engine stub; trailing config derived EXACTLY as engine.__init__."""
+        trail = cfg.get("execution.trailing_stop", {}) or {}
+        eng = object.__new__(TradingEngine)
+        eng._trailing_enabled = bool(trail.get("enabled", True))
+        eng._trailing_activation_pct = float(trail.get("activation_pct", 0.005))
+        eng._trailing_distance_pct = float(trail.get("trail_pct", 0.003))
+        raw = trail.get("exclude_strategies", [])
+        eng._trailing_exclude_strategies = (
+            {str(s) for s in raw} if isinstance(raw, list) else set()
+        )
+        eng._trailing_data = {}
+
+        class _Port:
+            def __init__(self):
+                self.stops = {}
+
+            async def update_stop_loss(self, symbol, new_stop, side):
+                self.stops[symbol] = (new_stop, side)
+
+        eng._portfolio = _Port()
+        eng._sync_native_stop = _noop_native_sync  # native resize off in stub
+        return eng
+
+    @staticmethod
+    def _pos(sub: str, side: str = "long", entry: float = 50_000.0) -> Position:
+        return Position(
+            symbol="BTC", side=side, entry_price=entry, size=0.1,
+            entry_time_ms=0, stop_loss_price=entry * 0.99,
+            metadata={"sub_strategy": sub},
+        )
+
+    # -- config derivation -------------------------------------------------
+
+    def test_production_trailing_values_are_active(self, prod_cfg):
+        trail = prod_cfg.get("execution.trailing_stop", {}) or {}
+        assert trail.get("enabled") is True
+        assert trail.get("activation_pct") == 0.01
+        assert trail.get("trail_pct") == 0.008
+        assert set(trail.get("exclude_strategies", [])) == {
+            "VolatilityBreakout", "VWAPDeviation", "SmartMoneyFlow", "TrendPyramid",
+        }
+
+    def test_engine_derives_production_trailing_config(self, prod_cfg):
+        eng = self._trailing_engine(prod_cfg)
+        assert eng._trailing_enabled is True
+        assert eng._trailing_activation_pct == 0.01
+        assert eng._trailing_distance_pct == 0.008
+        assert eng._trailing_exclude_strategies == {
+            "VolatilityBreakout", "VWAPDeviation", "SmartMoneyFlow", "TrendPyramid",
+        }
+
+    # -- ratchet math under production thresholds ---------------------------
+
+    async def test_long_below_activation_does_not_ratchet(self, prod_cfg):
+        eng = self._trailing_engine(prod_cfg)
+        await eng._maybe_update_trailing_stop(self._pos("ChecklistMeta"), 50_250.0)  # +0.5%
+        assert eng._portfolio.stops == {}
+
+    async def test_long_above_activation_ratchets_to_0pct8_trail(self, prod_cfg):
+        eng = self._trailing_engine(prod_cfg)
+        # +1.5% >= 1% activation -> stop = peak * (1 - 0.008)
+        await eng._maybe_update_trailing_stop(self._pos("ChecklistMeta"), 50_750.0)
+        new_stop, side = eng._portfolio.stops["BTC"]
+        assert side == "long"
+        assert abs(new_stop - 50_750.0 * (1 - 0.008)) < 1e-9
+
+    async def test_long_ratchet_ratchets_up_with_peak(self, prod_cfg):
+        eng = self._trailing_engine(prod_cfg)
+        await eng._maybe_update_trailing_stop(self._pos("ChecklistMeta"), 50_750.0)
+        await eng._maybe_update_trailing_stop(self._pos("ChecklistMeta"), 51_000.0)
+        new_stop, _side = eng._portfolio.stops["BTC"]
+        assert abs(new_stop - 51_000.0 * (1 - 0.008)) < 1e-9
+
+    async def test_short_ratchets_to_0pct8_trail(self, prod_cfg):
+        eng = self._trailing_engine(prod_cfg)
+        # -1% on the short reaches the 1% activation -> stop = trough * (1 + 0.008)
+        await eng._maybe_update_trailing_stop(
+            self._pos("ChecklistMeta", side="short"), 49_500.0,
+        )
+        new_stop, side = eng._portfolio.stops["BTC"]
+        assert side == "short"
+        assert abs(new_stop - 49_500.0 * (1 + 0.008)) < 1e-9
+
+    # -- exclude list is the single source of truth -------------------------
+
+    async def test_production_exclude_list_skips_ratchet(self, prod_cfg):
+        for sub in ("VolatilityBreakout", "VWAPDeviation", "SmartMoneyFlow", "TrendPyramid"):
+            eng = self._trailing_engine(prod_cfg)
+            await eng._maybe_update_trailing_stop(self._pos(sub), 52_500.0)  # +5%
+            assert eng._portfolio.stops == {}, f"{sub} must not ratchet"
+            assert eng._trailing_excluded_for_position(self._pos(sub)) is True
+
+    async def test_non_excluded_still_ratchets_under_production(self, prod_cfg):
+        eng = self._trailing_engine(prod_cfg)
+        await eng._maybe_update_trailing_stop(self._pos("ChecklistMeta"), 52_500.0)  # +5%
+        new_stop, _side = eng._portfolio.stops["BTC"]
+        assert new_stop == pytest.approx(52_500.0 * (1 - 0.008))
+
+    def test_backtest_engine_has_no_ratchet_surface_production(self):
+        bt = object.__new__(BacktestEngine)
+        bt.cfg = BacktestConfig()
+        assert not hasattr(bt, "_trailing_data")
+        assert not hasattr(bt, "_maybe_update_trailing_stop")
+
+
+async def _noop_native_sync(symbol: str, new_stop: float) -> None:
+    """Stub for TradingEngine._sync_native_stop (native resize off in tests)."""
+
+
 def _cm_position(entry: float, sl: float, ts: int) -> Position:
     return Position(
         symbol="BTC", side="long", entry_price=entry, size=0.1,
