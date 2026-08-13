@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from src.utils.helpers import safe_float, validate_safe_path
+from src.utils.helpers import safe_float, safe_write_file, validate_safe_path
 
 logger = logging.getLogger(__name__)
 
@@ -183,19 +183,22 @@ class TopTraderTracker:
         return 0
 
     def _write_wallets_file(self, payload: Dict[str, Any]) -> None:
+        # AUDIT-004 remediated (2026-08-13): the direct ``path.write_text``
+        # was replaced with the project's atomic ``safe_write_file`` (temp
+        # file + move, size guard) — the path is still validated by
+        # ``validate_safe_path`` first, so a crash mid-write can no longer
+        # leave a truncated wallets file.
         raw = Path(self._wallets_path)
         if not raw.is_absolute():
-            candidate = ROOT / raw
             rel = Path(str(self._wallets_path).replace("\\", "/"))
         else:
-            candidate = raw
-            rel = candidate.resolve().relative_to(ROOT)
+            rel = raw.resolve().relative_to(ROOT)
         safe = validate_safe_path(rel.as_posix())
         if safe is None:
             raise ValueError(f"unsafe wallets path: {self._wallets_path}")
         path = Path(safe) if Path(safe).is_absolute() else ROOT / safe
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        if not safe_write_file(path, json.dumps(payload, indent=2) + "\n"):
+            raise OSError(f"safe_write_file failed for {path}")
 
     def load_wallets_from_path(self, path: str | Path) -> int:
         """Load wallet addresses from JSON; returns count loaded."""

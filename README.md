@@ -379,10 +379,14 @@ Flags:
 | `--skip-hash` | skip the config_hash-vs-frozen check (runs separately) |
 
 Exit codes: `0` all stages passed · `1` any stage failed · `2` a stage was
-unreachable (e.g. missing Fase 10 manifest). Note the audit default mirrors
-`main.py --audit`: it fails on CRITICAL findings; the 2 pre-existing HIGH
-(`AUDIT-005` subprocess) and 1 MEDIUM (`AUDIT-004` file write) are baseline
-and do not block unless you pass `--fail-on-high`.
+unreachable (e.g. missing Fase 10 manifest). The audit is **closed at 0 HIGH
++ 0 MEDIUM** (2026-08-13, see `docs/SECURITY.md` §2.4): AUDIT-004 was
+remediated (`safe_write_file` in `top_trader_tracker`), and the single
+accepted AUDIT-005 (`crash_recovery` subprocess — hardened with
+`_validate_cmd`) carries an inline `# audit-ok: AUDIT-005` marker and is
+reported in the audit's `[ACCEPTED]` section instead of the blocking counts.
+`tests/test_security_audit_suppression.py` fails CI if a new HIGH/MEDIUM
+appears without a decision.
 
 ---
 

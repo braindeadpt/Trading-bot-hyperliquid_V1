@@ -118,16 +118,29 @@ This prevents corruption if the process crashes mid-write.
 | T-012 | **Dependency confusion / supply chain** | 🟡 Medium | Pin all dependencies in `requirements.txt`. Verify wheel hashes on install. Review `cryptography` release notes. | Operator |
 | T-013 | **Insider threat — operator misconfiguration** | 🟡 Medium | All user input is validated. Config is YAML-based (no executable logic). | Config loader |
 
-### 2.4 Audit findings — decisions (AUDIT-005 subprocess)
+### 2.4 Audit findings — decisions (closed: 0 HIGH + 0 MEDIUM)
 
-Re-evaluated 2026-08-13. The two `AUDIT-005` (subprocess) HIGH findings were
-reviewed individually; both are now resolved by remediation or by hardening
-+ documented acceptance. Tests: `tests/test_subprocess_remediation.py`.
+Closed 2026-08-13. Every HIGH/MEDIUM finding now has an explicit decision —
+remediated, or accepted with justification — so the audit reports **0 HIGH +
+0 MEDIUM** (pinned by `tests/test_security_audit_suppression.py`, which
+fails CI if a new HIGH/MEDIUM appears without a decision).
+
+**Acceptance mechanism**: a call site that is deliberately kept carries an
+inline `# audit-ok: RULE_ID — justification` marker on the flagged line (or
+the line directly above). The audit moves that finding to the `[ACCEPTED]`
+section of its report — still visible and auditable — and excludes it from
+the blocking counts. The marker is self-validating: it only suppresses a rule
+that actually fired at that exact location; a stray marker on a clean line
+does nothing. `--fail-on-high` therefore passes on the current tree.
+
+Tests: `tests/test_subprocess_remediation.py` (validation layer) +
+`tests/test_security_audit_suppression.py` (marker contract + closed baseline).
 
 | Finding | Decision | Rationale |
 |---------|----------|-----------|
 | `backtest/run_manifest.py:25` — `get_git_commit()` | **REMEDIATED** | Was `subprocess.check_output(["git", "rev-parse", ...])` just to read the current HEAD short hash. Replaced with a pure-file read of `.git/HEAD` (+ the loose ref it points to, with worktree/submodule `gitdir:` handling). Same best-effort `"unknown"` contract, zero external processes, no PATH dependency. Finding gone. |
-| `utils/crash_recovery.py:132` — `_run_once()` | **ACCEPTED + HARDENED** | The subprocess is the module's core function: it respawns the bot after a crash — it cannot be removed. Hardened with `_validate_cmd()`: refuses any command whose executable is not the current interpreter, whose script is not `main.py`, or whose `--mode` is not one of `paper`/`testnet`/`live`. No user-controlled argument reaches `subprocess.run` unvalidated. Remains the single accepted HIGH (documented here). |
+| `exchanges/top_trader_tracker.py:198` — `_write_wallets_file()` | **REMEDIATED** | The direct `path.write_text` (flagged AUDIT-004, MEDIUM) was replaced with the atomic `safe_write_file()` helper (temp file + move, size guard) while keeping the `validate_safe_path()` guard — the wallets JSON can no longer be truncated by a crash mid-write. Finding gone. |
+| `utils/crash_recovery.py:143` — `_run_once()` | **ACCEPTED + HARDENED** | The subprocess is the module's core function: it respawns the bot after a crash — it cannot be removed. Hardened with `_validate_cmd()`: refuses any command whose executable is not the current interpreter, whose script is not `main.py`, or whose `--mode` is not one of `paper`/`testnet`/`live`. No user-controlled argument reaches `subprocess.run` unvalidated. The call site carries `# audit-ok: AUDIT-005` and is reported in the audit's `[ACCEPTED]` section. |
 
 Residual risk of the accepted finding: an attacker who can already write to
 the interpreter or `main.py` on disk could spawn anything — but that is

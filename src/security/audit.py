@@ -135,6 +135,14 @@ _FILE_WRITE_RE: re.Pattern[str] = re.compile(
     r"(?i)\b(?:os\.(?:remove|unlink|rmdir)|shutil\.rmtree|\.write_text\s*\(|\.write_bytes\s*\(|open\s*\([^,]*,\s*['\"][wa])"
 )
 
+# Inline acceptance marker: ``# audit-ok: AUDIT-00X — justification`` on the
+# flagged line (or the line directly above) documents a reviewed-and-accepted
+# finding. The finding is moved to ``suppressed_findings`` and excluded from
+# the blocking counts. The marker is self-validating: it only suppresses a
+# rule that actually fired at that exact location — a stray marker on a line
+# with no match does nothing.
+_SUPPRESSION_RE: re.Pattern[str] = re.compile(r"#\s*audit-ok:\s*([A-Z]+-\d+)\b")
+
 # Module-level imports of urllib or requests (we flag to verify domain allowlist)
 _IMPORT_HTTP_RE: re.Pattern[str] = re.compile(
     r"(?i)^\s*import\s+urllib|^\s*from\s+urllib|^\s*import\s+requests|^\s*from\s+requests"
@@ -219,6 +227,9 @@ class SecurityAuditor:
             "node_modules",
         )
         self.findings: List[Finding] = []
+        # Findings accepted via an inline ``# audit-ok: RULE_ID`` marker —
+        # reported in the audit output but excluded from blocking counts.
+        self.suppressed_findings: List[Finding] = []
         self.files_scanned: int = 0
         self.lines_scanned: int = 0
 
@@ -233,6 +244,22 @@ class SecurityAuditor:
                 if f.endswith(".py"):
                     yield Path(root) / f
 
+    def _is_suppressed(self, text: str, match: re.Match[str], rule_id: str) -> bool:
+        """True when the match line (or the line directly above) carries an
+        ``# audit-ok: <rule_id>`` marker — the finding is accepted and
+        documented in-code instead of blocking."""
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        candidates = [line_start]
+        if line_start > 0:
+            candidates.append(text.rfind("\n", 0, line_start - 1) + 1)
+        for start in candidates:
+            end = text.find("\n", start)
+            line_text = text[start:end if end != -1 else len(text)]
+            m = _SUPPRESSION_RE.search(line_text)
+            if m and m.group(1) == rule_id:
+                return True
+        return False
+
     def _add_finding(
         self,
         path: Path,
@@ -242,19 +269,26 @@ class SecurityAuditor:
         rule_id: str,
         message: str,
     ) -> None:
-        """Append a Finding derived from a regex match."""
+        """Append a Finding derived from a regex match.
+
+        A finding whose location carries an ``# audit-ok: <rule_id>`` marker
+        is recorded as suppressed (accepted + documented) instead of being
+        added to the blocking ``findings`` list.
+        """
         line = _find_line_number(text, match.start())
         snippet = _extract_snippet(text, match.start())
-        self.findings.append(
-            Finding(
-                file=path.relative_to(self.src_dir),
-                line=line,
-                severity=severity,
-                rule_id=rule_id,
-                message=message,
-                snippet=snippet,
-            )
+        finding = Finding(
+            file=path.relative_to(self.src_dir),
+            line=line,
+            severity=severity,
+            rule_id=rule_id,
+            message=message,
+            snippet=snippet,
         )
+        if self._is_suppressed(text, match, rule_id):
+            self.suppressed_findings.append(finding)
+            return
+        self.findings.append(finding)
 
     # -- Rule engines --------------------------------------------------------
 
@@ -435,6 +469,7 @@ class SecurityAuditor:
         scans the whole tree, exactly as before.
         """
         self.findings.clear()
+        self.suppressed_findings.clear()
         self.files_scanned = 0
         self.lines_scanned = 0
 
@@ -467,6 +502,20 @@ class SecurityAuditor:
         # Sort findings by severity descending, then file, then line
         self.findings.sort(key=lambda f: (-f.severity.value, str(f.file), f.line))
 
+    def _render_suppressed(self) -> str:
+        """Render the accepted (suppressed) findings block."""
+        lines: List[str] = [f"{'─' * 72}"]
+        lines.append(
+            f"  [ACCEPTED] — {len(self.suppressed_findings)} finding(s) suppressed "
+            "via # audit-ok markers (documented in-code)"
+        )
+        lines.append("─" * 72)
+        for f in sorted(self.suppressed_findings, key=lambda x: (-x.severity.value, str(x.file), x.line)):
+            lines.append(f"  {f.rule_id}  {f.file}:{f.line} ({f.severity.name})")
+            lines.append(f"       → {f.message}")
+            lines.append("")
+        return "\n".join(lines)
+
     def generate_report(self) -> str:
         """Return a human-readable multi-line report string."""
         lines: List[str] = []
@@ -478,12 +527,15 @@ class SecurityAuditor:
         lines.append(f"  Files     : {self.files_scanned}")
         lines.append(f"  Lines     : {self.lines_scanned}")
         lines.append(f"  Findings  : {len(self.findings)}")
+        lines.append(f"  Suppressed: {len(self.suppressed_findings)} (accepted via # audit-ok)")
         lines.append("=" * 72)
         lines.append("")
 
         if not self.findings:
             lines.append("✅ No security findings detected.")
             lines.append("")
+            if self.suppressed_findings:
+                lines.append(self._render_suppressed())
             return "\n".join(lines)
 
         # Group by severity
@@ -505,6 +557,10 @@ class SecurityAuditor:
                     lines.append(f"       snippet: {f.snippet}")
                 lines.append("")
 
+        # Accepted (suppressed) findings — reviewed + documented in-code.
+        if self.suppressed_findings:
+            lines.append(self._render_suppressed())
+
         # Summary footer
         critical_count = sum(1 for f in self.findings if f.severity == Severity.CRITICAL)
         high_count = sum(1 for f in self.findings if f.severity == Severity.HIGH)
@@ -514,6 +570,7 @@ class SecurityAuditor:
         lines.append(f"  Medium   : {sum(1 for f in self.findings if f.severity == Severity.MEDIUM)}")
         lines.append(f"  Low      : {sum(1 for f in self.findings if f.severity == Severity.LOW)}")
         lines.append(f"  Info     : {sum(1 for f in self.findings if f.severity == Severity.INFO)}")
+        lines.append(f"  Suppressed : {len(self.suppressed_findings)}")
         lines.append("=" * 72)
 
         if critical_count > 0:

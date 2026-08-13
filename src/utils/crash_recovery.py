@@ -136,6 +136,10 @@ class CrashRecovery:
             return 1
         logger.info("Starting bot: %s", " ".join(cmd))
         try:
+            # Crash recovery's core function is respawning the bot; cmd is
+            # allowlist-validated by _validate_cmd() above. Accepted finding,
+            # justification in docs/SECURITY.md §2.4:
+            # audit-ok: AUDIT-005
             result = subprocess.run(
                 cmd,
                 capture_output=False,  # let output go to console
