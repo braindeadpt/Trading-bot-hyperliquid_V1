@@ -178,6 +178,9 @@ python scripts/run_pre_push_gate.py --fail-on-high   # audit fails on HIGH too
 python scripts/run_pre_push_gate.py --skip-audit     # CI battery only
 python scripts/run_pre_push_gate.py --skip-hash      # skip the config_hash check
 
+# Pre-start feed delivery check (fails early instead of waiting for silence)
+python scripts/preflight_feed_check.py
+
 # Maintenance
 python scripts/backfill_candles.py --symbols BTC,ETH,SOL --days 7
 python tests/test_basic.py
@@ -227,6 +230,27 @@ contaminated research because nobody was told the pipe was empty.
 | `l2_book_recording` | `market_data.l2_recording.enabled` | 2m |
 | `binance_perp` | `strategy.lead_lag.enabled` / `auto_enable` | 1h |
 | `liquidation_binance` | operator opt-in (below) | 6h |
+
+### Pre-start delivery check
+
+Run **before** starting the bot (e.g. in the start script or after a
+restart) to confirm every contracted feed has recent delivery evidence —
+failing early instead of waiting for the silence threshold to trip:
+
+```bash
+python scripts/preflight_feed_check.py            # exit 0 = all fresh
+python scripts/preflight_feed_check.py --json     # machine-readable report
+```
+
+It reads the persisted artifacts (liquidation/funding/candles tables in
+`data/live/bot.db`, newest file mtime under `data/research/l2_books/`),
+uses the **same** `feed_silence_contracts()` decision as the engine, and
+reports per feed: age, threshold, % of threshold, status. Exit codes:
+`0` all fresh · `2` a feed past 50% of its threshold (delivery slowing) ·
+`1` a feed stale or missing (blocked path — check before starting).
+Coinalyze (verify-only, never persisted) is reported but not gated unless
+`--gate-coinalyze`. `liquidation_binance`/`binance_perp` are skipped when
+not contracted, exactly like the watchdog.
 
 ### Enabling `liquidation_binance` where fstream is accessible
 
