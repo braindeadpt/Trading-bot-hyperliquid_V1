@@ -382,6 +382,8 @@ class FeedSilenceMonitor:
                 "age_sec": None if age is None else round(age, 1),
                 "max_silence_sec": st.max_silence_sec,
                 "degraded": st.degraded,
+                "warned_50_pct": st.warned_50_pct,
+                "warned_90_pct": st.warned_90_pct,
                 "warn_level": (
                     "degraded" if st.degraded
                     else "imminent" if st.warned_90_pct

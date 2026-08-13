@@ -218,7 +218,10 @@ def test_feed_silence_imminent_warning_at_90_pct() -> None:
     warns = mon.check_early_warnings(now_ms=1_000_000 + int(0.5 * 3600_000))
     assert len(warns) == 1
     assert "FEED QUIET (early)" in warns[0]
-    assert mon.snapshot()["liquidation_okx"]["warn_level"] == "early"
+    snap = mon.snapshot()["liquidation_okx"]
+    assert snap["warn_level"] == "early"
+    assert snap["warned_50_pct"] is True
+    assert snap["warned_90_pct"] is False
 
     # 70% — neither level fires (fire-once at 50% already consumed)
     assert mon.check_early_warnings(now_ms=1_000_000 + int(0.7 * 3600_000)) == []
@@ -228,7 +231,10 @@ def test_feed_silence_imminent_warning_at_90_pct() -> None:
     assert len(warns2) == 1
     assert "FEED QUIET (imminent)" in warns2[0]
     assert "90%" in warns2[0]
-    assert mon.snapshot()["liquidation_okx"]["warn_level"] == "imminent"
+    snap = mon.snapshot()["liquidation_okx"]
+    assert snap["warn_level"] == "imminent"
+    assert snap["warned_50_pct"] is True
+    assert snap["warned_90_pct"] is True
 
     # Fire-once at imminent: same age, no second warning
     assert mon.check_early_warnings(now_ms=1_000_000 + int(0.95 * 3600_000)) == []

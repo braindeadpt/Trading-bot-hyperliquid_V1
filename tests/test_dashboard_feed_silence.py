@@ -75,18 +75,24 @@ class TestFeedSilencePayload:
                     "age_sec": 30.0,
                     "max_silence_sec": 3600.0,
                     "degraded": False,
+                    "warned_50_pct": False,
+                    "warned_90_pct": False,
                 },
                 "liquidation_okx": {
                     "last_event_ms": 1_000,
                     "age_sec": 5400.0,
                     "max_silence_sec": 21600.0,
                     "degraded": False,
+                    "warned_50_pct": True,
+                    "warned_90_pct": False,
                 },
                 "liquidation_bybit": {
                     "last_event_ms": 1_000,
                     "age_sec": 22000.0,
                     "max_silence_sec": 21600.0,
                     "degraded": True,
+                    "warned_50_pct": True,
+                    "warned_90_pct": True,
                 },
             }
         )
@@ -99,8 +105,13 @@ class TestFeedSilencePayload:
         assert fs["funding_hl"]["age_sec"] == 30.0
         assert fs["funding_hl"]["max_silence_sec"] == 3600.0
         assert fs["funding_hl"]["degraded"] is False
+        # fire-once flags pass through the snapshot
+        assert fs["funding_hl"]["warned_50_pct"] is False
+        assert fs["liquidation_okx"]["warned_50_pct"] is True
+        assert fs["liquidation_okx"]["warned_90_pct"] is False
         # bybit is past its 6h threshold -> degraded
         assert fs["liquidation_bybit"]["degraded"] is True
+        assert fs["liquidation_bybit"]["warned_90_pct"] is True
 
     def test_all_healthy_no_degraded_flag(self) -> None:
         silence = _SilenceStub(
@@ -192,11 +203,12 @@ class TestFeedSilenceTemplate:
 
     def test_template_has_threshold_vs_age_columns(self) -> None:
         html = TEMPLATE_PATH.read_text(encoding="utf-8")
-        # the 6 columns: Feed, Age, Threshold, % of threshold, 24h %, State
+        # the 7 columns: Feed, Age, Threshold, % of threshold, 24h %, Alerted, State
         assert ">Age</th>" in html
         assert ">Threshold</th>" in html
         assert "% of threshold" in html
         assert ">24h %</th>" in html
+        assert ">Alerted</th>" in html
         assert ">State</th>" in html
 
     def test_template_has_render_and_poll_wiring(self) -> None:
@@ -206,3 +218,12 @@ class TestFeedSilenceTemplate:
         assert "feed_silence_spark" in html
         assert "sparklineSvg(sparks[feed] || [], 92, 20)" in html
         assert 'authFetch("/api/market_data_health")' in html
+
+    def test_template_uses_warned_flags_for_alerted_column(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # the JS must read the fire-once flags and render early/imminent
+        assert "st.warned_50_pct" in html
+        assert "st.warned_90_pct" in html
+        assert "alerted50" in html
+        assert "alerted90" in html
+        assert "alertedTxt" in html

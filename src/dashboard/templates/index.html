@@ -380,8 +380,9 @@ tr:hover td { background: var(--panel-hover); }
             <b>% of threshold</b> = age &divide; max-silence &times; 100 — how close each contracted feed is to
             tripping <b>degraded</b>. Green &lt; 60% · yellow 60&ndash;90% · red &ge; 90% · <b>EARLY</b> =
             fire-once alert at &ge;50% of threshold (warn) · <b>IMMINENT</b> = fire-once alert at &ge;90%
-            (degrade imminent) · <b>DEGRADED</b> = silence threshold crossed. Only feeds contracted by this
-            deployment are listed.
+            (degrade imminent) · <b>DEGRADED</b> = silence threshold crossed. <b>Alerted</b> = which fire-once
+            alert has already been sent this silence episode (early / imminent, reset on beat). Only feeds
+            contracted by this deployment are listed.
         </div>
         <table style="width:100%; font-size:11px; border-collapse:collapse;">
             <thead>
@@ -391,11 +392,12 @@ tr:hover td { background: var(--panel-hover); }
                     <th title="Max allowed silence before degraded">Threshold</th>
                     <th title="age / threshold — how close to degrading">% of threshold</th>
                     <th title="Max % of threshold per 10-min bucket, last 24h — a rising sawtooth = age growing between resets">24h %</th>
+                    <th title="Fire-once early/imminent alerts already sent this silence episode (reset on beat)">Alerted</th>
                     <th title="Silence watchdog state">State</th>
                 </tr>
             </thead>
             <tbody id="feed-silence-tbody">
-                <tr><td colspan="6" class="muted">Waiting...</td></tr>
+                <tr><td colspan="7" class="muted">Waiting...</td></tr>
             </tbody>
         </table>
     </div>
@@ -1444,6 +1446,16 @@ function renderFeedSilence(payload) {
             : (age / 3600).toFixed(1) + "h");
         const maxTxt = (max / 3600).toFixed(1) + "h";
         const warnLvl = st.warn_level || (degraded ? "degraded" : "none");
+        const alerted50 = !!st.warned_50_pct;
+        const alerted90 = !!st.warned_90_pct;
+        const alertedTxt = degraded ? "—"
+            : alerted90 ? "imminent"
+            : alerted50 ? "early"
+            : "—";
+        const alertedColor = degraded ? "var(--muted)"
+            : alerted90 ? "var(--down)"
+            : alerted50 ? "var(--warn, #d29922)"
+            : "var(--muted)";
         const stateTxt = degraded ? "DEGRADED"
             : warnLvl === "imminent" ? "IMMINENT"
             : warnLvl === "early" ? "EARLY"
@@ -1467,6 +1479,7 @@ function renderFeedSilence(payload) {
                 '</div>' +
             '</td>' +
             '<td style="padding:3px 4px;width:96px;">' + sparklineSvg(sparks[feed] || [], 92, 20) + '</td>' +
+            '<td style="padding:3px 4px;font-weight:600;color:' + alertedColor + ';">' + alertedTxt + '</td>' +
             '<td style="padding:3px 4px;font-weight:600;color:' + stateColor + ';">' + stateTxt + '</td>' +
             '</tr>';
     }).join("");
