@@ -381,14 +381,15 @@ tr:hover td { background: var(--panel-hover); }
             tripping <b>degraded</b>. Green &lt; 60% · yellow 60&ndash;90% · red &ge; 90% · <b>EARLY</b> =
             fire-once alert at &ge;50% of threshold (warn) · <b>IMMINENT</b> = fire-once alert at &ge;90%
             (degrade imminent) · <b>DEGRADED</b> = silence threshold crossed. <b>Alerted</b> = which fire-once
-            alert has already been sent this silence episode (early / imminent, reset on beat). Only feeds
-            contracted by this deployment are listed.
+            alert has already been sent this silence episode (early / imminent, reset on beat). <b>exp ≤</b>
+            under the age = historical p99 inter-event gap of the feed — a current age above it is anomalous
+            (cadence alert fires); below it is normal quiet. Only feeds contracted by this deployment are listed.
         </div>
         <table style="width:100%; font-size:11px; border-collapse:collapse;">
             <thead>
                 <tr style="color:var(--muted); text-align:left;">
                     <th title="Feed key, only feeds contracted for this deployment">Feed</th>
-                    <th title="Seconds since last event (— = never seen this process)">Age</th>
+                    <th title="Seconds since last event, with expected gap (historical p95/p99 cadence of this feed)">Age / exp gap</th>
                     <th title="Max allowed silence before degraded">Threshold</th>
                     <th title="age / threshold — how close to degrading">% of threshold</th>
                     <th title="Max % of threshold per 10-min bucket, last 24h — a rising sawtooth = age growing between resets">24h %</th>
@@ -1397,6 +1398,14 @@ function renderResearchWatchdogs(payload) {
 }
 
 // ── DVOL / IV regime ──
+function fmtDur(sec) {
+    if (sec == null || isNaN(sec)) return "—";
+    if (sec < 60) return sec.toFixed(0) + "s";
+    if (sec < 3600) return (sec / 60).toFixed(0) + "m";
+    if (sec < 86400) return (sec / 3600).toFixed(1) + "h";
+    return (sec / 86400).toFixed(1) + "d";
+}
+
 function sparklineSvg(series, w, h) {
     // series: [[ts_ms, pct], ...] — % of silence threshold per bucket, 24h.
     if (!series || !series.length) return '<span class="muted">—</span>';
@@ -1445,6 +1454,18 @@ function renderFeedSilence(payload) {
             : age < 3600 ? (age / 60).toFixed(1) + "m"
             : (age / 3600).toFixed(1) + "h");
         const maxTxt = (max / 3600).toFixed(1) + "h";
+        // Expected gap = historical p95/p99 cadence of this feed. Distinguishes
+        // normal quiet (age < p99) from anomalous thinning (age > p99).
+        const p95 = st.cadence_p95_sec == null ? null : Number(st.cadence_p95_sec);
+        const p99 = st.cadence_p99_sec == null ? null : Number(st.cadence_p99_sec);
+        const nSamples = st.cadence_samples == null ? 0 : Number(st.cadence_samples);
+        const expColor = (age != null && p99 != null && age > p99)
+            ? "var(--down)"
+            : (age != null && p95 != null && age > p95) ? "var(--warn, #d29922)"
+            : "var(--muted)";
+        const expTxt = (p99 == null)
+            ? (nSamples > 0 ? "learning…" : "—")
+            : "exp ≤ " + fmtDur(p99);
         const warnLvl = st.warn_level || (degraded ? "degraded" : "none");
         const alerted50 = !!st.warned_50_pct;
         const alerted90 = !!st.warned_90_pct;
@@ -1468,7 +1489,9 @@ function renderFeedSilence(payload) {
         const barColor = barCls === "crit" ? "var(--down)" : barCls === "warn" ? "#d29922" : "var(--up)";
         return '<tr style="border-top:1px solid var(--border);">' +
             '<td style="padding:3px 4px;font-family:monospace;">' + feed + '</td>' +
-            '<td style="padding:3px 4px;">' + ageTxt + '</td>' +
+            '<td style="padding:3px 4px;">' + ageTxt +
+                '<div style="font-size:9px;color:' + expColor + ';white-space:nowrap;" title="Historical p95/p99 inter-event gap of this feed (' + (p95 == null ? "—" : fmtDur(p95)) + ' / ' + (p99 == null ? "—" : fmtDur(p99)) + ')">' + expTxt + '</div>' +
+            '</td>' +
             '<td style="padding:3px 4px;">' + maxTxt + '</td>' +
             '<td style="padding:3px 4px;width:26%;">' +
                 '<div style="display:flex;align-items:center;gap:6px;">' +

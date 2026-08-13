@@ -212,18 +212,31 @@ class FeedSilenceState:
         now = now_ms if now_ms is not None else int(time.time() * 1000)
         return max(0.0, (now - self.last_event_ms) / 1000.0)
 
-    def cadence_p99_sec(self, min_samples: int = 100) -> Optional[float]:
-        """Historical p99 of inter-event gaps, or None with too few samples.
+    def cadence_percentile_sec(
+        self,
+        pct: float = 0.99,
+        min_samples: int = 100,
+    ) -> Optional[float]:
+        """Historical ``pct`` percentile of inter-event gaps, or None with too
+        few samples.
 
-        Nearest-rank percentile over the rolling gap deque — the cadence
-        the feed normally keeps. A current gap above this means delivery is
+        Nearest-rank percentile over the rolling gap deque — the cadence the
+        feed normally keeps. A current gap above the p99 means delivery is
         thinning out long before the 6h silence threshold trips.
         """
         if len(self.gaps) < min_samples:
             return None
         ordered = sorted(self.gaps)
-        idx = min(len(ordered) - 1, int(0.99 * len(ordered)))
+        idx = min(len(ordered) - 1, int(pct * len(ordered)))
         return float(ordered[idx])
+
+    def cadence_p95_sec(self, min_samples: int = 100) -> Optional[float]:
+        """Historical p95 of inter-event gaps (typical quiet ceiling)."""
+        return self.cadence_percentile_sec(0.95, min_samples=min_samples)
+
+    def cadence_p99_sec(self, min_samples: int = 100) -> Optional[float]:
+        """Historical p99 of inter-event gaps (anomalous-quiet threshold)."""
+        return self.cadence_percentile_sec(0.99, min_samples=min_samples)
 
 
 class FeedSilenceMonitor:
@@ -449,6 +462,9 @@ class FeedSilenceMonitor:
                 "warned_50_pct": st.warned_50_pct,
                 "warned_90_pct": st.warned_90_pct,
                 "warned_cadence": st.warned_cadence,
+                "cadence_p95_sec": st.cadence_p95_sec(
+                    min_samples=self._cadence_min_samples
+                ),
                 "cadence_p99_sec": st.cadence_p99_sec(
                     min_samples=self._cadence_min_samples
                 ),

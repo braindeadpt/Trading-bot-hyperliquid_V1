@@ -203,13 +203,23 @@ class TestFeedSilenceTemplate:
 
     def test_template_has_threshold_vs_age_columns(self) -> None:
         html = TEMPLATE_PATH.read_text(encoding="utf-8")
-        # the 7 columns: Feed, Age, Threshold, % of threshold, 24h %, Alerted, State
-        assert ">Age</th>" in html
+        # the 7 columns: Feed, Age/exp gap, Threshold, % of threshold, 24h %, Alerted, State
+        assert ">Age / exp gap</th>" in html
         assert ">Threshold</th>" in html
         assert "% of threshold" in html
         assert ">24h %</th>" in html
         assert ">Alerted</th>" in html
         assert ">State</th>" in html
+
+    def test_template_renders_expected_gap_from_cadence(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # the Age cell shows the historical p99 cadence as "exp ≤ …"
+        assert "cadence_p95_sec" in html
+        assert "cadence_p99_sec" in html
+        assert "cadence_samples" in html
+        assert "exp ≤ " in html
+        assert "fmtDur" in html
+        assert "learning…" in html
 
     def test_template_has_render_and_poll_wiring(self) -> None:
         html = TEMPLATE_PATH.read_text(encoding="utf-8")

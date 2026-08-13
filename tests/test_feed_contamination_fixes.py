@@ -324,6 +324,9 @@ def test_feed_silence_cadence_tracks_gaps_and_fires_above_p99() -> None:
     snap = mon.snapshot()["liquidation_okx"]
     assert snap["cadence_samples"] == 59
     assert snap["cadence_p99_sec"] is not None
+    assert snap["cadence_p95_sec"] is not None
+    # p95 <= p99 always
+    assert snap["cadence_p95_sec"] <= snap["cadence_p99_sec"]
 
     # Current gap of 10 min (> p99 of ~5 min) fires the cadence alert.
     now = t + 10 * 60_000
