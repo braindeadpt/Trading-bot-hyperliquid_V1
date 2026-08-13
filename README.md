@@ -172,6 +172,11 @@ python main.py --audit               # security audit
 python scripts/lookahead_audit.py --ci   # future-data leakage scanner
 python tests/test_cascade_simulation.py  # vol circuit stress test
 
+# Pre-commit / pre-push gate (CI battery + security audit in one command)
+python scripts/run_pre_push_gate.py
+python scripts/run_pre_push_gate.py --fail-on-high   # audit fails on HIGH too
+python scripts/run_pre_push_gate.py --skip-audit     # CI battery only
+
 # Maintenance
 python scripts/backfill_candles.py --symbols BTC,ETH,SOL --days 7
 python tests/test_basic.py
@@ -286,6 +291,33 @@ An uncontracted feed must never appear in the snapshot, and
 - See `docs/SECURITY.md` for the full threat model and deployment checklist.
 
 ---
+
+## Pre-commit / pre-push gate
+
+`scripts/run_pre_push_gate.py` is the **single command to run before
+commit/push** — it runs the full CI battery (pytest `unit` +
+`integration_offline`, same as `scripts/run_ci_tests.py`) and then the static
+security audit (`security.audit`), stopping early with a non-zero exit code
+if either stage fails. Wire it into your hook:
+
+```bash
+# .git/hooks/pre-push
+python scripts/run_pre_push_gate.py || exit 1
+```
+
+Flags:
+
+| flag | effect |
+|------|--------|
+| `--network` / `--testnet-live` | also run those opt-in pytest suites (real endpoints) |
+| `--fail-on-high` | audit fails on HIGH findings too (default: CRITICAL only, matching `main.py --audit`) |
+| `--skip-audit` | run only the CI battery |
+
+Exit codes: `0` all stages passed · `1` CI or audit failed · `2` audit
+unreachable. Note the audit default mirrors `main.py --audit`: it fails on
+CRITICAL findings; the 2 pre-existing HIGH (`AUDIT-005` subprocess) and
+1 MEDIUM (`AUDIT-004` file write) are baseline and do not block unless you
+pass `--fail-on-high`.
 
 ## Testing
 
