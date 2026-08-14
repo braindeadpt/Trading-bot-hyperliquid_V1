@@ -397,6 +397,29 @@ class TestIvGateShadowTemplate:
         # The filter label is humanised (high_iv -> high iv).
         assert '_tradesIvFilter.replace("_", " ")' in html
 
+    def test_trades_gate_toggle_links_filter_to_projection(self) -> None:
+        """The gate toggle pre-selects the IV class the projected decision
+        condemns: PROMOTE → low_iv (enforcement would block it), REJECT →
+        high_iv (the slice that fails to confirm). Live-follows the
+        projection on every watchdog refresh; N/A refuses to engage."""
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        # Toggle in the Trade History header, wired to the filter.
+        assert 'id="trades-gate-toggle"' in html
+        assert 'onchange="setGateFilter(this.checked)"' in html
+        assert "gate\n" in html or "> gate<" in html
+        # Projection state + mapping (PROMOTE → low_iv, REJECT → high_iv).
+        assert "let _ivProjection = null;" in html
+        assert '_ivProjection === "REJECT" ? "high_iv" : "low_iv"' in html
+        # Manual filter overrides the toggle (checkbox turns off).
+        assert 'if (gate && gate.checked && v !== "all") gate.checked = false;' in html
+        # N/A projection refuses the toggle (no class to pre-select).
+        assert '_ivProjection !== "PROMOTE" && _ivProjection !== "REJECT"' in html
+        # Live follow on watchdog refresh + reset to all when projection N/A.
+        assert 'gateChk && gateChk.checked' in html
+        assert '_ivProjection = (w.projected && w.projected.status !== "N/A") ? w.projected.status : null;' in html
+
 
 class TestTradesEndpointIvEnrichment:
     """/api/trades enriches executed trades with the shadow IV decision."""

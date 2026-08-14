@@ -299,6 +299,9 @@ tr:hover td { background: var(--panel-hover); }
                 <span class="dim tiny" id="trades-liq-count" style="margin-left:8px;" title="Trades fechados por liquidation stop-out (flush valida o side)"></span>
                 <span id="trades-filter-stats" class="tiny" style="margin-left:8px;" title="n e net PnL dos trades do filtro IV activo (fechados)"></span>
                 <span style="float:right;">
+                    <label class="dim tiny" style="cursor:pointer;" title="Liga o filtro à projecção do gate IV: PROMOTE → mostra low_iv (o que o enforcement bloquearia) · REJECT → mostra high_iv (a classe que não confirma)">
+                        <input type="checkbox" id="trades-gate-toggle" onchange="setGateFilter(this.checked)" style="vertical-align:-2px;"> gate
+                    </label>
                     <label class="dim tiny" for="trades-iv-filter">IV</label>
                     <select id="trades-iv-filter" onchange="setTradesIvFilter(this.value)" style="font-size:11px;padding:1px 4px;background:var(--panel-bg);color:var(--text);border:1px solid var(--border);border-radius:3px;">
                         <option value="all">all</option>
@@ -1477,6 +1480,11 @@ function renderResearchWatchdogs(payload) {
         // Projected decision for the IV gate: the direction the current slices
         // point to BEFORE the n>=30 trigger fires (provisional while small).
         let projected = null;
+        if (w.id === "iv_gate_shadow") {
+            // Live projection for the gate toggle; N/A (no slices yet) clears
+            // it so the toggle cannot hang on a stale class.
+            _ivProjection = (w.projected && w.projected.status !== "N/A") ? w.projected.status : null;
+        }
         if (w.id === "iv_gate_shadow" && w.projected && w.projected.status && w.projected.status !== "N/A") {
             const pr = w.projected;
             // Concentration caveat: one strategy/symbol drives ~80%+ of the
@@ -1519,6 +1527,25 @@ function renderResearchWatchdogs(payload) {
             '<td>' + status + (projected ? '<div>' + projected + '</div>' : '') + (creep ? '<div>' + creep + '</div>' : '') + (cadence ? '<div>' + cadence + '</div>' : '') + '</td>' +
             '<td class="muted" style="font-size:10px;">' + last + '</td></tr>';
     }).join("");
+    // The gate toggle follows the projection live: if it is ON, the
+    // pre-selected class tracks PROMOTE/REJECT as the sample shifts; a
+    // vanished projection (N/A) resets the filter to all.
+    const gateChk = document.getElementById("trades-gate-toggle");
+    if (gateChk && gateChk.checked) {
+        const sel2 = document.getElementById("trades-iv-filter");
+        if (!_ivProjection) {
+            if (sel2) sel2.value = "all";
+            _tradesIvFilter = "all";
+            renderTrades(_tradesAll);
+        } else {
+            const cls = _ivProjection === "REJECT" ? "high_iv" : "low_iv";
+            if (sel2 && sel2.value !== cls) {
+                sel2.value = cls;
+                _tradesIvFilter = cls;
+                renderTrades(_tradesAll);
+            }
+        }
+    }
 }
 
 // ── DVOL / IV regime ──
@@ -2030,9 +2057,35 @@ function ivBadge(cls) {
 
 let _tradesIvFilter = "all";
 let _tradesAll = [];
+// Projected IV gate decision (PROMOTE / REJECT / null) — filled by
+// renderResearchWatchdogs; the gate toggle maps it to the class the gate
+// would block: PROMOTE → low_iv (enforcement removes it), REJECT → high_iv
+// (the slice that fails to confirm).
+let _ivProjection = null;
 
 function setTradesIvFilter(v) {
     _tradesIvFilter = v;
+    const gate = document.getElementById("trades-gate-toggle");
+    if (gate && gate.checked && v !== "all") gate.checked = false;  // manual filter wins
+    renderTrades(_tradesAll);
+}
+
+function setGateFilter(on) {
+    const gate = document.getElementById("trades-gate-toggle");
+    const sel = document.getElementById("trades-iv-filter");
+    if (on) {
+        // Without a projection there is no class to pre-select — refuse.
+        if (_ivProjection !== "PROMOTE" && _ivProjection !== "REJECT") {
+            if (gate) gate.checked = false;
+            return;
+        }
+        const cls = _ivProjection === "REJECT" ? "high_iv" : "low_iv";
+        if (sel) sel.value = cls;
+        _tradesIvFilter = cls;
+    } else {
+        if (sel) sel.value = "all";
+        _tradesIvFilter = "all";
+    }
     renderTrades(_tradesAll);
 }
 
