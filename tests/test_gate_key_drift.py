@@ -28,6 +28,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 
+from src.core.signal_pipeline import (
+    GATE_ORDER,
+    GATE_PARITY_VERSION,
+    LIVE_ONLY_GATES,
+    SignalPipeline,
+)
+from src.core.risk_manager import RiskManager
+from src.utils.config import load_config
+
 pytestmark = pytest.mark.unit
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -230,6 +239,42 @@ GATE_KEY_VALUES: dict = {
 }
 
 
+# Canonical mirror of the RUNTIME gate tables — what ``gate_manifest()``
+# returns for the production config. Pinned here so the docs (README parity
+# table, docs/GATES_REFERENCE.md §2/§3/§5) and the runtime cannot drift apart:
+# changing ``GATE_ORDER``, ``LIVE_ONLY_GATES`` or ``replay_substitutes`` in
+# src/core/signal_pipeline.py without updating this pin (and the docs) fails.
+# Regenerated from src/core/signal_pipeline.py on 2026-08-14.
+GATE_MANIFEST_PIN: dict = {
+    "gate_parity_version": "phase05-gates-v1",
+    "shared_gate_order": list(GATE_ORDER),
+    "live_only_gates": list(LIVE_ONLY_GATES),
+    "replay_substitutes": {"feed_health": "replay_data_quality"},
+}
+
+# Doc shorthand for the values that appear verbatim in GATES_REFERENCE §5.
+LIVE_ONLY_DOC_NAMES: dict = {
+    "execution_block": "execution_block",
+    "fill_ratio": "fill_ratio",
+    "slippage_l2": "slippage_l2",
+    "reconciliation_stale": "reconciliation_stale",
+    "executor_debounce": "executor_debounce",
+}
+
+
+def _runtime_gate_manifest() -> dict:
+    """Instantiate the REAL SignalPipeline against production settings and
+    return its gate_manifest() — the runtime source of truth for the gate
+    tables (same path the backtest engine embeds in run manifests)."""
+    cfg = load_config(SETTINGS_PATH)
+    rm = RiskManager(cfg, None)
+    live = SignalPipeline(cfg, rm, for_backtest=False)
+    bt = SignalPipeline(cfg, rm, for_backtest=True)
+    m = live.gate_manifest()
+    m["_backtest_tca_mode"] = bt._tca_mode
+    return m
+
+
 def _settings_value(key: str):
     """Read a dotted key's raw value from settings.yaml."""
     with open(SETTINGS_PATH, encoding="utf-8") as f:
@@ -389,3 +434,65 @@ def test_gate_key_values_are_mirrored_in_docs() -> None:
         "docs/GATES_REFERENCE.md:\n  {missing}\n"
         "The docs are the mirror of this registry — keep values in sync."
     ).format(missing="\n  ".join(f"{k}={v!r}" for k, v in missing))
+
+
+def test_gate_manifest_runtime_matches_pin() -> None:
+    """The RUNTIME gate_manifest() must equal the pinned gate tables.
+
+    The parity docs promise a specific shared/live-only gate split. This
+    instantiates the real SignalPipeline against the production settings
+    (the same path the backtest engine embeds in run manifests) and asserts
+    its gate_manifest() equals GATE_MANIFEST_PIN — so changing GATE_ORDER,
+    LIVE_ONLY_GATES or replay_substitutes in code without updating the pin
+    (and the docs) fails.
+    """
+    m = _runtime_gate_manifest()
+    diffs = []
+    for key in ("gate_parity_version", "shared_gate_order", "live_only_gates", "replay_substitutes"):
+        if m.get(key) != GATE_MANIFEST_PIN.get(key):
+            diffs.append((key, GATE_MANIFEST_PIN.get(key), m.get(key)))
+    assert not diffs, (
+        "Runtime gate_manifest() drifted from GATE_MANIFEST_PIN:\n"
+        + "\n".join(f"  {k}: pin {e!r} != runtime {a!r}" for k, e, a in diffs)
+        + "\nUpdate GATE_MANIFEST_PIN in tests/test_gate_key_drift.py AND the parity "
+        "docs (README parity table / docs/GATES_REFERENCE.md §2/§3/§5)."
+    )
+
+
+def test_gate_manifest_pin_matches_signal_pipeline_constants() -> None:
+    """The pin must be regenerated from the actual module constants."""
+    assert GATE_MANIFEST_PIN["gate_parity_version"] == GATE_PARITY_VERSION
+    assert GATE_MANIFEST_PIN["shared_gate_order"] == list(GATE_ORDER)
+    assert GATE_MANIFEST_PIN["live_only_gates"] == list(LIVE_ONLY_GATES)
+
+
+def test_gate_tables_are_mirrored_in_docs() -> None:
+    """Every gate in the runtime tables must appear in the parity docs.
+
+    The shared order rows (GATES_REFERENCE §2), the live-only table (§5) and
+    the substitution (§3) must each mention their gate names — so an operator
+    reading the docs sees the same gate surface the runtime runs.
+    """
+    docs = _docs_text()
+    missing = []
+    for gate in GATE_ORDER:
+        if f"`{gate}`" not in docs:
+            missing.append(("shared_gate_order", gate))
+    for gate in LIVE_ONLY_GATES:
+        if f"`{gate}`" not in docs:
+            missing.append(("live_only_gates", gate))
+    for live_gate, sub in GATE_MANIFEST_PIN["replay_substitutes"].items():
+        if f"`{live_gate}`" not in docs or f"`{sub}`" not in docs:
+            missing.append(("replay_substitutes", f"{live_gate} -> {sub}"))
+    assert not missing, (
+        "Gate table member(s) missing from README.md / docs/GATES_REFERENCE.md:\n"
+        + "\n  ".join(f"[{table}] {g}" for table, g in missing)
+        + "\nThe docs are the mirror of the runtime gate tables — keep them in sync."
+    )
+
+
+def test_gate_manifest_backtest_tca_mode_is_proxy() -> None:
+    """The runtime manifest pins backtest TCA as proxy (candle-only replay)."""
+    m = _runtime_gate_manifest()
+    assert m["_backtest_tca_mode"] == "proxy"
+    assert m.get("tca_mode") == "strict"  # live stays strict
