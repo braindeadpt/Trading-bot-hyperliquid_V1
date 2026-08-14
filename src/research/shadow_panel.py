@@ -7,13 +7,14 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.exchanges.liquidation_event import is_real_liquidation_source
 from src.research.shadow_outcome_evaluator import (
     IDEALIZED_FILL_DISCLAIMER,
     evaluate_shadow_decisions,
     run_evaluation,
 )
 from src.research.shadow_recorder import ShadowRecorder
-from src.utils.config import Config, load_config
+from src.utils.config import Config, get_trading_symbols, load_config
 
 ROOT = Path(__file__).resolve().parents[2]
 GATE_ARTIFACTS = ROOT / "data" / "backtests" / "parity_diag"
@@ -100,6 +101,40 @@ def _count_signals(
     )
 
 
+def _liquidation_provenance(
+    config: Config,
+    symbol: str = "BTC",
+) -> Optional[str]:
+    """Best-effort provenance of replayed liquidation rows in the research DB.
+
+    Mirrors the feed-requirements classifier (real venue rows = production
+    grade; proxy synthesis = candle+OI heuristic) so the dashboard tier
+    matches what a strict-research replay would decide — without running the
+    full data contract. Returns None when the research DB is missing/unreadable
+    (panel falls back to the hardcoded tier).
+    """
+    try:
+        from src.data.research_database import (
+            DEFAULT_RESEARCH_DB_PATH,
+            ResearchDatabase,
+        )
+
+        rel = config.get("research.database.path", str(DEFAULT_RESEARCH_DB_PATH))
+        db = ResearchDatabase(rel)
+        rows = db.get_liquidation_events(symbol, limit=200)
+        if not rows:
+            return "none"
+        n_real = sum(1 for r in rows if is_real_liquidation_source(r.get("source")))
+        n_proxy = len(rows) - n_real
+        if n_real > 0 and n_proxy > 0:
+            return "mixed"
+        if n_real > 0:
+            return "real"
+        return "proxy"
+    except Exception:  # noqa: BLE001 — provenance is best-effort
+        return None
+
+
 def build_shadow_panel_payload(
     *,
     shadow_names: List[str],
@@ -177,6 +212,19 @@ def build_shadow_panel_payload(
             "TopTraderFlow",
         ):
             fidelity = "tier_b_missing_or_proxy"
+        # Liquidation provenance (only for strategies whose Tier-A feed map
+        # requires LIQUIDATION) — derived from the research DB, not hardcoded,
+        # so the panel mirrors what strict-research replay would refuse/accept.
+        liquidation_provenance: Optional[str] = None
+        if name == "LiquidationCatcher":
+            liquidation_provenance = _liquidation_provenance(cfg)
+            if liquidation_provenance == "real" or liquidation_provenance == "mixed":
+                fidelity = "tier_a_hl_liquidation"
+            elif liquidation_provenance == "proxy":
+                fidelity = "tier_b_liquidation_proxy_not_production"
+            elif liquidation_provenance == "none":
+                fidelity = "tier_b_missing_liquidation"
+            # None (research DB unreadable) keeps the hardcoded tier_b fallback
         note = None
         if name == "OrderBookScalper":
             note = (
@@ -219,6 +267,7 @@ def build_shadow_panel_payload(
                 "last_gate": gate,
                 "fidelity_tier": fidelity,
                 "fidelity_note": note,
+                "liquidation_provenance": liquidation_provenance,
             }
         )
 

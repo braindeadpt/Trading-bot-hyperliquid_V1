@@ -1283,6 +1283,19 @@ function renderShadowPanel(payload) {
             gateHint = " <span class='dim' style='font-size:9px;'>(n&lt;30)</span>";
         }
         const freq = r.frequency_insufficient_90d ? " <span style='color:var(--yellow)' title='n&lt;30 in 90d'>freq</span>" : "";
+        const liqProv = r.liquidation_provenance;
+        let liqBadge = "";
+        if (liqProv) {
+            const liqColor = liqProv === "real" || liqProv === "mixed"
+                ? "var(--up)" : liqProv === "proxy" ? "var(--yellow)" : "var(--down)";
+            const liqTitle = {
+                real: "Liquidações reais (venues) no replay — produção-grade",
+                mixed: "Real + proxy no replay",
+                proxy: "Só liquidações proxy (heurística candle+OI) — strict research recusa",
+                none: "Sem liquidações no replay",
+            }[liqProv] || liqProv;
+            liqBadge = ` <span style="color:${liqColor};font-weight:600;font-size:9px;" title="${liqTitle}">liq:${liqProv}</span>`;
+        }
         return `<tr style="border-top:1px solid var(--border);">
             <td title="${r.fidelity_note || ""}">${r.strategy}${freq}</td>
             <td>${r.signals_today || 0}</td>
@@ -1292,7 +1305,7 @@ function renderShadowPanel(payload) {
             <td>${er}</td>
             <td>${bar}</td>
             <td style="color:${vColor};" title="${fail}">${verdict}${gateHint}</td>
-            <td style="font-size:9px;color:var(--dim);">${(r.fidelity_tier || "").replace("tier_", "")}</td>
+            <td style="font-size:9px;color:var(--dim);">${(r.fidelity_tier || "").replace("tier_", "")}${liqBadge}</td>
         </tr>`;
     }).join("");
 }
