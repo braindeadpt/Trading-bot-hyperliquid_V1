@@ -200,6 +200,54 @@ def test_outage_episode_pages_imminent_then_silent(
     asyncio.run(scenario())
 
 
+def test_feed_silent_respects_cooldown_before_realert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A degraded feed re-alerts only after alert_cooldown_sec elapses — never
+    on every refresh (the monitor gates repeats with time.monotonic())."""
+    import time as _time
+
+    async def scenario() -> None:
+        clock = {"t": 1_000_000.0, "mono_offset": 0.0}
+        engine, mon, notifier = _bare_engine(clock, monkeypatch)
+        # production gating: 1h cooldown between FEED SILENT repeats.
+        mon._alert_cooldown_sec = 3600.0
+        # Cooldown compares time.monotonic(); wrap the REAL monotonic so the
+        # asyncio event loop keeps ticking while the monitor sees an offset
+        # we control (advancing it simulates an hour passing between checks).
+        real_mono = _time.monotonic
+
+        def fake_monotonic() -> float:
+            return real_mono() + clock["mono_offset"]
+
+        monkeypatch.setattr(
+            "src.data.market_data_health.time.monotonic", fake_monotonic
+        )
+
+        mon.beat("liquidation_okx", timestamp_ms=int(clock["t"] * 1000))
+        clock["t"] += 1.1 * 3600.0  # 110% -> degraded
+        await _refresh(engine)
+        assert sum("FEED SILENT" in m for m, _ in notifier.alerts) == 1
+
+        # refresh again while still degraded, BEFORE the cooldown elapses:
+        # the refresh itself must not re-page.
+        clock["t"] += 0.5 * 3600.0
+        await _refresh(engine)
+        assert sum("FEED SILENT" in m for m, _ in notifier.alerts) == 1
+
+        # refresh AFTER the cooldown elapses -> the re-alert fires (once).
+        clock["mono_offset"] += 3601.0  # monotonic passes the 1h cooldown
+        await _refresh(engine)
+        assert sum("FEED SILENT" in m for m, _ in notifier.alerts) == 2
+
+        # and again it is quiet until the next cooldown window
+        clock["t"] += 0.25 * 3600.0
+        await _refresh(engine)
+        assert sum("FEED SILENT" in m for m, _ in notifier.alerts) == 2
+
+    asyncio.run(scenario())
+
+
 def test_disabled_feed_silence_sends_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
