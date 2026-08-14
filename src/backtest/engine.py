@@ -99,6 +99,11 @@ class BacktestConfig:
     # Phase08 hard ADX router (mutual exclusion VB ↔ VWAP) — live parity
     use_phase08_regime_router: bool = False
     phase08_seq_block_ms: int = 3_600_000
+    # Liquidation stop-out floor override (USD). None → the calibrated
+    # constant LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD (live parity). A/B
+    # studies set it explicitly: float("inf") disables the stop-out
+    # (baseline), 0 makes any dominant window validate (max sensitivity).
+    liquidation_stopout_min_notional_usd: Optional[float] = None
 
 
 # Candle-range OIR proxy vs live entry_oir (n=265, scripts/_calibrate_oir_proxy.py):
@@ -1457,14 +1462,19 @@ class BacktestEngine:
         # calls the same function on the live accumulator). Same numbers from
         # real or proxy provenance → same stop-out, by construction.
         from src.core.liquidation_stopout import (
+            LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD,
             STOPOUT_REASON,
             liquidation_stopout_decision,
         )
 
+        floor = self.cfg.liquidation_stopout_min_notional_usd
+        if floor is None:
+            floor = LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD
         if liquidation_stopout_decision(
             pos.side,
             event.liquidation_side_5m,
             event.liquidation_notional_5m,
+            min_notional_usd=floor,
         ):
             fill = float(event.price) if event.price and event.price > 0 else float(c1m.close)
             return self._close_position(

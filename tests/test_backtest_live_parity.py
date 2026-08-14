@@ -1700,6 +1700,43 @@ class TestLiquidationStopoutParity:
 
         assert not liquidation_stopout_decision("long", side, notional)
 
+    # -- config override: the A/B floor knob is hash-neutral -------------
+
+    def test_stopout_floor_override_reaches_the_decision(self) -> None:
+        """The BacktestConfig override is threaded into the shared decision:
+        inf disables the stop-out, 0 makes any dominant window validate."""
+        from src.backtest.engine import BacktestConfig, BacktestEngine
+        from src.core.liquidation_stopout import (
+            LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD,
+            liquidation_stopout_decision,
+        )
+
+        # Default (None) preserves the calibrated constant — live parity.
+        cfg_default = BacktestConfig()
+        assert cfg_default.liquidation_stopout_min_notional_usd is None
+        assert liquidation_stopout_decision(
+            "long", "long", 3_000_000.0,
+            min_notional_usd=(cfg_default.liquidation_stopout_min_notional_usd
+                              or LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD),
+        ) is True   # 3.0M >= calibrated 2.5M
+        assert liquidation_stopout_decision(
+            "long", "long", 1_000_000.0,
+            min_notional_usd=(cfg_default.liquidation_stopout_min_notional_usd
+                              or LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD),
+        ) is False  # 1.0M < 2.5M
+
+        # Disabled (inf) — the baseline: no window can validate.
+        assert liquidation_stopout_decision("long", "long", 50_000_000.0,
+                                            min_notional_usd=float("inf")) is False
+        # Max sensitivity (0): any dominant window validates.
+        assert liquidation_stopout_decision("long", "long", 1.0,
+                                            min_notional_usd=0.0) is True
+
+        # The engine threads the knob: the replay close path reads it from cfg.
+        eng = object.__new__(BacktestEngine)
+        eng.cfg = BacktestConfig(liquidation_stopout_min_notional_usd=float("inf"))
+        assert eng.cfg.liquidation_stopout_min_notional_usd == float("inf")
+
     # -- backtest replay path: same numbers → same decision ---------------
 
     def test_backtest_replay_replicates_live_decision(self) -> None:
