@@ -269,7 +269,8 @@ class TestIvGateShadowTemplate:
         assert "/api/shadow_panel" not in poll_all
         assert "/api/market_data_health" in poll_all
         assert "setInterval(pollResearch, 60000)" in html
-        assert 'class="research-fold"' in html
+        assert 'id="tt-bias-tbody"' in html
+        assert "Top Traders (aggregate)" in html
 
     def test_panel_shows_pnl_and_join_coverage(self) -> None:
         """The panel renders the accumulated PnL columns (Net PnL / WR / Avg)
@@ -374,6 +375,27 @@ class TestIvGateShadowTemplate:
         assert 'class="pill pill-liq"' in html
         assert 'LIQ STOP-OUT' in html
         assert '${liqBadge}' in html
+
+    def test_trades_panel_header_shows_active_filter_n_and_net(self) -> None:
+        """The Trade History header shows n + net PnL of the ACTIVE IV filter
+        (all / high_iv / low_iv / sem decisão) — performance by class without
+        opening the DB."""
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        # Element in the header, next to the liquidation counter.
+        assert 'id="trades-filter-stats"' in html
+        assert 'n e net PnL dos trades do filtro IV activo (fechados)' in html
+        # Stats computed from the same filtered array the table renders —
+        # closed-only net, open count shown as a suffix.
+        assert 'filtered.filter(t => t.status === "closed" && typeof t.pnl_usd === "number")' in html
+        assert 'closed.reduce((a, t) => a + t.pnl_usd, 0)' in html
+        assert '${label}:</span>' in html
+        assert '${filtered.length}</b> trades' in html
+        assert 'net <b class="${cls}">' in html
+        assert '(${filtered.length - closed.length} open)' in html
+        # The filter label is humanised (high_iv -> high iv).
+        assert '_tradesIvFilter.replace("_", " ")' in html
 
 
 class TestTradesEndpointIvEnrichment:

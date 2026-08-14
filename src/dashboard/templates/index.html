@@ -297,6 +297,7 @@ tr:hover td { background: var(--panel-hover); }
         <div class="panel" style="max-height:180px;">
             <div class="panel-header">Trade History <span class="dim">Last 50</span>
                 <span class="dim tiny" id="trades-liq-count" style="margin-left:8px;" title="Trades fechados por liquidation stop-out (flush valida o side)"></span>
+                <span id="trades-filter-stats" class="tiny" style="margin-left:8px;" title="n e net PnL dos trades do filtro IV activo (fechados)"></span>
                 <span style="float:right;">
                     <label class="dim tiny" for="trades-iv-filter">IV</label>
                     <select id="trades-iv-filter" onchange="setTradesIvFilter(this.value)" style="font-size:11px;padding:1px 4px;background:var(--panel-bg);color:var(--text);border:1px solid var(--border);border-radius:3px;">
@@ -2046,6 +2047,17 @@ function renderTrades(data) {
     if (liqEl) liqEl.textContent = liqCount > 0
         ? `⛔ ${liqCount} liquidation stop-out`
         : `0 liquidation stop-out`;
+    const statsEl = document.getElementById("trades-filter-stats");
+    if (statsEl) {
+        const closed = filtered.filter(t => t.status === "closed" && typeof t.pnl_usd === "number");
+        const net = closed.reduce((a, t) => a + t.pnl_usd, 0);
+        const label = _tradesIvFilter === "all" ? "all" : _tradesIvFilter.replace("_", " ");
+        const cls = net > 0 ? "up" : net < 0 ? "down" : "";
+        statsEl.innerHTML = `<span class="dim">${label}:</span> ` +
+            `<b>${filtered.length}</b> trades` +
+            ` · net <b class="${cls}">${net >= 0 ? "+" : "−"}$${Math.abs(net).toFixed(2)}</b>` +
+            (closed.length < filtered.length ? ` <span class="muted">(${filtered.length - closed.length} open)</span>` : "");
+    }
     if (filtered.length === 0) {
         const empty = _tradesAll.length === 0
             ? "No trades yet"
