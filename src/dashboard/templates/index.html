@@ -2081,8 +2081,8 @@ function renderPositions(data) {
             <td class="muted tiny">${p.strategy || "?"}</td>
             <td class="num tiny">${p.stop_loss != null ? "$" + fmtNum(p.stop_loss) : "—"}</td>
             <td class="num tiny">${p.take_profit != null ? "$" + fmtNum(p.take_profit) : "—"}</td>
-            <td class="num tiny">${p.iv_percentile != null ? p.iv_percentile.toFixed(1) + "%" : "<span class='muted'>—</span>"}</td>
-            <td class="tiny">${ivBadge(p.iv_class)}</td>
+            <td class="num tiny" title="${ivTip}">${p.iv_percentile != null ? p.iv_percentile.toFixed(1) + "%" : "<span class='muted'>—</span>"}</td>
+            <td class="tiny" title="${ivTip}">${ivBadge(p.iv_class)}</td>
         </tr>`;
     }).join('');
 }
@@ -2211,8 +2211,8 @@ function renderTrades(data) {
             <td class="num tiny ${fundClass}">${fundDisplay}</td>
             <td class="muted tiny">${t.strategy || "?"}</td>
             <td class="tiny">${liqBadge}</td>
-            <td class="num tiny">${t.iv_percentile != null ? t.iv_percentile.toFixed(1) + "%" : "<span class='muted'>—</span>"}</td>
-            <td class="tiny">${ivBadge(t.iv_class)}</td>
+            <td class="num tiny" title="${ivTip}">${t.iv_percentile != null ? t.iv_percentile.toFixed(1) + "%" : "<span class='muted'>—</span>"}</td>
+            <td class="tiny" title="${ivTip}">${ivBadge(t.iv_class)}</td>
             <td>${statusBadge}</td>
         </tr>`;
     }).join('');

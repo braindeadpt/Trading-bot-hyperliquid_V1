@@ -381,6 +381,13 @@ class TestIvGateShadowTemplate:
         assert 'ivTipTxt(p.iv_percentile, p.iv_threshold, p.iv_class)' in html
         # Positions rows now carry the tooltip (they had none before).
         assert '<tr title="${ivTip}">' in html
+        # Hover on the IV pct cell / badge shows the same tooltip — the
+        # operator reads the slack where the pointer naturally lands.
+        assert 'title="${ivTip}">${p.iv_percentile' in html
+        assert 'title="${ivTip}">${ivBadge(p.iv_class)}' in html
+        # Trades mirror the same per-cell tooltip.
+        assert 'title="${ivTip}">${t.iv_percentile' in html
+        assert 'title="${ivTip}">${ivBadge(t.iv_class)}' in html
 
     def test_trades_panel_has_liquidation_stop_out_counter_and_badge(self) -> None:
         """The trades panel surfaces liquidation stop-outs: a counter in the
