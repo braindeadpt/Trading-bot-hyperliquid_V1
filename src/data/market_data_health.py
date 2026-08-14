@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import collections
+import logging
 import time
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -255,6 +258,7 @@ class FeedSilenceMonitor:
         imminent_fraction: float = 0.9,
         cadence_min_samples: int = 100,
         cadence_gap_history: int = 4000,
+        on_alert: Optional[Callable[[str, str, int, str], None]] = None,
     ) -> None:
         # feed_name -> max silence seconds
         defaults = {
@@ -278,12 +282,36 @@ class FeedSilenceMonitor:
         self._warn_fraction = float(warn_fraction)
         self._imminent_fraction = float(imminent_fraction)
         self._cadence_min_samples = int(cadence_min_samples)
+        # Optional sink for every emitted alert: (feed, alert_type, fired_ms,
+        # message). The engine uses it to persist the real silence history to
+        # the research DB for audit vs the daily max-age rollup.
+        self._on_alert = on_alert
         self._cadence_gap_history = int(cadence_gap_history)
         self._enabled_feeds: set[str] = set(cfg.keys())
         # time.monotonic() is since an arbitrary epoch (often system boot on
         # Windows), NOT process start. Never-seen silence must use age since
         # monitor construction or every restart fires "never produced" instantly.
         self._started_mono: float = time.monotonic()
+
+    def _emit_alert(
+        self,
+        alerts: List[str],
+        name: str,
+        alert_type: str,
+        now_ms: int,
+        msg: str,
+    ) -> None:
+        """Append an alert and forward it to the optional on_alert sink.
+
+        The sink (research-DB recorder) is best-effort: a failing recorder
+        must never break the monitor's own alert flow.
+        """
+        alerts.append(msg)
+        if self._on_alert is not None:
+            try:
+                self._on_alert(name, alert_type, int(now_ms), msg)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("feed silence on_alert failed: %s", exc)
 
     def enable_feed(self, feed: str, max_silence_sec: Optional[float] = None) -> None:
         self._enabled_feeds.add(feed)
@@ -335,10 +363,11 @@ class FeedSilenceMonitor:
                     st.degraded = True
                     if mono - st.last_alert_mono >= self._alert_cooldown_sec:
                         st.last_alert_mono = mono
-                        alerts.append(
+                        self._emit_alert(
+                            alerts, name, "degraded", now,
                             f"FEED SILENT: `{name}` never produced an event "
                             f"(threshold {st.max_silence_sec/3600:.1f}h) — "
-                            f"marking degraded"
+                            f"marking degraded",
                         )
                 continue
             age = (now - st.last_event_ms) / 1000.0
@@ -346,10 +375,11 @@ class FeedSilenceMonitor:
                 st.degraded = True
                 if mono - st.last_alert_mono >= self._alert_cooldown_sec:
                     st.last_alert_mono = mono
-                    alerts.append(
+                    self._emit_alert(
+                        alerts, name, "degraded", now,
                         f"FEED SILENT: `{name}` quiet for {age/3600:.1f}h "
                         f"(threshold {st.max_silence_sec/3600:.1f}h) — "
-                        f"data may be stale or path blocked"
+                        f"data may be stale or path blocked",
                     )
             else:
                 st.degraded = False
@@ -390,34 +420,38 @@ class FeedSilenceMonitor:
                 # degrade threshold. Fire early then imminent, independently.
                 if not st.warned_50_pct and uptime_sec >= st.max_silence_sec * warn_fraction:
                     st.warned_50_pct = True
-                    warnings.append(
+                    self._emit_alert(
+                        warnings, name, "early", now,
                         f"FEED QUIET (early): `{name}` never produced an event "
                         f"for {uptime_sec/3600:.1f}h "
-                        f"(≥{warn_fraction * 100:.0f}% of {st.max_silence_sec/3600:.1f}h threshold)"
+                        f"(≥{warn_fraction * 100:.0f}% of {st.max_silence_sec/3600:.1f}h threshold)",
                     )
                 if not st.warned_90_pct and uptime_sec >= st.max_silence_sec * imminent_fraction:
                     st.warned_90_pct = True
-                    warnings.append(
+                    self._emit_alert(
+                        warnings, name, "imminent", now,
                         f"FEED QUIET (imminent): `{name}` still no events after "
                         f"{uptime_sec/3600:.1f}h "
                         f"(≥{imminent_fraction * 100:.0f}% of {st.max_silence_sec/3600:.1f}h "
-                        f"threshold) — degrade iminente"
+                        f"threshold) — degrade iminente",
                     )
                 continue
             age = (now - st.last_event_ms) / 1000.0
             if not st.warned_50_pct and age >= st.max_silence_sec * warn_fraction:
                 st.warned_50_pct = True
-                warnings.append(
+                self._emit_alert(
+                    warnings, name, "early", now,
                     f"FEED QUIET (early): `{name}` quiet for {age/3600:.1f}h "
                     f"(≥{warn_fraction * 100:.0f}% of {st.max_silence_sec/3600:.1f}h threshold) — "
-                    f"check delivery path before it degrades"
+                    f"check delivery path before it degrades",
                 )
             if not st.warned_90_pct and age >= st.max_silence_sec * imminent_fraction:
                 st.warned_90_pct = True
-                warnings.append(
+                self._emit_alert(
+                    warnings, name, "imminent", now,
                     f"FEED QUIET (imminent): `{name}` quiet for {age/3600:.1f}h "
                     f"(≥{imminent_fraction * 100:.0f}% of {st.max_silence_sec/3600:.1f}h "
-                    f"threshold) — verificar já, degrade iminente"
+                    f"threshold) — verificar já, degrade iminente",
                 )
         return warnings
 
@@ -447,10 +481,11 @@ class FeedSilenceMonitor:
             age = (now - st.last_event_ms) / 1000.0
             if age > p99:
                 st.warned_cadence = True
-                alerts.append(
+                self._emit_alert(
+                    alerts, name, "cadence", now,
                     f"FEED CADENCE: `{name}` quiet for {age/60:.0f}m "
                     f"(>p99 historical gap {p99/60:.0f}m, n={len(st.gaps)}) — "
-                    f"delivery thinning out, check before it degrades"
+                    f"delivery thinning out, check before it degrades",
                 )
         return alerts
 

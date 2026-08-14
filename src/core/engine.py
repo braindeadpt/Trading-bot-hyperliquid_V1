@@ -574,6 +574,7 @@ class TradingEngine:
             feeds=_silence_feeds if _silence_enabled else {},
             warn_fraction=feed_silence_warn_fraction(),
             imminent_fraction=feed_silence_imminent_fraction(),
+            on_alert=self._record_feed_silence_alert,
         )
         self._feed_silence_enabled = _silence_enabled
         if not _silence_enabled:
@@ -744,6 +745,33 @@ class TradingEngine:
             lock = asyncio.Lock()
             self._symbol_locks[symbol] = lock
         return lock
+
+    def _record_feed_silence_alert(
+        self,
+        feed: str,
+        alert_type: str,
+        fired_ms: int,
+        message: str,
+    ) -> None:
+        """Persist an emitted early/imminent/degraded/cadence alert.
+
+        Best-effort and synchronous (alerts are fire-once per episode, so a
+        handful per day at most): appends to the research DB's
+        ``feed_silence_alerts`` table — the audit trail of the REAL silence
+        history that can be crossed with the daily max-age rollup. A broken
+        research DB must never disturb the alert flow (the monitor already
+        wraps the callback).
+        """
+        try:
+            db = getattr(self, "_feed_silence_alert_db", None)
+            if db is None:
+                from src.data.research_database import ResearchDatabase
+
+                db = ResearchDatabase()
+                self._feed_silence_alert_db = db
+            db.save_feed_silence_alerts([(feed, alert_type, fired_ms, message)])
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("feed silence alert record failed: %s", exc)
 
     def _notify(self, coro_factory: Callable[[], "asyncio.Future[Any]"]) -> None:
         """Schedule a notifier coroutine fire-and-forget.

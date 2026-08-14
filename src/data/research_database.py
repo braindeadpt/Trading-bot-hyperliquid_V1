@@ -256,6 +256,20 @@ class ResearchDatabase(Database):
             "CREATE INDEX IF NOT EXISTS idx_feed_age_samples_feed "
             "ON feed_age_samples(feed, bucket_ms);"
         )
+        self._conn().execute("""
+            CREATE TABLE IF NOT EXISTS feed_silence_alerts (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                feed            TEXT    NOT NULL,
+                alert_type      TEXT    NOT NULL,
+                fired_ms        INTEGER NOT NULL,
+                message         TEXT,
+                ingested_at_ms  INTEGER NOT NULL
+            );
+        """)
+        self._conn().execute(
+            "CREATE INDEX IF NOT EXISTS idx_feed_silence_alerts_feed "
+            "ON feed_silence_alerts(feed, fired_ms);"
+        )
         self._commit()
 
     def prune_old_data(self, days: int = 30) -> Dict[str, int]:
@@ -655,6 +669,57 @@ class ResearchDatabase(Database):
         if not row:
             return None
         return (int(row[0]), float(row[1]), int(row[2]))
+
+    def save_feed_silence_alerts(
+        self,
+        rows: List[Tuple[str, str, int, str]],
+    ) -> int:
+        """Append emitted early/imminent/degraded/cadence alerts.
+
+        ``rows`` = (feed, alert_type, fired_ms, message). Append-only — each
+        emission is a unique event (the monitor is fire-once per episode, so
+        a row per emission is exactly the audit trail the operator wants:
+        WHEN each level fired and FOR which feed).
+        """
+        if not rows:
+            return 0
+        ingested = int(time.time() * 1000)
+        sql = """
+            INSERT INTO feed_silence_alerts (feed, alert_type, fired_ms, message, ingested_at_ms)
+            VALUES (?, ?, ?, ?, ?)
+        """
+        params = [
+            (str(feed), str(alert_type), int(fired_ms), str(message), ingested)
+            for feed, alert_type, fired_ms, message in rows
+        ]
+        with self._write_lock:
+            conn = self._conn()
+            conn.executemany(sql, params)
+            conn.commit()
+        return len(params)
+
+    def load_feed_silence_alerts(
+        self,
+        feed: Optional[str] = None,
+        start_ms: int = 0,
+        end_ms: Optional[int] = None,
+    ) -> List[Tuple[str, str, int, str]]:
+        """Emitted alerts ascending by ``fired_ms``, optionally per feed.
+
+        Returns (feed, alert_type, fired_ms, message).
+        """
+        q = "SELECT feed, alert_type, fired_ms, message FROM feed_silence_alerts "
+        conds = ["fired_ms >= ?"]
+        params: list = [int(start_ms)]
+        if feed is not None:
+            conds.append("feed = ?")
+            params.append(str(feed))
+        if end_ms is not None:
+            conds.append("fired_ms <= ?")
+            params.append(int(end_ms))
+        q += "WHERE " + " AND ".join(conds) + " ORDER BY fired_ms ASC"
+        rows = self._conn().execute(q, params).fetchall()
+        return [(str(f), str(t), int(ms), str(m)) for f, t, ms, m in rows]
 
     def save_feed_age_samples(
         self,

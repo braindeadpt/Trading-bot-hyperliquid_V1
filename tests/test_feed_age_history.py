@@ -78,6 +78,47 @@ class TestResearchDb:
         assert rdb.load_latest_feed_age("liquidation_okx") == (DAY, 300.0, 8)
 
 
+class TestFeedSilenceAlerts:
+    def test_save_load_roundtrip_and_feed_filter(self, tmp_path):
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        rows = [
+            ("liquidation_okx", "early", 1_000, "FEED QUIET (early): ..."),
+            ("liquidation_okx", "imminent", 2_000, "FEED QUIET (imminent): ..."),
+            ("funding_hl", "degraded", 3_000, "FEED SILENT: ..."),
+        ]
+        assert rdb.save_feed_silence_alerts(rows) == 3
+        assert rdb.load_feed_silence_alerts() == rows
+        assert rdb.load_feed_silence_alerts(feed="liquidation_okx") == rows[:2]
+        assert rdb.load_feed_silence_alerts(feed="funding_hl") == rows[2:]
+        assert rdb.load_feed_silence_alerts(feed="missing") == []
+
+    def test_window_filter_and_ordering(self, tmp_path):
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        rdb.save_feed_silence_alerts([
+            ("liquidation_okx", "early", 1_000, "m1"),
+            ("liquidation_okx", "imminent", 5_000, "m2"),
+            ("liquidation_okx", "degraded", 9_000, "m3"),
+        ])
+        got = rdb.load_feed_silence_alerts(start_ms=2_000, end_ms=6_000)
+        assert got == [("liquidation_okx", "imminent", 5_000, "m2")]
+
+    def test_append_only_keeps_every_emission(self, tmp_path):
+        """Each emission is a row — a repeat FEED SILENT after the cooldown
+        is its own audit entry, never merged away."""
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        rdb.save_feed_silence_alerts([("liquidation_okx", "degraded", 1_000, "a")])
+        rdb.save_feed_silence_alerts([("liquidation_okx", "degraded", 4_000, "b")])
+        assert rdb.load_feed_silence_alerts() == [
+            ("liquidation_okx", "degraded", 1_000, "a"),
+            ("liquidation_okx", "degraded", 4_000, "b"),
+        ]
+
+    def test_empty_save(self, tmp_path):
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        assert rdb.save_feed_silence_alerts([]) == 0
+        assert rdb.load_feed_silence_alerts() == []
+
+
 class TestIntradaySamples:
     def test_bucket_start_floors_to_10min(self):
         assert sample_bucket_start_ms(0) == 0

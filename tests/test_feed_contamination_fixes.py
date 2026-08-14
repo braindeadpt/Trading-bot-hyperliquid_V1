@@ -523,3 +523,103 @@ def test_feed_silence_imminent_fraction_env_wiring(
 
     monkeypatch.setenv("FEED_SILENCE_IMMINENT_FRACTION", "not-a-float")
     assert feed_silence_imminent_fraction() == 0.9
+
+
+def test_feed_silence_on_alert_records_every_emission() -> None:
+    """The on_alert sink receives (feed, alert_type, fired_ms, message) for
+    every emitted early/imminent/degraded alert — the audit trail of WHEN
+    each level fired, exactly once per episode (fire-once)."""
+    recorded: list = []
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=7200.0,  # degraded re-alert gated by a 2h cooldown
+        feeds={"liquidation_okx": 3600.0},
+        on_alert=lambda f, t, ms, m: recorded.append((f, t, ms, m)),
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    mon.beat("liquidation_okx", timestamp_ms=1_000_000)
+
+    # 55% -> early fires and is recorded
+    mon.check_early_warnings(now_ms=1_000_000 + int(0.55 * 3600_000))
+    assert recorded[-1][:3] == ("liquidation_okx", "early", 1_000_000 + int(0.55 * 3600_000))
+    n = len(recorded)
+    # same episode continuing -> no second early emission
+    mon.check_early_warnings(now_ms=1_000_000 + int(0.7 * 3600_000))
+    assert len(recorded) == n
+
+    # 95% -> imminent fires and is recorded
+    mon.check_early_warnings(now_ms=1_000_000 + int(0.95 * 3600_000))
+    assert recorded[-1][:3] == ("liquidation_okx", "imminent", 1_000_000 + int(0.95 * 3600_000))
+    n = len(recorded)
+    mon.check_early_warnings(now_ms=1_000_000 + int(0.99 * 3600_000))
+    assert len(recorded) == n
+
+    # 110% -> degraded (FEED SILENT) fires and is recorded
+    mon.check(now_ms=1_000_000 + int(1.1 * 3600_000))
+    assert recorded[-1][:3] == ("liquidation_okx", "degraded", 1_000_000 + int(1.1 * 3600_000))
+    assert "FEED SILENT" in recorded[-1][3]
+    assert len([r for r in recorded if r[1] == "degraded"]) == 1
+
+    # fire-once per episode: repeat check at a later age records nothing new
+    mon.check(now_ms=1_000_000 + int(2.0 * 3600_000))
+    assert len([r for r in recorded if r[1] == "degraded"]) == 1
+
+
+def test_feed_silence_on_alert_fires_cadence() -> None:
+    """The cadence alert (gap > historical p99) is also recorded."""
+    recorded: list = []
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+        cadence_min_samples=3,
+        on_alert=lambda f, t, ms, m: recorded.append((f, t, ms, m)),
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    t = 1_000_000
+    mon.beat("liquidation_okx", timestamp_ms=t)
+    for _ in range(6):
+        t += 60_000
+        mon.beat("liquidation_okx", timestamp_ms=t)
+    mon.check_cadence(now_ms=t + 10 * 60_000)
+    assert len(recorded) == 1
+    assert recorded[0][0] == "liquidation_okx"
+    assert recorded[0][1] == "cadence"
+    assert "FEED CADENCE" in recorded[0][3]
+
+
+def test_feed_silence_on_alert_quiet_when_nothing_fires() -> None:
+    """No emissions -> no callback calls."""
+    recorded: list = []
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+        on_alert=lambda f, t, ms, m: recorded.append((f, t, ms, m)),
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    mon.beat("liquidation_okx", timestamp_ms=1_000_000)
+    mon.check(now_ms=1_000_000 + int(0.3 * 3600_000))
+    mon.check_early_warnings(now_ms=1_000_000 + int(0.3 * 3600_000))
+    assert recorded == []
+
+
+def test_feed_silence_on_alert_broken_sink_does_not_break_flow() -> None:
+    """A failing recorder must never break the monitor's own alert flow."""
+    def boom(*a, **k):
+        raise RuntimeError("db down")
+
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+        on_alert=boom,
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    mon.beat("liquidation_okx", timestamp_ms=1_000_000)
+    warns = mon.check_early_warnings(now_ms=1_000_000 + int(0.95 * 3600_000))
+    assert len(warns) == 2  # early + imminent still returned despite the sink

@@ -40,12 +40,14 @@ def _bare_engine(
     monkeypatch: pytest.MonkeyPatch,
     *,
     warn_fraction: float = 0.5,
+    on_alert=None,
 ):
     """Bare TradingEngine with the attrs _refresh_market_data_health needs.
 
     ``warn_fraction`` defaults to 0.5 for the existing tests; the env-driven
     test passes ``feed_silence_warn_fraction()`` (exactly what the engine's
-    constructor does) to prove the env reaches the monitor.
+    constructor does) to prove the env reaches the monitor. ``on_alert`` is
+    forwarded to the monitor — the engine wires it to the research DB.
     """
     from src.core.engine import TradingEngine
     from src.data.market_data_health import (
@@ -75,6 +77,7 @@ def _bare_engine(
         alert_cooldown_sec=0.0,
         feeds={"liquidation_okx": MAX_SILENCE_SEC},
         warn_fraction=warn_fraction,
+        on_alert=on_alert,
     )
     for name in list(mon._enabled_feeds):
         if name != "liquidation_okx":
@@ -98,6 +101,39 @@ async def _refresh(engine) -> None:
 
 def _messages(notifier) -> list:
     return [msg for msg, _ in notifier.alerts]
+
+
+def test_engine_forwards_feed_silent_to_on_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine's refresh forwards every FEED SILENT emission to the
+    monitor's on_alert sink (the research-DB audit trail) — same path as the
+    notifier page, so the recorded history matches what the operator saw."""
+
+    async def scenario() -> None:
+        clock = {"t": 1_000_000.0}
+        recorded: list = []
+        engine, mon, _notifier = _bare_engine(
+            clock, monkeypatch,
+            on_alert=lambda f, t, ms, m: recorded.append((f, t, ms, m)),
+        )
+        mon._alert_cooldown_sec = 0.0  # degraded re-fires per refresh (test only)
+
+        mon.beat("liquidation_okx", timestamp_ms=int(clock["t"] * 1000))
+        clock["t"] += 1.1 * 3600.0  # 110% -> degraded
+        await _refresh(engine)
+        assert recorded and recorded[0][:2] == ("liquidation_okx", "degraded")
+        assert "FEED SILENT" in recorded[0][3]
+        assert recorded[0][2] == int(clock["t"] * 1000)  # fired_ms
+
+        # each emission is appended — a repeat after cooldown is its own row
+        n = len(recorded)
+        clock["t"] += 1.1 * 3600.0
+        await _refresh(engine)
+        assert len(recorded) == n + 1
+        assert recorded[-1][1] == "degraded"
+
+    asyncio.run(scenario())
 
 
 def test_warn_fraction_env_moves_early_threshold(
