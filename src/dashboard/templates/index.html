@@ -1657,15 +1657,27 @@ function renderFeedSilence(payload) {
         // beat) — 'early 14:32' style, with full precision in the tooltip.
         const earlyAt = st.warned_50_at_ms ? " · " + fmtHM(st.warned_50_at_ms) : "";
         const imminentAt = st.warned_90_at_ms ? " · " + fmtHM(st.warned_90_at_ms) : "";
-        const alertedTitle = degraded ? ""
+        // Daily episode counters (UTC day, rolled by the monitor): how many
+        // early/imminent episodes this feed has already had today. Visible as
+        // 'N× hoje' next to the level; per-level breakdown in the tooltip.
+        const earlyToday = st.early_count_today == null ? 0 : Number(st.early_count_today);
+        const imminentToday = st.imminent_count_today == null ? 0 : Number(st.imminent_count_today);
+        const epsToday = earlyToday + imminentToday;
+        const todayTxt = epsToday > 0 ? " · " + epsToday + "× hoje" : "";
+        const epsTitle = (earlyToday > 0 || imminentToday > 0)
+            ? " · " + (earlyToday > 0 ? earlyToday + " episódio(s) early" : "")
+              + (earlyToday > 0 && imminentToday > 0 ? " + " : "")
+              + (imminentToday > 0 ? imminentToday + " episódio(s) imminent" : "") + " hoje"
+            : "";
+        const alertedTitle = (degraded ? ""
             : alerted90 && st.warned_90_at_ms
                 ? "imminent disparou a " + fmtTime(st.warned_90_at_ms) + " · " + fmtDate(st.warned_90_at_ms)
             : alerted50 && st.warned_50_at_ms
                 ? "early disparou a " + fmtTime(st.warned_50_at_ms) + " · " + fmtDate(st.warned_50_at_ms)
-            : "";
+            : "") + epsTitle;
         const alertedTxt = degraded ? "—"
-            : alerted90 ? "imminent @ " + imminentFrac + "%" + imminentAt
-            : alerted50 ? "early @ " + earlyFrac + "%" + earlyAt
+            : alerted90 ? "imminent @ " + imminentFrac + "%" + imminentAt + todayTxt
+            : alerted50 ? "early @ " + earlyFrac + "%" + earlyAt + todayTxt
             : "—";
         const alertedColor = degraded ? "var(--muted)"
             : alerted90 ? "var(--down)"

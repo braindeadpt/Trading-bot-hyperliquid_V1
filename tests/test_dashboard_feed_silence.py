@@ -79,6 +79,8 @@ class TestFeedSilencePayload:
                     "warned_50_at_ms": 1_752_000_000_000,
                     "warned_90_pct": False,
                     "warned_90_at_ms": None,
+                    "early_count_today": 2,
+                    "imminent_count_today": 1,
                     "warn_fraction": 0.3,
                     "imminent_fraction": 0.8,
                 },
@@ -117,6 +119,9 @@ class TestFeedSilencePayload:
         # when each alert fired also passes through (None until it fires)
         assert fs["funding_hl"]["warned_50_at_ms"] == 1_752_000_000_000
         assert fs["funding_hl"]["warned_90_at_ms"] is None
+        # daily episode counters (UTC day) pass through per feed
+        assert fs["funding_hl"]["early_count_today"] == 2
+        assert fs["funding_hl"]["imminent_count_today"] == 1
         # fire-once flags pass through the snapshot (funding_hl already fired
         # early at 30% warn_fraction, hence its persisted timestamp)
         assert fs["funding_hl"]["warned_50_pct"] is True
@@ -598,3 +603,16 @@ class TestFeedSilenceTemplate:
         # tooltip with full precision
         assert "early disparou a " in html
         assert "imminent disparou a " in html
+
+    def test_template_shows_daily_episode_counters(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # the Alerted cell appends how many episodes already alerted today
+        assert "st.early_count_today" in html
+        assert "st.imminent_count_today" in html
+        assert "epsToday" in html
+        assert "todayTxt" in html
+        assert "× hoje" in html
+        # tooltip carries the per-level breakdown
+        assert "epsTitle" in html
+        assert "episódio(s) early" in html
+        assert "episódio(s) imminent" in html

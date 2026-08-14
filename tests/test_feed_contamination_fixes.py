@@ -585,6 +585,50 @@ def test_feed_silence_on_alert_records_every_emission() -> None:
     assert snap["warned_90_at_ms"] is None
 
 
+def test_feed_silence_daily_episode_counters() -> None:
+    """Daily counters count EPISODES (fire-once re-arms on beat), not checks,
+    and roll over at the UTC day boundary — "episódios hoje" is a day."""
+    from src.data.market_data_health import FeedSilenceMonitor
+
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    day_a = 1_752_000_000_000  # any UTC day
+    mon.beat("liquidation_okx", timestamp_ms=day_a)
+
+    # episode 1: early at 55%, then imminent at 95% — same episode
+    mon.check_early_warnings(now_ms=day_a + int(0.55 * 3600_000))
+    assert mon.snapshot(now_ms=day_a)["liquidation_okx"]["early_count_today"] == 1
+    # same episode continuing -> fire-once, no re-increment
+    mon.check_early_warnings(now_ms=day_a + int(0.7 * 3600_000))
+    mon.check_early_warnings(now_ms=day_a + int(0.95 * 3600_000))
+    snap = mon.snapshot(now_ms=day_a)
+    assert snap["liquidation_okx"]["early_count_today"] == 1
+    assert snap["liquidation_okx"]["imminent_count_today"] == 1
+
+    # beat re-arms -> a NEW episode on the same day counts again
+    mon.beat("liquidation_okx", timestamp_ms=day_a + int(1.5 * 3600_000))
+    mon.check_early_warnings(now_ms=day_a + int(2.05 * 3600_000))  # 55% again
+    snap = mon.snapshot(now_ms=day_a + int(2.05 * 3600_000))
+    assert snap["liquidation_okx"]["early_count_today"] == 2
+    assert snap["liquidation_okx"]["imminent_count_today"] == 1
+
+    # UTC day flips -> counters reset; new episodes count from zero
+    day_b = day_a + 86_400_000
+    snap = mon.snapshot(now_ms=day_b)
+    assert snap["liquidation_okx"]["early_count_today"] == 0
+    assert snap["liquidation_okx"]["imminent_count_today"] == 0
+    mon.beat("liquidation_okx", timestamp_ms=day_b)
+    mon.check_early_warnings(now_ms=day_b + int(0.95 * 3600_000))  # straight to imminent
+    snap = mon.snapshot(now_ms=day_b + int(0.95 * 3600_000))
+    assert snap["liquidation_okx"]["early_count_today"] == 1
+    assert snap["liquidation_okx"]["imminent_count_today"] == 1
+
+
 def test_feed_silence_on_alert_fires_cadence() -> None:
     """The cadence alert (gap > historical p99) is also recorded."""
     recorded: list = []

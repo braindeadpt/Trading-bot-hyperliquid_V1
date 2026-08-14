@@ -208,6 +208,12 @@ class FeedSilenceState:
     warned_90_pct: bool = False
     # Wall-clock ms when the imminent warning fired (None until it does).
     warned_90_at_ms: Optional[int] = None
+    # Daily episode counters (UTC calendar day — the same boundary the daily
+    # feed_age rollups use). One increment per EPISODE, not per check: the
+    # fire-once flags re-arm on beat(), so a feed that alerts twice today
+    # counts 2. NOT reset by beat() — only when the UTC day flips.
+    early_count_today: int = 0
+    imminent_count_today: int = 0
     # Cadence tracking: rolling inter-event gaps (sec) used to detect a feed
     # that is still delivering but far less often than its historical p99.
     gaps: "collections.deque" = field(default_factory=collections.deque)
@@ -297,6 +303,26 @@ class FeedSilenceMonitor:
         # Windows), NOT process start. Never-seen silence must use age since
         # monitor construction or every restart fires "never produced" instantly.
         self._started_mono: float = time.monotonic()
+        # UTC date (YYYY-MM-DD) the per-feed daily episode counters were last
+        # rolled to. None until the first check/snapshot anchors them.
+        self._counts_day: Optional[str] = None
+
+    def _roll_counts_to_day(self, now_ms: int) -> None:
+        """Reset per-feed daily episode counters when the UTC day flips.
+
+        "Today" is a UTC calendar day (the same boundary the daily
+        ``feed_age_history`` rollups use), not a 24h rolling window. Called
+        before increments (``check_early_warnings``) and before reads
+        (``snapshot``) so the dashboard never shows yesterday's counts after
+        midnight — and increments always land in the right day.
+        """
+        day = time.strftime("%Y-%m-%d", time.gmtime(int(now_ms) // 1000))
+        if day == self._counts_day:
+            return
+        self._counts_day = day
+        for st in self._states.values():
+            st.early_count_today = 0
+            st.imminent_count_today = 0
 
     def _emit_alert(
         self,
@@ -415,6 +441,7 @@ class FeedSilenceMonitor:
         if imminent_fraction is None:
             imminent_fraction = self._imminent_fraction
         now = now_ms if now_ms is not None else int(time.time() * 1000)
+        self._roll_counts_to_day(now)
         mono = time.monotonic()
         uptime_sec = mono - self._started_mono
         warnings: List[str] = []
@@ -428,6 +455,7 @@ class FeedSilenceMonitor:
                 if not st.warned_50_pct and uptime_sec >= st.max_silence_sec * warn_fraction:
                     st.warned_50_pct = True
                     st.warned_50_at_ms = int(now)
+                    st.early_count_today += 1
                     self._emit_alert(
                         warnings, name, "early", now,
                         f"FEED QUIET (early): `{name}` never produced an event "
@@ -437,6 +465,7 @@ class FeedSilenceMonitor:
                 if not st.warned_90_pct and uptime_sec >= st.max_silence_sec * imminent_fraction:
                     st.warned_90_pct = True
                     st.warned_90_at_ms = int(now)
+                    st.imminent_count_today += 1
                     self._emit_alert(
                         warnings, name, "imminent", now,
                         f"FEED QUIET (imminent): `{name}` still no events after "
@@ -449,6 +478,7 @@ class FeedSilenceMonitor:
             if not st.warned_50_pct and age >= st.max_silence_sec * warn_fraction:
                 st.warned_50_pct = True
                 st.warned_50_at_ms = int(now)
+                st.early_count_today += 1
                 self._emit_alert(
                     warnings, name, "early", now,
                     f"FEED QUIET (early): `{name}` quiet for {age/3600:.1f}h "
@@ -458,6 +488,7 @@ class FeedSilenceMonitor:
             if not st.warned_90_pct and age >= st.max_silence_sec * imminent_fraction:
                 st.warned_90_pct = True
                 st.warned_90_at_ms = int(now)
+                st.imminent_count_today += 1
                 self._emit_alert(
                     warnings, name, "imminent", now,
                     f"FEED QUIET (imminent): `{name}` quiet for {age/3600:.1f}h "
@@ -500,8 +531,9 @@ class FeedSilenceMonitor:
                 )
         return alerts
 
-    def snapshot(self) -> Dict[str, Dict[str, object]]:
-        now = int(time.time() * 1000)
+    def snapshot(self, now_ms: Optional[int] = None) -> Dict[str, Dict[str, object]]:
+        now = now_ms if now_ms is not None else int(time.time() * 1000)
+        self._roll_counts_to_day(now)
         out: Dict[str, Dict[str, object]] = {}
         for name in sorted(self._enabled_feeds):
             st = self._states[name]
@@ -515,6 +547,8 @@ class FeedSilenceMonitor:
                 "warned_50_at_ms": st.warned_50_at_ms,
                 "warned_90_pct": st.warned_90_pct,
                 "warned_90_at_ms": st.warned_90_at_ms,
+                "early_count_today": st.early_count_today,
+                "imminent_count_today": st.imminent_count_today,
                 "warned_cadence": st.warned_cadence,
                 "cadence_p95_sec": st.cadence_p95_sec(
                     min_samples=self._cadence_min_samples
