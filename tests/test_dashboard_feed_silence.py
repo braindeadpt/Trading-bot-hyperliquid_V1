@@ -616,3 +616,19 @@ class TestFeedSilenceTemplate:
         assert "epsTitle" in html
         assert "episódio(s) early" in html
         assert "episódio(s) imminent" in html
+
+    def test_template_cadence_badge_and_gap_comparison(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # the cadence badge + Age cell compare the rolling p99 vs the gap
+        assert "pill-cadence" in html
+        assert "cadenceBad" in html
+        assert "cadenceBadge" in html
+        assert "gapOverP99" in html
+        assert "gapOverP95" in html
+        assert "st.warned_cadence" in html
+        # when breached, the Age cell spells out the comparison
+        assert 'gap " + fmtDur(age) + " > p99 " + fmtDur(p99)' in html
+        # tooltip carries the sample count and the fire-once flag state
+        assert "alerta cadence emitido" in html
+        assert "(n=" in html
+        assert "cadência a degradar" in html

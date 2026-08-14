@@ -75,6 +75,7 @@ tr:hover td { background: var(--panel-hover); }
 .pill-pending { background: rgba(217,119,6,0.15); color: #d97706; }
 .pill-creep { background: rgba(210,153,34,0.18); color: #d29922; }
 .pill-creep-hi { background: rgba(239,68,68,0.18); color: #ef4444; }
+.pill-cadence { background: rgba(239,68,68,0.15); color: #ef4444; }
 .pill-approved { background: rgba(26,71,42,0.3); color: var(--up); }
 .pill-rejected { background: rgba(239,68,68,0.15); color: #ef4444; }
 .pill-executed { background: rgba(59,130,246,0.15); color: #3b82f6; }
@@ -1639,12 +1640,17 @@ function renderFeedSilence(payload) {
         const p95 = st.cadence_p95_sec == null ? null : Number(st.cadence_p95_sec);
         const p99 = st.cadence_p99_sec == null ? null : Number(st.cadence_p99_sec);
         const nSamples = st.cadence_samples == null ? 0 : Number(st.cadence_samples);
-        const expColor = (age != null && p99 != null && age > p99)
-            ? "var(--down)"
-            : (age != null && p95 != null && age > p95) ? "var(--warn, #d29922)"
+        // Cadence breach: the current gap is ABOVE the feed's own rolling p99
+        // (the same condition that fires check_cadence) — delivery is thinning
+        // out. p95 breach is the softer amber step below it.
+        const gapOverP99 = (age != null && p99 != null && age > p99);
+        const gapOverP95 = !gapOverP99 && (age != null && p95 != null && age > p95);
+        const expColor = gapOverP99 ? "var(--down)"
+            : gapOverP95 ? "var(--warn, #d29922)"
             : "var(--muted)";
         const expTxt = (p99 == null)
             ? (nSamples > 0 ? "learning…" : "—")
+            : gapOverP99 ? "gap " + fmtDur(age) + " > p99 " + fmtDur(p99)
             : "exp ≤ " + fmtDur(p99);
         const warnLvl = st.warn_level || (degraded ? "degraded" : "none");
         const alerted50 = !!st.warned_50_pct;
@@ -1701,8 +1707,15 @@ function renderFeedSilence(payload) {
         const creepBadge = cr && cr.creeping
             ? '<span class="pill ' + ((pct != null && pct >= 90) ? "pill-creep-hi" : "pill-creep") + '" title="max age diário a subir há ' + cr.days + ' dias (+' + Math.round(cr.growth_frac * 100) + '% do threshold) — cadência a degradar">creeping</span>'
             : '';
+        // Cadence badge: current gap above the feed's rolling p99 (or the
+        // fire-once check_cadence already flagged this episode). Tooltip
+        // carries the exact comparison and the sample count behind the p99.
+        const cadenceBad = gapOverP99 || !!st.warned_cadence;
+        const cadenceBadge = cadenceBad && p99 != null
+            ? '<span class="pill pill-cadence" title="gap atual ' + fmtDur(age) + ' > p99 histórico ' + fmtDur(p99) + ' (n=' + nSamples + ')' + (st.warned_cadence ? ' — alerta cadence emitido' : '') + ' — cadência a degradar">cadence</span>'
+            : '';
         return '<tr style="border-top:1px solid var(--border);">' +
-            '<td style="padding:3px 4px;font-family:monospace;">' + feed + ' ' + creepBadge + '</td>' +
+            '<td style="padding:3px 4px;font-family:monospace;">' + feed + ' ' + creepBadge + ' ' + cadenceBadge + '</td>' +
             '<td style="padding:3px 4px;">' + ageTxt +
                 '<div style="font-size:9px;color:' + expColor + ';white-space:nowrap;" title="Historical p95/p99 inter-event gap of this feed (' + (p95 == null ? "—" : fmtDur(p95)) + ' / ' + (p99 == null ? "—" : fmtDur(p99)) + ')">' + expTxt + '</div>' +
             '</td>' +
