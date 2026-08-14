@@ -60,6 +60,28 @@ def _stub_metrics(monkeypatch):
                 "triggered": False,
                 "runs": [{"ts": "2026-08-13T01:00:00", "verdict": "INCONCLUSIVE"}],
             },
+            "feed_age_creep": {
+                "triggered": True,
+                "runs": [{"ts": "2026-08-13T02:00:00", "verdict": "CREEP DETECTED",
+                           "feed": "liquidation_okx"}],
+                "feeds_alerted": {"liquidation_okx": 1},
+            },
+        },
+    )
+    monkeypatch.setattr(wd, "resolve_creep_contracts",
+                        lambda: {"funding_hl": 3600.0, "liquidation_okx": 21600.0})
+    monkeypatch.setattr(
+        wd, "detect_creeping_age",
+        lambda contracts: {
+            "liquidation_okx": {
+                "creeping": True,
+                "days": 5,
+                "first_max_age_sec": 600.0,
+                "last_max_age_sec": 2100.0,
+                "growth_sec": 1500.0,
+                "growth_frac": 0.417,
+                "last_day_start_ms": 1_752_000_000_000,
+            }
         },
     )
 
@@ -68,10 +90,13 @@ def _by_id(payload):
     return {w.get("id"): w for w in payload["watchdogs"]}
 
 
-def test_three_watchdogs_present(_stub_metrics):
+def test_four_watchdogs_present(_stub_metrics):
     payload = wd.build_research_watchdogs_payload()
     by_id = _by_id(payload)
-    assert set(by_id) == {"top_trader_bias", "liquidation_flush", "iv_gate_shadow"}
+    assert set(by_id) == {
+        "top_trader_bias", "liquidation_flush", "iv_gate_shadow",
+        "feed_age_creep",
+    }
     assert payload["generated_ms"] > 0
 
 
@@ -193,6 +218,36 @@ def test_broken_builder_is_isolated(_stub_metrics, monkeypatch):
     assert by_id["liquidation_flush"]["current"] == 12.3
 
 
+def test_creeping_age_payload(_stub_metrics):
+    """The creep watchdog reports the live creeping feeds + the episode state."""
+    by_id = _by_id(wd.build_research_watchdogs_payload())
+    creep_wd = by_id["feed_age_creep"]
+    assert creep_wd["current"] == 1
+    assert creep_wd["target"] == 0
+    assert creep_wd["progress_pct"] == 0.0
+    assert creep_wd["min_days"] == 5
+    assert creep_wd["triggered"] is True
+    assert creep_wd["samples"] == 1  # alert episodes so far
+    assert creep_wd["last_run"]["verdict"] == "CREEP DETECTED"
+    feeds = creep_wd["feeds"]
+    assert len(feeds) == 1
+    assert feeds[0]["feed"] == "liquidation_okx"
+    assert feeds[0]["days"] == 5
+    assert feeds[0]["growth_frac"] == pytest.approx(0.417)
+    assert feeds[0]["last_max_age_sec"] == 2100.0
+    assert creep_wd["report_path"] == "docs/FEED_AGE_CREEP_RECHECK_RESULT.md"
+
+
+def test_creeping_age_quiet_when_nothing_detected(_stub_metrics, monkeypatch):
+    monkeypatch.setattr(wd, "detect_creeping_age", lambda contracts: {})
+    by_id = _by_id(wd.build_research_watchdogs_payload())
+    creep_wd = by_id["feed_age_creep"]
+    assert creep_wd["current"] == 0
+    assert creep_wd["feeds"] == []
+    # episode state persists even while quiet (triggered stays sticky)
+    assert creep_wd["triggered"] is True
+
+
 class TestResearchWatchdogsEndpoint:
     """The /api/research_watchdogs REST endpoint serves both watchdogs."""
 
@@ -214,7 +269,10 @@ class TestResearchWatchdogsEndpoint:
         r = self.client.get("/api/research_watchdogs")
         assert r.status_code == 200
         ids = {w.get("id") for w in r.get_json()["watchdogs"]}
-        assert ids == {"top_trader_bias", "liquidation_flush", "iv_gate_shadow"}
+        assert ids == {
+            "top_trader_bias", "liquidation_flush", "iv_gate_shadow",
+            "feed_age_creep",
+        }
 
 
 class TestResearchWatchdogsTemplate:
@@ -232,3 +290,14 @@ class TestResearchWatchdogsTemplate:
         assert "→ " in html and "(proj)" in html
         assert "high_net_usd" in html
         assert "low_net_usd" in html
+
+    def test_panel_renders_feed_age_creep(self) -> None:
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        # the creep watchdog renders the creeping feed names in red
+        assert "w.id === \"feed_age_creep\"" in html
+        assert "CREEP ATIVO" in html
+        assert "w.feeds" in html
+        assert "growth_frac" in html
+        assert "sem creep — ok" in html

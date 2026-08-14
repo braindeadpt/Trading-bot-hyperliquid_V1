@@ -19,6 +19,11 @@ from scripts.iv_gate_shadow_recheck import (
     project_decision,
     run_comparison as run_iv_comparison,
 )
+from scripts.feed_age_creep_recheck import (  # noqa: E402
+    CREEP_MIN_DAYS,
+    detect_creeping_age,
+    resolve_contracts as resolve_creep_contracts,
+)
 from scripts.liquidation_flush_recheck import (
     TARGET_DAYS as FLUSH_TARGET_DAYS,
 )
@@ -121,13 +126,56 @@ def _iv_gate_watchdog() -> Dict[str, Any]:
     }
 
 
+def _creeping_age_watchdog() -> Dict[str, Any]:
+    """Feed age creep — feeds with consistent daily max-age growth.
+
+    Reads the live detection (research DB rollup + deployment contracts) and
+    the supervisor's shared state (episodes alerted so far). ``current`` is
+    the number of feeds creeping RIGHT NOW; ``feeds`` carries the detail for
+    the panel; ``target`` is 0 so the progress bar stays neutral.
+    """
+    detected = detect_creeping_age(resolve_creep_contracts())
+    state = load_shared_state()["feed_age_creep"]
+    runs = state.get("runs") or []
+    feeds = [
+        {
+            "feed": f,
+            "days": d["days"],
+            "first_max_age_sec": d["first_max_age_sec"],
+            "last_max_age_sec": d["last_max_age_sec"],
+            "growth_sec": d["growth_sec"],
+            "growth_frac": d["growth_frac"],
+            "last_day_start_ms": d["last_day_start_ms"],
+        }
+        for f, d in sorted(detected.items())
+        if d.get("creeping")
+    ]
+    return {
+        "id": "feed_age_creep",
+        "label": "Feed age creep (max diário a subir)",
+        "script": "scripts/research_watchdog_supervisor.py",
+        "metric_label": "feeds com max age diário em crescimento",
+        "unit": "feeds",
+        "current": len(feeds),
+        "target": 0,
+        "progress_pct": 0.0,
+        "min_days": CREEP_MIN_DAYS,
+        "samples": len(runs),
+        "feeds": feeds,
+        "triggered": bool(state.get("triggered")),
+        "last_run": runs[-1] if runs else None,
+        "report_path": "docs/FEED_AGE_CREEP_RECHECK_RESULT.md",
+    }
+
+
 def build_research_watchdogs_payload() -> Dict[str, Any]:
-    """Assemble the read-only watchdog status (bias + flush + iv gate)."""
+    """Assemble the read-only watchdog status (bias + flush + iv + creep)."""
     watchdogs: List[Dict[str, Any]] = []
     builders = [
         ("top_trader_bias", _bias_watchdog),
         ("liquidation_flush", _flush_watchdog),
         ("iv_gate_shadow", _iv_gate_watchdog),
+        ("feed_age_creep", _creeping_age_watchdog),
     ]
     for wd_id, builder in builders:
         try:

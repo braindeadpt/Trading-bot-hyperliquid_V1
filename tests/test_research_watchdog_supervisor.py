@@ -344,3 +344,115 @@ class TestIvGateGate:
             assert len(shared["iv_gate_shadow"]["runs"]) == 1
         finally:
             sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
+
+
+class TestCreepingAgeGate:
+    """Edge-triggered per feed: alerts once when an episode starts, stays
+    quiet while it continues, and re-arms when the feed recovers."""
+
+    def _stub_detect(self, monkeypatch, creeping=None):
+        creeping = creeping or {}
+        monkeypatch.setattr(
+            sup, "resolve_contracts",
+            lambda: {"funding_hl": 3600.0, "liquidation_okx": 21600.0},
+        )
+        monkeypatch.setattr(
+            sup, "detect_creeping_age", lambda contracts: dict(creeping)
+        )
+        monkeypatch.setattr(sup, "write_creep_report", lambda *a, **k: None)
+
+    def _creeping(self, feed="liquidation_okx"):
+        return {
+            feed: {
+                "creeping": True,
+                "days": 5,
+                "first_max_age_sec": 600.0,
+                "last_max_age_sec": 2100.0,
+                "growth_sec": 1500.0,
+                "growth_frac": 0.417,
+                "last_day_start_ms": 1_752_000_000_000,
+            }
+        }
+
+    def test_fires_once_per_episode_and_rearms_on_recovery(
+        self, monkeypatch, tmp_path
+    ):
+        shared = sup.fresh_state()
+        sup.STATE_PATH = tmp_path / "state.json"
+        notified: list = []
+        try:
+            monkeypatch.setattr(sup, "notify_creeping_age",
+                                lambda f, d, r: notified.append((f, r["verdict"])))
+            self._stub_detect(monkeypatch, self._creeping())
+
+            # episode starts -> one alert + run persisted
+            assert sup.check_creeping_age(shared, force=False) is True
+            assert notified == [("liquidation_okx", "CREEP DETECTED")]
+            assert shared["feed_age_creep"]["triggered"] is True
+            assert len(shared["feed_age_creep"]["runs"]) == 1
+            assert shared["feed_age_creep"]["feeds_alerted"]["liquidation_okx"] \
+                == 1_752_000_000_000
+
+            # same episode continuing -> no re-alert, no new run
+            assert sup.check_creeping_age(shared, force=False) is False
+            assert len(notified) == 1
+            assert len(shared["feed_age_creep"]["runs"]) == 1
+
+            # recovery -> episode closed, feed dropped from the alerted map
+            self._stub_detect(monkeypatch, {})
+            assert sup.check_creeping_age(shared, force=False) is False
+            assert shared["feed_age_creep"]["feeds_alerted"] == {}
+
+            # re-creep -> new episode alerts again
+            self._stub_detect(monkeypatch, self._creeping())
+            assert sup.check_creeping_age(shared, force=False) is True
+            assert len(notified) == 2
+            assert len(shared["feed_age_creep"]["runs"]) == 2
+        finally:
+            sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
+
+    def test_alert_has_warning_severity_and_feed_detail(
+        self, monkeypatch, tmp_path
+    ):
+        shared = sup.fresh_state()
+        sup.STATE_PATH = tmp_path / "state.json"
+        captured: list = []
+        try:
+            class _FakeNotifier:
+                async def send(self, msg, level="info", *, force=False):
+                    captured.append((msg, level))
+
+            monkeypatch.setattr(sup, "build_alert_notifier",
+                                lambda: _FakeNotifier())
+            self._stub_detect(monkeypatch, self._creeping())
+
+            assert sup.check_creeping_age(shared, force=False) is True
+            assert len(captured) == 1
+            msg, level = captured[0]
+            assert level == "warning"
+            assert "FEED AGE CREEP" in msg
+            assert "liquidation_okx" in msg
+            assert "+42%" in msg  # growth_frac 0.417 -> 41.7 -> 42
+        finally:
+            sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
+
+    def test_no_notifier_does_not_break(self, monkeypatch, tmp_path):
+        shared = sup.fresh_state()
+        sup.STATE_PATH = tmp_path / "state.json"
+        try:
+            monkeypatch.setattr(sup, "build_alert_notifier", lambda: None)
+            self._stub_detect(monkeypatch, self._creeping())
+            assert sup.check_creeping_age(shared, force=False) is True
+            assert shared["feed_age_creep"]["runs"][-1]["verdict"] == "CREEP DETECTED"
+        finally:
+            sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
+
+    def test_shared_state_roundtrip_preserves_feeds_alerted(self, tmp_path):
+        p = tmp_path / "state.json"
+        state = sup.fresh_state()
+        state["feed_age_creep"]["feeds_alerted"] = {"liquidation_okx": 123}
+        state["feed_age_creep"]["triggered"] = True
+        sup.save_shared_state(state, path=p)
+        loaded = sup.load_shared_state(path=p)
+        assert loaded["feed_age_creep"]["feeds_alerted"] == {"liquidation_okx": 123}
+        assert loaded["feed_age_creep"]["triggered"] is True

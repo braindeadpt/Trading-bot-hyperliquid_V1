@@ -13,8 +13,13 @@ Unifies the three auto-rerun evidence gates that previously ran as separate
   * **IV gate shadow recheck** re-runs the high_iv vs low_iv comparison
     (``scripts/iv_gate_shadow_recheck.py``) once ≥30 closed executed trades
     carry an IV decision, and decides shadow vs enforcement (threshold 66.7).
+  * **Feed age creep** (``scripts/feed_age_creep_recheck.py``) monitors the
+    daily max-age rollup and alerts when any contracted feed shows a
+    consistent staircase (non-decreasing daily max over ≥5 days, growing a
+    meaningful fraction of its silence threshold) — fire-once per episode,
+    re-armed when the feed recovers.
 
-All three are **read-only evidence gates**: they run probes and write decision
+All four are **read-only evidence gates**: they run probes and write decision
 reports; nothing here trades or touches the OMS.
 
 State is held in ONE gitignored file (``data/research/research_watchdogs_state.json``)
@@ -54,7 +59,12 @@ STATE_PATH = STATE_DIR / "research_watchdogs_state.json"
 
 CHECK_HOURS = 6.0
 
-WATCHDOG_IDS = ("top_trader_bias", "liquidation_flush", "iv_gate_shadow")
+WATCHDOG_IDS = (
+    "top_trader_bias",
+    "liquidation_flush",
+    "iv_gate_shadow",
+    "feed_age_creep",
+)
 
 # ── helpers reused from the per-gate scripts (single source of truth) ──
 from scripts.top_trader_bias_recheck import (  # noqa: E402
@@ -82,6 +92,12 @@ from scripts.iv_gate_shadow_recheck import (  # noqa: E402
     run_comparison as run_iv_comparison,
     verdict as iv_verdict,
     write_report as write_iv_report,
+)
+from scripts.feed_age_creep_recheck import (  # noqa: E402
+    CREEP_MIN_DAYS,
+    detect_creeping_age,
+    resolve_contracts,
+    write_report as write_creep_report,
 )
 
 # Legacy per-watchdog state files (migration source on first run).
@@ -159,20 +175,34 @@ def notify_iv_promote(report: Dict[str, Any], v: Dict[str, Any]) -> None:
 
 
 def fresh_state() -> Dict[str, Dict[str, Any]]:
-    """Empty shared state: one (triggered, runs) subtree per watchdog."""
+    """Empty shared state: one (triggered, runs) subtree per watchdog.
+
+    ``feed_age_creep`` additionally keeps ``feeds_alerted`` — feed -> day
+    when the current alert episode started. A feed stays in the map while
+    it keeps creeping (no re-alert), and is dropped when it recovers so a
+    new episode re-arms.
+    """
     return {
         "top_trader_bias": {"triggered": False, "runs": []},
         "liquidation_flush": {"triggered": False, "runs": []},
         "iv_gate_shadow": {"triggered": False, "runs": []},
+        "feed_age_creep": {
+            "triggered": False,
+            "runs": [],
+            "feeds_alerted": {},
+        },
     }
 
 
 def _normalize_sub(raw: Any) -> Dict[str, Any]:
     sub = raw if isinstance(raw, dict) else {}
-    return {
+    out: Dict[str, Any] = {
         "triggered": bool(sub.get("triggered", False)),
         "runs": list(sub.get("runs") or []),
     }
+    if sub.get("feeds_alerted") is not None:
+        out["feeds_alerted"] = dict(sub.get("feeds_alerted") or {})
+    return out
 
 
 def load_shared_state(path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
@@ -374,14 +404,102 @@ def check_iv_gate(
     return True
 
 
+# ── feed age creep watchdog ──────────────────────────────────────────
+
+def notify_creeping_age(feed: str, d: Dict[str, Any], run: Dict[str, Any]) -> None:
+    """Fire the creep alert best-effort — never blocks the detector.
+
+    Same contract as ``notify_iv_promote``: build the notifier per call,
+    send with a timeout, swallow every failure.
+    """
+    notifier = build_alert_notifier()
+    if notifier is None:
+        log(f"creep: alert skipped for `{feed}` — no notifier")
+        return
+    msg = (
+        f"⚠️ <b>FEED AGE CREEP</b>\n"
+        f"`{feed}` max age diário a subir há {d['days']} dias consecutivos — "
+        f"escada de {d['first_max_age_sec'] / 3600:.1f}h → "
+        f"{d['last_max_age_sec'] / 3600:.1f}h "
+        f"(+{d['growth_frac'] * 100:.0f}% do threshold)\n"
+        f"A cadência está a degradar antes do silêncio — verificar o path "
+        f"de entrega. Episódio: {run['ts']}"
+    )
+    try:
+        asyncio.run(
+            asyncio.wait_for(notifier.send(msg, "warning"), timeout=15)
+        )
+        log(f"creep: alert sent for `{feed}`")
+    except Exception as exc:  # noqa: BLE001
+        log(f"creep: alert failed for `{feed}` (best-effort): {exc}")
+
+
+def check_creeping_age(
+    shared: Dict[str, Dict[str, Any]],
+    *,
+    force: bool = False,
+) -> bool:
+    """Alert when any contracted feed shows consistent daily max-age growth.
+
+    Edge-triggered per feed: a feed alerts once when it *starts* creeping
+    (enters ``feeds_alerted``) and stays quiet while the episode continues;
+    when it recovers (no longer flagged), it is dropped from
+    ``feeds_alerted`` and a later re-creep alerts again. ``--force`` does not
+    consume the episode state (it only forces a fresh detection + report).
+    """
+    sub = shared["feed_age_creep"]
+    contracts = resolve_contracts()
+    detected = detect_creeping_age(contracts)
+    creeping = {f: d for f, d in detected.items() if d.get("creeping")}
+    alerted = dict(sub.get("feeds_alerted") or {})
+    fired = False
+    for feed, d in sorted(creeping.items()):
+        if feed in alerted:
+            continue  # already alerting this episode
+        alerted[feed] = d["last_day_start_ms"]
+        run = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "feed": feed,
+            "days": d["days"],
+            "first_max_age_sec": d["first_max_age_sec"],
+            "last_max_age_sec": d["last_max_age_sec"],
+            "growth_sec": d["growth_sec"],
+            "growth_frac": d["growth_frac"],
+            "verdict": "CREEP DETECTED",
+        }
+        sub["runs"].append(run)
+        sub["triggered"] = True
+        fired = True
+        notify_creeping_age(feed, d, run)
+    # Recovery: a feed that stopped creeping leaves the alerted map, so the
+    # next episode re-arms the alert.
+    recovered = [f for f in alerted if f not in creeping]
+    for feed in recovered:
+        del alerted[feed]
+    sub["feeds_alerted"] = alerted
+    write_creep_report(detected, contracts)
+    save_shared_state(shared)
+    if recovered:
+        log(f"creep: {len(recovered)} feed(s) recuperaram — episódio fechado "
+            f"({', '.join(sorted(recovered))})")
+    if creeping:
+        log(f"creep: {len(creeping)} feed(s) em crescimento consistente "
+            f"({', '.join(sorted(creeping))})")
+    else:
+        log("creep: sem feeds com max age diário em crescimento")
+    return fired
+
+
 def check_all(
     shared: Dict[str, Dict[str, Any]], *, force: bool = False
-) -> Tuple[bool, bool, bool]:
-    """Run all three gates once. Returns (bias_ran, flush_ran, iv_ran)."""
+) -> Tuple[bool, bool, bool, bool]:
+    """Run all four gates once. Returns (bias_ran, flush_ran, iv_ran,
+    creep_ran)."""
     bias_ran = check_bias(shared, force=force)
     flush_ran = check_flush(shared, force=force)
     iv_ran = check_iv_gate(shared, force=force)
-    return bias_ran, flush_ran, iv_ran
+    creep_ran = check_creeping_age(shared, force=force)
+    return bias_ran, flush_ran, iv_ran, creep_ran
 
 
 def main() -> int:
@@ -397,6 +515,7 @@ def main() -> int:
     log("=== research watchdog supervisor "
         f"(bias >= {BIAS_TARGET_DATES} datas, flush >= {FLUSH_TARGET_DAYS}d real, "
         f"iv >= {IV_TARGET_CLOSED} closed com decisão, "
+        f"creep >= {CREEP_MIN_DAYS}d de escada no max diário, "
         f"check a cada {args.hours:.0f}h) ===")
     shared = load_shared_state()
     # Always persist the canonical shared file (fresh or migrated) so the

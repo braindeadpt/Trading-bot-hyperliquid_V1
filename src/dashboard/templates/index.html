@@ -1448,6 +1448,11 @@ function renderResearchWatchdogs(payload) {
         let status = w.triggered
             ? (w.last_run && w.last_run.verdict ? w.last_run.verdict : "triggered")
             : (pct >= 100 ? "due — next check runs it" : "accumulating");
+        if (w.id === "feed_age_creep") {
+            status = w.feeds && w.feeds.length
+                ? "⚠ CREEP ATIVO (" + w.feeds.length + " feed(s))"
+                : (w.triggered ? "episódio anterior — a vigiar" : "sem creep — ok");
+        }
         // Projected decision for the IV gate: the direction the current slices
         // point to BEFORE the n>=30 trigger fires (provisional while small).
         let projected = null;
@@ -1459,6 +1464,13 @@ function renderResearchWatchdogs(payload) {
             projected = '<div title="' + prTip.replace(/"/g, "&quot;") + '" style="font-size:10px;color:' + prColor + ';font-weight:600;">' + prTxt +
                 '<span class="dim" style="font-weight:400;"> · hi ' + (pr.high_net_usd == null ? "—" : (pr.high_net_usd >= 0 ? "+" : "") + pr.high_net_usd.toFixed(2)) +
                 ' / lo ' + (pr.low_net_usd == null ? "—" : (pr.low_net_usd >= 0 ? "+" : "") + pr.low_net_usd.toFixed(2)) + ' USD</span></div>';
+        }
+        // Feed age creep: list the feeds currently creeping (consistent daily
+        // max-age staircase) — red, with the growth detail in the tooltip.
+        let creep = null;
+        if (w.id === "feed_age_creep" && w.feeds && w.feeds.length) {
+            const names = w.feeds.map(f => "<b>" + f.feed + "</b> (" + f.days + "d, +" + Math.round(f.growth_frac * 100) + "% thr)").join(", ");
+            creep = '<div style="font-size:10px;color:var(--down);font-weight:600;" title="Max age diário a subir ' + w.feeds[0].days + ' dias consecutivos (escada de ' + (w.feeds[0].first_max_age_sec / 3600).toFixed(1) + 'h → ' + (w.feeds[0].last_max_age_sec / 3600).toFixed(1) + 'h) — cadência a degradar antes do silêncio">⚠ ' + names + '</div>';
         }
         const last = w.last_run
             ? (String(w.last_run.ts || "").slice(0, 16).replace("T", " ") + " · " + (w.last_run.verdict || ""))
@@ -1472,7 +1484,7 @@ function renderResearchWatchdogs(payload) {
             '<td><div style="background:var(--border);height:8px;width:120px;border-radius:4px;display:inline-block;vertical-align:middle;">' +
                 '<div style="height:8px;width:' + pct + '%;background:' + barCol + ';border-radius:4px;"></div></div>' +
                 '<span class="dim" style="margin-left:6px;">' + pct.toFixed(0) + '%</span></td>' +
-            '<td>' + status + (projected ? '<div>' + projected + '</div>' : '') + '</td>' +
+            '<td>' + status + (projected ? '<div>' + projected + '</div>' : '') + (creep ? '<div>' + creep + '</div>' : '') + '</td>' +
             '<td class="muted" style="font-size:10px;">' + last + '</td></tr>';
     }).join("");
 }
