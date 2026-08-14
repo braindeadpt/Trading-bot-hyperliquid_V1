@@ -218,23 +218,30 @@ class AlertNotifier:
         )
         await self.send(msg, "info")
 
-    async def iv_gate_promote(self, *, report: dict, verdict: dict) -> None:
-        """IV gate PROMOTE alert — the evidence gate reached and the live
-        sample confirms the backtest direction: the router should flip from
-        shadow to enforcement (threshold 66.7).
+    async def iv_gate_verdict(self, *, report: dict, verdict: dict) -> None:
+        """IV gate verdict alert — PROMOTE or REJECT at the evidence gate.
 
-        Carries the **exact diff**: the slice numbers, the IV threshold, and
-        the report path, so the operator can review and flip the router
-        deliberately. The watchdog never touches the router itself — this is
-        the human-in-the-loop notification.
+        Fires when the recheck decides (n>=30 closed with an IV decision):
+          * PROMOTE — live sample confirms the backtest direction, the router
+            may flip from shadow to enforcement (threshold 66.7).
+          * REJECT — the sample contradicts the backtest direction; keep
+            shadow, never enforce.
+
+        Both carry the **exact diff**: the slice numbers (high_iv / low_iv
+        realized PnL + WR + n), the IV threshold, the verdict detail and the
+        report path — the operator reviews and acts deliberately. The
+        watchdog never touches the router itself — this is the
+        human-in-the-loop notification.
         """
         hi = (report.get("slices") or {}).get("high_iv") or {}
         lo = (report.get("slices") or {}).get("low_iv") or {}
+        status = str(verdict.get("verdict") or "PROMOTE").upper()
         n_closed = verdict.get("n_closed") or (
             (hi.get("n_closed") or 0) + (lo.get("n_closed") or 0)
         )
         threshold = verdict.get("threshold", 66.7)
         report_path = verdict.get("report_path") or "docs/IV_GATE_SHADOW_RECHECK_RESULT.md"
+        detail = verdict.get("detail") or ""
 
         def _money(v) -> str:
             return "—" if v is None else f"{v:+.2f} USD"
@@ -242,21 +249,39 @@ class AlertNotifier:
         def _wr(v) -> str:
             return "—" if v is None else f"{v * 100:.0f}%"
 
+        if status == "REJECT":
+            emoji, title, intro, level = (
+                "🛑", "IV GATE REJECT — manter shadow",
+                "A amostra live não confirma a direção do backtest: o gate "
+                "mantém-se shadow — nunca enforce.",
+                "warning",
+            )
+        else:
+            emoji, title, intro, level = (
+                "🚀", "IV GATE PROMOTE — shadow → enforcement",
+                "O gate IV passou o gate de evidência e a amostra live confirma "
+                "o backtest: o router pode flipar de shadow a enforcement.",
+                "warning",
+            )
+
         msg = (
-            f"🚀 <b>IV GATE PROMOTE</b> — shadow → enforcement\n"
-            f"O gate IV passou o gate de evidência e a amostra live confirma "
-            f"o backtest: o router pode flipar de shadow a enforcement.\n\n"
+            f"{emoji} <b>{title}</b>\n"
+            f"{intro}\n\n"
             f"<b>Evidência (n={n_closed} closed com decisão IV)</b>\n"
             f"· high_iv: net {_money(hi.get('net_pnl_usd'))} · WR {_wr(hi.get('win_rate'))} "
             f"(n={hi.get('n_closed') or 0})\n"
             f"· low_iv : net {_money(lo.get('net_pnl_usd'))} · WR {_wr(lo.get('win_rate'))} "
             f"(n={lo.get('n_closed') or 0})\n"
-            f"· threshold IV: {threshold} (DVOL percentile 30d)\n\n"
-            f"<b>Diff exacto para flipar o router:</b> {report_path}\n"
+            f"· threshold IV: {threshold} (DVOL percentile 30d)\n"
+        )
+        if detail:
+            msg += f"· decisão: {detail}\n"
+        msg += (
+            f"\n<b>Diff exacto:</b> {report_path}\n"
             f"A flip é uma mudança deliberada e revista — fora do âmbito do "
             f"watchdog."
         )
-        await self.send(msg, "warning", force=True)
+        await self.send(msg, level, force=True)
 
     async def error(self, message: str) -> None:
         await self.send(f"❌ <b>ERROR</b>\n{message}", "error")

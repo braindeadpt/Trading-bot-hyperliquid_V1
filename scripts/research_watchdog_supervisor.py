@@ -164,27 +164,30 @@ def build_alert_notifier() -> Optional[Any]:
         return None
 
 
-def notify_iv_promote(report: Dict[str, Any], v: Dict[str, Any]) -> None:
-    """Fire the PROMOTE alert best-effort — never blocks the gate.
+def notify_iv_verdict(report: Dict[str, Any], v: Dict[str, Any]) -> None:
+    """Fire the IV gate verdict alert best-effort — never blocks the gate.
 
+    Fires for **both** PROMOTE and REJECT (each is a decision at the
+    evidence gate the operator should see — promote means flip the router,
+    reject means the live sample contradicts the backtest and shadow stays).
     Builds the notifier per call (cheap, and the supervisor may run outside
     the bot process), sends with a timeout, and swallows every failure so the
     watchdog's own decision/state flow is unaffected.
     """
     notifier = build_alert_notifier()
     if notifier is None:
-        log("iv: PROMOTE alert skipped — no notifier")
+        log(f"iv: {v['verdict']} alert skipped — no notifier")
         return
     try:
         asyncio.run(
             asyncio.wait_for(
-                notifier.iv_gate_promote(report=report, verdict=v),
+                notifier.iv_gate_verdict(report=report, verdict=v),
                 timeout=15,
             )
         )
-        log("iv: PROMOTE alert sent")
+        log(f"iv: {v['verdict']} alert sent")
     except Exception as exc:  # noqa: BLE001
-        log(f"iv: PROMOTE alert failed (best-effort): {exc}")
+        log(f"iv: {v['verdict']} alert failed (best-effort): {exc}")
 
 
 def fresh_state() -> Dict[str, Dict[str, Any]]:
@@ -409,15 +412,18 @@ def check_iv_gate(
         "detail": v["detail"],
         "threshold": IV_THRESHOLD,
         "report_path": str(IV_REPORT_PATH),
+        "slices": report.get("slices", {}),
     }
     sub["runs"].append(run)
     if not force:
         sub["triggered"] = True
     save_shared_state(shared)
-    # Human-in-the-loop: a PROMOTE is a recommendation to flip the router
-    # from shadow to enforcement — notify the operator with the exact diff.
-    if v["status"] == "PROMOTE":
-        notify_iv_promote(report, run)
+    # Human-in-the-loop: both decisions at the evidence gate reach the
+    # operator — PROMOTE is the recommendation to flip the router from
+    # shadow to enforcement, REJECT keeps shadow (the sample contradicts
+    # the backtest). The alert carries the slice numbers either way.
+    if v["status"] in ("PROMOTE", "REJECT"):
+        notify_iv_verdict(report, run)
     log(f"iv: gate completo (n={n_closed}, high={n_high}, low={n_low}) -> {run['verdict']}")
     return True
 
@@ -427,7 +433,7 @@ def check_iv_gate(
 def notify_creeping_age(feed: str, d: Dict[str, Any], run: Dict[str, Any]) -> None:
     """Fire the creep alert best-effort — never blocks the detector.
 
-    Same contract as ``notify_iv_promote``: build the notifier per call,
+    Same contract as ``notify_iv_verdict``: build the notifier per call,
     send with a timeout, swallow every failure.
     """
     notifier = build_alert_notifier()

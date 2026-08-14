@@ -224,8 +224,10 @@ class TestIvGateGate:
         finally:
             sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
 
-    def test_reject_keeps_shadow(self, monkeypatch, tmp_path):
-        """high_iv not positive => REJECT: never silently enforce."""
+    def test_reject_keeps_shadow_and_notifies_with_slices(self, monkeypatch, tmp_path):
+        """high_iv not positive => REJECT: never silently enforce — and the
+        verdict alert fires with the slice numbers so the operator sees why
+        shadow stays (no silent keep)."""
         shared = sup.fresh_state()
         sup.STATE_PATH = tmp_path / "state.json"
         try:
@@ -249,12 +251,16 @@ class TestIvGateGate:
             monkeypatch.setattr(sup, "run_iv_comparison", lambda: report)
             monkeypatch.setattr(sup, "write_iv_report", lambda *a, **k: None)
             notified: list = []
-            monkeypatch.setattr(sup, "notify_iv_promote", lambda r, v: notified.append(v["status"]))
+            monkeypatch.setattr(sup, "notify_iv_verdict", lambda r, v: notified.append(v))
 
             assert sup.check_iv_gate(shared, force=False) is True
-            assert shared["iv_gate_shadow"]["runs"][-1]["verdict"] == "REJECT"
-            # REJECT must NOT fire the promote alert.
-            assert notified == []
+            run = shared["iv_gate_shadow"]["runs"][-1]
+            assert run["verdict"] == "REJECT"
+            # REJECT notifies with the slices so the operator sees the diff.
+            assert len(notified) == 1
+            assert notified[0]["verdict"] == "REJECT"
+            assert notified[0]["slices"]["high_iv"]["net_pnl_usd"] == -10.0
+            assert notified[0]["slices"]["low_iv"]["net_pnl_usd"] == 10.0
         finally:
             sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
 
@@ -295,7 +301,7 @@ class TestIvGateGate:
                     "lo_net": rpt["slices"]["low_iv"]["net_pnl_usd"],
                 })
 
-            monkeypatch.setattr(sup, "notify_iv_promote", _fake_notify)
+            monkeypatch.setattr(sup, "notify_iv_verdict", _fake_notify)
 
             assert sup.check_iv_gate(shared, force=False) is True
             assert len(notified) == 1
@@ -305,6 +311,8 @@ class TestIvGateGate:
             assert "IV_GATE_SHADOW_RECHECK_RESULT.md" in notified[0]["report_path"]
             assert notified[0]["hi_net"] == 50.0
             assert notified[0]["lo_net"] == -30.0
+            # The persisted run carries the slices for the dashboard/state.
+            assert shared["iv_gate_shadow"]["runs"][-1]["slices"]["high_iv"]["net_pnl_usd"] == 50.0
 
             # Watch-only second call: no re-run, no second alert.
             assert sup.check_iv_gate(shared, force=False) is False
