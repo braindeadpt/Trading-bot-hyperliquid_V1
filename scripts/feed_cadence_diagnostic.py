@@ -38,7 +38,9 @@ import json
 import sqlite3
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -54,6 +56,22 @@ from src.utils.config import load_config  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = ROOT / "data" / "live" / "bot.db"
+REPORT_PATH = ROOT / "docs" / "FEED_CADENCE_REPORT.md"
+HISTORY_PATH = ROOT / "data" / "research" / "feed_cadence_history.json"
+# Per-feed caps: the history file is gitignored and bounded; the report shows
+# the most recent rows so a feed's trend is readable without a huge table.
+HISTORY_CAP_PER_FEED = 500
+REPORT_HISTORY_ROWS = 30
+
+
+def _fmt_dur(sec) -> str:
+    if sec is None:
+        return "—"
+    if sec < 60:
+        return f"{sec:.0f}s"
+    if sec < 3600:
+        return f"{sec / 60:.1f}m"
+    return f"{sec / 3600:.1f}h"
 
 
 def _event_timestamps(
@@ -291,6 +309,156 @@ def cross_verdict(status: str, live: dict | None) -> str:
     return "no_diagnosis"
 
 
+def _feed_history_record(report: dict) -> list[dict]:
+    """One history row per feed for the current run (status + trend + cross)."""
+    ts_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = report.get("now_ms")
+    rows: list[dict] = []
+    for feed, st in sorted((report.get("feeds") or {}).items()):
+        live = st.get("live_snapshot") or {}
+        rows.append({
+            "ts": ts_iso,
+            "now_ms": now,
+            "feed": feed,
+            "status": st.get("status"),
+            "recent_median_sec": st.get("recent_median_sec"),
+            "recent_p99_sec": st.get("recent_p99_sec"),
+            "hist_p95_sec": st.get("hist_p95_sec"),
+            "hist_p99_sec": st.get("hist_p99_sec"),
+            "latest_gap_sec": st.get("latest_gap_sec"),
+            "trend_sec_per_gap": st.get("trend_sec_per_gap"),
+            "cross": st.get("cross"),
+            "live_warn_level": live.get("warn_level"),
+        })
+    return rows
+
+
+def load_cadence_history(path: Optional[Path] = None) -> list[dict]:
+    """The gitignored accumulated history (append-only rows per run)."""
+    hp = path or HISTORY_PATH
+    if hp.exists():
+        try:
+            data = json.loads(hp.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    return []
+
+
+def record_and_save_history(
+    report: dict, *, path: Optional[Path] = None
+) -> list[dict]:
+    """Append the current run's per-feed rows (capped per feed) and persist.
+
+    Best-effort: a failing history write never breaks the diagnostic.
+    """
+    hp = path or HISTORY_PATH
+    history = load_cadence_history(path=hp)
+    history.extend(_feed_history_record(report))
+    by_feed: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for row in history:
+        f = str(row.get("feed") or "?")
+        if f not in by_feed:
+            by_feed[f] = []
+            order.append(f)
+        by_feed[f].append(row)
+    capped: list[dict] = []
+    for f in order:
+        capped.extend(by_feed[f][-HISTORY_CAP_PER_FEED:])
+    try:
+        hp.parent.mkdir(parents=True, exist_ok=True)
+        hp.write_text(json.dumps(capped, indent=2), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        print(f"history write failed: {exc}", file=sys.stderr)
+    return capped
+
+
+def render_markdown_report(report: dict, history: list[dict]) -> str:
+    """Markdown for docs/FEED_CADENCE_REPORT.md: current state + the
+    accumulated per-feed trend history (recent runs, newest last)."""
+    lines = [
+        "# Feed Cadence Report",
+        "",
+        f"Gerado a {datetime.now(timezone.utc).isoformat(timespec='seconds')} "
+        f"(UTC) · janela recente {report.get('recent_hours', 48):.0f}h · "
+        "apenas feeds contratados neste deployment",
+        "",
+        "## Estado actual",
+        "",
+        "| Feed | Status | hist p95 | hist p99 | rec med | rec p99 | latest | "
+        "trend | cross |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for feed, st in sorted((report.get("feeds") or {}).items()):
+        live = st.get("live_snapshot") or {}
+        level = live.get("warn_level")
+        cross = st.get("cross") or "-"
+        if level not in (None, "none"):
+            cross = f"{cross} ({level})"
+        if st["status"] in ("no_data", "insufficient"):
+            lines.append(
+                f"| `{feed}` | {st['status']} | — | — | — | — | — | — | {cross} |"
+            )
+            continue
+        lines.append(
+            f"| `{feed}` | {st['status']} | "
+            f"{_fmt_dur(st.get('hist_p95_sec'))} | {_fmt_dur(st.get('hist_p99_sec'))} | "
+            f"{_fmt_dur(st.get('recent_median_sec'))} | {_fmt_dur(st.get('recent_p99_sec'))} | "
+            f"{_fmt_dur(st.get('latest_gap_sec'))} | "
+            f"{st.get('trend_sec_per_gap'):+.2f} | {cross} |"
+        )
+    lines += ["", "## Histórico de tendências por feed", ""]
+    feeds = sorted({str(r.get("feed") or "?") for r in history})
+    if not feeds:
+        lines.append("_Sem histórico acumulado ainda._")
+    for feed in feeds:
+        rows = [r for r in history if str(r.get("feed")) == feed]
+        rows = rows[-REPORT_HISTORY_ROWS:]
+        lines += [
+            f"### `{feed}`",
+            "",
+            "| Run (UTC) | Status | rec med | hist p99 | trend | cross |",
+            "|---|---|---|---|---|---|",
+        ]
+        for r in rows:
+            ts_txt = str(r.get("ts") or "")[:16].replace("T", " ")
+            lines.append(
+                f"| {ts_txt} | {r.get('status')} | "
+                f"{_fmt_dur(r.get('recent_median_sec'))} | "
+                f"{_fmt_dur(r.get('hist_p99_sec'))} | "
+                f"{r.get('trend_sec_per_gap') or 0:+.2f} | {r.get('cross')} |"
+            )
+        lines.append("")
+    lines.append(
+        "_Gerado por `scripts/feed_cadence_diagnostic.py` — read-only, nunca "
+        "trade._"
+    )
+    return "\n".join(lines)
+
+
+def write_cadence_report(
+    report: dict,
+    *,
+    path: Optional[Path] = None,
+    history_path: Optional[Path] = None,
+) -> Optional[Path]:
+    """Record the run in the accumulated history and render the markdown
+    report (docs/FEED_CADENCE_REPORT.md). Best-effort — a write failure
+    never breaks the diagnostic or the supervisor."""
+    try:
+        history = record_and_save_history(report, path=history_path)
+        md = render_markdown_report(report, history)
+        rp = path or REPORT_PATH
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        rp.write_text(md, encoding="utf-8")
+        return rp
+    except Exception as exc:  # noqa: BLE001
+        print(f"write_cadence_report failed: {exc}", file=sys.stderr)
+        return None
+
+
 def run_cadence_diagnostic(
     db_path: Path,
     contracts: dict,
@@ -373,6 +541,11 @@ def main() -> int:
     parser.add_argument("--min-history", type=int, default=50,
                         help="minimum recorded gaps to report p95/p99 (default 50)")
     parser.add_argument("--json", action="store_true", help="emit JSON report")
+    parser.add_argument("--report", type=Path, default=None,
+                        help="markdown report path (default: docs/FEED_CADENCE_REPORT.md)")
+    parser.add_argument("--history", type=Path, default=None,
+                        help="accumulated history JSON path (default: "
+                             "data/research/feed_cadence_history.json)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -393,18 +566,17 @@ def main() -> int:
     for st in report["feeds"].values():
         worst = max(worst, codes.get(st["status"], 0))
 
+    md_path = write_cadence_report(
+        report,
+        path=args.report,
+        history_path=args.history,
+    )
+
     if args.json:
         print(json.dumps(report, indent=2))
+        if md_path:
+            print(f"report -> {md_path}", file=sys.stderr)
         return worst
-
-    def _dur(sec):
-        if sec is None:
-            return "—"
-        if sec < 60:
-            return f"{sec:.0f}s"
-        if sec < 3600:
-            return f"{sec / 60:.1f}m"
-        return f"{sec / 3600:.1f}h"
 
     print(f"Feed cadence diagnostic — recent window {args.recent_hours:.0f}h "
           f"(now {time.strftime('%Y-%m-%d %H:%M', time.localtime(now_ms / 1000))} UTC)")
@@ -423,9 +595,9 @@ def main() -> int:
             cross = f"{cross}({live['warn_level']})"
         print(
             f"{feed:30s} {st['status']:10s} "
-            f"{_dur(st['hist_p95_sec']):>8s} {_dur(st['hist_p99_sec']):>8s} "
-            f"{_dur(st['recent_median_sec']):>8s} {_dur(st['recent_p99_sec']):>8s} "
-            f"{_dur(st['latest_gap_sec']):>8s} {st['trend_sec_per_gap']:>+8.2f}s "
+            f"{_fmt_dur(st['hist_p95_sec']):>8s} {_fmt_dur(st['hist_p99_sec']):>8s} "
+            f"{_fmt_dur(st['recent_median_sec']):>8s} {_fmt_dur(st['recent_p99_sec']):>8s} "
+            f"{_fmt_dur(st['latest_gap_sec']):>8s} {st['trend_sec_per_gap']:>+8.2f}s "
             f"{cross:>14s}"
         )
     if worst >= 1:
@@ -436,6 +608,8 @@ def main() -> int:
               "trend — delivery thinning?", file=sys.stderr)
     else:
         print("\n[PASS] all contracted feeds keep their historical cadence.")
+    if md_path:
+        print(f"report -> {md_path}")
     return worst
 
 

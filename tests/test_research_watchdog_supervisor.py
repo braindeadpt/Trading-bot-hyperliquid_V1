@@ -478,6 +478,9 @@ class TestCadenceGate:
             sup, "cadence_diagnostic",
             lambda: {"now_ms": 1_752_000_000_000, "feeds": feeds},
         )
+        # the markdown report write is a side artifact — tests never touch
+        # the real docs/ path.
+        monkeypatch.setattr(sup, "write_cadence_report", lambda *a, **k: None)
 
     def test_fires_once_per_episode_and_rearms_on_recovery(
         self, monkeypatch, tmp_path
@@ -602,6 +605,7 @@ class TestCadenceGate:
             monkeypatch.setattr(sup, "CADENCE_DEFAULT_DB", db_path)
             monkeypatch.setattr(sup, "feed_silence_contracts",
                                 lambda cfg: {"liquidation_okx": 6 * 3600.0})
+            monkeypatch.setattr(sup, "write_cadence_report", lambda *a, **k: None)
 
             assert sup.check_cadence_degrading(shared, force=False) is True
             assert notified == ["liquidation_okx"]

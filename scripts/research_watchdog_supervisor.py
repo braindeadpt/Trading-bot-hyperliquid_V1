@@ -108,6 +108,7 @@ from scripts.feed_age_creep_recheck import (  # noqa: E402
 from scripts.feed_cadence_diagnostic import (  # noqa: E402
     DEFAULT_DB as CADENCE_DEFAULT_DB,
     run_cadence_diagnostic,
+    write_cadence_report,
 )
 from src.core.engine import feed_silence_contracts  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
@@ -566,6 +567,9 @@ def check_cadence_degrading(
     """
     sub = shared["feed_cadence"]
     report = cadence_diagnostic()
+    # Accumulate the trend history + render the markdown report each check
+    # (best-effort — a write failure never breaks the gate).
+    write_cadence_report(report)
     degrading = {
         f: d for f, d in (report.get("feeds") or {}).items()
         if d.get("status") == "DEGRADING"

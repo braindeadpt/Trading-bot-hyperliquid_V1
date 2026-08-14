@@ -144,10 +144,14 @@ def test_healthy_feed_exits_zero() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db = os.path.join(tmp, "bot.db")
         _make_db(db, okx_gaps_min=[1.0] * 250)
-        r = _run(["--db", db, "--min-history", "50"])
+        r = _run(["--db", db, "--min-history", "50",
+                  "--report", os.path.join(tmp, "rep.md"),
+                  "--history", os.path.join(tmp, "hist.json")])
         assert r.returncode == 0, r.stdout + r.stderr
         assert "[PASS]" in r.stdout
         assert "liquidation_okx" in r.stdout
+        # the script wrote the markdown report
+        assert os.path.exists(os.path.join(tmp, "rep.md"))
 
 
 def test_degrading_feed_exits_one() -> None:
@@ -156,7 +160,9 @@ def test_degrading_feed_exits_one() -> None:
         # 200 one-minute gaps then 5 thirty-minute gaps — recent window must
         # be small so the 30-min gaps are "recent" vs the 1-min history.
         _make_db(db, okx_gaps_min=[1.0] * 200 + [30.0] * 5)
-        r = _run(["--db", db, "--min-history", "50", "--recent-hours", "2"])
+        r = _run(["--db", db, "--min-history", "50", "--recent-hours", "2",
+                  "--report", os.path.join(tmp, "rep.md"),
+                  "--history", os.path.join(tmp, "hist.json")])
         assert r.returncode == 1, r.stdout + r.stderr
         assert "DEGRADING" in r.stdout
         assert "liquidation_okx" in r.stdout
@@ -166,7 +172,9 @@ def test_json_output_shape() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db = os.path.join(tmp, "bot.db")
         _make_db(db, okx_gaps_min=[1.0] * 250)
-        r = _run(["--db", db, "--min-history", "50", "--json"])
+        r = _run(["--db", db, "--min-history", "50", "--json",
+                  "--report", os.path.join(tmp, "rep.md"),
+                  "--history", os.path.join(tmp, "hist.json")])
         assert r.returncode == 0
         d = json.loads(r.stdout)
         assert "now_ms" in d
@@ -268,7 +276,9 @@ def test_json_report_crosses_with_live_snapshot() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db = os.path.join(tmp, "bot.db")
         _make_db(db, okx_gaps_min=[1.0] * 250)
-        r = _run(["--db", db, "--min-history", "50", "--json"])
+        r = _run(["--db", db, "--min-history", "50", "--json",
+                  "--report", os.path.join(tmp, "rep.md"),
+                  "--history", os.path.join(tmp, "hist.json")])
         assert r.returncode == 0
         d = json.loads(r.stdout)
         assert "live_thresholds" in d
@@ -280,3 +290,65 @@ def test_json_report_crosses_with_live_snapshot() -> None:
         assert live["cadence_p99_sec"] == 60.0
         # the last event is ~10min old; every 60s gap is <= that age
         assert live["cadence_pct_current"] == 100.0
+
+
+def test_report_accumulates_history_per_feed() -> None:
+    """Two runs accumulate two history rows per feed in the JSON, and the
+    markdown report shows the current state + the per-feed trend table."""
+    from scripts.feed_cadence_diagnostic import (
+        load_cadence_history,
+        render_markdown_report,
+        write_cadence_report,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        _make_db(db, okx_gaps_min=[1.0] * 250)
+        rep = os.path.join(tmp, "rep.md")
+        hist = os.path.join(tmp, "hist.json")
+        for _ in range(2):
+            r = _run(["--db", db, "--min-history", "50",
+                      "--report", rep, "--history", hist])
+            assert r.returncode == 0
+
+        # history accumulated 2 rows for the okx feed
+        history = load_cadence_history(path=Path(hist))
+        okx_rows = [h for h in history if h["feed"] == "liquidation_okx"]
+        assert len(okx_rows) == 2
+        assert okx_rows[-1]["status"] == "OK"
+        assert okx_rows[-1]["cross"] == "aligned_ok"
+
+        # the markdown report renders both the current table and the trend
+        md = Path(rep).read_text(encoding="utf-8")
+        assert "# Feed Cadence Report" in md
+        assert "## Estado actual" in md
+        assert "liquidation_okx" in md
+        assert "## Histórico de tendências por feed" in md
+        assert "| Run (UTC) | Status | rec med | hist p99 | trend | cross |" in md
+        assert md.count("| 2026-") >= 2  # two accumulated runs rendered
+
+
+def test_history_cap_per_feed() -> None:
+    from scripts.feed_cadence_diagnostic import (
+        HISTORY_CAP_PER_FEED,
+        record_and_save_history,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        hp = Path(tmp) / "hist.json"
+        report = {
+            "now_ms": 1,
+            "feeds": {"liquidation_okx": {"status": "OK"}},
+        }
+        # 3 runs would exceed the tiny cap -> only the cap survives
+        old = HISTORY_CAP_PER_FEED
+        from scripts import feed_cadence_diagnostic as dg
+        dg.HISTORY_CAP_PER_FEED = 3
+        try:
+            for _ in range(5):
+                record_and_save_history(report, path=hp)
+        finally:
+            dg.HISTORY_CAP_PER_FEED = old
+        from scripts.feed_cadence_diagnostic import load_cadence_history
+        history = load_cadence_history(path=hp)
+        assert len([h for h in history if h["feed"] == "liquidation_okx"]) == 3
