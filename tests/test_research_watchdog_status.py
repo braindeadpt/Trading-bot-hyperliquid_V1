@@ -229,6 +229,51 @@ def test_iv_gate_projected_na_on_broken_db(_stub_metrics, monkeypatch):
     assert iv["projected"]["status"] == "N/A"
     assert iv["current"] == 0
     assert iv["progress_pct"] == 0.0
+    # the N/A branch still carries a clean (not-flagged) concentration
+    assert iv["concentration"]["flagged"] is False
+
+
+def _slice_stats(n_closed, net=0.0):
+    return {
+        "n": n_closed, "n_closed": n_closed, "n_open": 0,
+        "net_pnl_usd": net, "win_rate": 0.5,
+        "avg_pnl_usd": net / max(1, n_closed),
+        "median_pnl_usd": net / max(1, n_closed),
+        "best_usd": net, "worst_usd": -net,
+    }
+
+
+def test_iv_gate_projection_carries_concentration_caveat(_stub_metrics, monkeypatch):
+    """A sample dominated by one strategy flags the projection yellow
+    (concentration_caveat) — the panel's amber marker on the verdict."""
+    report = {
+        "slices": {
+            "high_iv": _slice_stats(24, 10.0),
+            "low_iv": _slice_stats(10, -5.0),
+            "unknown": _slice_stats(0, 0.0),
+        },
+        "per_strategy": {
+            "high_iv": {"BreakoutVB": _slice_stats(22, 9.0),
+                        "VWAP": _slice_stats(2, 1.0)},
+            "low_iv": {"BreakoutVB": _slice_stats(8, -4.0),
+                       "VWAP": _slice_stats(2, -1.0)},
+        },
+        "per_symbol": {
+            "high_iv": {"BTC": _slice_stats(20, 8.0), "ETH": _slice_stats(4, 2.0)},
+            "low_iv": {"BTC": _slice_stats(6, -3.0), "ETH": _slice_stats(4, -2.0)},
+        },
+    }
+    monkeypatch.setattr(wd, "run_iv_comparison", lambda: report)
+    by_id = _by_id(wd.build_research_watchdogs_payload())
+    iv = by_id["iv_gate_shadow"]
+    proj = iv["projected"]
+    assert proj["concentration_caveat"] is True
+    assert "Concentração" in proj["detail"]
+    assert "BreakoutVB" in proj["detail"]
+    assert iv["concentration"]["flagged"] is True
+    assert iv["concentration"]["combined"]["top_strategy"] == "BreakoutVB"
+    assert iv["concentration"]["combined"]["top_strategy_share"] \
+        == pytest.approx(30 / 34, abs=1e-3)
 
 
 def test_broken_builder_is_isolated(_stub_metrics, monkeypatch):
@@ -374,3 +419,17 @@ class TestResearchWatchdogsTemplate:
         assert "recent_median_sec" in html
         assert "hist_p99_sec" in html
         assert "med " in html and " > p99 " in html
+
+    def test_panel_marks_concentration_caveat_yellow(self) -> None:
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        # the projected verdict turns amber + a ⚠ conc tag when one strategy /
+        # symbol drives ~80%+ of the sample
+        assert "pr.concentration_caveat" in html
+        assert "⚠ conc" in html
+        assert "var(--warn, #d29922)" in html
+        # the IV gate shadow panel shows the concentration banner too
+        assert "payload.concentration" in html
+        assert "concTxt" in html
+        assert "Concentração: amostra dominada" in html

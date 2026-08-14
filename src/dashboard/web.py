@@ -1470,7 +1470,10 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 BACKTEST_EVIDENCE,
                 build_report,
             )
-            from scripts.iv_gate_shadow_recheck import TARGET_CLOSED
+            from scripts.iv_gate_shadow_recheck import (
+                TARGET_CLOSED,
+                concentration_caveat,
+            )
 
             report = build_report()
             if report.get("error"):
@@ -1544,6 +1547,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 "join_coverage_pct": round(report["matched_decisions"] / n_dec * 100, 1),
                 "trade_coverage_pct": round(report["trades_with_decision"] / n_total * 100, 1),
                 "verdict": report["verdict"],
+                "concentration": concentration_caveat(report),
                 "decisions_per_day": report.get("decisions_per_day", []),
                 "threshold": report["iv_high_pct"],
                 "target_closed": TARGET_CLOSED,

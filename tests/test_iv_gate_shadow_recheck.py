@@ -80,6 +80,78 @@ def test_target_closed_matches_min_n_gate():
     assert rc.TARGET_CLOSED == MIN_N_GATE == 30
 
 
+def _slice_stats(n_closed, net=0.0):
+    return {
+        "n": n_closed, "n_closed": n_closed, "n_open": 0,
+        "net_pnl_usd": net, "win_rate": 0.5,
+        "avg_pnl_usd": net / max(1, n_closed),
+        "median_pnl_usd": net / max(1, n_closed),
+        "best_usd": net, "worst_usd": -net,
+    }
+
+
+def _concentrated_report():
+    """high_iv 24 closed (22 BreakoutVB / 20 BTC), low_iv 10 (8 / 6) —
+    combined strategy share 30/34 = 88% >= 80%."""
+    report = _report(24, 10.0, 10, -5.0)
+    report["per_strategy"] = {
+        "high_iv": {"BreakoutVB": _slice_stats(22), "VWAP": _slice_stats(2)},
+        "low_iv": {"BreakoutVB": _slice_stats(8), "VWAP": _slice_stats(2)},
+    }
+    report["per_symbol"] = {
+        "high_iv": {"BTC": _slice_stats(20), "ETH": _slice_stats(4)},
+        "low_iv": {"BTC": _slice_stats(6), "ETH": _slice_stats(4)},
+    }
+    return report
+
+
+def test_concentration_caveat_flags_dominant_strategy():
+    c = rc.concentration_caveat(_concentrated_report())
+    assert c["flagged"] is True
+    assert c["combined"]["top_strategy"] == "BreakoutVB"
+    assert c["combined"]["top_strategy_share"] == pytest.approx(30 / 34, abs=1e-3)
+    assert c["combined"]["top_symbol"] == "BTC"
+    assert c["combined"]["top_symbol_share"] == pytest.approx(26 / 34, abs=1e-3)
+    assert c["by_class"]["high_iv"]["top_strategy_share"] == pytest.approx(22 / 24, abs=1e-3)
+
+
+def test_concentration_caveat_not_flagged_balanced():
+    report = _report(20, 50.0, 10, -30.0)
+    report["per_strategy"] = {
+        "high_iv": {"A": _slice_stats(10), "B": _slice_stats(10)},
+        "low_iv": {"A": _slice_stats(5), "B": _slice_stats(5)},
+    }
+    report["per_symbol"] = {
+        "high_iv": {"BTC": _slice_stats(10), "ETH": _slice_stats(10)},
+        "low_iv": {"BTC": _slice_stats(5), "ETH": _slice_stats(5)},
+    }
+    c = rc.concentration_caveat(report)
+    assert c["flagged"] is False
+    assert c["combined"]["top_strategy_share"] == pytest.approx(0.5)
+
+
+def test_concentration_caveat_empty_breakdowns():
+    c = rc.concentration_caveat(_report(20, 50.0, 10, -30.0))
+    assert c["flagged"] is False
+    assert c["combined"]["top_strategy"] is None
+
+
+def test_verdict_carries_concentration_caveat():
+    """A concentrated sample marks the verdict: concentration_caveat True and
+    the dominant driver named in the detail."""
+    v = rc.verdict(_concentrated_report())
+    assert v["status"] == "PROMOTE"
+    assert v["concentration_caveat"] is True
+    assert "Concentração" in v["detail"]
+    assert "BreakoutVB" in v["detail"]
+
+
+def test_verdict_clean_when_balanced():
+    v = rc.verdict(_report(20, 50.0, 10, -30.0))
+    assert v["concentration_caveat"] is False
+    assert "Concentração" not in v["detail"]
+
+
 def test_iv_decision_count_reuses_live_join(monkeypatch):
     """iv_decision_count reads the same build_report() the report script uses —
     the trigger and the report can never disagree."""
@@ -128,6 +200,24 @@ def test_project_decision_na_without_closed_pnl():
     assert p["status"] == "N/A"
     assert p["provisional"] is True
     assert p["n_closed"] == 0
+
+
+def test_project_decision_with_concentration():
+    """The projected verdict is marked amber (concentration_caveat) when the
+    sample is dominated by one driver — the panel's yellow marker."""
+    conc = {
+        "flagged": True, "threshold": 0.8,
+        "combined": {"top_strategy": "BreakoutVB", "top_strategy_share": 0.88,
+                     "top_symbol": "BTC", "top_symbol_share": 0.76},
+        "by_class": {},
+    }
+    p = rc.project_decision(_slice(20, 50.0), _slice(5, -30.0), concentration=conc)
+    assert p["concentration_caveat"] is True
+    assert "⚠ Concentração" in p["detail"]
+    assert "BreakoutVB" in p["detail"]
+    # default (no concentration passed) stays clean
+    p2 = rc.project_decision(_slice(20, 50.0), _slice(5, -30.0))
+    assert p2["concentration_caveat"] is False
 
 
 def test_project_decision_matches_verdict_at_gate():

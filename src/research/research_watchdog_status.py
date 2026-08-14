@@ -16,6 +16,7 @@ from typing import Any, Dict, List
 
 from scripts.iv_gate_shadow_recheck import (
     TARGET_CLOSED as IV_TARGET_CLOSED,
+    concentration_caveat as iv_concentration_caveat,
     project_decision,
     run_comparison as run_iv_comparison,
 )
@@ -108,13 +109,20 @@ def _iv_gate_watchdog() -> Dict[str, Any]:
             "low_net_usd": None,
             "detail": "sem relatório de comparação (DB em falta?).",
         }
+        concentration = {
+            "flagged": False,
+            "threshold": 0.8,
+            "combined": {},
+            "by_class": {},
+        }
     else:
         hi = report["slices"]["high_iv"]
         lo = report["slices"]["low_iv"]
         n_high = hi["n_closed"] or 0
         n_low = lo["n_closed"] or 0
         n_closed = n_high + n_low
-        projected = project_decision(hi, lo)
+        concentration = iv_concentration_caveat(report)
+        projected = project_decision(hi, lo, concentration=concentration)
     return {
         "id": "iv_gate_shadow",
         "label": "IV gate shadow recheck",
@@ -126,6 +134,7 @@ def _iv_gate_watchdog() -> Dict[str, Any]:
         "progress_pct": _progress_pct(n_closed, IV_TARGET_CLOSED),
         "samples": n_high + n_low,
         "projected": projected,
+        "concentration": concentration,
         "triggered": bool(state.get("triggered")),
         "last_run": runs[-1] if runs else None,
         "report_path": "docs/IV_GATE_SHADOW_RECHECK_RESULT.md",
