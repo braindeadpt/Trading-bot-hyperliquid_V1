@@ -152,6 +152,105 @@ DOCUMENTED_GATE_KEYS: frozenset = frozenset(
 )
 
 
+# Canonical production VALUES for the gate keys with meaningful numeric/enum
+# pins. Mirror of the "production value" column in docs/GATES_REFERENCE.md §6
+# registry and the README parity table. A gate key that changes its production
+# value (e.g. max_positions 3 -> 5) must be a reviewable act touching the docs
+# too — presence alone is not enough (the frozen window guards the hash, but
+# the parity docs must stay truthful for operators reading them).
+# Regenerated from settings.yaml on 2026-08-14.
+GATE_KEY_VALUES: dict = {
+    "risk.max_positions": 3,
+    "risk.max_position_size_pct": 2.0,
+    "risk.taker_fee_pct": 0.045,
+    "risk.paper_slippage_pct": 0.02,
+    "risk.per_trade_risk_pct": 1.0,
+    "risk.max_daily_loss_pct": 3.0,
+    "risk.max_daily_stop_losses": 4,
+    "risk.max_slippage_pct": 0.2,
+    "risk.min_fill_ratio": 0.8,
+    "risk.circuit_breaker_drawdown_pct": 10.0,
+    "risk.circuit_breaker_recovery_pct": 50.0,
+    "risk.symbol_risk_multiplier.SOL": 0.5,
+    "risk.chase_filter.enabled": True,
+    "risk.chase_filter.lookback_hours": 3.0,
+    "risk.chase_filter.max_runup_pct": 0.008,
+    "risk.chase_filter.exempt_strategies": ["VolatilityBreakout", "DonchianBreakout"],
+    "risk.volatility_circuit_breaker.enabled": True,
+    "risk.volatility_circuit_breaker.multiplier": 3.0,
+    "risk.volatility_circuit_breaker.baseline_window_bars": 168,
+    "risk.volatility_circuit_breaker.block_duration_min": 30,
+    "risk.volatility_circuit_breaker.min_samples": 24,
+    "risk.funding_blackout.enabled": True,
+    "risk.funding_blackout.minutes_before": 5,
+    "risk.funding_blackout.minutes_after": 5,
+    "risk.funding_blackout.resets_utc": ["00:00", "08:00", "16:00"],
+    "strategy.portfolio_governance.max_directional_exposure_pct": 50,
+    "strategy.portfolio_governance.max_sector_exposure_pct": 100,
+    "strategy.portfolio_governance.max_correlation": 0.85,
+    "strategy.portfolio_governance.max_correlation_lookback": 60,
+    "strategy.portfolio_governance.daily_drawdown_circuit_pct": 3,
+    "strategy.portfolio_governance.daily_drawdown_halt_entries": True,
+    "strategy.portfolio_governance.daily_drawdown_flatten": True,
+    "strategy.portfolio_governance.daily_drawdown_alert": True,
+    "market_data.liquidation_source": "real",
+    "market_data.liquidation_okx_enabled": True,
+    "market_data.liquidation_bybit_enabled": True,
+    "market_data.liquidation_coinalyze_check": True,
+    "strategy.liquidation_catcher.require_real_liquidation_data": True,
+    "strategy.liquidation_catcher.feed_warmup_events": 1,
+    "market_data.block_entries_on_stale": True,
+    "market_data.block_entries_on_ws_unhealthy": True,
+    "market_data.block_funding_strategies_on_red": True,
+    "market_data.funding_stale_max_sec": 300,
+    "market_data.min_exchanges_for_green": 2,
+    "market_data.max_venue_spread": 0.001,
+    "execution.tca_enabled": True,
+    "execution.tca_mode": "strict",
+    "execution.min_edge_buffer_pct": 0.05,
+    "execution.entry_debounce_ms": 5000,
+    "execution.trailing_stop.enabled": True,
+    "execution.trailing_stop.activation_pct": 0.01,
+    "execution.trailing_stop.trail_pct": 0.008,
+    "execution.trailing_stop.exclude_strategies": [
+        "VolatilityBreakout", "VWAPDeviation", "SmartMoneyFlow", "TrendPyramid",
+    ],
+    "backtest.tca_mode": "proxy",
+    "backtest.replay_data_quality.min_coverage_pct": 95.0,
+    "backtest.replay_data_quality.max_bar_gap_ms": 120000,
+    "backtest.replay_data_quality.max_funding_stale_ms": 300000,
+    "backtest.replay_data_quality.max_oi_stale_ms": 300000,
+    "backtest.replay_data_quality.require_funding": True,
+    "backtest.replay_data_quality.require_oi": False,
+    "reconciliation.enabled": True,
+    "reconciliation.interval_sec": 60,
+    "reconciliation.stale_threshold_sec": 120,
+    "reconciliation.orphan_exchange_policy": "ADOPT_AND_PROTECT",
+    "reconciliation.mismatch_policy": "HALT",
+}
+
+
+def _settings_value(key: str):
+    """Read a dotted key's raw value from settings.yaml."""
+    with open(SETTINGS_PATH, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    cur = cfg
+    for part in key.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return "<MISSING>"
+        cur = cur[part]
+    return cur
+
+
+def _norm(v):
+    """Normalize YAML scalars for comparison (bool case, int/float)."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return float(v)
+    return v
+
+
 def _gate_keys_in_settings() -> set:
     """Collect the leaf gate keys actually present in settings.yaml."""
     with open(SETTINGS_PATH, encoding="utf-8") as f:
@@ -233,3 +332,60 @@ def test_gate_prefixes_have_no_orphans() -> None:
         "Registry entry(s) not covered by GATE_PREFIXES — the forward check "
         "would never see them:\n  {unreachable}"
     ).format(unreachable="\n  ".join(unreachable))
+
+
+def test_gate_key_values_match_production() -> None:
+    """Every pinned gate value must equal the production settings.yaml value.
+
+    Presence is not enough: the parity docs promise *values* (max_positions 3,
+    trailing activation 1%, trail 0.8%, ...). If a gate key's production value
+    changes without updating this pin (and the docs), this fails.
+    """
+    mismatches = []
+    for key, expected in sorted(GATE_KEY_VALUES.items()):
+        actual = _settings_value(key)
+        if isinstance(expected, list):
+            if not isinstance(actual, list) or [_norm(x) for x in actual] != [_norm(x) for x in expected]:
+                mismatches.append((key, expected, actual))
+        else:
+            if _norm(actual) != _norm(expected):
+                mismatches.append((key, expected, actual))
+    assert not mismatches, (
+        "Gate key value(s) drifted from the production pin:\n"
+        + "\n".join(f"  {k}: expected {e!r}, settings.yaml has {a!r}" for k, e, a in mismatches)
+        + "\nUpdate GATE_KEY_VALUES in tests/test_gate_key_drift.py AND the parity "
+        "docs (README parity table / docs/GATES_REFERENCE.md) — a production "
+        "gate value change must be a reviewable act."
+    )
+
+
+def test_gate_key_values_are_mirrored_in_docs() -> None:
+    """Pinned values must appear on the SAME docs row as their key.
+
+    The registry already checks the docs mention each *key*; this checks the
+    docs carry the *value* too (the `key` | `value` rows of GATES_REFERENCE §6
+    and the README parity table), so an operator reading the docs sees the
+    truth, not a stale number next to a live key. Matching key+value on the
+    same line avoids false hits from common values (3, true, 0.8) that appear
+    anywhere in the prose.
+    """
+    docs = _docs_text()
+    missing = []
+    for key, value in sorted(GATE_KEY_VALUES.items()):
+        if isinstance(value, list):
+            # Lists are rendered as abbreviations in the docs (e.g. "VB, VWAP").
+            # Only require the key to be present (registry check) — the exact
+            # list expansion lives in settings.yaml + this pin.
+            continue
+        value_str = str(value).lower()
+        matched = any(
+            key in line and value_str in line.lower()
+            for line in docs.splitlines()
+        )
+        if not matched:
+            missing.append((key, value))
+    assert not missing, (
+        "Pinned gate value(s) not on the same docs row as their key in README.md / "
+        "docs/GATES_REFERENCE.md:\n  {missing}\n"
+        "The docs are the mirror of this registry — keep values in sync."
+    ).format(missing="\n  ".join(f"{k}={v!r}" for k, v in missing))
