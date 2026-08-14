@@ -6,6 +6,7 @@ import collections
 import os
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datetime import datetime, timezone
 
+from src.backtest.data_contract import evaluate_data_contract
 from src.backtest.engine import BacktestEngine, BacktestConfig, _OpenPosition
 from src.backtest.symbol_rounding import round_position_size
 from src.backtest.replay_data_quality import ReplayDataQualityGate, SymbolReplayAudit
@@ -26,7 +28,10 @@ from src.core.risk_manager import RiskManager
 from src.core.signal_pipeline import GATE_ORDER, PipelineContext, SignalPipeline
 from src.core.volatility_circuit import VolatilityCircuitBreaker
 from src.data.database import Candle as DBCandle
-from src.data.database import Database
+from src.data.database import Database, LiquidationRecord
+from src.data.hl_research_backfill import hl_snapshot_to_candle
+from src.data.research_database import ResearchDatabase
+from src.data.series_metadata import SeriesMetadata
 from src.exchanges.liquidation_event import (
     is_proxy_liquidation_source,
     is_real_liquidation_source,
@@ -1327,6 +1332,11 @@ class TestLiquidationSourceGateParity:
     pytestmark = pytest.mark.integration_offline
 
     @staticmethod
+    def _prod_cfg() -> Config:
+        assert os.path.exists(PROD_SETTINGS_PATH), PROD_SETTINGS_PATH
+        return load_config(PROD_SETTINGS_PATH)
+
+    @staticmethod
     def _live_engine(mode: str = "real") -> TradingEngine:
         """Live engine stub; liquidation state shaped like TradingEngine.__init__."""
         eng = object.__new__(TradingEngine)
@@ -1482,6 +1492,97 @@ class TestLiquidationSourceGateParity:
         # agree that proxy provenance must not produce a liquidation signal.
         assert is_real_liquidation_source("real")
         assert not is_real_liquidation_source("proxy")
+
+    # -- strict research data contract: proxy-only replay refuses -----------
+
+    @staticmethod
+    def _research_db() -> ResearchDatabase:
+        path = os.path.join(
+            tempfile.gettempdir(), f"test_parity_liq_{uuid.uuid4().hex}.db"
+        )
+        return ResearchDatabase(path)
+
+    @staticmethod
+    def _seed_hl_candles(db: ResearchDatabase, symbol: str, start_ms: int, n: int) -> None:
+        meta = SeriesMetadata.hl_candles(taker_split=False)
+        candles = [
+            DBCandle(
+                symbol, start_ms + i * 60_000,
+                100.0, 101.0, 99.0, 100.5, 10.0,
+            )
+            for i in range(n)
+        ]
+        db.save_research_candles(candles, "1m", meta)
+
+    @staticmethod
+    def _contract_result(db: ResearchDatabase, prod_cfg: Config) -> Any:
+        start = 1_700_000_000_000
+        return evaluate_data_contract(
+            db,
+            ["BTC"],
+            start_ms=start,
+            end_ms=start + 59 * 60_000,
+            config=prod_cfg,
+            active_strategies=["LiquidationCatcher"],
+            refuse_on_fail=True,
+            strict_research=True,
+        )
+
+    def test_proxy_only_replay_refuses_liquidation_catcher_in_strict_research(
+        self,
+    ) -> None:
+        """Production parity: the deployment runs ``liquidation_source: real``
+        (settings.yaml), so a research replay whose liquidation rows are
+        proxy-only must REFUSE LiquidationCatcher under the strict contract —
+        the same provenance gate that keeps proxy events out of the live
+        window (``_accepts_liquidation_source``) and out of the strategy
+        (``is_real_liquidation_source``)."""
+        db = self._research_db()
+        self._seed_hl_candles(db, "BTC", 1_700_000_000_000, 60)
+        db.save_liquidation(LiquidationRecord(
+            symbol="BTC", timestamp_ms=1_700_000_060_000,
+            notional_usd=2_000_000.0, side="long", source="proxy",
+        ))
+
+        result = self._contract_result(db, self._prod_cfg())
+
+        assert result.refused
+        assert any(
+            "LiquidationCatcher" in r and "liquidation_proxy_only" in r
+            for r in result.reasons
+        ), result.reasons
+        fid = result.strategy_fidelity.get("LiquidationCatcher")
+        assert fid is not None and not fid.tier_a_eligible
+        assert fid.liquidation_provenance == "proxy"
+
+    def test_real_provenance_replay_accepted_in_strict_research(
+        self,
+    ) -> None:
+        """Same strict contract, real-venue rows replayed: LiquidationCatcher
+        is Tier A and the contract is NOT refused — the refusal above is about
+        provenance, not about the strategy or strictness itself."""
+        db = self._research_db()
+        self._seed_hl_candles(db, "BTC", 1_700_000_000_000, 60)
+        db.save_liquidation(LiquidationRecord(
+            symbol="BTC", timestamp_ms=1_700_000_060_000,
+            notional_usd=2_000_000.0, side="long", source="okx",
+        ))
+
+        result = self._contract_result(db, self._prod_cfg())
+
+        assert not result.refused
+        fid = result.strategy_fidelity.get("LiquidationCatcher")
+        assert fid is not None and fid.tier_a_eligible
+        assert fid.liquidation_provenance == "real"
+
+    def test_production_strict_research_flags_are_active(self) -> None:
+        """The production settings.yaml pins the mode keys that make the
+        refusal tests meaningful: real liquidation source + strict research."""
+        prod = self._prod_cfg()
+        assert str(prod.get("market_data.liquidation_source", "auto")).lower() == "real"
+        research = prod.get("research", {}) or {}
+        assert bool(research.get("strict_mode", False)) is True
+        assert bool(research.get("refuse_insufficient_feeds", True)) is True
 
 
 class TestLiquidationStopoutParity:
