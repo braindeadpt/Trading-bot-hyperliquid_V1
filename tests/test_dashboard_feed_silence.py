@@ -75,8 +75,10 @@ class TestFeedSilencePayload:
                     "age_sec": 30.0,
                     "max_silence_sec": 3600.0,
                     "degraded": False,
-                    "warned_50_pct": False,
+                    "warned_50_pct": True,
+                    "warned_50_at_ms": 1_752_000_000_000,
                     "warned_90_pct": False,
+                    "warned_90_at_ms": None,
                     "warn_fraction": 0.3,
                     "imminent_fraction": 0.8,
                 },
@@ -112,8 +114,12 @@ class TestFeedSilencePayload:
         # the effective early/imminent fractions flow through the snapshot
         assert fs["funding_hl"]["warn_fraction"] == 0.3
         assert fs["funding_hl"]["imminent_fraction"] == 0.8
-        # fire-once flags pass through the snapshot
-        assert fs["funding_hl"]["warned_50_pct"] is False
+        # when each alert fired also passes through (None until it fires)
+        assert fs["funding_hl"]["warned_50_at_ms"] == 1_752_000_000_000
+        assert fs["funding_hl"]["warned_90_at_ms"] is None
+        # fire-once flags pass through the snapshot (funding_hl already fired
+        # early at 30% warn_fraction, hence its persisted timestamp)
+        assert fs["funding_hl"]["warned_50_pct"] is True
         assert fs["liquidation_okx"]["warned_50_pct"] is True
         assert fs["liquidation_okx"]["warned_90_pct"] is False
         # bybit is past its 6h threshold -> degraded
@@ -578,3 +584,17 @@ class TestFeedSilenceTemplate:
         assert "imminentFrac" in html
         assert '"early @ " + earlyFrac + "%"' in html
         assert '"imminent @ " + imminentFrac + "%"' in html
+
+    def test_template_shows_alert_fired_timestamp(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # the Alerted column appends WHEN each alert fired (e.g. 'early 14:32')
+        assert "function fmtHM(" in html
+        assert "st.warned_50_at_ms" in html
+        assert "st.warned_90_at_ms" in html
+        assert "earlyAt" in html
+        assert "imminentAt" in html
+        assert "fmtHM(st.warned_50_at_ms)" in html
+        assert "fmtHM(st.warned_90_at_ms)" in html
+        # tooltip with full precision
+        assert "early disparou a " in html
+        assert "imminent disparou a " in html

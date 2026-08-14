@@ -921,6 +921,10 @@ function fmtTime(ts) {
     if (!ts) return "--";
     return new Date(ts).toLocaleTimeString("pt-PT", {hour:"2-digit", minute:"2-digit", second:"2-digit"});
 }
+function fmtHM(ts) {
+    if (!ts) return "";
+    return new Date(ts).toLocaleTimeString("pt-PT", {hour:"2-digit", minute:"2-digit"});
+}
 function fmtDate(ts) {
     if (!ts) return "--";
     return new Date(ts).toLocaleString("pt-PT", {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"});
@@ -1649,9 +1653,19 @@ function renderFeedSilence(payload) {
             ? Math.round(Number(st.warn_fraction) * 100) : 50;
         const imminentFrac = st.imminent_fraction != null
             ? Math.round(Number(st.imminent_fraction) * 100) : 90;
+        // WHEN each alert fired (persisted in the monitor state, reset on
+        // beat) — 'early 14:32' style, with full precision in the tooltip.
+        const earlyAt = st.warned_50_at_ms ? " · " + fmtHM(st.warned_50_at_ms) : "";
+        const imminentAt = st.warned_90_at_ms ? " · " + fmtHM(st.warned_90_at_ms) : "";
+        const alertedTitle = degraded ? ""
+            : alerted90 && st.warned_90_at_ms
+                ? "imminent disparou a " + fmtTime(st.warned_90_at_ms) + " · " + fmtDate(st.warned_90_at_ms)
+            : alerted50 && st.warned_50_at_ms
+                ? "early disparou a " + fmtTime(st.warned_50_at_ms) + " · " + fmtDate(st.warned_50_at_ms)
+            : "";
         const alertedTxt = degraded ? "—"
-            : alerted90 ? "imminent @ " + imminentFrac + "%"
-            : alerted50 ? "early @ " + earlyFrac + "%"
+            : alerted90 ? "imminent @ " + imminentFrac + "%" + imminentAt
+            : alerted50 ? "early @ " + earlyFrac + "%" + earlyAt
             : "—";
         const alertedColor = degraded ? "var(--muted)"
             : alerted90 ? "var(--down)"
@@ -1691,7 +1705,7 @@ function renderFeedSilence(payload) {
             '</td>' +
             '<td style="padding:3px 4px;width:96px;">' + sparklineSvg(sparks[feed] || [], 92, 20) + '</td>' +
             '<td style="padding:3px 4px;width:96px;" title="Daily max age (seconds) per UTC day, last 14 days">' + sparklineAbs(daily[feed] || [], 92, 20, max) + '</td>' +
-            '<td style="padding:3px 4px;font-weight:600;color:' + alertedColor + ';">' + alertedTxt + '</td>' +
+            '<td style="padding:3px 4px;font-weight:600;color:' + alertedColor + ';" title="' + alertedTitle.replace(/"/g, "&quot;") + '">' + alertedTxt + '</td>' +
             '<td style="padding:3px 4px;font-weight:600;color:' + stateColor + ';">' + stateTxt + '</td>' +
             '</tr>';
     }).join("");

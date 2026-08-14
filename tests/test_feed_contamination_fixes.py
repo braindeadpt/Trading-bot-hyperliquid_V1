@@ -540,17 +540,28 @@ def test_feed_silence_on_alert_records_every_emission() -> None:
             mon.disable_feed(name)
     mon.beat("liquidation_okx", timestamp_ms=1_000_000)
 
-    # 55% -> early fires and is recorded
-    mon.check_early_warnings(now_ms=1_000_000 + int(0.55 * 3600_000))
-    assert recorded[-1][:3] == ("liquidation_okx", "early", 1_000_000 + int(0.55 * 3600_000))
+    # 55% -> early fires and is recorded; the state persists WHEN it fired
+    fired_early = 1_000_000 + int(0.55 * 3600_000)
+    mon.check_early_warnings(now_ms=fired_early)
+    assert recorded[-1][:3] == ("liquidation_okx", "early", fired_early)
+    snap = mon.snapshot()["liquidation_okx"]
+    assert snap["warned_50_pct"] is True
+    assert snap["warned_50_at_ms"] == fired_early
+    assert snap["warned_90_at_ms"] is None
     n = len(recorded)
     # same episode continuing -> no second early emission
     mon.check_early_warnings(now_ms=1_000_000 + int(0.7 * 3600_000))
     assert len(recorded) == n
 
-    # 95% -> imminent fires and is recorded
-    mon.check_early_warnings(now_ms=1_000_000 + int(0.95 * 3600_000))
-    assert recorded[-1][:3] == ("liquidation_okx", "imminent", 1_000_000 + int(0.95 * 3600_000))
+    # 95% -> imminent fires and is recorded; WHEN is persisted too
+    fired_imminent = 1_000_000 + int(0.95 * 3600_000)
+    mon.check_early_warnings(now_ms=fired_imminent)
+    assert recorded[-1][:3] == ("liquidation_okx", "imminent", fired_imminent)
+    snap = mon.snapshot()["liquidation_okx"]
+    assert snap["warned_90_pct"] is True
+    assert snap["warned_90_at_ms"] == fired_imminent
+    # the early timestamp survives (both fired in this episode)
+    assert snap["warned_50_at_ms"] == fired_early
     n = len(recorded)
     mon.check_early_warnings(now_ms=1_000_000 + int(0.99 * 3600_000))
     assert len(recorded) == n
@@ -564,6 +575,14 @@ def test_feed_silence_on_alert_records_every_emission() -> None:
     # fire-once per episode: repeat check at a later age records nothing new
     mon.check(now_ms=1_000_000 + int(2.0 * 3600_000))
     assert len([r for r in recorded if r[1] == "degraded"]) == 1
+
+    # beat() resets the episode: flags AND the persisted timestamps
+    mon.beat("liquidation_okx", timestamp_ms=2_000_000)
+    snap = mon.snapshot()["liquidation_okx"]
+    assert snap["warned_50_pct"] is False
+    assert snap["warned_50_at_ms"] is None
+    assert snap["warned_90_pct"] is False
+    assert snap["warned_90_at_ms"] is None
 
 
 def test_feed_silence_on_alert_fires_cadence() -> None:

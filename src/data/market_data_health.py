@@ -200,9 +200,14 @@ class FeedSilenceState:
     last_alert_mono: float = 0.0
     # Fire-once early-warning: alerted at >=50% of max_silence; reset on beat.
     warned_50_pct: bool = False
+    # Wall-clock ms when the early warning fired (None until it does) — the
+    # Alerted column shows this so the operator sees WHEN the alert went out.
+    warned_50_at_ms: Optional[int] = None
     # Fire-once imminent-warning: alerted at >=90% of max_silence (before
     # degrading); reset on beat.
     warned_90_pct: bool = False
+    # Wall-clock ms when the imminent warning fired (None until it does).
+    warned_90_at_ms: Optional[int] = None
     # Cadence tracking: rolling inter-event gaps (sec) used to detect a feed
     # that is still delivering but far less often than its historical p99.
     gaps: "collections.deque" = field(default_factory=collections.deque)
@@ -345,6 +350,8 @@ class FeedSilenceMonitor:
         st.warned_50_pct = False
         st.warned_90_pct = False
         st.warned_cadence = False
+        st.warned_50_at_ms = None
+        st.warned_90_at_ms = None
 
     def check(self, now_ms: Optional[int] = None) -> List[str]:
         """Return alert messages for newly-degraded (or re-alertable) feeds."""
@@ -420,6 +427,7 @@ class FeedSilenceMonitor:
                 # degrade threshold. Fire early then imminent, independently.
                 if not st.warned_50_pct and uptime_sec >= st.max_silence_sec * warn_fraction:
                     st.warned_50_pct = True
+                    st.warned_50_at_ms = int(now)
                     self._emit_alert(
                         warnings, name, "early", now,
                         f"FEED QUIET (early): `{name}` never produced an event "
@@ -428,6 +436,7 @@ class FeedSilenceMonitor:
                     )
                 if not st.warned_90_pct and uptime_sec >= st.max_silence_sec * imminent_fraction:
                     st.warned_90_pct = True
+                    st.warned_90_at_ms = int(now)
                     self._emit_alert(
                         warnings, name, "imminent", now,
                         f"FEED QUIET (imminent): `{name}` still no events after "
@@ -439,6 +448,7 @@ class FeedSilenceMonitor:
             age = (now - st.last_event_ms) / 1000.0
             if not st.warned_50_pct and age >= st.max_silence_sec * warn_fraction:
                 st.warned_50_pct = True
+                st.warned_50_at_ms = int(now)
                 self._emit_alert(
                     warnings, name, "early", now,
                     f"FEED QUIET (early): `{name}` quiet for {age/3600:.1f}h "
@@ -447,6 +457,7 @@ class FeedSilenceMonitor:
                 )
             if not st.warned_90_pct and age >= st.max_silence_sec * imminent_fraction:
                 st.warned_90_pct = True
+                st.warned_90_at_ms = int(now)
                 self._emit_alert(
                     warnings, name, "imminent", now,
                     f"FEED QUIET (imminent): `{name}` quiet for {age/3600:.1f}h "
@@ -501,7 +512,9 @@ class FeedSilenceMonitor:
                 "max_silence_sec": st.max_silence_sec,
                 "degraded": st.degraded,
                 "warned_50_pct": st.warned_50_pct,
+                "warned_50_at_ms": st.warned_50_at_ms,
                 "warned_90_pct": st.warned_90_pct,
+                "warned_90_at_ms": st.warned_90_at_ms,
                 "warned_cadence": st.warned_cadence,
                 "cadence_p95_sec": st.cadence_p95_sec(
                     min_samples=self._cadence_min_samples
