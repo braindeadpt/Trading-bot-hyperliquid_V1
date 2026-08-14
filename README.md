@@ -366,6 +366,47 @@ FEED_SILENCE_IMMINENT_FRACTION=0.8
   sets the preflight warn level (`scripts/preflight_feed_check.py` —
   `past N%` in its exit-2 report) unless `--warn-fraction` is passed.
 
+### The cadence signal and the exp-gap indicator
+
+Beyond age vs threshold, the monitor tracks each feed's **cadence** — the
+rolling distribution of its inter-event gaps. `FEED CADENCE`, the
+earliest signal in the escalation ladder (before `early`), fires when a
+feed's current gap exceeds its **own historical p99**:
+
+- **p99** — nearest-rank percentile of the last
+  `FEED_CADENCE_GAP_HISTORY` gaps, computed only after
+  `FEED_CADENCE_MIN_SAMPLES` gaps (the `learning…` state). Scale is
+  per-feed: a feed that normally prints every 5s and one that prints
+  every 2m each get a p99 of *their own* delivery — a thinning feed is
+  flagged long before any absolute silence threshold.
+- **Fire** — once per episode (reset on beat), like the early/imminent
+  levels. **Log-only by design**: a p99 threshold means ~1% of gaps
+  naturally exceed it, so paging on every breach would be constant
+  noise — the operator sees it in the dashboard instead, and the
+  imminent/degraded levels own the Telegram paging.
+- **Lead** — a gap that keeps growing past p99 and reaches the silence
+  threshold (6h for liquidation feeds) is the real outage; the cadence
+  fire preceded it by `max_silence − p99`. That lead time is measured
+  against the real `liquidation_events` history by
+  `scripts/validate_feed_cadence_leadtime.py` (report:
+  `docs/FEED_CADENCE_LEADTIME_VALIDATION.md`).
+
+The Feed Silence panel's **Age/exp gap** column renders the same signal:
+
+- The small line under the age shows `exp ≤ p99` (the feed's expected
+  quiet ceiling), or `gap 45.2m > p99 12.3m` in red when the p99 is
+  breached.
+- A red **`cadence`** pill next to the feed name flags the episode
+  (tooltip: the exact comparison, the sample count behind the p99, and
+  whether the fire-once alert already emitted).
+- The cell tooltip carries the full shape of the distribution —
+  `p50 / p95 / p99` and where the current gap sits (`gap actual no
+  percentil 63 do histórico`, read from the snapshot as
+  `cadence_pct_current`).
+- The cell color is a **continuous 0-100 ramp** of that percentile
+  (green → amber → red), not a hard p95/p99 cutoff — gated on the
+  learned p99 so a cold-start feed never shows a false alarm color.
+
 ### Tuning the cadence detector sensitivity
 
 The cadence watchdog (`FEED CADENCE`, log-only) fires when a feed's
