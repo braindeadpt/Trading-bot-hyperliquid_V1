@@ -42,7 +42,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.core.engine import feed_silence_contracts  # noqa: E402
+from src.core.engine import (  # noqa: E402
+    feed_silence_cadence_gap_history,
+    feed_silence_cadence_min_samples,
+    feed_silence_contracts,
+    feed_silence_imminent_fraction,
+    feed_silence_warn_fraction,
+)
+from src.data.market_data_health import cadence_percentile  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -198,6 +205,92 @@ def analyze_feed(
     }
 
 
+def live_snapshot_equivalent(
+    ts: list[int],
+    *,
+    now_ms: int,
+    max_silence_sec: float,
+    warn_fraction: float,
+    imminent_fraction: float,
+    min_samples: int,
+    gap_history: int,
+) -> dict | None:
+    """Reconstruct what the live ``FeedSilenceMonitor.snapshot()`` would
+    report for this feed, from the same persisted events.
+
+    The monitor's cadence fields are pure functions of the event series
+    (percentiles of the rolling gap deque via the shared
+    ``cadence_percentile``, plus the rank of the current age), so an offline
+    script reproduces them exactly. ``warn_level`` is rebuilt from the
+    current age vs the fractions — the fire-once flags mirror the age
+    crossing after the first check. ``None`` when the feed has no events.
+    """
+    if len(ts) < 2:
+        return None
+    raw_gaps: list[float] = []
+    for a, b in zip(ts, ts[1:]):
+        g = (b - a) / 1000.0
+        if g >= 0:  # the monitor records only gaps >= 0
+            raw_gaps.append(g)
+    if not raw_gaps:
+        return None
+    recent = raw_gaps[-gap_history:]  # same deque cap as the monitor
+    p50 = cadence_percentile(recent, 0.50, min_samples)
+    p95 = cadence_percentile(recent, 0.95, min_samples)
+    p99 = cadence_percentile(recent, 0.99, min_samples)
+    age_sec = max(0.0, (now_ms - ts[-1]) / 1000.0)
+    pct_current: float | None = None
+    if recent:
+        below = sum(1 for g in recent if g <= age_sec)
+        pct_current = round(100.0 * below / len(recent), 1)
+    if age_sec >= max_silence_sec:
+        warn_level = "degraded"
+    elif age_sec >= max_silence_sec * imminent_fraction:
+        warn_level = "imminent"
+    elif age_sec >= max_silence_sec * warn_fraction:
+        warn_level = "early"
+    else:
+        warn_level = "none"
+    return {
+        "age_sec": round(age_sec, 1),
+        "max_silence_sec": max_silence_sec,
+        "warn_level": warn_level,
+        "cadence_p50_sec": None if p50 is None else round(p50, 1),
+        "cadence_p95_sec": None if p95 is None else round(p95, 1),
+        "cadence_p99_sec": None if p99 is None else round(p99, 1),
+        "cadence_pct_current": pct_current,
+        "cadence_samples": len(recent),
+    }
+
+
+def cross_verdict(status: str, live: dict | None) -> str:
+    """Agreement between the offline diagnostic and the reconstructed live
+    snapshot:
+
+    * ``aligned_ok`` — both see the feed healthy;
+    * ``aligned_trouble`` — DEGRADING and live already imminent/degraded;
+    * ``offline_ahead`` — DEGRADING while live is still none/early (the
+      recent-vs-history trend is visible offline before the live flags);
+    * ``live_ahead`` — OK/WATCH while live degraded (a silence the recent
+      window missed);
+    * ``live_escalating`` — OK/WATCH while live is early/imminent;
+    * ``no_live_data`` / ``no_diagnosis`` — missing side.
+    """
+    if live is None:
+        return "no_live_data"
+    level = live.get("warn_level") or "none"
+    if status == "DEGRADING":
+        return "aligned_trouble" if level in ("degraded", "imminent") \
+            else "offline_ahead"
+    if status in ("OK", "WATCH"):
+        if level == "degraded":
+            return "live_ahead"
+        if level in ("imminent", "early"):
+            return "live_escalating"
+        return "aligned_ok"
+    return "no_diagnosis"
+
+
 def run_cadence_diagnostic(
     db_path: Path,
     contracts: dict,
@@ -205,14 +298,29 @@ def run_cadence_diagnostic(
     now_ms: int | None = None,
     recent_hours: float = 48.0,
     min_history: int = 50,
+    warn_fraction: float | None = None,
+    imminent_fraction: float | None = None,
+    min_samples: int | None = None,
+    gap_history: int | None = None,
 ) -> dict:
     """Per-feed cadence verdict for the contracted feeds, from the live DB.
 
     Pure read — the reusable core behind the CLI and the research watchdog
     (``scripts/research_watchdog_supervisor.py`` / dashboard): one function
     computes the status every gate reads, so the dashboard and the watchdog
-    can never disagree on a feed's verdict.
+    can never disagree on a feed's verdict. Each feed also carries a
+    ``live_snapshot`` (the reconstructed monitor state: warn_level + cadence
+    percentiles) and a ``cross`` verdict, so the JSON report lets the
+    operator compare the offline diagnosis with the live monitor.
     """
+    if warn_fraction is None:
+        warn_fraction = feed_silence_warn_fraction()
+    if imminent_fraction is None:
+        imminent_fraction = feed_silence_imminent_fraction()
+    if min_samples is None:
+        min_samples = feed_silence_cadence_min_samples()
+    if gap_history is None:
+        gap_history = feed_silence_cadence_gap_history()
     if not Path(db_path).exists():
         return {"now_ms": now_ms, "recent_hours": recent_hours, "feeds": {}}
     db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -220,13 +328,37 @@ def run_cadence_diagnostic(
     recent_ms = int(recent_hours * 3600_000)
     timestamps = _feed_timestamps(db)
     db.close()
-    report: dict = {"now_ms": now, "recent_hours": recent_hours, "feeds": {}}
+    report: dict = {
+        "now_ms": now,
+        "recent_hours": recent_hours,
+        "live_thresholds": {
+            "warn_fraction": warn_fraction,
+            "imminent_fraction": imminent_fraction,
+            "cadence_min_samples": min_samples,
+            "cadence_gap_history": gap_history,
+        },
+        "feeds": {},
+    }
     for feed in sorted(contracts):
-        report["feeds"][feed] = analyze_feed(
+        st = analyze_feed(
             feed, timestamps.get(feed, []),
             now_ms=now, recent_ms=recent_ms,
             min_history=min_history,
         )
+        max_sil = contracts.get(feed) or 0.0
+        if max_sil > 0:
+            live = live_snapshot_equivalent(
+                timestamps.get(feed, []),
+                now_ms=now,
+                max_silence_sec=float(max_sil),
+                warn_fraction=warn_fraction,
+                imminent_fraction=imminent_fraction,
+                min_samples=min_samples,
+                gap_history=gap_history,
+            )
+            st["live_snapshot"] = live
+            st["cross"] = cross_verdict(st["status"], live)
+        report["feeds"][feed] = st
     return report
 
 
@@ -277,18 +409,24 @@ def main() -> int:
     print(f"Feed cadence diagnostic — recent window {args.recent_hours:.0f}h "
           f"(now {time.strftime('%Y-%m-%d %H:%M', time.localtime(now_ms / 1000))} UTC)")
     print(f"{'feed':30s} {'status':10s} {'hist p95':>8s} {'hist p99':>8s} "
-          f"{'rec med':>8s} {'rec p99':>8s} {'latest':>8s} {'trend':>8s}")
-    print("-" * 96)
+          f"{'rec med':>8s} {'rec p99':>8s} {'latest':>8s} {'trend':>8s} "
+          f"{'cross':>14s}")
+    print("-" * 112)
     for feed, st in report["feeds"].items():
         if st["status"] in ("no_data", "insufficient"):
             print(f"{feed:30s} {st['status']:10s} ({st.get('events', 0)} events, "
                   f"{st.get('gaps', 0)} gaps)")
             continue
+        live = st.get("live_snapshot")
+        cross = st.get("cross") or "-"
+        if live and live.get("warn_level") not in (None, "none"):
+            cross = f"{cross}({live['warn_level']})"
         print(
             f"{feed:30s} {st['status']:10s} "
             f"{_dur(st['hist_p95_sec']):>8s} {_dur(st['hist_p99_sec']):>8s} "
             f"{_dur(st['recent_median_sec']):>8s} {_dur(st['recent_p99_sec']):>8s} "
-            f"{_dur(st['latest_gap_sec']):>8s} {st['trend_sec_per_gap']:>+8.2f}s"
+            f"{_dur(st['latest_gap_sec']):>8s} {st['trend_sec_per_gap']:>+8.2f}s "
+            f"{cross:>14s}"
         )
     if worst >= 1:
         print("\n[DEGRADING] feed(s) consistently slower than their historical "

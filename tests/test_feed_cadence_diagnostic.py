@@ -182,3 +182,101 @@ def test_missing_db_reports_error() -> None:
     r = _run(["--db", "/nonexistent/bot.db"])
     assert r.returncode == 1
     assert "not found" in r.stderr
+
+
+# ── live snapshot cross-check (offline vs live monitor) ───────────────────
+
+def _okx_ts(gap_secs, start=1_000_000):
+    ts = [start]
+    for g in gap_secs:
+        ts.append(ts[-1] + int(g * 1000))
+    return ts
+
+
+def test_live_snapshot_equivalent_healthy() -> None:
+    from scripts.feed_cadence_diagnostic import live_snapshot_equivalent
+
+    ts = _okx_ts([60.0] * 120)
+    now = ts[-1] + 30_000  # age 30s
+    live = live_snapshot_equivalent(
+        ts, now_ms=now, max_silence_sec=21600.0,
+        warn_fraction=0.5, imminent_fraction=0.9,
+        min_samples=100, gap_history=4000,
+    )
+    assert live["warn_level"] == "none"
+    assert live["cadence_p50_sec"] == 60.0
+    assert live["cadence_p99_sec"] == 60.0
+    assert live["cadence_samples"] == 120
+    # age 30s: no recorded gap is <= 30s -> rank 0%
+    assert live["cadence_pct_current"] == 0.0
+
+
+def test_live_snapshot_warn_levels_by_age() -> None:
+    from scripts.feed_cadence_diagnostic import live_snapshot_equivalent
+
+    ts = _okx_ts([60.0] * 120)
+    max_sil = 21600.0
+    for age_sec, expected in (
+        (0.5 * max_sil, "early"),
+        (0.9 * max_sil, "imminent"),
+        (1.1 * max_sil, "degraded"),
+    ):
+        live = live_snapshot_equivalent(
+            ts, now_ms=ts[-1] + int(age_sec * 1000), max_silence_sec=max_sil,
+            warn_fraction=0.5, imminent_fraction=0.9,
+            min_samples=100, gap_history=4000,
+        )
+        assert live["warn_level"] == expected, age_sec
+
+
+def test_live_snapshot_none_without_events() -> None:
+    from scripts.feed_cadence_diagnostic import live_snapshot_equivalent
+
+    assert live_snapshot_equivalent(
+        [], now_ms=1, max_silence_sec=21600.0, warn_fraction=0.5,
+        imminent_fraction=0.9, min_samples=100, gap_history=4000,
+    ) is None
+    assert live_snapshot_equivalent(
+        [1_000_000], now_ms=1_000_001, max_silence_sec=21600.0,
+        warn_fraction=0.5, imminent_fraction=0.9,
+        min_samples=100, gap_history=4000,
+    ) is None
+
+
+def test_cross_verdict_buckets() -> None:
+    from scripts.feed_cadence_diagnostic import cross_verdict
+
+    none = {"warn_level": "none"}
+    early = {"warn_level": "early"}
+    imminent = {"warn_level": "imminent"}
+    degraded = {"warn_level": "degraded"}
+    assert cross_verdict("OK", none) == "aligned_ok"
+    assert cross_verdict("WATCH", none) == "aligned_ok"
+    assert cross_verdict("DEGRADING", imminent) == "aligned_trouble"
+    assert cross_verdict("DEGRADING", degraded) == "aligned_trouble"
+    assert cross_verdict("DEGRADING", none) == "offline_ahead"
+    assert cross_verdict("DEGRADING", early) == "offline_ahead"
+    assert cross_verdict("OK", degraded) == "live_ahead"
+    assert cross_verdict("WATCH", early) == "live_escalating"
+    assert cross_verdict("OK", None) == "no_live_data"
+    assert cross_verdict("insufficient", none) == "no_diagnosis"
+
+
+def test_json_report_crosses_with_live_snapshot() -> None:
+    """The JSON report carries the reconstructed live monitor state per feed
+    (warn_level + cadence percentiles) and the cross verdict."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        _make_db(db, okx_gaps_min=[1.0] * 250)
+        r = _run(["--db", db, "--min-history", "50", "--json"])
+        assert r.returncode == 0
+        d = json.loads(r.stdout)
+        assert "live_thresholds" in d
+        assert d["live_thresholds"]["warn_fraction"] == 0.5
+        st = d["feeds"]["liquidation_okx"]
+        assert st["cross"] == "aligned_ok"
+        live = st["live_snapshot"]
+        assert live["warn_level"] == "none"
+        assert live["cadence_p99_sec"] == 60.0
+        # the last event is ~10min old; every 60s gap is <= that age
+        assert live["cadence_pct_current"] == 100.0
