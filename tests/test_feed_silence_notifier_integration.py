@@ -136,6 +136,47 @@ def test_engine_forwards_feed_silent_to_on_alert(
     asyncio.run(scenario())
 
 
+def test_warned_50_pct_true_in_same_refresh_as_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The snapshot flag warned_50_pct is True in the SAME refresh where the
+    early warning is emitted — the Alerted column (reads the snapshot) never
+    shows 'early' before the alert fires, nor hides it after."""
+
+    async def scenario() -> None:
+        clock = {"t": 1_000_000.0}
+        recorded: list = []
+        engine, mon, _notifier = _bare_engine(
+            clock, monkeypatch,
+            on_alert=lambda f, t, ms, m: recorded.append((f, t, ms, m)),
+        )
+
+        mon.beat("liquidation_okx", timestamp_ms=int(clock["t"] * 1000))
+        clock["t"] += 0.40 * 3600.0  # 40% — below the 0.5 early level
+        await _refresh(engine)
+        assert mon.snapshot()["liquidation_okx"]["warned_50_pct"] is False
+        assert not any(r[1] == "early" for r in recorded)
+
+        # cross the early level in ONE refresh: the emission and the flag
+        # must land atomically — the column reads the snapshot right after.
+        clock["t"] += 0.15 * 3600.0  # 55%
+        await _refresh(engine)
+        snap = mon.snapshot()["liquidation_okx"]
+        assert any(r[1] == "early" for r in recorded)  # the warning was emitted
+        assert snap["warned_50_pct"] is True  # in the SAME refresh
+        assert snap["warn_level"] == "early"
+
+        # fire-once: a later refresh keeps the flag True (the column keeps
+        # showing the episode's alert) but does NOT re-emit.
+        n_early = len([r for r in recorded if r[1] == "early"])
+        clock["t"] += 0.10 * 3600.0
+        await _refresh(engine)
+        assert mon.snapshot()["liquidation_okx"]["warned_50_pct"] is True
+        assert len([r for r in recorded if r[1] == "early"]) == n_early
+
+    asyncio.run(scenario())
+
+
 def test_warn_fraction_env_moves_early_threshold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
