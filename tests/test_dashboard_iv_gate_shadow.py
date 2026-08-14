@@ -359,6 +359,22 @@ class TestIvGateShadowTemplate:
         assert 'colspan="12"' in html
         assert html.count("IV pct") >= 2  # trades + positions headers
 
+    def test_trades_panel_has_liquidation_stop_out_counter_and_badge(self) -> None:
+        """The trades panel surfaces liquidation stop-outs: a counter in the
+        header and a distinct badge on the exit_reason cell."""
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        # Counter element in the panel header.
+        assert 'id="trades-liq-count"' in html
+        # Counter updated on every render (socket + REST share renderTrades).
+        assert 't.exit_reason === "liquidation_stop_out"' in html
+        assert '⛔ ${liqCount} liquidation stop-out' in html
+        # Distinct badge on the Reason cell for stop-out trades.
+        assert 'class="pill pill-liq"' in html
+        assert 'LIQ STOP-OUT' in html
+        assert '${liqBadge}' in html
+
 
 class TestTradesEndpointIvEnrichment:
     """/api/trades enriches executed trades with the shadow IV decision."""

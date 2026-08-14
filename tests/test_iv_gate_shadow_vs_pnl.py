@@ -200,8 +200,12 @@ def test_decisions_per_day_returns_14_days_zero_filled() -> None:
     assert all(r["n"] == 0 for r in rows[1:-2])  # middle days zero-filled
 
 
-def test_report_carries_decisions_per_day() -> None:
+def test_report_carries_decisions_per_day(monkeypatch: pytest.MonkeyPatch) -> None:
     """build_report exposes the per-day series for the dashboard panel."""
+    # Anchor the script's clock on the fixture's fixed t0 (2026-08-13) so the
+    # 3 synthetic decisions always land on the newest bucket regardless of the
+    # wall clock — a date-dependent test would flip at each UTC midnight.
+    monkeypatch.setattr(pnl.time, "time", lambda: (1_786_600_000_000 + 3_600_000) / 1000.0)
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         live, research = _make_dbs(tmp, n_high=2, n_low=1)
         report = pnl.build_report(live_db=live, research_db=research)

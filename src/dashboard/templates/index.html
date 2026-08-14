@@ -300,6 +300,7 @@ details.research-fold:not([open]) > summary .text::after {
     <div class="g-6">
         <div class="panel" style="max-height:180px;">
             <div class="panel-header">Trade History <span class="dim">Last 50</span>
+                <span class="dim tiny" id="trades-liq-count" style="margin-left:8px;" title="Trades fechados por liquidation stop-out (flush valida o side)"></span>
                 <span style="float:right;">
                     <label class="dim tiny" for="trades-iv-filter">IV</label>
                     <select id="trades-iv-filter" onchange="setTradesIvFilter(this.value)" style="font-size:11px;padding:1px 4px;background:var(--panel-bg);color:var(--text);border:1px solid var(--border);border-radius:3px;">
@@ -1845,6 +1846,11 @@ function renderTrades(data) {
     const filtered = _tradesIvFilter === "all"
         ? _tradesAll
         : _tradesAll.filter(t => (t.iv_class || "unknown") === _tradesIvFilter);
+    const liqCount = _tradesAll.filter(t => t.exit_reason === "liquidation_stop_out").length;
+    const liqEl = document.getElementById("trades-liq-count");
+    if (liqEl) liqEl.textContent = liqCount > 0
+        ? `⛔ ${liqCount} liquidation stop-out`
+        : `0 liquidation stop-out`;
     if (filtered.length === 0) {
         const empty = _tradesAll.length === 0
             ? "No trades yet"
@@ -1867,6 +1873,9 @@ function renderTrades(data) {
         const ivTip = t.iv_percentile != null
             ? `IV ${t.iv_percentile.toFixed(1)}% (threshold ${t.iv_threshold != null ? t.iv_threshold : 66.7}) → ${t.iv_class}`
             : "IV: sem decisão shadow";
+        const liqBadge = t.exit_reason === "liquidation_stop_out"
+            ? '<span class="pill pill-liq" style="color:var(--down);font-weight:600;" title="Flush de liquidações validou o side — stop-out forçado">LIQ STOP-OUT</span>'
+            : (t.exit_reason || (isOpen ? "● Active" : ""));
         return `<tr style="${isOpen ? 'background:rgba(0,229,255,0.03);' : ''}" title="Funding paid: $${fund.toFixed(4)} · ${ivTip}">
             <td class="muted tiny">${entryTime}</td>
             <td><span class="highlight">${t.symbol}</span></td>
@@ -1878,7 +1887,7 @@ function renderTrades(data) {
             <td class="num ${pnlClass}">${pnlPctDisplay}</td>
             <td class="num tiny ${fundClass}">${fundDisplay}</td>
             <td class="muted tiny">${t.strategy || "?"}</td>
-            <td class="muted tiny">${t.exit_reason || (isOpen ? "● Active" : "")}</td>
+            <td class="tiny">${liqBadge}</td>
             <td class="num tiny">${t.iv_percentile != null ? t.iv_percentile.toFixed(1) + "%" : "<span class='muted'>—</span>"}</td>
             <td class="tiny">${ivBadge(t.iv_class)}</td>
             <td>${statusBadge}</td>
