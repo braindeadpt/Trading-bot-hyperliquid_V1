@@ -1503,7 +1503,8 @@ function fmtDur(sec) {
 function sparklineSvg(series, w, h) {
     // series: [[ts_ms, pct], ...] — % of silence threshold per bucket, 24h.
     if (!series || !series.length) return '<span class="muted">—</span>';
-    const vals = series.map(p => Math.max(0, Math.min(100, Number(p[1]))));
+    const raw = series.map(p => Number(p[1]));
+    const vals = raw.map(v => Math.max(0, Math.min(100, v)));
     const minV = Math.min.apply(null, vals);
     const maxV = Math.max.apply(null, vals);
     const span = Math.max(1, maxV - minV);
@@ -1512,7 +1513,10 @@ function sparklineSvg(series, w, h) {
     const y = (v) => (h - pad) - ((v - minV) / span) * (h - 2 * pad);
     const pts = vals.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
     const color = maxV >= 90 ? "var(--down)" : maxV >= 60 ? "var(--warn, #d29922)" : "var(--up)";
-    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block;">' +
+    // data-tips carries the RAW values (unclamped, exact pct) + bucket ts
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block;cursor:crosshair;" data-tips="' +
+        encodeURIComponent(JSON.stringify(series.map((p, i) => [p[0], raw[i]]))) +
+        '" data-tip-format="pct">' +
         '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.2" />' +
         '<circle cx="' + x(vals.length - 1).toFixed(1) + '" cy="' + y(vals[vals.length - 1]).toFixed(1) + '" r="1.6" fill="' + color + '" />' +
         '</svg>';
@@ -1523,7 +1527,8 @@ function sparklineAbs(series, w, h, maxSilenceSec) {
     // Raw seconds scaled to the cell; color by fraction of the feed's
     // silence threshold so a stair to 90%+ reads red like the % columns.
     if (!series || !series.length) return '<span class="muted">—</span>';
-    const vals = series.map(p => Math.max(0, Number(p[1])));
+    const raw = series.map(p => Math.max(0, Number(p[1])));
+    const vals = raw.slice();
     const minV = Math.min.apply(null, vals);
     const maxV = Math.max.apply(null, vals);
     const span = Math.max(1, maxV - minV);
@@ -1534,11 +1539,46 @@ function sparklineAbs(series, w, h, maxSilenceSec) {
     const th = Math.max(1, Number(maxSilenceSec) || 1);
     const lastPct = (vals[vals.length - 1] / th) * 100;
     const color = lastPct >= 90 ? "var(--down)" : lastPct >= 60 ? "var(--warn, #d29922)" : "var(--up)";
-    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block;">' +
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block;cursor:crosshair;" data-tips="' +
+        encodeURIComponent(JSON.stringify(series.map((p, i) => [p[0], raw[i]]))) +
+        '" data-tip-format="abs">' +
         '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.2" />' +
         '<circle cx="' + x(vals.length - 1).toFixed(1) + '" cy="' + y(vals[vals.length - 1]).toFixed(1) + '" r="1.6" fill="' + color + '" />' +
         '</svg>';
 }
+
+// ── Sparkline hover tooltip: exact value + timestamp of the nearest bucket ──
+let _sparkTip = null;
+function _sparkTipEl() {
+    if (!_sparkTip) {
+        _sparkTip = document.createElement("div");
+        _sparkTip.style.cssText = "position:fixed;z-index:9999;pointer-events:none;display:none;" +
+            "background:rgba(18,22,28,0.95);border:1px solid var(--border);border-radius:4px;" +
+            "padding:3px 6px;font-size:10px;color:var(--text);white-space:nowrap;font-family:'SF Mono','Consolas',monospace;";
+        document.body.appendChild(_sparkTip);
+    }
+    return _sparkTip;
+}
+document.addEventListener("mousemove", function (e) {
+    const tip = _sparkTipEl();
+    const svg = e.target && e.target.closest ? e.target.closest("svg[data-tips]") : null;
+    if (!svg) { tip.style.display = "none"; return; }
+    let series = null;
+    try { series = JSON.parse(decodeURIComponent(svg.getAttribute("data-tips"))); } catch (err) { series = null; }
+    if (!series || !series.length) { tip.style.display = "none"; return; }
+    const rect = svg.getBoundingClientRect();
+    const frac = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
+    const idx = Math.max(0, Math.min(series.length - 1, Math.round(frac * (series.length - 1))));
+    const [ts, v] = series[idx];
+    const fmt = svg.getAttribute("data-tip-format");
+    const txt = fmt === "pct"
+        ? fmtTime(ts) + " · " + v.toFixed(1) + "% do threshold"
+        : fmtDate(ts) + " · max " + fmtDur(v);
+    tip.textContent = txt;
+    tip.style.display = "block";
+    tip.style.left = (e.clientX + 12) + "px";
+    tip.style.top = (e.clientY + 14) + "px";
+});
 
 function renderFeedSilence(payload) {
     const tbody = document.getElementById("feed-silence-tbody");

@@ -545,3 +545,17 @@ class TestFeedSilenceTemplate:
         assert "creepBadge" in html
         assert ">creeping</span>" in html
         assert "cr.growth_frac" in html
+
+    def test_template_sparkline_hover_tooltip(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # both sparklines carry per-bucket data for the hover tooltip
+        assert "data-tips=" in html
+        assert 'data-tip-format="pct"' in html
+        assert 'data-tip-format="abs"' in html
+        assert "encodeURIComponent(JSON.stringify" in html
+        # the delegated mousemove tooltip: nearest bucket + exact value
+        assert "svg[data-tips]" in html
+        assert "_sparkTipEl" in html
+        assert "closest(\"svg[data-tips]\")" in html
+        assert "fmtTime(ts) + \" · \" + v.toFixed(1) + \"% do threshold\"" in html
+        assert "fmtDate(ts) + \" · max \" + fmtDur(v)" in html
