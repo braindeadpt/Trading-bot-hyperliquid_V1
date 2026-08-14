@@ -520,16 +520,17 @@ def get_sizing_version(config: Union[Config, Dict[str, Any]]) -> str:
 def _sanitize_config_for_hash(data: Dict[str, Any]) -> Dict[str, Any]:
     """Drop secret-like keys before hashing.
 
-    ``dvol_feed`` and ``feed_age_history`` are research data-collection
-    feeds (Deribit DVOL → research DB; daily max feed age → research DB);
-    their schedules affect no trading/risk parameter, so they are excluded
-    from the frozen Fase-10 window hash — toggling the feeds must not trip
-    the mid-window drift assert.
+    ``dvol_feed``, ``feed_age_history`` and ``l2_recording`` are research
+    data-collection feeds (Deribit DVOL → research DB; daily max feed age →
+    research DB; L2 order-book snapshots → research storage); their schedules
+    and destinations affect no trading/risk parameter, so they are excluded
+    from the frozen Fase-10 window hash — toggling the feeds or relocating
+    their storage must not trip the mid-window drift assert.
     """
     skip_keys = {
         "password", "token", "secret", "secret_key", "api_key", "api_secret",
         "telegram_bot_token", "telegram_chat_id", "coinalyze_api_key",
-        "dvol_feed", "feed_age_history",
+        "dvol_feed", "feed_age_history", "l2_recording",
     }
 
     def _walk(node: Any) -> Any:

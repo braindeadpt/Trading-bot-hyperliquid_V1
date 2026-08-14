@@ -336,7 +336,7 @@ class TestHashNeutral:
         from src.utils.config import compute_config_hash, load_config
 
         cfg = load_config(str(ROOT / "config" / "settings.yaml"))
-        assert compute_config_hash(cfg) == "9456c6eb877b2391"
+        assert compute_config_hash(cfg) == "4984555298afe7c8"
 
 
 class TestStartFromConfig:

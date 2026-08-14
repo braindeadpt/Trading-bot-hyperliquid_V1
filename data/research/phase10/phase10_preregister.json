@@ -1,9 +1,9 @@
 {
-  "config_hash": "9456c6eb877b2391",
+  "config_hash": "4984555298afe7c8",
   "execution_strategies": [
     "VWAPDeviation"
   ],
-  "experiment_id": "efb4f1fb-7dbc-463a-830e-6c00c9f24e7a",
+  "experiment_id": "ab03bf10-5b8b-45d5-bd84-0f10609247ad",
   "gate_note": "All four criteria must be a real PASS (not merely 'no FAIL yet due to insufficient data') for the frozen window to be considered met. Drift in execution_strategies or config_hash after freeze invalidates the window \u2014 see assert_config_matches_preregister().",
   "gate_thresholds": {
     "expectancy_r_gt": 0.0,
@@ -11,12 +11,12 @@
     "min_profit_factor": 1.2,
     "min_trades": 100
   },
-  "in_sample_selection_note": "VWAPDeviation remains the sole paper execution control (INCONCLUSIVE sample). TopTraderFlow is shadow-only swing research (aggregate bias). Mainnet still blocked.",
-  "manifest_hash": "f1db5c3ab264157c1eeb72e2405846ec1545e1f6a70bcbd09f3d8a3c765a304e",
+  "in_sample_selection_note": "Storage relocation only. VWAPDeviation remains the sole paper execution control (INCONCLUSIVE sample). No promotion; mainnet still blocked. Accumulated OOS evidence intentionally retained.",
+  "manifest_hash": "863f9e775d2d85850c6f325a95b4e839df8c88b3cf0fcc89747a3d3ddee1fec0",
   "protocol": "phase10-frozen-window-v1",
-  "registered_at_ms": 1786457297619,
-  "reregistration_reason": "research shadow \u2014 TopTraderFlow hybrid swing panel (bias samples + virtual book + 5d max_hold / wider SL-TP). No execution_strategies change; OOS counter restarts because config_hash includes strategy params.",
-  "supersedes_experiment_id": "6f0b8a3b-67d8-47f0-840b-d76cd6c77418",
+  "registered_at_ms": 1786725694215,
+  "reregistration_reason": "research data-collection change only \u2014 l2_recording made hash-neutral (joins dvol_feed / feed_age_history in _sanitize_config_for_hash) and its path relocated back to the E: HDD, undoing the a26dee1 regression that wrote ~29 MB/day of research data to the system SSD and split the dataset. No strategy, risk, fee or execution_strategies change. OOS window PRESERVED \u2014 window_start_ms unchanged.",
+  "supersedes_experiment_id": "efb4f1fb-7dbc-463a-830e-6c00c9f24e7a",
   "window": {
     "max_end_ms": 1793714897421,
     "max_weeks": 12,

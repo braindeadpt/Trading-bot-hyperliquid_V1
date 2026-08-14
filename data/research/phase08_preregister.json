@@ -5,7 +5,7 @@
     "timeframe": "15m",
     "timeframe_s": 900
   },
-  "config_hash": "9456c6eb877b2391",
+  "config_hash": "4984555298afe7c8",
   "edge_demonstrated": false,
   "execution_scope": {
     "mode": "paper",
@@ -26,10 +26,10 @@
       "VWAPDeviation"
     ]
   },
-  "experiment_id": "61cda260-e1bb-4e40-85a5-e5cf5a44aabc",
+  "experiment_id": "1a36a4bc-7121-455f-a0fd-4fc1bba55ad6",
   "fidelity_note": "tier_a_hl_ohlc certifies Hyperliquid OHLC data availability only; it does not certify strategy edge.",
-  "in_sample_selection_note": "VWAPDeviation remains the sole paper execution control (INCONCLUSIVE sample). TopTraderFlow is shadow-only swing research (aggregate bias). Mainnet still blocked.",
-  "manifest_hash": "f8d43b824703db9572f8271d44f3d609e35bc12de340bc56e27a53812465b72f",
+  "in_sample_selection_note": "Storage relocation only. VWAPDeviation remains the sole paper execution control (INCONCLUSIVE sample). No promotion; mainnet still blocked. Accumulated OOS evidence intentionally retained.",
+  "manifest_hash": "0ae825cf71ceac5f779eb770c5e0a2f65f4ea58505a689828e8bd8f2de5bccf7",
   "oos_protocol": "phase06-train-val-test-v1",
   "oos_status": "pending",
   "protocol": "phase08-preregister-v2",
@@ -53,8 +53,8 @@
       "low_vol"
     ]
   },
-  "registered_at_ms": 1786457297631,
-  "reregistration_reason": "research shadow \u2014 TopTraderFlow hybrid swing panel (bias samples + virtual book + 5d max_hold / wider SL-TP). No execution_strategies change; OOS counter restarts because config_hash includes strategy params.",
+  "registered_at_ms": 1786725694232,
+  "reregistration_reason": "research data-collection change only \u2014 l2_recording made hash-neutral (joins dvol_feed / feed_age_history in _sanitize_config_for_hash) and its path relocated back to the E: HDD, undoing the a26dee1 regression that wrote ~29 MB/day of research data to the system SSD and split the dataset. No strategy, risk, fee or execution_strategies change. OOS window PRESERVED \u2014 window_start_ms unchanged.",
   "strategies": {
     "ChecklistMeta": {
       "expected_max_signals_per_symbol_per_week": 1344.0,
@@ -139,5 +139,5 @@
       "signal_throttle_ms": 1800000
     }
   },
-  "supersedes_experiment_id": "f9fe8620-87ce-4831-b4d2-09cb0312b183"
+  "supersedes_experiment_id": "61cda260-e1bb-4e40-85a5-e5cf5a44aabc"
 }

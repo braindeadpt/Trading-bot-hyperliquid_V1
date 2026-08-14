@@ -888,8 +888,12 @@ market_data:
     interval_sec: 1.0
     depth_levels: 25
     min_mid_change_bps: 1.0
-    # Keep writes under the repository; mount external storage here if needed.
-    path: "data/research/l2_books"
+    # 2026-08-14: back on the E: HDD (466 GB free). Sequential batched writes off
+    # the hot path suit a HDD, and this keeps ~10 GB/year of research data off the
+    # system SSD (wear + C: space + trivial VPS migration). l2_recording is
+    # hash-neutral (see _sanitize_config_for_hash), so relocating it never trips
+    # the frozen Fase-10 drift assert. See docs/DATA_ARCHITECTURE.md
+    path: "E:/hyperliquid_research/l2_books"
     retention_days: 365
     prune_interval_sec: 3600        # retention actually runs (start + hourly + stop)
     queue_max: 5000                 # adequate at 1s/25; watch recorder dropped after restart
