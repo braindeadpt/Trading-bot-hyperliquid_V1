@@ -101,6 +101,8 @@ class TestFeedSilencePayload:
         assert r.status_code == 200
         d = r.get_json()
         assert d["feed_silence_degraded"] is True
+        # bybit is already degraded, okx only early-warned -> not "imminent"
+        assert d["feed_silence_imminent"] is False
         fs = d["feed_silence"]
         assert fs["funding_hl"]["age_sec"] == 30.0
         assert fs["funding_hl"]["max_silence_sec"] == 3600.0
@@ -127,6 +129,46 @@ class TestFeedSilencePayload:
         self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
         d = self._client.get("/api/market_data_health").get_json()
         assert d["feed_silence_degraded"] is False
+        assert d["feed_silence_imminent"] is False
+
+    def test_imminent_flag_when_feed_past_90pct_not_degraded(self) -> None:
+        """A feed at >=90% of its threshold (fire-once warned_90_pct set, still
+        healthy) flips the global imminent flag that the header consumes."""
+        silence = _SilenceStub(
+            {
+                "funding_hl": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 30.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                    "warned_50_pct": True,
+                    "warned_90_pct": True,
+                }
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        assert d["feed_silence_degraded"] is False
+        assert d["feed_silence_imminent"] is True
+
+    def test_imminent_flag_false_when_feed_degraded(self) -> None:
+        """Once the feed degrades, imminent yields to degraded (never both)."""
+        silence = _SilenceStub(
+            {
+                "liquidation_okx": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 22000.0,
+                    "max_silence_sec": 21600.0,
+                    "degraded": True,
+                    "warned_50_pct": True,
+                    "warned_90_pct": True,
+                }
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        assert d["feed_silence_degraded"] is True
+        assert d["feed_silence_imminent"] is False
 
     def test_engine_without_silence_monitor_omits_key(self) -> None:
         self._web._engine = _EngineStub(None, summary=_HealthSummaryStub())
@@ -237,3 +279,13 @@ class TestFeedSilenceTemplate:
         assert "alerted50" in html
         assert "alerted90" in html
         assert "alertedTxt" in html
+
+    def test_template_header_turns_amber_on_imminent(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # the whole header bar must change color when any contracted feed
+        # crosses ~90% of its silence threshold (before degrading)
+        assert "feed_silence_imminent" in html
+        assert "state-imminent" in html
+        assert "state-degraded" in html
+        assert "hdr.classList.toggle" in html
+        assert "warned_90_pct && !st.degraded" in html

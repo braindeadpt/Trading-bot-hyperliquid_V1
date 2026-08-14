@@ -30,6 +30,8 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); font-size: 12px; line-height: 1.3; padding: 10px; min-height: 100vh; }
 .header { display: flex; justify-content: space-between; align-items: center; height: 32px; margin-bottom: var(--gap); padding: 0 2px; }
+.header.state-imminent { background: rgba(210,153,34,0.10); box-shadow: inset 0 0 0 1px var(--yellow); }
+.header.state-degraded { background: rgba(255,77,79,0.10); box-shadow: inset 0 0 0 1px var(--down); }
 h1 { font-size: 14px; margin: 0; color: var(--accent); font-weight: 600; }
 .badges { display: flex; gap: 6px; align-items: center; }
 .badge { padding: 2px 8px; border-radius: 4px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -1520,6 +1522,24 @@ function renderFeedSilence(payload) {
         tbody.innerHTML = '<tr><td colspan="6" class="muted">No silence data (feed_silence monitor off)</td></tr>';
         if (meta) meta.textContent = "threshold vs age";
         return;
+    }
+    // Global header state: the whole header bar turns amber when any contracted
+    // feed crosses ~90% of its silence threshold (imminent, still healthy) and
+    // red when a feed actually degrades. Derived from the payload flags, with a
+    // snapshot-scan fallback for sockets that predate the flag.
+    const hdr = document.querySelector(".header");
+    const imminentAny = !!(payload && payload.feed_silence_imminent)
+        || Object.values(sil).some(st => st && st.warned_90_pct && !st.degraded);
+    const degradedAny = !!(payload && payload.feed_silence_degraded);
+    if (hdr) {
+        hdr.classList.toggle("state-degraded", degradedAny);
+        hdr.classList.toggle("state-imminent", !degradedAny && imminentAny);
+        const imminentNames = Object.entries(sil)
+            .filter(([, st]) => st && st.warned_90_pct && !st.degraded)
+            .map(([f]) => f);
+        hdr.title = imminentNames.length
+            ? "FEED IMMINENT: " + imminentNames.join(", ") + " at ≥90% of silence threshold"
+            : "";
     }
     if (meta) meta.textContent = payload && payload.feed_silence_degraded
         ? "degraded feeds present" : "all feeds healthy";

@@ -146,6 +146,20 @@ def _feed_silence_sparklines(feed_silence: Dict[str, Any]) -> Dict[str, List[Lis
     return _ttl_put("feed_silence_sparklines", out, _FEED_SPARK_TTL_S)
 
 
+def _feed_silence_imminent(feed_silence: Dict[str, Any]) -> bool:
+    """True when any contracted feed is past ~90% of its silence threshold
+    but not yet degraded — the window where the header should warn early.
+
+    Mirrors the monitor's ``warn_level == "imminent"`` (fire-once ``warned_90_pct``
+    flag set, feed still healthy). Derived from the snapshot flags so it also
+    works against stubs in tests.
+    """
+    return any(
+        st.get("warned_90_pct") and not st.get("degraded")
+        for st in feed_silence.values()
+    )
+
+
 def _socket_connect_auth(auth, enabled: bool, token: Optional[str]) -> Optional[bool]:
     """Token gate for the Socket.IO ``connect`` event.
 
@@ -1057,6 +1071,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
             if silence is not None:
                 body["feed_silence"] = silence.snapshot()
                 body["feed_silence_degraded"] = bool(silence.any_degraded)
+                body["feed_silence_imminent"] = _feed_silence_imminent(
+                    body["feed_silence"]
+                )
             body["feed_silence_spark"] = _feed_silence_sparklines(
                 body.get("feed_silence", {})
             )
@@ -1073,6 +1090,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
         if silence is not None:
             body["feed_silence"] = silence.snapshot()
             body["feed_silence_degraded"] = bool(silence.any_degraded)
+            body["feed_silence_imminent"] = _feed_silence_imminent(
+                body["feed_silence"]
+            )
         body["feed_silence_spark"] = _feed_silence_sparklines(
             body.get("feed_silence", {})
         )
