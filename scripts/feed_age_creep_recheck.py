@@ -63,6 +63,51 @@ def load_daily_history(
     ]
 
 
+def staircase_verdict(
+    rows: List[Tuple[int, float, int]],
+    max_silence: float,
+    *,
+    min_days: int = CREEP_MIN_DAYS,
+    min_growth_frac: float = CREEP_MIN_GROWTH_FRAC,
+    min_level_frac: float = CREEP_MIN_LEVEL_FRAC,
+) -> Optional[Dict[str, Any]]:
+    """The staircase rule on ascending daily rows — pure, no DB.
+
+    ``rows`` = (day_start_ms, max_age_sec, samples) ascending. A feed is
+    creeping at this point in time when its last ``min_days`` rows are a
+    non-decreasing staircase with meaningful growth on the feed's own
+    ``max_silence`` scale (see ``detect_creeping_age`` for the rationale).
+
+    Returns the verdict dict (same shape as ``detect_creeping_age`` entries)
+    or ``None`` when not creeping. This is THE rule — shared by the
+    supervisor detector and the lead-time validation script, so both always
+    measure the exact production behaviour.
+    """
+    if len(rows) < min_days:
+        return None
+    tail = rows[-min_days:]
+    ages = [float(age) for _, age, _ in tail]
+    # 1. non-decreasing staircase (a drop breaks it and re-arms)
+    if any(ages[i] < ages[i - 1] for i in range(1, len(ages))):
+        return None
+    growth = ages[-1] - ages[0]
+    # 2. real growth on the feed's scale
+    if growth < min_growth_frac * max_silence:
+        return None
+    # 3. meaningful quiet level
+    if ages[-1] < min_level_frac * max_silence:
+        return None
+    return {
+        "creeping": True,
+        "days": len(ages),
+        "first_max_age_sec": round(ages[0], 1),
+        "last_max_age_sec": round(ages[-1], 1),
+        "growth_sec": round(growth, 1),
+        "growth_frac": round(growth / max_silence, 4),
+        "last_day_start_ms": int(tail[-1][0]),
+    }
+
+
 def detect_creeping_age(
     contracts: Dict[str, float],
     *,
@@ -106,29 +151,15 @@ def detect_creeping_age(
                 rdb, feed, start, now,
                 min_samples_per_day=min_samples_per_day,
             )
-            if len(rows) < min_days:
-                continue
-            tail = rows[-min_days:]
-            ages = [age for _, age, _ in tail]
-            # 1. non-decreasing staircase
-            if any(ages[i] < ages[i - 1] for i in range(1, len(ages))):
-                continue
-            growth = ages[-1] - ages[0]
-            # 2. real growth on the feed's scale
-            if growth < min_growth_frac * max_silence:
-                continue
-            # 3. meaningful quiet level
-            if ages[-1] < min_level_frac * max_silence:
-                continue
-            out[feed] = {
-                "creeping": True,
-                "days": len(ages),
-                "first_max_age_sec": round(ages[0], 1),
-                "last_max_age_sec": round(ages[-1], 1),
-                "growth_sec": round(growth, 1),
-                "growth_frac": round(growth / max_silence, 4),
-                "last_day_start_ms": int(tail[-1][0]),
-            }
+            verdict = staircase_verdict(
+                rows,
+                max_silence,
+                min_days=min_days,
+                min_growth_frac=min_growth_frac,
+                min_level_frac=min_level_frac,
+            )
+            if verdict is not None:
+                out[feed] = verdict
     except Exception as exc:  # noqa: BLE001 — a broken DB must never error
         import logging
 
