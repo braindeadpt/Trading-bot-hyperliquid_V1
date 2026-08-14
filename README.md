@@ -256,9 +256,17 @@ contaminated research because nobody was told the pipe was empty.
 | `liquidation_okx` / `liquidation_bybit` | always | 6h |
 | `funding_cex` / `funding_hl` / `taker_split` | always | 1h |
 | `liquidation_coinalyze_check` | always (verify-only) | 12h |
-| `l2_book_recording` | `market_data.l2_recording.enabled` | 2m |
+| `l2_book_recording` | `market_data.l2_recording.enabled` | 2m (runtime-only — self-produced, never boot-gated) |
 | `binance_perp` | `strategy.lead_lag.enabled` / `auto_enable` | 1h |
 | `liquidation_binance` | operator opt-in (below) | 6h |
+
+`l2_book_recording` is **self-produced**: the bot itself writes it, so its
+evidence only exists while the bot runs. The **runtime** `FeedSilenceMonitor`
+still degrades it (2m) if the recorder stops persisting mid-run, but the
+**pre-start** check never gates the boot on it — after any downtime its
+evidence is stale by definition, and booting on it would deadlock every
+restart longer than 2 minutes (`src.core.engine.SELF_PRODUCED_FEEDS`,
+2026-08-14 audit).
 
 ### Pre-start delivery check
 

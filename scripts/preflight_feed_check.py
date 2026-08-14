@@ -21,6 +21,12 @@ stopped):
   * liquidation_coinalyze_check
       -> verify-only venue: no persisted evidence; reported but never gated.
 
+``l2_book_recording`` is SELF-PRODUCED — the bot writes it, so its evidence
+only exists while the bot runs. It is reported for visibility but NEVER
+gates the boot (after any downtime it is stale by definition); the runtime
+FeedSilenceMonitor keeps degrading it while the bot runs. See
+``src.core.engine.SELF_PRODUCED_FEEDS``.
+
 Per-symbol candle freshness (1m/15m) is also validated for every trading
 symbol — a data backlog (the collector fell behind) shows up here before a
 backtest silently reads a window that ends days ago. Two modes:
@@ -55,6 +61,7 @@ from typing import Optional
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.core.engine import (  # noqa: E402
+    SELF_PRODUCED_FEEDS,
     feed_silence_contracts,
     feed_silence_warn_fraction,
 )
@@ -199,7 +206,17 @@ def main() -> int:
             latest = evidence.get(feed, 0)
             age_sec = None
             status = "ok"
-            if latest == 0:
+            if feed in SELF_PRODUCED_FEEDS:
+                # Evidence exists only while the bot runs; after any downtime
+                # it is stale by definition, so boot gating on it would
+                # deadlock every restart longer than the threshold. Reported
+                # for visibility (age still shown when fresh), NEVER gated —
+                # the RUNTIME FeedSilenceMonitor still degrades it while the
+                # bot runs (2026-08-14 audit).
+                if latest:
+                    age_sec = max(0.0, (now_ms - latest) / 1000.0)
+                status = "self-produced"
+            elif latest == 0:
                 if feed == "liquidation_coinalyze_check" and not args.gate_coinalyze:
                     # Verify-only venue: never persisted, never blocks. Reported
                     # so operators still see it in the panel.
@@ -223,6 +240,7 @@ def main() -> int:
                     None if age_sec is None else round(age_sec / max_sec * 100, 1)
                 ),
                 "status": status,
+                "self_produced": feed in SELF_PRODUCED_FEEDS,
             }
 
     # Per-symbol 1m/15m candle freshness / coverage.

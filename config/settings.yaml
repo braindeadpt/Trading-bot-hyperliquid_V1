@@ -894,6 +894,7 @@ market_data:
     # hash-neutral (see _sanitize_config_for_hash), so relocating it never trips
     # the frozen Fase-10 drift assert. See docs/DATA_ARCHITECTURE.md
     path: "E:/hyperliquid_research/l2_books"
+    allow_external_path: true       # opt-in explícito p/ destino fora do repo (audit 2026-08-14)
     retention_days: 365
     prune_interval_sec: 3600        # retention actually runs (start + hourly + stop)
     queue_max: 5000                 # adequate at 1s/25; watch recorder dropped after restart

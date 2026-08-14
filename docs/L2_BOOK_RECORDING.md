@@ -117,6 +117,25 @@ data/research/l2_books/
 Relative default in `DEFAULT_CONFIG` remains `data/research/l2_books` (CI / machines
 without `E:`). Live `config/settings.yaml` must state the real path.
 
+### External paths (research HDD volume) — opt-in, fail-high
+
+The destination is configurable **by design** (research storage may live on
+another volume). A path **outside the project root** is honoured only with the
+explicit opt-in:
+
+```yaml
+market_data:
+  l2_recording:
+    path: "E:/hyperliquid_research/l2_books"
+    allow_external_path: true   # required for destinations outside the repo
+```
+
+Without the opt-in an external path is **refused with an ERROR and recording
+is disabled** — the recorder NEVER silently redirects to another destination
+(2026-08-14 audit: the E: → C: silent regression that split the dataset and
+wore the system SSD). Any unusable destination (missing volume, unwritable,
+< 512 MB free) disables recording the same way. Trading is never affected.
+
 ---
 
 ## Config (`market_data.l2_recording`)
@@ -129,6 +148,7 @@ market_data:
     depth_levels: 25           # was 10
     min_mid_change_bps: 1.0
     path: "data/research/l2_books"
+    allow_external_path: false # set true to honour external (non-repo) paths
     retention_days: 365        # was 90
     prune_interval_sec: 3600   # start + hourly + stop — not config-only
     queue_max: 5000
@@ -144,7 +164,8 @@ market_data:
 - Subscribes to DataBus `orderbook:{symbol}` (same topic as the engine).
 - Sync callback only enqueues (`put_nowait`); never awaits disk I/O.
 - Background task batches → gzip append via `asyncio.to_thread`.
-- Start probes mkdir + write; OSError → **ERROR** log, recorder stays off.
+- Start probes mkdir + write + free space (< 512 MB → **ERROR**, recorder stays off).
+- Refused/external-without-opt-in path → **ERROR**, recorder stays off, never redirected.
 - Mid-run write OSError → **ERROR**, drop batch, `disk_ok=false`; trading continues.
 
 ---

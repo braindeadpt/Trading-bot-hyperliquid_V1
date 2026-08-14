@@ -257,7 +257,7 @@ that cannot deliver must never be able to force a false `degraded` state
 |---|---|---|---|
 | `binance_perp` | `strategy.lead_lag.enabled` OR `auto_enable` is true (testnet mode override turns it on) | config `strategy.lead_lag` | `binance_perp_max_sec` (1h) |
 | `liquidation_binance` | only when the operator opts in | `LIQUIDATION_BINANCE_CONTRACTED=true` in `.env` | `liquidation_binance_max_sec` (6h) |
-| `l2_book_recording` | `market_data.l2_recording.enabled` (default true) | config `market_data.l2_recording` | `l2_book_recording_max_sec` (2m) |
+| `l2_book_recording` | `market_data.l2_recording.enabled` (default true) | config `market_data.l2_recording` | `l2_book_recording_max_sec` (2m, runtime-only — self-produced, never boot-gated) |
 | `liquidation_okx`, `liquidation_bybit`, `funding_cex`, `funding_hl`, `taker_split`, `liquidation_coinalyze_check` | **always** — hard contracts | n/a | 6h / 1h / 1h / 1h / 1h / 12h |
 
 #### 3.6.2 The opt-in mechanism (`liquidation_binance`)

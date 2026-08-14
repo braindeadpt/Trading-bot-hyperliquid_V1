@@ -3,8 +3,12 @@
 Never writes to the live operational DB. Failures degrade with ERROR logs only
 and must not block the trading event loop.
 
-Writes are contained under ``project_root``. Operators may mount external
-storage beneath the project research directory when more capacity is needed.
+The destination is configurable by design (``market_data.l2_recording.path`` —
+research storage may live on another volume). Paths outside the project root
+are honoured only with the explicit ``allow_external_path`` opt-in; any
+refused or unavailable destination DISABLES recording with an ERROR — the
+recorder never silently redirects to another path (2026-08-14 audit: the
+E: → C: silent regression).
 
 Architecture map: ``docs/DATA_ARCHITECTURE.md``.
 Backup: ``scripts/backup_research_data.py``.
@@ -16,6 +20,7 @@ import asyncio
 import gzip
 import json
 import logging
+import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -29,6 +34,11 @@ from src.utils.helpers import safe_write_file, validate_safe_path
 logger = logging.getLogger(__name__)
 _SAFE_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+# Below this much free space the recorder disables itself with an ERROR
+# (trading unaffected) instead of filling the volume — a full disk would
+# silently stop persisting and look like a feed outage.
+_MIN_FREE_BYTES = 512 * 1024 * 1024  # 512 MB
+
 
 @dataclass(frozen=True)
 class L2BookRecorderConfig:
@@ -41,46 +51,74 @@ class L2BookRecorderConfig:
     prune_interval_sec: float = 3600.0
     queue_max: int = 5_000
     flush_interval_sec: float = 1.0
+    # Opt-in for destinations OUTSIDE the project root (research HDD volume).
+    # Without it an external path is refused — recording disabled with ERROR —
+    # never silently redirected to the repo default.
+    allow_external_path: bool = False
 
 
-def resolve_l2_recording_root(cfg_path: str, project_root: Path) -> Path:
-    """Resolve recorder root.
+def resolve_l2_recording_root(
+    cfg_path: str,
+    project_root: Path,
+    *,
+    allow_external_path: bool = False,
+) -> Optional[Path]:
+    """Resolve the recorder root from the configured path.
 
-    Paths must resolve beneath ``project_root``. Invalid or external paths
-    fall back to ``data/research/l2_books``.
+    Returns the resolved root, or ``None`` when the configured path is
+    refused — the recorder then DISABLES itself with an ERROR log (trading
+    unaffected). It NEVER silently redirects to another path: a fallback that
+    contradicts the config is worse than failing loud (2026-08-14 audit — the
+    E: → C: silent regression).
+
+    Rules:
+      * ``..`` traversal is refused outright.
+      * Paths resolving inside the repository keep the safe-path guard.
+      * External paths (outside the repository — e.g. a research HDD volume)
+        require the explicit ``allow_external_path`` opt-in; l2_recording is
+        research storage and may live on another volume by design, but only
+        when the deployment says so.
     """
     root = project_root.resolve()
-    raw = Path(str(cfg_path).strip())
-    if ".." in raw.parts:
-        fallback = root / "data" / "research" / "l2_books"
+    raw = str(cfg_path).strip()
+    if not raw:
         logger.error(
-            "L2BookRecorder path contains '..' (%s) — refusing; using %s",
+            "L2BookRecorder path is empty — recording disabled (trading unaffected)"
+        )
+        return None
+    raw_path = Path(raw)
+    if ".." in raw_path.parts:
+        logger.error(
+            "L2BookRecorder path contains '..' (%s) — refusing; recording "
+            "disabled (trading unaffected)",
             cfg_path,
-            fallback,
         )
-        return fallback.resolve()
-    resolved = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
-    try:
-        relative = resolved.relative_to(root)
-    except ValueError:
-        fallback = (root / "data" / "research" / "l2_books").resolve()
-        logger.error(
-            "L2BookRecorder path escaped project_root (%s) — using %s",
-            resolved,
-            fallback,
-        )
-        return fallback
+        return None
+    resolved = (
+        raw_path.resolve() if raw_path.is_absolute() else (root / raw_path).resolve()
+    )
     try:
         repo_relative = resolved.relative_to(_SAFE_PROJECT_ROOT)
     except ValueError:
-        fallback = (root / "data" / "research" / "l2_books").resolve()
-        logger.error("L2BookRecorder project root is outside repository — using %s", fallback)
-        return fallback
+        # External storage (research HDD volume). Honoured only with the opt-in.
+        if not allow_external_path:
+            logger.error(
+                "L2BookRecorder path outside project root (%s) requires "
+                "market_data.l2_recording.allow_external_path: true — recording "
+                "DISABLED (config never silently overridden; trading unaffected)",
+                resolved,
+            )
+            return None
+        logger.info("L2BookRecorder external path opted-in: %s", resolved)
+        return resolved
     safe = validate_safe_path(repo_relative.as_posix())
     if safe is None:
-        fallback = (root / "data" / "research" / "l2_books").resolve()
-        logger.error("L2BookRecorder rejected unsafe path %s — using %s", resolved, fallback)
-        return fallback
+        logger.error(
+            "L2BookRecorder rejected unsafe path %s — recording disabled "
+            "(trading unaffected)",
+            resolved,
+        )
+        return None
     return safe
 
 
@@ -116,6 +154,9 @@ def config_from_mapping(md: Any, project_root: Path) -> L2BookRecorderConfig:
                 "flush_interval_sec": md.get(
                     "market_data.l2_recording.flush_interval_sec", 1.0
                 ),
+                "allow_external_path": md.get(
+                    "market_data.l2_recording.allow_external_path", False
+                ),
             }
     path = str(raw.get("path", "data/research/l2_books"))
     return L2BookRecorderConfig(
@@ -128,6 +169,7 @@ def config_from_mapping(md: Any, project_root: Path) -> L2BookRecorderConfig:
         prune_interval_sec=max(60.0, float(raw.get("prune_interval_sec", 3600.0))),
         queue_max=max(100, int(raw.get("queue_max", 5_000))),
         flush_interval_sec=max(0.2, float(raw.get("flush_interval_sec", 1.0))),
+        allow_external_path=bool(raw.get("allow_external_path", False)),
     )
 
 
@@ -148,8 +190,14 @@ class L2BookRecorder:
         self._cfg = cfg
         root = project_root or Path.cwd()
         self._project_root = root.resolve()
-        self._root = resolve_l2_recording_root(cfg.path, root)
+        self._root = resolve_l2_recording_root(
+            cfg.path, root, allow_external_path=cfg.allow_external_path
+        )
         self._on_persist = on_persist  # beat FeedSilenceMonitor
+        if self._root is None:
+            # Refused path: disabled from birth — trading unaffected, and no
+            # silent redirection to any other destination.
+            self._disk_ok = False
 
         self._queue: Optional[asyncio.Queue] = None
         self._flush_task: Optional[asyncio.Task] = None
@@ -181,7 +229,7 @@ class L2BookRecorder:
             "write_errors": self._write_errors,
             "bytes_written": self._bytes_written,
             "mb_per_hour": (self._bytes_written / (1024 * 1024)) / (elapsed / 3600.0),
-            "path": str(self._root),
+            "path": str(self._root) if self._root is not None else "DISABLED",
             "interval_sec": self._cfg.interval_sec,
             "depth_levels": self._cfg.depth_levels,
             "retention_days": self._cfg.retention_days,
@@ -191,18 +239,25 @@ class L2BookRecorder:
         }
 
     def _ensure_writable(self) -> bool:
-        """Create root + write probe. Returns False on any OSError."""
+        """Create root + write probe + free-space check.
+
+        Returns False on any failure — recording is disabled with an ERROR,
+        trading unaffected. The root was already validated at construction
+        (safe inside the repo, or external with opt-in), so the probe needs
+        no further path guard.
+        """
+        if self._root is None:
+            return False
         try:
             self._root.mkdir(parents=True, exist_ok=True)
             probe = self._root / ".write_probe"
-            probe.resolve().relative_to(self._project_root)
-            repo_relative = probe.resolve().relative_to(_SAFE_PROJECT_ROOT)
-            safe_probe = validate_safe_path(repo_relative.as_posix())
-            if safe_probe is None or not safe_write_file(safe_probe, "ok"):
+            # AUDIT-004 remediated (2026-08-14): atomic safe_write_file (temp
+            # + move) instead of a raw write_text; works for repo-contained
+            # and opted-in external roots alike.
+            if not safe_write_file(probe, "ok"):
                 return False
             probe.unlink(missing_ok=True)
-            return True
-        except (OSError, ValueError) as exc:
+        except OSError as exc:
             logger.error(
                 "L2BookRecorder disk unavailable at %s: %s — "
                 "recording disabled (trading unaffected)",
@@ -210,11 +265,40 @@ class L2BookRecorder:
                 exc,
             )
             return False
+        try:
+            usage = shutil.disk_usage(self._root)
+        except OSError as exc:
+            logger.error(
+                "L2BookRecorder cannot read disk usage at %s: %s — "
+                "recording disabled (trading unaffected)",
+                self._root,
+                exc,
+            )
+            return False
+        if usage.free < _MIN_FREE_BYTES:
+            logger.error(
+                "L2BookRecorder disk nearly full at %s: %.1f MB free "
+                "(need >= %d MB) — recording disabled (trading unaffected)",
+                self._root,
+                usage.free / (1024 * 1024),
+                _MIN_FREE_BYTES // (1024 * 1024),
+            )
+            return False
+        return True
 
     async def start(self) -> bool:
-        """Start recorder. Returns False if disk unusable (trading unaffected)."""
+        """Start recorder. Returns False if path refused or disk unusable
+        (trading unaffected)."""
         if self._running or not self._cfg.enabled:
             return self._running
+        if self._root is None:
+            self._disk_ok = False
+            logger.error(
+                "L2BookRecorder refused its configured path — recording disabled "
+                "(trading unaffected; fix market_data.l2_recording.path or enable "
+                "allow_external_path)"
+            )
+            return False
         ok = await asyncio.to_thread(self._ensure_writable)
         if not ok:
             self._disk_ok = False
@@ -434,18 +518,17 @@ class L2BookRecorder:
         nbytes = 0
         n = 0
         for path, lines in by_file.items():
+            # Defense-in-depth: every write stays inside the validated root
+            # (safe repo path, or external root honoured via opt-in).
             try:
-                path.resolve().relative_to(self._project_root)
-                repo_relative = path.resolve().relative_to(_SAFE_PROJECT_ROOT)
+                resolved = path.resolve()
+                resolved.relative_to(self._root)
             except ValueError as exc:
-                raise OSError(f"L2 path escaped project root: {path}") from exc
-            safe_path = validate_safe_path(repo_relative.as_posix())
-            if safe_path is None:
-                raise OSError(f"L2 path rejected as unsafe: {path}")
-            safe_path.parent.mkdir(parents=True, exist_ok=True)
+                raise OSError(f"L2 path escaped recorder root: {path}") from exc
+            resolved.parent.mkdir(parents=True, exist_ok=True)
             payload = ("\n".join(lines) + "\n").encode("utf-8")
             # Append gzip members (concatenated gzip is valid)
-            with safe_path.open("ab") as raw:
+            with resolved.open("ab") as raw:
                 with gzip.GzipFile(fileobj=raw, mode="wb") as compressed:
                     compressed.write(payload)
             nbytes += len(payload)
@@ -457,7 +540,7 @@ class L2BookRecorder:
         cutoff = datetime.now(timezone.utc).date() - timedelta(
             days=self._cfg.retention_days
         )
-        if not self._root.exists():
+        if self._root is None or not self._root.exists():
             return 0
         removed = 0
         for sym_dir in self._root.iterdir():

@@ -214,6 +214,63 @@ def test_contracts_exclude_not_contracted_feeds() -> None:
         assert "binance_perp" not in r.stdout
         assert "liquidation_binance" not in r.stdout
 
+
+def test_self_produced_feed_never_blocks_boot() -> None:
+    """l2_book_recording is SELF-PRODUCED (the bot writes it; evidence only
+    exists while it runs). After any downtime its evidence is stale by
+    definition — the boot gate must NOT deadlock on it: no L2 evidence at all
+    still exits 0 when every external feed is fresh (2026-08-14 audit:
+    restart after long downtime without --skip-preflight)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        _make_db(db, liq_okx_ms=NOW - 5_000, liq_bybit_ms=NOW - 5_000,
+                 funding_ms=NOW - 5_000, candle_ms=_now() - 30_000,
+                 candle_15m_ms=_now() - 60_000)
+        # l2 dir that does NOT exist -> no evidence at all for the
+        # self-produced feed.
+        r = _run(["--db", db, "--l2-dir", os.path.join(tmp, "no_l2_books")])
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "l2_book_recording" in r.stdout
+        assert "SELF-PRODUCED" in r.stdout
+
+
+def test_self_produced_stale_evidence_reported_but_never_gated() -> None:
+    """Even a *very* stale L2 recording (10+ minutes past its 2m runtime
+    threshold) is reported with its age but never counted as a failure — the
+    exact case that blocked boot before (bot down > 2 min)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        _make_db(db, liq_okx_ms=NOW - 5_000, liq_bybit_ms=NOW - 5_000,
+                 funding_ms=NOW - 5_000, candle_ms=_now() - 30_000,
+                 candle_15m_ms=_now() - 60_000)
+        l2 = Path(tmp) / "l2_books"
+        btc = l2 / "BTC"
+        btc.mkdir(parents=True, exist_ok=True)
+        # mtime 10 minutes ago — far past the 120s runtime threshold.
+        old = btc / "2026-01-01.jsonl.gz"
+        old.write_text("{}\n", encoding="utf-8")
+        old_ts = time.time() - 600
+        os.utime(old, (old_ts, old_ts))
+        r = _run(["--db", db, "--l2-dir", str(l2)])
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "SELF-PRODUCED" in r.stdout
+        assert "FAIL" not in r.stdout
+
+
+def test_external_feed_missing_still_blocks_boot_with_self_produced_stale() -> None:
+    """The self-produced exemption must NOT weaken the original protection:
+    a genuinely missing EXTERNAL feed (liquidation_okx) still fails, even
+    when the L2 evidence is stale too."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        _make_db(db, liq_okx_ms=0, liq_bybit_ms=NOW - 5_000,
+                 funding_ms=NOW - 5_000, candle_ms=_now() - 30_000,
+                 candle_15m_ms=_now() - 60_000)
+        r = _run(["--db", db, "--l2-dir", os.path.join(tmp, "no_l2_books")])
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "liquidation_okx" in r.stdout
+        assert "FAIL" in r.stdout
+
 # ---------------------------------------------------------------------------
 # Per-symbol candle freshness / backlog
 # ---------------------------------------------------------------------------
