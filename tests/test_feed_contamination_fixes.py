@@ -462,5 +462,64 @@ def test_feed_silence_warn_fraction_env_wiring(
     monkeypatch.setenv("FEED_SILENCE_WARN_FRACTION", "not-a-float")
     assert feed_silence_warn_fraction() == 0.5
 
-    monkeypatch.delenv("FEED_SILENCE_WARN_FRACTION", raising=False)
-    assert feed_silence_warn_fraction() == 0.5
+
+def test_feed_silence_imminent_fraction_constructor_override() -> None:
+    """imminent_fraction set at construction moves the 90% checkpoint."""
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+        imminent_fraction=0.7,
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    mon.beat("liquidation_okx", timestamp_ms=1_000_000)
+
+    # 60% of 1h — past early (50%) but below the 70% override: no imminent
+    warns = mon.check_early_warnings(now_ms=1_000_000 + int(0.6 * 3600_000))
+    assert len(warns) == 1
+    assert "FEED QUIET (early)" in warns[0]
+    assert "(imminent)" not in warns[0]
+    # 80% of 1h — past 70%: imminent fires (early already consumed)
+    warns = mon.check_early_warnings(now_ms=1_000_000 + int(0.8 * 3600_000))
+    assert len(warns) == 1
+    assert "FEED QUIET (imminent)" in warns[0]
+    assert "70%" in warns[0]
+    assert mon.snapshot()["liquidation_okx"]["imminent_fraction"] == 0.7
+
+
+def test_feed_silence_imminent_fraction_default_still_90() -> None:
+    """Default construction keeps the 90% checkpoint."""
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    assert mon.snapshot()["liquidation_okx"]["imminent_fraction"] == 0.9
+
+
+def test_feed_silence_imminent_fraction_env_wiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine reads FEED_SILENCE_IMMINENT_FRACTION and clamps it to
+    (0.5, 1.0) — hash-neutral (no BOT_ prefix), like the warn fraction."""
+    from src.core.engine import feed_silence_imminent_fraction
+
+    assert feed_silence_imminent_fraction() == 0.9  # no env
+
+    monkeypatch.setenv("FEED_SILENCE_IMMINENT_FRACTION", "0.8")
+    assert feed_silence_imminent_fraction() == 0.8
+
+    monkeypatch.setenv("FEED_SILENCE_IMMINENT_FRACTION", "0.3")  # below floor
+    assert feed_silence_imminent_fraction() == 0.5
+
+    monkeypatch.setenv("FEED_SILENCE_IMMINENT_FRACTION", "1.0")  # valid bound
+    assert feed_silence_imminent_fraction() == 1.0
+
+    monkeypatch.setenv("FEED_SILENCE_IMMINENT_FRACTION", "1.5")  # out of (0,1]
+    assert feed_silence_imminent_fraction() == 0.9  # rejected -> default
+
+    monkeypatch.setenv("FEED_SILENCE_IMMINENT_FRACTION", "not-a-float")
+    assert feed_silence_imminent_fraction() == 0.9

@@ -133,6 +133,32 @@ def feed_silence_warn_fraction() -> float:
     return max(0.05, min(0.95, frac))
 
 
+def feed_silence_imminent_fraction() -> float:
+    """Imminent threshold as a fraction of max_silence (default 0.9).
+
+    Configurable via ``FEED_SILENCE_IMMINENT_FRACTION`` in ``.env`` — NOT
+    ``BOT_``-prefixed, so it never enters the Fase-10 ``config_hash``
+    (same contract as ``FEED_SILENCE_WARN_FRACTION``). Clamped to
+    (0.5, 1.0) so it always stays above the early-warning level.
+    """
+    raw = os.environ.get("FEED_SILENCE_IMMINENT_FRACTION", "").strip()
+    if not raw:
+        return 0.9
+    try:
+        frac = float(raw)
+    except ValueError:
+        logger.warning(
+            "FEED_SILENCE_IMMINENT_FRACTION=%r not a float — using 0.9", raw
+        )
+        return 0.9
+    if not (0.0 < frac <= 1.0):
+        logger.warning(
+            "FEED_SILENCE_IMMINENT_FRACTION=%s out of (0,1] — using 0.9", frac
+        )
+        return 0.9
+    return max(0.5, min(1.0, frac))
+
+
 def feed_silence_contracts(config: Config) -> Dict[str, float]:
     """Decide which feeds the silence watchdog contracts for this deployment.
 
@@ -547,6 +573,7 @@ class TradingEngine:
             ),
             feeds=_silence_feeds if _silence_enabled else {},
             warn_fraction=feed_silence_warn_fraction(),
+            imminent_fraction=feed_silence_imminent_fraction(),
         )
         self._feed_silence_enabled = _silence_enabled
         if not _silence_enabled:

@@ -407,7 +407,7 @@ tr:hover td { background: var(--panel-hover); }
                     <th title="age / threshold — how close to degrading">% of threshold</th>
                     <th title="Max % of threshold per 10-min bucket, last 24h — a rising sawtooth = age growing between resets">24h %</th>
                     <th title="Max age per UTC day, last 14 days — a rising staircase = age creeping between resets">14d max age</th>
-                    <th title="Fire-once early/imminent alerts already sent this silence episode (reset on beat). Early fires at warn_fraction of the threshold (configurável, default 50%); imminent at 90%.">Alerted</th>
+                    <th title="Fire-once early/imminent alerts already sent this silence episode (reset on beat). Early fires at warn_fraction of the threshold (configurável, default 50%); imminent at imminent_fraction (configurável, default 90%).">Alerted</th>
                     <th title="Silence watchdog state">State</th>
                 </tr>
             </thead>
@@ -1647,8 +1647,10 @@ function renderFeedSilence(payload) {
         const alerted90 = !!st.warned_90_pct;
         const earlyFrac = st.warn_fraction != null
             ? Math.round(Number(st.warn_fraction) * 100) : 50;
+        const imminentFrac = st.imminent_fraction != null
+            ? Math.round(Number(st.imminent_fraction) * 100) : 90;
         const alertedTxt = degraded ? "—"
-            : alerted90 ? "imminent @ 90%"
+            : alerted90 ? "imminent @ " + imminentFrac + "%"
             : alerted50 ? "early @ " + earlyFrac + "%"
             : "—";
         const alertedColor = degraded ? "var(--muted)"

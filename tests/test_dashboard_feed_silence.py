@@ -78,6 +78,7 @@ class TestFeedSilencePayload:
                     "warned_50_pct": False,
                     "warned_90_pct": False,
                     "warn_fraction": 0.3,
+                    "imminent_fraction": 0.8,
                 },
                 "liquidation_okx": {
                     "last_event_ms": 1_000,
@@ -108,8 +109,9 @@ class TestFeedSilencePayload:
         assert fs["funding_hl"]["age_sec"] == 30.0
         assert fs["funding_hl"]["max_silence_sec"] == 3600.0
         assert fs["funding_hl"]["degraded"] is False
-        # the effective early-warning fraction flows through the snapshot
+        # the effective early/imminent fractions flow through the snapshot
         assert fs["funding_hl"]["warn_fraction"] == 0.3
+        assert fs["funding_hl"]["imminent_fraction"] == 0.8
         # fire-once flags pass through the snapshot
         assert fs["funding_hl"]["warned_50_pct"] is False
         assert fs["liquidation_okx"]["warned_50_pct"] is True
@@ -223,8 +225,9 @@ class TestFeedSilencePayload:
         self._web._engine = _EngineStub(mon, summary=_HealthSummaryStub())
         d = self._client.get("/api/market_data_health").get_json()
         assert d["feed_silence"]["liquidation_okx"]["warn_level"] == "early"
-        # the real monitor's effective warn_fraction is on the wire (default 0.5)
+        # the real monitor's effective fractions are on the wire (defaults)
         assert d["feed_silence"]["liquidation_okx"]["warn_fraction"] == 0.5
+        assert d["feed_silence"]["liquidation_okx"]["imminent_fraction"] == 0.9
 
         # escalate to 90% -> the same endpoint now reports imminent
         # (bust the endpoint TTL cache so the refresh re-snapshots the monitor)
@@ -565,11 +568,13 @@ class TestFeedSilenceTemplate:
         assert "fmtTime(ts) + \" · \" + v.toFixed(1) + \"% do threshold\"" in html
         assert "fmtDate(ts) + \" · max \" + fmtDur(v)" in html
 
-    def test_template_shows_warn_fraction_in_alerted_column(self) -> None:
+    def test_template_shows_fractions_in_alerted_column(self) -> None:
         html = TEMPLATE_PATH.read_text(encoding="utf-8")
-        # the Alerted column renders the effective early threshold, e.g.
-        # "early @ 30%" and the fixed "imminent @ 90%"
+        # the Alerted column renders the effective thresholds, e.g.
+        # "early @ 30%" and "imminent @ 80%" (configurable, not assumed)
         assert "st.warn_fraction" in html
         assert "earlyFrac" in html
+        assert "st.imminent_fraction" in html
+        assert "imminentFrac" in html
         assert '"early @ " + earlyFrac + "%"' in html
-        assert "imminent @ 90%" in html
+        assert '"imminent @ " + imminentFrac + "%"' in html

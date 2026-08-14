@@ -252,6 +252,7 @@ class FeedSilenceMonitor:
         alert_cooldown_sec: float = 3600.0,
         feeds: Optional[Dict[str, float]] = None,
         warn_fraction: float = 0.5,
+        imminent_fraction: float = 0.9,
         cadence_min_samples: int = 100,
         cadence_gap_history: int = 4000,
     ) -> None:
@@ -275,6 +276,7 @@ class FeedSilenceMonitor:
         }
         self._alert_cooldown_sec = float(alert_cooldown_sec)
         self._warn_fraction = float(warn_fraction)
+        self._imminent_fraction = float(imminent_fraction)
         self._cadence_min_samples = int(cadence_min_samples)
         self._cadence_gap_history = int(cadence_gap_history)
         self._enabled_feeds: set[str] = set(cfg.keys())
@@ -357,7 +359,7 @@ class FeedSilenceMonitor:
         self,
         now_ms: Optional[int] = None,
         warn_fraction: Optional[float] = None,
-        imminent_fraction: float = 0.9,
+        imminent_fraction: Optional[float] = None,
     ) -> List[str]:
         """Return fire-once early/imminent warning messages before degrading.
 
@@ -365,12 +367,16 @@ class FeedSilenceMonitor:
         on ``beat()``: ``early`` when age crosses ``warn_fraction`` (default
         ``self._warn_fraction`` — 50%, configurable via
         ``FEED_SILENCE_WARN_FRACTION``) of ``max_silence_sec``, and
-        ``imminent`` when it crosses ``imminent_fraction`` (default 90%) —
-        the last checkpoint before the feed trips ``degraded`` at 100%.
-        Already-degraded feeds are skipped (``check()`` owns those alerts).
+        ``imminent`` when it crosses ``imminent_fraction`` (default
+        ``self._imminent_fraction`` — 90%, configurable via
+        ``FEED_SILENCE_IMMINENT_FRACTION``) — the last checkpoint before the
+        feed trips ``degraded`` at 100%. Already-degraded feeds are skipped
+        (``check()`` owns those alerts).
         """
         if warn_fraction is None:
             warn_fraction = self._warn_fraction
+        if imminent_fraction is None:
+            imminent_fraction = self._imminent_fraction
         now = now_ms if now_ms is not None else int(time.time() * 1000)
         mono = time.monotonic()
         uptime_sec = mono - self._started_mono
@@ -470,6 +476,7 @@ class FeedSilenceMonitor:
                 ),
                 "cadence_samples": len(st.gaps),
                 "warn_fraction": round(self._warn_fraction, 4),
+                "imminent_fraction": round(self._imminent_fraction, 4),
                 "warn_level": (
                     "degraded" if st.degraded
                     else "imminent" if st.warned_90_pct

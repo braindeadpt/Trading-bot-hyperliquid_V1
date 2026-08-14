@@ -350,6 +350,20 @@ FEED_SILENCE_WARN_FRACTION=0.3
   `config_hash`. It is a monitoring sensitivity knob, not a strategy
   parameter.
 
+  The imminent level follows the same pattern, defaulting to **90%** and
+  clamped to `(0.5, 1.0)` so it always stays above the early level:
+
+```bash
+# .env (gitignored) — imminent at 80% of the silence threshold
+FEED_SILENCE_IMMINENT_FRACTION=0.8
+```
+
+- Accepted: any float in `(0, 1]`; values below `0.5` clamp to `0.5`.
+  Unparseable or out-of-range values fall back to `0.9` with a warning.
+  Both fractions appear per-feed in the snapshot as `warn_fraction` /
+  `imminent_fraction` and render in the panel's Alerted column
+  (`early @ N%` / `imminent @ N%`).
+
 **Verify after start:** `GET /api/market_data_health` returns
 `feed_silence` (per-feed age + `degraded`) and `feed_silence_degraded`.
 An uncontracted feed must never appear in the snapshot, and
