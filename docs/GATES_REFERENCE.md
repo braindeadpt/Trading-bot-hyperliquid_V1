@@ -187,7 +187,7 @@ open position), the position is stopped out before price stops are evaluated.
 |--|------|----------|
 | decision function | `liquidation_stopout_decision` (`src/core/liquidation_stopout.py`) | **the same function** |
 | window state | `TradingEngine._get_liquidation_stats` (rolling accumulator) | `_advance_liquidation_replay` → `LiquidationAccumulator.stats()` |
-| floor | `LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD = 5_000_000` (code, hash-neutral) | same |
+| floor | `LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD = 2_500_000` (code, hash-neutral — calibrated to the real multi-venue 5m p90, see docs/LIQUIDATION_STOPOUT_FLOOR_CALIBRATION.md) | same |
 | provenance | window entry gated by `liquidation_source` (proxy rejected in `real` mode) | stored label replayed verbatim; decision is provenance-agnostic |
 
 Because both paths call the **same pure function** on the same accumulator

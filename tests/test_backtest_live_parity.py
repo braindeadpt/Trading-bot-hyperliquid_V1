@@ -1669,7 +1669,10 @@ class TestLiquidationStopoutParity:
             liquidation_stopout_decision,
         )
 
-        assert LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD == 5_000_000.0
+        # Calibrated 2026-08-14 against the real multi-venue 5m window p90
+        # (2.47M USD, okx+bybit, 6,651 samples) — see
+        # docs/LIQUIDATION_STOPOUT_FLOOR_CALIBRATION.md.
+        assert LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD == 2_500_000.0
         # Below floor → no stop-out (single stray print must not stop a trade).
         assert not liquidation_stopout_decision("long", "long", 1_000_000.0)
         # No window state yet → never a fake flush.

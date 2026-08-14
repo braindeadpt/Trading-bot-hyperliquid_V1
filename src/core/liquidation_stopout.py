@@ -29,9 +29,16 @@ from typing import Optional
 
 # Floor (USD) for the dominant liquidation notional before a stop-out fires.
 # Kept in code (hash-neutral) — recalibrating it is a reviewed decision, not a
-# runtime knob. Mirrors the aggregator's provisional p90-of-single-venue scale
-# so a single stray print never stops a position out.
-LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD = 5_000_000.0
+# runtime knob.
+#
+# Calibrated 2026-08-14 against the real multi-venue 5m window (okx+bybit,
+# 13,268 events, 6,651 samples) by scripts/calibrate_liquidation_stopout_floor.py:
+# the p90 of the dominant window notional is 2.47M USD (p95 6.98M, p99 45.1M).
+# The previous 5.0M sat ~2x above that p90 — super-calibrated, it would almost
+# never fire. 2.5M keeps the p90 gate (only the top ~10% of windows exceed it)
+# while making the stop-out effective. Full distribution and the per-symbol
+# sensitivity in docs/LIQUIDATION_STOPOUT_FLOOR_CALIBRATION.md.
+LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD = 2_500_000.0
 
 STOPOUT_REASON = "liquidation_stop_out"
 
