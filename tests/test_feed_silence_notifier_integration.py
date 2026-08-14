@@ -35,8 +35,18 @@ class _FakeNotifier:
         self.alerts.append((message, level))
 
 
-def _bare_engine(clock, monkeypatch: pytest.MonkeyPatch):
-    """Bare TradingEngine with the attrs _refresh_market_data_health needs."""
+def _bare_engine(
+    clock,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    warn_fraction: float = 0.5,
+):
+    """Bare TradingEngine with the attrs _refresh_market_data_health needs.
+
+    ``warn_fraction`` defaults to 0.5 for the existing tests; the env-driven
+    test passes ``feed_silence_warn_fraction()`` (exactly what the engine's
+    constructor does) to prove the env reaches the monitor.
+    """
     from src.core.engine import TradingEngine
     from src.data.market_data_health import (
         FeedSilenceMonitor,
@@ -64,6 +74,7 @@ def _bare_engine(clock, monkeypatch: pytest.MonkeyPatch):
     mon = FeedSilenceMonitor(
         alert_cooldown_sec=0.0,
         feeds={"liquidation_okx": MAX_SILENCE_SEC},
+        warn_fraction=warn_fraction,
     )
     for name in list(mon._enabled_feeds):
         if name != "liquidation_okx":
@@ -87,6 +98,56 @@ async def _refresh(engine) -> None:
 
 def _messages(notifier) -> list:
     return [msg for msg, _ in notifier.alerts]
+
+
+def test_warn_fraction_env_moves_early_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FEED_SILENCE_WARN_FRACTION moves the early threshold through the
+    engine's notifier pipeline: the SAME age flips from 'none' to 'early'
+    when the env goes 0.5 -> 0.3, and the early level never pages — a more
+    sensitive threshold must not spam the notifier."""
+    from src.core.engine import feed_silence_warn_fraction
+
+    async def scenario() -> None:
+        # default env: 40% of the 1h threshold is below the 0.5 early level
+        assert feed_silence_warn_fraction() == 0.5
+        clock_a = {"t": 1_000_000.0}
+        engine_a, mon_a, notif_a = _bare_engine(
+            clock_a, monkeypatch,
+            warn_fraction=feed_silence_warn_fraction(),
+        )
+        mon_a.beat("liquidation_okx", timestamp_ms=int(clock_a["t"] * 1000))
+        clock_a["t"] += 0.40 * 3600.0  # 40%
+        await _refresh(engine_a)
+        assert mon_a.snapshot()["liquidation_okx"]["warn_fraction"] == 0.5
+        assert mon_a.snapshot()["liquidation_okx"]["warn_level"] == "none"
+        assert notif_a.alerts == []
+
+        # env 0.3: the SAME 40% age is now 'early' — the threshold moved
+        monkeypatch.setenv("FEED_SILENCE_WARN_FRACTION", "0.3")
+        assert feed_silence_warn_fraction() == 0.3
+        clock_b = {"t": 2_000_000.0}
+        engine_b, mon_b, notif_b = _bare_engine(
+            clock_b, monkeypatch,
+            warn_fraction=feed_silence_warn_fraction(),
+        )
+        mon_b.beat("liquidation_okx", timestamp_ms=int(clock_b["t"] * 1000))
+        clock_b["t"] += 0.40 * 3600.0  # 40%
+        await _refresh(engine_b)
+        assert mon_b.snapshot()["liquidation_okx"]["warn_fraction"] == 0.3
+        assert mon_b.snapshot()["liquidation_okx"]["warn_level"] == "early"
+        # early is log-only by contract: the moved threshold must NOT page
+        assert notif_b.alerts == []
+
+        # the paging level is env-agnostic: imminent still pages at 90%
+        clock_b["t"] += 0.55 * 3600.0  # 95%
+        await _refresh(engine_b)
+        assert any(
+            "FEED QUIET (imminent)" in m for m, _ in notif_b.alerts
+        )
+
+    asyncio.run(scenario())
 
 
 def test_early_is_log_only_not_telegram(
