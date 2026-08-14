@@ -140,6 +140,49 @@ def test_warn_fraction_exits_two() -> None:
         r = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp)])
         assert r.returncode == 2, r.stdout + r.stderr
         assert "WARN" in r.stdout
+        assert "past 50%" in r.stderr  # default warn-fraction (no env)
+
+
+def test_warn_fraction_respects_env_threshold(monkeypatch) -> None:
+    """FEED_SILENCE_WARN_FRACTION moves the preflight warn level: 40% of the
+    threshold warns when the env says 0.3 (and prints "past 30%"), where the
+    hardcoded 0.5 default would have passed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        _make_db(db, liq_okx_ms=NOW - int(0.4 * 6 * 3600_000),
+                 liq_bybit_ms=NOW - 5_000,
+                 funding_ms=NOW - 5_000, candle_ms=_now() - 30_000,
+                 candle_15m_ms=_now() - 60_000)
+        env = dict(os.environ)
+        env["FEED_SILENCE_WARN_FRACTION"] = "0.3"
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), "--db", db,
+             "--l2-dir", _make_l2_dir(tmp)],
+            capture_output=True, text=True, cwd=str(ROOT), env=env,
+        )
+        assert r.returncode == 2, r.stdout + r.stderr
+        assert "past 30%" in r.stderr
+
+
+def test_warn_fraction_cli_override_beats_env(monkeypatch) -> None:
+    """An explicit --warn-fraction still overrides the env threshold."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        # 40% of the 6h threshold: warns with env 0.3, but --warn-fraction
+        # 0.7 is stricter-avoiding -> passes.
+        _make_db(db, liq_okx_ms=NOW - int(0.4 * 6 * 3600_000),
+                 liq_bybit_ms=NOW - 5_000,
+                 funding_ms=NOW - 5_000, candle_ms=_now() - 30_000,
+                 candle_15m_ms=_now() - 60_000)
+        env = dict(os.environ)
+        env["FEED_SILENCE_WARN_FRACTION"] = "0.3"
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), "--db", db,
+             "--l2-dir", _make_l2_dir(tmp), "--warn-fraction", "0.7"],
+            capture_output=True, text=True, cwd=str(ROOT), env=env,
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "[PASS]" in r.stdout
 
 
 def test_coinalyze_skipped_by_default_gated_with_flag() -> None:

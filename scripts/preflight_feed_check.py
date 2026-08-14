@@ -36,7 +36,9 @@ Exit codes:
   0  all contracted feeds have fresh evidence AND candles are fresh/covered
   1  at least one feed aged past its silence threshold (or missing entirely)
      or a symbol's candles failed (missing / past max age / below min)
-  2  at least one check aged past --warn-fraction of its threshold
+  2  at least one check aged past --warn-fraction of its threshold (default:
+     FEED_SILENCE_WARN_FRACTION env — the same early-warning level the
+     bot's FeedSilenceMonitor uses — else 0.5; --warn-fraction overrides)
 """
 
 from __future__ import annotations
@@ -52,7 +54,10 @@ from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.core.engine import feed_silence_contracts  # noqa: E402
+from src.core.engine import (  # noqa: E402
+    feed_silence_contracts,
+    feed_silence_warn_fraction,
+)
 from src.utils.config import get_trading_symbols, load_config  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -146,8 +151,9 @@ def main() -> int:
         default=str(L2_BOOKS_DIR),
         help="L2 book recording directory (default: data/research/l2_books)",
     )
-    parser.add_argument("--warn-fraction", type=float, default=0.5,
-                        help="warn when age exceeds this fraction of threshold")
+    parser.add_argument("--warn-fraction", type=float, default=None,
+                        help="warn when age exceeds this fraction of threshold "
+                             "(default: FEED_SILENCE_WARN_FRACTION env, else 0.5)")
     parser.add_argument("--json", action="store_true", help="emit JSON report")
     parser.add_argument("--gate-coinalyze", action="store_true",
                         help="fail if coinalyze has no evidence (default: skipped, verify-only)")
@@ -163,6 +169,13 @@ def main() -> int:
                              "timestamp (coverage mode, freshness ignored)")
     args = parser.parse_args()
 
+    # Same warn threshold the bot's FeedSilenceMonitor uses — the env wins
+    # over the hardcoded 0.5, and an explicit --warn-fraction overrides both.
+    warn_frac = (
+        args.warn_fraction
+        if args.warn_fraction is not None
+        else feed_silence_warn_fraction()
+    )
     cfg = load_config(args.config)
     contracts = feed_silence_contracts(cfg)  # same decision the engine makes
     symbols = get_trading_symbols(cfg)
@@ -199,7 +212,7 @@ def main() -> int:
                 if age_sec >= max_sec:
                     status = "fail"
                     failures += 1
-                elif age_sec >= max_sec * args.warn_fraction:
+                elif age_sec >= max_sec * warn_frac:
                     status = "warn"
                     warnings += 1
             report["feeds"][feed] = {
@@ -224,7 +237,7 @@ def main() -> int:
             status, age_sec = _candle_status(
                 latest, now_ms,
                 max_age_sec=max_age,
-                warn_fraction=args.warn_fraction,
+                warn_fraction=warn_frac,
                 min_latest_ms=args.min_latest_ms,
             )
             if status == "fail":
@@ -273,7 +286,7 @@ def main() -> int:
               file=sys.stderr if not args.json else sys.stdout)
         return 1
     if warnings:
-        print(f"\n[WARN] {warnings} check(s) past {args.warn_fraction * 100:.0f}% "
+        print(f"\n[WARN] {warnings} check(s) past {warn_frac * 100:.0f}% "
               "of threshold — delivery/backlog forming?", file=sys.stderr)
         return 2
     if not args.json:

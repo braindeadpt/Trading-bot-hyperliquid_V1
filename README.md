@@ -362,7 +362,9 @@ FEED_SILENCE_IMMINENT_FRACTION=0.8
   Unparseable or out-of-range values fall back to `0.9` with a warning.
   Both fractions appear per-feed in the snapshot as `warn_fraction` /
   `imminent_fraction` and render in the panel's Alerted column
-  (`early @ N%` / `imminent @ N%`).
+  (`early @ N%` / `imminent @ N%`). `FEED_SILENCE_WARN_FRACTION` also
+  sets the preflight warn level (`scripts/preflight_feed_check.py` —
+  `past N%` in its exit-2 report) unless `--warn-fraction` is passed.
 
 **Verify after start:** `GET /api/market_data_health` returns
 `feed_silence` (per-feed age + `degraded`) and `feed_silence_degraded`.
