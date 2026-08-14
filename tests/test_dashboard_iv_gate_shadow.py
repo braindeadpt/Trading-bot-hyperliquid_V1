@@ -397,6 +397,30 @@ class TestIvGateShadowTemplate:
         # The filter label is humanised (high_iv -> high iv).
         assert '_tradesIvFilter.replace("_", " ")' in html
 
+    def test_positions_panel_mirrors_iv_class_filter(self) -> None:
+        """The open-positions panel (already carrying the IV columns) mirrors
+        the same IV-class filter: one shared state, both selects in sync,
+        and renderPositions filters with the same rule as renderTrades."""
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        # Select in the Open Positions header, wired to its own setter.
+        assert 'id="positions-iv-filter"' in html
+        assert 'onchange="setPositionsIvFilter(this.value)"' in html
+        assert 'value="high_iv"' in html
+        assert 'value="low_iv"' in html
+        # Shared state + mirror: changing positions updates the trades select.
+        assert "let _positionsAll = [];" in html
+        assert 'function setPositionsIvFilter(v)' in html
+        assert 'document.getElementById("trades-iv-filter")' in html
+        # renderPositions filters with the SAME rule as renderTrades.
+        assert '(p.iv_class || "unknown") === _tradesIvFilter' in html
+        assert 'No ${_tradesIvFilter.replace("_", " ")} positions' in html
+        # Reverse mirror: trades filter + gate toggle sync the positions select.
+        assert 'document.getElementById("positions-iv-filter")' in html
+        assert 'posSel.value = v' in html
+        assert 'posSel2.value = cls' in html
+
     def test_trades_gate_toggle_links_filter_to_projection(self) -> None:
         """The gate toggle pre-selects the IV class the projected decision
         condemns: PROMOTE → low_iv (enforcement would block it), REJECT →

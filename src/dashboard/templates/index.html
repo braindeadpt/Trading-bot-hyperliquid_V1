@@ -272,7 +272,17 @@ tr:hover td { background: var(--panel-hover); }
 <div class="grid">
     <div class="g-6">
         <div class="panel" style="max-height:180px;">
-            <div class="panel-header">Open Positions <span class="dim">Active</span></div>
+            <div class="panel-header">Open Positions <span class="dim">Active</span>
+                <span style="float:right;">
+                    <label class="dim tiny" for="positions-iv-filter">IV</label>
+                    <select id="positions-iv-filter" onchange="setPositionsIvFilter(this.value)" style="font-size:11px;padding:1px 4px;background:var(--panel-bg);color:var(--text);border:1px solid var(--border);border-radius:3px;">
+                        <option value="all">all</option>
+                        <option value="high_iv">high_iv</option>
+                        <option value="low_iv">low_iv</option>
+                        <option value="unknown">sem decisão</option>
+                    </select>
+                </span>
+            </div>
             <div class="panel-body" style="padding:0;">
                 <div style="overflow:auto; max-height:156px;">
                     <table>
@@ -1533,16 +1543,21 @@ function renderResearchWatchdogs(payload) {
     const gateChk = document.getElementById("trades-gate-toggle");
     if (gateChk && gateChk.checked) {
         const sel2 = document.getElementById("trades-iv-filter");
+        const posSel2 = document.getElementById("positions-iv-filter");
         if (!_ivProjection) {
             if (sel2) sel2.value = "all";
+            if (posSel2) posSel2.value = "all";
             _tradesIvFilter = "all";
             renderTrades(_tradesAll);
+            renderPositions(_positionsAll);
         } else {
             const cls = _ivProjection === "REJECT" ? "high_iv" : "low_iv";
             if (sel2 && sel2.value !== cls) {
                 sel2.value = cls;
+                if (posSel2) posSel2.value = cls;
                 _tradesIvFilter = cls;
                 renderTrades(_tradesAll);
+                renderPositions(_positionsAll);
             }
         }
     }
@@ -2019,13 +2034,36 @@ function renderDecisions(data) {
 }
 
 // ── Positions ──
+let _positionsAll = [];
+
+function setPositionsIvFilter(v) {
+    // Mirror of the trades filter: one shared state, both selects in sync.
+    const tradesSel = document.getElementById("trades-iv-filter");
+    if (tradesSel && tradesSel.value !== v) {
+        tradesSel.value = v;
+        _tradesIvFilter = v;
+        const gate = document.getElementById("trades-gate-toggle");
+        if (gate && gate.checked && v !== "all") gate.checked = false;  // manual filter wins
+        renderTrades(_tradesAll);
+    }
+    renderPositions(_positionsAll);
+}
+
 function renderPositions(data) {
+    _positionsAll = data || [];
     const tbody = document.getElementById("positions-tbody");
-    if (!data || data.length === 0) {
+    if (!_positionsAll.length) {
         tbody.innerHTML = '<tr><td colspan="12" class="muted" style="text-align:center;">No positions</td></tr>';
         return;
     }
-    tbody.innerHTML = data.map(p => {
+    const filtered = _tradesIvFilter === "all"
+        ? _positionsAll
+        : _positionsAll.filter(p => (p.iv_class || "unknown") === _tradesIvFilter);
+    if (filtered.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="12" class="muted" style="text-align:center;">No ${_tradesIvFilter.replace("_", " ")} positions (${_positionsAll.length} total)</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = filtered.map(p => {
         const sideClass = p.side === "long" ? "up" : "down";
         const pnl = p.pnl_pct || 0;
         const pnlClass = pnl >= 0 ? "up" : "down";
@@ -2067,12 +2105,16 @@ function setTradesIvFilter(v) {
     _tradesIvFilter = v;
     const gate = document.getElementById("trades-gate-toggle");
     if (gate && gate.checked && v !== "all") gate.checked = false;  // manual filter wins
+    const posSel = document.getElementById("positions-iv-filter");
+    if (posSel && posSel.value !== v) posSel.value = v;  // mirror to positions
     renderTrades(_tradesAll);
+    renderPositions(_positionsAll);
 }
 
 function setGateFilter(on) {
     const gate = document.getElementById("trades-gate-toggle");
     const sel = document.getElementById("trades-iv-filter");
+    const posSel = document.getElementById("positions-iv-filter");
     if (on) {
         // Without a projection there is no class to pre-select — refuse.
         if (_ivProjection !== "PROMOTE" && _ivProjection !== "REJECT") {
@@ -2081,12 +2123,15 @@ function setGateFilter(on) {
         }
         const cls = _ivProjection === "REJECT" ? "high_iv" : "low_iv";
         if (sel) sel.value = cls;
+        if (posSel) posSel.value = cls;
         _tradesIvFilter = cls;
     } else {
         if (sel) sel.value = "all";
+        if (posSel) posSel.value = "all";
         _tradesIvFilter = "all";
     }
     renderTrades(_tradesAll);
+    renderPositions(_positionsAll);
 }
 
 function renderTrades(data) {
