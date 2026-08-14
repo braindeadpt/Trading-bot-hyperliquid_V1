@@ -148,7 +148,7 @@ class TestFeedSilencePayload:
         assert d["feed_silence_imminent"] is False
 
     def test_imminent_flag_when_feed_past_90pct_not_degraded(self) -> None:
-        """A feed at >=90% of its threshold (fire-once warned_90_pct set, still
+        """A feed in the imminent window (warn_level "imminent", still
         healthy) flips the global imminent flag that the header consumes."""
         silence = _SilenceStub(
             {
@@ -159,12 +159,51 @@ class TestFeedSilencePayload:
                     "degraded": False,
                     "warned_50_pct": True,
                     "warned_90_pct": True,
+                    "warn_level": "imminent",
                 }
             }
         )
         self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
         d = self._client.get("/api/market_data_health").get_json()
         assert d["feed_silence_degraded"] is False
+        assert d["feed_silence_imminent"] is True
+
+    def test_imminent_flag_consumes_warn_level_not_flags(self) -> None:
+        """The global flag derives from the monitor's ``warn_level`` field
+        only — raw flags alone must NOT flip it (no duplicated derivation)."""
+        # warned_90_pct set but warn_level still "early": NOT imminent.
+        silence = _SilenceStub(
+            {
+                "funding_hl": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 30.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                    "warned_50_pct": True,
+                    "warned_90_pct": True,
+                    "warn_level": "early",
+                }
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        assert d["feed_silence_imminent"] is False
+        # bust the endpoint TTL cache before swapping the stub
+        self._web._ttl_clear()
+        # warn_level "imminent" alone (flags stale/absent) IS imminent.
+        silence = _SilenceStub(
+            {
+                "funding_hl": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 30.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                    "warn_level": "imminent",
+                }
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
         assert d["feed_silence_imminent"] is True
 
     def test_payload_carries_warn_level_per_feed(self) -> None:
@@ -520,6 +559,79 @@ class TestFeedSilencePayload:
         assert d["feed_silence_spark"] == {}  # best-effort empty
 
 
+class TestWarnLevelDerivation:
+    """The single derivation of the escalation level lives in the monitor;
+    every consumer (snapshot, cadence script, endpoint, JS) uses it."""
+
+    pytestmark = pytest.mark.unit
+
+    def test_helper_precedence_degraded_wins(self) -> None:
+        from src.data.market_data_health import warn_level_from_flags
+
+        assert warn_level_from_flags(degraded=True, imminent=True, early=True) == "degraded"
+        assert warn_level_from_flags(degraded=True, imminent=True, early=False) == "degraded"
+        assert warn_level_from_flags(degraded=True, imminent=False, early=True) == "degraded"
+        assert warn_level_from_flags(degraded=True, imminent=False, early=False) == "degraded"
+
+    def test_helper_escalation_order(self) -> None:
+        from src.data.market_data_health import warn_level_from_flags
+
+        assert warn_level_from_flags(degraded=False, imminent=True, early=True) == "imminent"
+        assert warn_level_from_flags(degraded=False, imminent=True, early=False) == "imminent"
+        assert warn_level_from_flags(degraded=False, imminent=False, early=True) == "early"
+        assert warn_level_from_flags(degraded=False, imminent=False, early=False) == "none"
+
+    def test_state_property_mirrors_helper(self) -> None:
+        from src.data.market_data_health import FeedSilenceState, warn_level_from_flags
+
+        for degraded in (False, True):
+            for warned_90 in (False, True):
+                for warned_50 in (False, True):
+                    st = FeedSilenceState(
+                        feed="liquidation_okx",
+                        degraded=degraded,
+                        warned_90_pct=warned_90,
+                        warned_50_pct=warned_50,
+                    )
+                    assert st.warn_level == warn_level_from_flags(
+                        degraded=degraded, imminent=warned_90, early=warned_50
+                    )
+
+    def test_snapshot_emits_state_property(self) -> None:
+        """The snapshot's warn_level comes from the state property — a stale
+        inline derivation would drift from the flags and this pins it."""
+        from src.data.market_data_health import FeedSilenceMonitor
+
+        mon = FeedSilenceMonitor(alert_cooldown_sec=0.0, feeds={"funding_hl": 3600.0})
+        for name in list(mon._enabled_feeds):
+            if name != "funding_hl":
+                mon.disable_feed(name)
+        mon.beat("funding_hl", timestamp_ms=1_000_000)
+        # the fire-once flags are set by the early-warning check — the
+        # snapshot's warn_level derives from them via the state property
+        mon.check_early_warnings(now_ms=1_000_000 + int(0.7 * 3600_000))
+        snap = mon.snapshot(now_ms=1_000_000 + int(0.7 * 3600_000))
+        st = mon._states["funding_hl"]
+        assert snap["funding_hl"]["warn_level"] == st.warn_level == "early"
+        # escalate to degraded — the state object and snapshot stay in sync
+        mon._states["funding_hl"].degraded = True
+        assert snap["funding_hl"]["warn_level"] == "early"  # snapshot is a copy
+        assert mon.snapshot(now_ms=1_000_000 + int(0.7 * 3600_000))[
+            "funding_hl"]["warn_level"] == "degraded"
+
+    def test_offline_diagnostic_uses_shared_helper(self) -> None:
+        """The offline reconstruction consumes warn_level_from_flags — the
+        precedence can never diverge between the live monitor and the script."""
+        import inspect
+
+        import scripts.feed_cadence_diagnostic as diag
+
+        src = inspect.getsource(diag.live_snapshot_equivalent)
+        assert "warn_level_from_flags" in src
+        assert "warn_level = \"degraded\"" not in src
+        assert "warn_level = \"imminent\"" not in src
+
+
 class TestFeedSilenceTemplate:
     """The panel markup + JS must expose the threshold-vs-age columns."""
 
@@ -555,7 +667,7 @@ class TestFeedSilenceTemplate:
         assert "function renderFeedSilence(" in html
         assert "function sparklineSvg(" in html
         assert "feed_silence_spark" in html
-        assert "sparklineSvg(sparks[feed] || [], 92, 20)" in html
+        assert "sparklineSvg(sparks[feed] || [], 92, 20, st.warn_fraction, st.imminent_fraction)" in html
         assert 'authFetch("/api/market_data_health")' in html
 
     def test_template_uses_warned_flags_for_alerted_column(self) -> None:
@@ -575,7 +687,9 @@ class TestFeedSilenceTemplate:
         assert "state-imminent" in html
         assert "state-degraded" in html
         assert "hdr.classList.toggle" in html
-        assert "warned_90_pct && !st.degraded" in html
+        # the scan keys off the monitor's single warn_level field — the
+        # header can never disagree with the per-feed State column
+        assert 'st.warn_level === "imminent"' in html
 
     def test_template_has_14d_daily_max_age_column(self) -> None:
         html = TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -584,7 +698,7 @@ class TestFeedSilenceTemplate:
         assert 'colspan="8"' in html
         assert "feed_silence_daily" in html
         assert "function sparklineAbs(" in html
-        assert "sparklineAbs(daily[feed] || [], 92, 20, max)" in html
+        assert "sparklineAbs(daily[feed] || [], 92, 20, max, st.warn_fraction, st.imminent_fraction)" in html
 
     def test_template_renders_creeping_badge(self) -> None:
         html = TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -691,3 +805,37 @@ class TestFeedSilenceTemplate:
         # the p95/p99 vars survive for the badge and the comparison text
         assert "gapOverP99" in html
         assert "gapOverP95" in html
+
+    def test_template_consumes_warn_level_only(self) -> None:
+        """The State column + header derive from the monitor's single
+        ``warn_level`` field — no re-derivation from the fire-once flags and
+        no hardcoded 60/90 % cutoffs left in the per-feed rendering."""
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # the per-feed level comes straight from the payload field
+        assert 'const warnLvl = st.warn_level || "none";' in html
+        # the global header scan keys off the same field
+        assert 'st.warn_level === "imminent"' in html
+        # the old re-derivations are gone (flags + degraded recomputation)
+        assert "warned_90_pct && !st.degraded" not in html
+        assert "warned_90_pct && !degraded" not in html
+        assert 'st.warn_level || (degraded ? "degraded" : "none")' not in html
+        # the % bar is width-only: no barCls state machine, no 60/90 cutoffs
+        assert "barCls" not in html
+        assert "pct >= 90 ? \"crit\"" not in html
+        assert "pct >= 60 ? \"warn\"" not in html
+        # colors key off warn_level, not age cutoffs
+        assert 'barColor = warnLvl === "degraded" || warnLvl === "imminent"' in html
+        assert 'stateColor = warnLvl === "degraded"' in html
+
+    def test_template_sparklines_use_configured_fractions(self) -> None:
+        """Both sparklines take the effective warn/imminent fractions from the
+        snapshot — the 24h % and daily-max-age colors follow the configured
+        FEED_SILENCE_WARN/ IMMINENT_FRACTION, never a hardcoded 60/90."""
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        assert "function sparklineSvg(series, w, h, warnFrac, imminentFrac)" in html
+        assert "function sparklineAbs(series, w, h, maxSilenceSec, warnFrac, imminentFrac)" in html
+        assert "const wF = warnFrac != null ? Number(warnFrac) : 0.5;" in html
+        assert "const iF = imminentFrac != null ? Number(imminentFrac) : 0.9;" in html
+        # the call sites forward the per-feed fractions from the snapshot
+        assert "sparklineSvg(sparks[feed] || [], 92, 20, st.warn_fraction, st.imminent_fraction)" in html
+        assert "sparklineAbs(daily[feed] || [], 92, 20, max, st.warn_fraction, st.imminent_fraction)" in html

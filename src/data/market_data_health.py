@@ -220,6 +220,20 @@ class FeedSilenceState:
     # Fire-once cadence alert (age > historical p99 gap); reset on beat.
     warned_cadence: bool = False
 
+    @property
+    def warn_level(self) -> str:
+        """Escalation level for this feed: degraded > imminent > early > none.
+
+        Single source of truth — the snapshot emits it, the dashboard and the
+        offline cadence diagnostic consume it. Nothing re-derives the level
+        from the fire-once flags or from age thresholds.
+        """
+        return warn_level_from_flags(
+            degraded=self.degraded,
+            imminent=self.warned_90_pct,
+            early=self.warned_50_pct,
+        )
+
     def age_sec(self, now_ms: Optional[int] = None) -> Optional[float]:
         if self.last_event_ms is None:
             return None
@@ -270,6 +284,32 @@ def cadence_percentile(
     ordered = sorted(gaps)
     idx = min(len(ordered) - 1, int(pct * len(ordered)))
     return float(ordered[idx])
+
+
+def warn_level_from_flags(
+    *,
+    degraded: bool,
+    imminent: bool,
+    early: bool,
+) -> str:
+    """Escalation level for one feed: ``degraded`` > ``imminent`` > ``early`` > ``none``.
+
+    Single source of truth for the ``warn_level`` string the dashboard
+    consumes. ``imminent``/``early`` are the fire-once flags (``warned_90_pct``
+    / ``warned_50_pct``); the precedence mirrors the escalation order of the
+    silence alerts — a feed is always exactly one level, and ``degraded``
+    wins regardless of which warnings fired first. Shared by
+    ``FeedSilenceState.warn_level`` (live snapshot) and the offline cadence
+    diagnostic, so the live monitor and the offline reconstruction can never
+    disagree about the ordering.
+    """
+    if degraded:
+        return "degraded"
+    if imminent:
+        return "imminent"
+    if early:
+        return "early"
+    return "none"
 
 
 class FeedSilenceMonitor:
@@ -589,12 +629,7 @@ class FeedSilenceMonitor:
                 "cadence_pct_current": self._current_gap_percentile(st, age),
                 "warn_fraction": round(self._warn_fraction, 4),
                 "imminent_fraction": round(self._imminent_fraction, 4),
-                "warn_level": (
-                    "degraded" if st.degraded
-                    else "imminent" if st.warned_90_pct
-                    else "early" if st.warned_50_pct
-                    else "none"
-                ),
+                "warn_level": st.warn_level,
             }
         return out
 

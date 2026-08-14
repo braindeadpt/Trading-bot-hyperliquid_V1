@@ -1572,8 +1572,10 @@ function fmtDur(sec) {
     return (sec / 86400).toFixed(1) + "d";
 }
 
-function sparklineSvg(series, w, h) {
+function sparklineSvg(series, w, h, warnFrac, imminentFrac) {
     // series: [[ts_ms, pct], ...] — % of silence threshold per bucket, 24h.
+    // Color from the CONFIGURED warn/imminent fractions (same single source
+    // as the bar/% columns) — never a hardcoded 60/90 that could drift.
     if (!series || !series.length) return '<span class="muted">—</span>';
     const raw = series.map(p => Number(p[1]));
     const vals = raw.map(v => Math.max(0, Math.min(100, v)));
@@ -1584,7 +1586,9 @@ function sparklineSvg(series, w, h) {
     const x = (i) => pad + (i / Math.max(1, vals.length - 1)) * (w - 2 * pad);
     const y = (v) => (h - pad) - ((v - minV) / span) * (h - 2 * pad);
     const pts = vals.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
-    const color = maxV >= 90 ? "var(--down)" : maxV >= 60 ? "var(--warn, #d29922)" : "var(--up)";
+    const wF = warnFrac != null ? Number(warnFrac) : 0.5;
+    const iF = imminentFrac != null ? Number(imminentFrac) : 0.9;
+    const color = maxV >= iF * 100 ? "var(--down)" : maxV >= wF * 100 ? "var(--warn, #d29922)" : "var(--up)";
     // data-tips carries the RAW values (unclamped, exact pct) + bucket ts
     return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block;cursor:crosshair;" data-tips="' +
         encodeURIComponent(JSON.stringify(series.map((p, i) => [p[0], raw[i]]))) +
@@ -1594,10 +1598,11 @@ function sparklineSvg(series, w, h) {
         '</svg>';
 }
 
-function sparklineAbs(series, w, h, maxSilenceSec) {
+function sparklineAbs(series, w, h, maxSilenceSec, warnFrac, imminentFrac) {
     // series: [[ts_ms, max_age_sec], ...] — daily max age, last 14 days.
     // Raw seconds scaled to the cell; color by fraction of the feed's
-    // silence threshold so a stair to 90%+ reads red like the % columns.
+    // silence threshold using the CONFIGURED warn/imminent fractions (same
+    // single source as the other columns), never a hardcoded 60/90.
     if (!series || !series.length) return '<span class="muted">—</span>';
     const raw = series.map(p => Math.max(0, Number(p[1])));
     const vals = raw.slice();
@@ -1610,7 +1615,9 @@ function sparklineAbs(series, w, h, maxSilenceSec) {
     const pts = vals.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
     const th = Math.max(1, Number(maxSilenceSec) || 1);
     const lastPct = (vals[vals.length - 1] / th) * 100;
-    const color = lastPct >= 90 ? "var(--down)" : lastPct >= 60 ? "var(--warn, #d29922)" : "var(--up)";
+    const wF = warnFrac != null ? Number(warnFrac) : 0.5;
+    const iF = imminentFrac != null ? Number(imminentFrac) : 0.9;
+    const color = lastPct >= iF * 100 ? "var(--down)" : lastPct >= wF * 100 ? "var(--warn, #d29922)" : "var(--up)";
     return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block;cursor:crosshair;" data-tips="' +
         encodeURIComponent(JSON.stringify(series.map((p, i) => [p[0], raw[i]]))) +
         '" data-tip-format="abs">' +
@@ -1668,17 +1675,17 @@ function renderFeedSilence(payload) {
     }
     // Global header state: the whole header bar turns amber when any contracted
     // feed crosses ~90% of its silence threshold (imminent, still healthy) and
-    // red when a feed actually degrades. Derived from the payload flags, with a
-    // snapshot-scan fallback for sockets that predate the flag.
+    // red when a feed actually degrades. Consumes only the monitor's
+    // per-feed `warn_level` field (single derivation) plus the backend flag.
     const hdr = document.querySelector(".header");
     const imminentAny = !!(payload && payload.feed_silence_imminent)
-        || Object.values(sil).some(st => st && st.warned_90_pct && !st.degraded);
+        || Object.values(sil).some(st => st && st.warn_level === "imminent");
     const degradedAny = !!(payload && payload.feed_silence_degraded);
     if (hdr) {
         hdr.classList.toggle("state-degraded", degradedAny);
         hdr.classList.toggle("state-imminent", !degradedAny && imminentAny);
         const imminentNames = Object.entries(sil)
-            .filter(([, st]) => st && st.warned_90_pct && !st.degraded)
+            .filter(([, st]) => st && st.warn_level === "imminent")
             .map(([f]) => f);
         hdr.title = imminentNames.length
             ? "FEED IMMINENT: " + imminentNames.join(", ") + " at ≥90% of silence threshold"
@@ -1690,13 +1697,13 @@ function renderFeedSilence(payload) {
         const age = st.age_sec == null ? null : Number(st.age_sec);
         const max = Number(st.max_silence_sec) || 0;
         const degraded = !!st.degraded;
-        let pct = null, barCls = "ok", pctTxt = "—";
+        // % of threshold: pure display (bar width + text) — the COLOR comes
+        // from warn_level below, never from hardcoded 60/90 cutoffs that
+        // could drift from the configured warn/imminent fractions.
+        let pct = null, pctTxt = "—";
         if (age != null && max > 0) {
             pct = (age / max) * 100;
             pctTxt = pct.toFixed(0) + "%";
-            barCls = pct >= 90 ? "crit" : pct >= 60 ? "warn" : "ok";
-        } else if (age == null) {
-            barCls = "never";
         }
         const ageTxt = age == null ? "—" : (age < 60 ? age.toFixed(0) + "s"
             : age < 3600 ? (age / 60).toFixed(1) + "m"
@@ -1727,7 +1734,7 @@ function renderFeedSilence(payload) {
             ? (nSamples > 0 ? "learning…" : "—")
             : gapOverP99 ? "gap " + fmtDur(age) + " > p99 " + fmtDur(p99)
             : "exp ≤ " + fmtDur(p99);
-        const warnLvl = st.warn_level || (degraded ? "degraded" : "none");
+        const warnLvl = st.warn_level || "none";
         const alerted50 = !!st.warned_50_pct;
         const alerted90 = !!st.warned_90_pct;
         const earlyFrac = st.warn_fraction != null
@@ -1764,16 +1771,23 @@ function renderFeedSilence(payload) {
             : alerted90 ? "var(--down)"
             : alerted50 ? "var(--warn, #d29922)"
             : "var(--muted)";
-        const stateTxt = degraded ? "DEGRADED"
+        const stateTxt = warnLvl === "degraded" ? "DEGRADED"
             : warnLvl === "imminent" ? "IMMINENT"
             : warnLvl === "early" ? "EARLY"
             : (pct == null ? "never seen" : "OK");
-        const stateColor = degraded ? "var(--down)"
+        const stateColor = warnLvl === "degraded" ? "var(--down)"
             : warnLvl === "imminent" ? "var(--down)"
             : warnLvl === "early" ? "var(--warn, #d29922)"
-            : (pct != null && pct >= 90 ? "var(--down)" : pct != null && pct >= 60 ? "var(--warn, #d29922)" : "var(--up)");
+            : "var(--up)";
+        // Bar + % text colors keyed off the SAME single warn_level — so the
+        // visual escalation tracks the configured warn/imminent fractions
+        // (FEED_SILENCE_WARN_FRACTION / _IMMINENT_FRACTION) instead of
+        // re-deriving a fixed 60/90% cutoff that could drift from the config.
         const barW = Math.max(2, Math.min(100, pct == null ? 0 : pct));
-        const barColor = barCls === "crit" ? "var(--down)" : barCls === "warn" ? "#d29922" : "var(--up)";
+        const barColor = warnLvl === "degraded" || warnLvl === "imminent"
+            ? "var(--down)" : warnLvl === "early" ? "#d29922" : "var(--up)";
+        const pctColor = warnLvl === "degraded" || warnLvl === "imminent"
+            ? "var(--down)" : warnLvl === "early" ? "#d29922" : "var(--muted)";
         // Creep badge: the production staircase rule (feed_silence_creep) sees
         // the daily max age rising consistently — same signal as the
         // feed_age_creep watchdog. Amber normally, red when the staircase is
@@ -1800,11 +1814,11 @@ function renderFeedSilence(payload) {
                     '<div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;">' +
                         '<div style="width:' + barW + '%;height:100%;background:' + barColor + ';"></div>' +
                     '</div>' +
-                    '<span style="font-size:10px;white-space:nowrap;color:' + (pct != null && pct >= 60 ? (pct >= 90 ? "var(--down)" : "#d29922") : "var(--muted)") + ';">' + pctTxt + '</span>' +
+                    '<span style="font-size:10px;white-space:nowrap;color:' + pctColor + ';">' + pctTxt + '</span>' +
                 '</div>' +
             '</td>' +
-            '<td style="padding:3px 4px;width:96px;">' + sparklineSvg(sparks[feed] || [], 92, 20) + '</td>' +
-            '<td style="padding:3px 4px;width:96px;" title="Daily max age (seconds) per UTC day, last 14 days">' + sparklineAbs(daily[feed] || [], 92, 20, max) + '</td>' +
+            '<td style="padding:3px 4px;width:96px;">' + sparklineSvg(sparks[feed] || [], 92, 20, st.warn_fraction, st.imminent_fraction) + '</td>' +
+            '<td style="padding:3px 4px;width:96px;" title="Daily max age (seconds) per UTC day, last 14 days">' + sparklineAbs(daily[feed] || [], 92, 20, max, st.warn_fraction, st.imminent_fraction) + '</td>' +
             '<td style="padding:3px 4px;font-weight:600;color:' + alertedColor + ';" title="' + alertedTitle.replace(/"/g, "&quot;") + '">' + alertedTxt + '</td>' +
             '<td style="padding:3px 4px;font-weight:600;color:' + stateColor + ';">' + stateTxt + '</td>' +
             '</tr>';

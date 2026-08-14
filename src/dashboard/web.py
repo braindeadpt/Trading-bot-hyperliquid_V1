@@ -217,15 +217,14 @@ def _feed_silence_creep(feed_silence: Dict[str, Any]) -> Dict[str, Dict[str, Any
 
 
 def _feed_silence_imminent(feed_silence: Dict[str, Any]) -> bool:
-    """True when any contracted feed is past ~90% of its silence threshold
-    but not yet degraded — the window where the header should warn early.
+    """True when any contracted feed is in the imminent window (>=90% of its
+    silence threshold, not yet degraded) — where the header should warn early.
 
-    Mirrors the monitor's ``warn_level == "imminent"`` (fire-once ``warned_90_pct``
-    flag set, feed still healthy). Derived from the snapshot flags so it also
-    works against stubs in tests.
+    Consumes the monitor's ``warn_level`` field — the single derivation —
+    instead of re-deriving the level from the fire-once flags.
     """
     return any(
-        st.get("warned_90_pct") and not st.get("degraded")
+        st.get("warn_level") == "imminent"
         for st in feed_silence.values()
     )
 

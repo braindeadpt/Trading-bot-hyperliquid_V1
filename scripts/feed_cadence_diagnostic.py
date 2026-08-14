@@ -51,7 +51,10 @@ from src.core.engine import (  # noqa: E402
     feed_silence_imminent_fraction,
     feed_silence_warn_fraction,
 )
-from src.data.market_data_health import cadence_percentile  # noqa: E402
+from src.data.market_data_health import (  # noqa: E402
+    cadence_percentile,
+    warn_level_from_flags,
+)
 from src.utils.config import load_config  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -240,8 +243,10 @@ def live_snapshot_equivalent(
     (percentiles of the rolling gap deque via the shared
     ``cadence_percentile``, plus the rank of the current age), so an offline
     script reproduces them exactly. ``warn_level`` is rebuilt from the
-    current age vs the fractions — the fire-once flags mirror the age
-    crossing after the first check. ``None`` when the feed has no events.
+    current age vs the fractions via the shared ``warn_level_from_flags`` —
+    the fire-once flags mirror the age crossing after the first check, so
+    the escalation precedence is single-source with the live monitor.
+    ``None`` when the feed has no events.
     """
     if len(ts) < 2:
         return None
@@ -261,14 +266,11 @@ def live_snapshot_equivalent(
     if recent:
         below = sum(1 for g in recent if g <= age_sec)
         pct_current = round(100.0 * below / len(recent), 1)
-    if age_sec >= max_silence_sec:
-        warn_level = "degraded"
-    elif age_sec >= max_silence_sec * imminent_fraction:
-        warn_level = "imminent"
-    elif age_sec >= max_silence_sec * warn_fraction:
-        warn_level = "early"
-    else:
-        warn_level = "none"
+    warn_level = warn_level_from_flags(
+        degraded=age_sec >= max_silence_sec,
+        imminent=age_sec >= max_silence_sec * imminent_fraction,
+        early=age_sec >= max_silence_sec * warn_fraction,
+    )
     return {
         "age_sec": round(age_sec, 1),
         "max_silence_sec": max_silence_sec,
