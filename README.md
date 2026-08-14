@@ -366,6 +366,34 @@ FEED_SILENCE_IMMINENT_FRACTION=0.8
   sets the preflight warn level (`scripts/preflight_feed_check.py` —
   `past N%` in its exit-2 report) unless `--warn-fraction` is passed.
 
+### Tuning the cadence detector sensitivity
+
+The cadence watchdog (`FEED CADENCE`, log-only) fires when a feed's
+current gap exceeds its **historical p99** inter-event gap. Two knobs
+adjust how quickly that p99 is trusted, per deployment:
+
+```bash
+# .env (gitignored) — trust the p99 after 50 gaps (default 100);
+# keep 8000 gaps of history (default 4000)
+FEED_CADENCE_MIN_SAMPLES=50
+FEED_CADENCE_GAP_HISTORY=8000
+```
+
+- `FEED_CADENCE_MIN_SAMPLES`: minimum recorded gaps before the p99 is
+  computed — the `learning…` state in the panel's Age column. Lower =
+  more sensitive, noisier on cold start; higher = more robust but blind
+  longer after a restart. Positive integer; non-integers, zero and
+  negatives fall back to `100` with a warning.
+- `FEED_CADENCE_GAP_HISTORY`: rolling inter-event gap history kept per
+  feed (the deque the percentile is computed over). Positive integer;
+  rejected values fall back to `4000`. The monitor clamps it up to
+  `FEED_CADENCE_MIN_SAMPLES` so the percentile can always be computed.
+- Same hash-neutral contract as the fractions: not `BOT_`-prefixed,
+  read at startup, never in `settings.yaml`, never in the Fase 10
+  `config_hash`. The effective `cadence_min_samples` appears per-feed
+  in the snapshot (`cadence_min_samples`) and in the Age-column
+  tooltip, so the panel reflects the deployment's actual learning gate.
+
 **Verify after start:** `GET /api/market_data_health` returns
 `feed_silence` (per-feed age + `degraded`) and `feed_silence_degraded`.
 An uncontracted feed must never appear in the snapshot, and

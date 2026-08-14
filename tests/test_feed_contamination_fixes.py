@@ -525,6 +525,66 @@ def test_feed_silence_imminent_fraction_env_wiring(
     assert feed_silence_imminent_fraction() == 0.9
 
 
+def test_feed_silence_cadence_env_wiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FEED_CADENCE_MIN_SAMPLES / FEED_CADENCE_GAP_HISTORY tune the cadence
+    detector hash-neutral (no BOT_ prefix); rejected values -> defaults."""
+    from src.core.engine import (
+        feed_silence_cadence_gap_history,
+        feed_silence_cadence_min_samples,
+    )
+
+    assert feed_silence_cadence_min_samples() == 100  # no env
+    assert feed_silence_cadence_gap_history() == 4000  # no env
+
+    monkeypatch.setenv("FEED_CADENCE_MIN_SAMPLES", "50")
+    assert feed_silence_cadence_min_samples() == 50
+    monkeypatch.setenv("FEED_CADENCE_MIN_SAMPLES", "1")  # valid bound
+    assert feed_silence_cadence_min_samples() == 1
+    monkeypatch.setenv("FEED_CADENCE_MIN_SAMPLES", "0")  # not positive
+    assert feed_silence_cadence_min_samples() == 100
+    monkeypatch.setenv("FEED_CADENCE_MIN_SAMPLES", "-5")
+    assert feed_silence_cadence_min_samples() == 100
+    monkeypatch.setenv("FEED_CADENCE_MIN_SAMPLES", "abc")
+    assert feed_silence_cadence_min_samples() == 100
+
+    monkeypatch.setenv("FEED_CADENCE_GAP_HISTORY", "8000")
+    assert feed_silence_cadence_gap_history() == 8000
+    monkeypatch.setenv("FEED_CADENCE_GAP_HISTORY", "0")
+    assert feed_silence_cadence_gap_history() == 4000
+    monkeypatch.setenv("FEED_CADENCE_GAP_HISTORY", "-1")
+    assert feed_silence_cadence_gap_history() == 4000
+    monkeypatch.setenv("FEED_CADENCE_GAP_HISTORY", "abc")
+    assert feed_silence_cadence_gap_history() == 4000
+
+
+def test_feed_silence_cadence_snapshot_exposes_effective_config() -> None:
+    """The snapshot carries the effective min_samples (the learning gate) and
+    the constructor keeps gap history at least as deep as min_samples so the
+    percentile can always be computed."""
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+        cadence_min_samples=50,
+        cadence_gap_history=10,  # below min_samples -> clamped up
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    assert mon._cadence_gap_history == 50
+    assert mon.snapshot()["liquidation_okx"]["cadence_min_samples"] == 50
+
+    mon2 = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+    )
+    for name in list(mon2._enabled_feeds):
+        if name != "liquidation_okx":
+            mon2.disable_feed(name)
+    assert mon2.snapshot()["liquidation_okx"]["cadence_min_samples"] == 100
+
+
 def test_feed_silence_on_alert_records_every_emission() -> None:
     """The on_alert sink receives (feed, alert_type, fired_ms, message) for
     every emitted early/imminent/degraded alert — the audit trail of WHEN

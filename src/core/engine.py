@@ -159,6 +159,65 @@ def feed_silence_imminent_fraction() -> float:
     return max(0.5, min(1.0, frac))
 
 
+def feed_silence_cadence_min_samples() -> int:
+    """Minimum recorded inter-event gaps before the cadence p99 is trusted
+    (default 100).
+
+    Configurable via ``FEED_CADENCE_MIN_SAMPLES`` in ``.env`` — NOT
+    ``BOT_``-prefixed, so it never enters the Fase-10 ``config_hash``
+    (same contract as ``FEED_SILENCE_WARN_FRACTION``). Positive integer;
+    non-integers, zero and negatives are rejected with a warning and the
+    default is used. Lower = the detector trusts the p99 earlier (more
+    sensitive, noisier on cold start); higher = more robust but blind
+    longer after a restart.
+    """
+    raw = os.environ.get("FEED_CADENCE_MIN_SAMPLES", "").strip()
+    if not raw:
+        return 100
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "FEED_CADENCE_MIN_SAMPLES=%r not an integer — using 100", raw
+        )
+        return 100
+    if value < 1:
+        logger.warning(
+            "FEED_CADENCE_MIN_SAMPLES=%s not a positive integer — using 100",
+            value,
+        )
+        return 100
+    return value
+
+
+def feed_silence_cadence_gap_history() -> int:
+    """Rolling inter-event gap history kept per feed (default 4000).
+
+    Configurable via ``FEED_CADENCE_GAP_HISTORY`` in ``.env`` — NOT
+    ``BOT_``-prefixed, so it never enters the Fase-10 ``config_hash``.
+    Positive integer; rejected values fall back to 4000. Keep it well
+    above ``FEED_CADENCE_MIN_SAMPLES`` — the monitor constructor clamps
+    it up to min_samples so the percentile can always be computed.
+    """
+    raw = os.environ.get("FEED_CADENCE_GAP_HISTORY", "").strip()
+    if not raw:
+        return 4000
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "FEED_CADENCE_GAP_HISTORY=%r not an integer — using 4000", raw
+        )
+        return 4000
+    if value < 1:
+        logger.warning(
+            "FEED_CADENCE_GAP_HISTORY=%s not a positive integer — using 4000",
+            value,
+        )
+        return 4000
+    return value
+
+
 def feed_silence_contracts(config: Config) -> Dict[str, float]:
     """Decide which feeds the silence watchdog contracts for this deployment.
 
@@ -574,6 +633,8 @@ class TradingEngine:
             feeds=_silence_feeds if _silence_enabled else {},
             warn_fraction=feed_silence_warn_fraction(),
             imminent_fraction=feed_silence_imminent_fraction(),
+            cadence_min_samples=feed_silence_cadence_min_samples(),
+            cadence_gap_history=feed_silence_cadence_gap_history(),
             on_alert=self._record_feed_silence_alert,
         )
         self._feed_silence_enabled = _silence_enabled

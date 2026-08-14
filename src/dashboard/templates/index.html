@@ -1717,7 +1717,7 @@ function renderFeedSilence(payload) {
         return '<tr style="border-top:1px solid var(--border);">' +
             '<td style="padding:3px 4px;font-family:monospace;">' + feed + ' ' + creepBadge + ' ' + cadenceBadge + '</td>' +
             '<td style="padding:3px 4px;">' + ageTxt +
-                '<div style="font-size:9px;color:' + expColor + ';white-space:nowrap;" title="Historical p95/p99 inter-event gap of this feed (' + (p95 == null ? "—" : fmtDur(p95)) + ' / ' + (p99 == null ? "—" : fmtDur(p99)) + ')">' + expTxt + '</div>' +
+                '<div style="font-size:9px;color:' + expColor + ';white-space:nowrap;" title="Historical p95/p99 inter-event gap of this feed (' + (p95 == null ? "—" : fmtDur(p95)) + ' / ' + (p99 == null ? "—" : fmtDur(p99)) + ') · learning needs ' + (st.cadence_min_samples == null ? 100 : Number(st.cadence_min_samples)) + ' gap samples (FEED_CADENCE_MIN_SAMPLES)">' + expTxt + '</div>' +
             '</td>' +
             '<td style="padding:3px 4px;">' + maxTxt + '</td>' +
             '<td style="padding:3px 4px;width:26%;">' +

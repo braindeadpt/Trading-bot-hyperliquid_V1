@@ -292,12 +292,16 @@ class FeedSilenceMonitor:
         self._alert_cooldown_sec = float(alert_cooldown_sec)
         self._warn_fraction = float(warn_fraction)
         self._imminent_fraction = float(imminent_fraction)
-        self._cadence_min_samples = int(cadence_min_samples)
+        self._cadence_min_samples = max(1, int(cadence_min_samples))
+        # Keep the rolling history at least as deep as min_samples — with a
+        # shorter deque the percentile could never be computed.
+        self._cadence_gap_history = max(
+            int(cadence_gap_history), self._cadence_min_samples
+        )
         # Optional sink for every emitted alert: (feed, alert_type, fired_ms,
         # message). The engine uses it to persist the real silence history to
         # the research DB for audit vs the daily max-age rollup.
         self._on_alert = on_alert
-        self._cadence_gap_history = int(cadence_gap_history)
         self._enabled_feeds: set[str] = set(cfg.keys())
         # time.monotonic() is since an arbitrary epoch (often system boot on
         # Windows), NOT process start. Never-seen silence must use age since
@@ -557,6 +561,7 @@ class FeedSilenceMonitor:
                     min_samples=self._cadence_min_samples
                 ),
                 "cadence_samples": len(st.gaps),
+                "cadence_min_samples": self._cadence_min_samples,
                 "warn_fraction": round(self._warn_fraction, 4),
                 "imminent_fraction": round(self._imminent_fraction, 4),
                 "warn_level": (

@@ -239,6 +239,8 @@ class TestFeedSilencePayload:
         # the real monitor's effective fractions are on the wire (defaults)
         assert d["feed_silence"]["liquidation_okx"]["warn_fraction"] == 0.5
         assert d["feed_silence"]["liquidation_okx"]["imminent_fraction"] == 0.9
+        # the cadence learning gate (min samples) flows through too
+        assert d["feed_silence"]["liquidation_okx"]["cadence_min_samples"] == 100
 
         # escalate to 90% -> the same endpoint now reports imminent
         # (bust the endpoint TTL cache so the refresh re-snapshots the monitor)
@@ -632,3 +634,7 @@ class TestFeedSilenceTemplate:
         assert "alerta cadence emitido" in html
         assert "(n=" in html
         assert "cadência a degradar" in html
+        # the Age-cell tooltip names the effective learning gate
+        assert "st.cadence_min_samples" in html
+        assert "learning needs " in html
+        assert "FEED_CADENCE_MIN_SAMPLES" in html
