@@ -374,6 +374,73 @@ def test_verdict_contradicts_when_high_iv_loses() -> None:
     assert "CONTRADIZ" in r.stdout
 
 
+def test_summary_mode_prints_single_compact_line() -> None:
+    """--summary emits exactly one machine-parseable line — no verbose
+    tables, no banner, no windows section — for cron consumption."""
+    r = _make(["--summary"], n_high=2, n_low=2)
+    assert r.returncode == 0, r.stdout + r.stderr
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    assert len(lines) == 1, r.stdout
+    line = lines[0]
+    assert line.startswith("iv_gate_shadow | ")
+    assert "window=all" in line
+    assert "trades=4" in line
+    assert "closed=4" in line
+    assert "hi_net=+20.00" in line
+    assert "lo_net=-10.00" in line
+    assert "verdict=INCONCLUSIVE" in line
+    # No verbose artifacts leak into summary mode.
+    assert "Cobertura" not in r.stdout
+    assert "[3b]" not in r.stdout
+    assert "=" * 20 not in r.stdout
+
+
+def test_summary_mode_carries_window_and_no_trades() -> None:
+    """--summary respects --since-days (window=7d) and reports the
+    no-trades case as a one-line error instead of the verbose message."""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        live, research = _make_age_dbs(tmp, young=2, old=3)
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), "--live-db", live, "--research-db", research,
+             "--summary", "--since-days", "7"],
+            capture_output=True, text=True, encoding="utf-8", cwd=str(ROOT),
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+        assert len(lines) == 1, r.stdout
+        assert "window=7d" in lines[0]
+        assert "trades=2" in lines[0]
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), "--live-db", os.path.join(tmp, "no.db"),
+             "--research-db", os.path.join(tmp, "no2.db"), "--summary"],
+            capture_output=True, text=True, encoding="utf-8", cwd=str(ROOT),
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+        assert len(lines) == 1, r.stdout
+        assert "error=no_trades" in lines[0]
+
+
+def test_summary_mode_still_writes_json() -> None:
+    """--summary --json keeps persisting the full report for later analysis
+    while stdout stays a single line."""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        live, research = _make_dbs(tmp, n_high=1, n_low=1)
+        jp = os.path.join(tmp, "report.json")
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), "--live-db", live, "--research-db", research,
+             "--summary", "--json", jp],
+            capture_output=True, text=True, encoding="utf-8", cwd=str(ROOT),
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+        assert len(lines) == 1, r.stdout
+        data = json.loads(Path(jp).read_text(encoding="utf-8"))
+        assert data["slices"]["high_iv"]["n"] == 1
+        assert data["verdict"]["status"] == "INCONCLUSIVE"
+
+
 def test_json_output_written() -> None:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         live, research = _make_dbs(tmp, n_high=1, n_low=1)

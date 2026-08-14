@@ -18,6 +18,7 @@ class in the snapshot metadata — *before* touching execution. This script:
 Usage:
   python scripts/iv_gate_shadow_vs_pnl.py [--live-db PATH] [--research-db PATH]
   python scripts/iv_gate_shadow_vs_pnl.py --json out.json
+  python scripts/iv_gate_shadow_vs_pnl.py --summary   # cron: one compact line
 """
 
 from __future__ import annotations
@@ -437,7 +438,19 @@ def main() -> int:
     ap.add_argument("--since-days", type=int, default=None,
                     help="restrict decisions/trades to the last N days (7/30)")
     ap.add_argument("--json", type=Path, help="write full report as JSON")
+    ap.add_argument("--summary", action="store_true",
+                    help="compact single-line output for cron (default: verbose)")
     args = ap.parse_args()
+
+    report = build_report(live_db=args.live_db, research_db=args.research_db,
+                          tolerance_ms=args.tolerance_ms, min_n=args.min_n,
+                          since_days=args.since_days)
+
+    if args.summary:
+        _print_summary(report, args.since_days)
+        if args.json:
+            args.json.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return 0
 
     live, research = _resolve_dbs(args)
 
@@ -449,9 +462,6 @@ def main() -> int:
         print(f"  janela:       últimos {args.since_days} dias (decisões + trades)")
     print("=" * 80)
 
-    report = build_report(live_db=args.live_db, research_db=args.research_db,
-                          tolerance_ms=args.tolerance_ms, min_n=args.min_n,
-                          since_days=args.since_days)
     if report.get("error") == "no_trades":
         print("Sem trades no live DB — nada a comparar.")
         return 0
@@ -518,6 +528,28 @@ def main() -> int:
         args.json.write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(f"\nJSON: {args.json}")
     return 0
+
+
+def _print_summary(report: Dict[str, Any], since_days: Optional[int]) -> None:
+    """One compact, machine-parseable line for cron — no verbose tables.
+
+    The line carries the fields a cron job / alert cares about: window,
+    sample size, closed count, the high_iv vs low_iv realized PnL and the
+    verdict status. Exit code stays 0 (the report is observational — the
+    status in the line is the signal, not the return code).
+    """
+    window = f"{since_days}d" if since_days else "all"
+    if report.get("error"):
+        print(f"iv_gate_shadow | window={window} | error={report['error']}")
+        return
+    hi = report["slices"]["high_iv"]
+    lo = report["slices"]["low_iv"]
+    closed = hi["n_closed"] + lo["n_closed"] + report["slices"]["unknown"]["n_closed"]
+    print(
+        f"iv_gate_shadow | window={window} | trades={report['n_trades']} "
+        f"| closed={closed} | hi_net={fmt_money(hi['net_pnl_usd'])} "
+        f"| lo_net={fmt_money(lo['net_pnl_usd'])} | verdict={report['verdict']['status']}"
+    )
 
 
 def _print_windows(args: argparse.Namespace) -> None:
