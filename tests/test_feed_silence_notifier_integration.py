@@ -1,10 +1,12 @@
-"""Integration-offline: engine wires FEED SILENT -> notifier.
+"""Integration-offline: engine wires feed-silence layers -> notifier.
 
-Early (50%), imminent (90%), and cadence (p99) stay in the monitor
-state (dashboard table + logs) but do **not** page Telegram/Discord.
-Only a real outage — ``check()`` crossing 100% → ``FEED SILENT`` — sends
-an alert. Builds a bare TradingEngine (``__new__``, no ``__init__``) with
-a real ``FeedSilenceMonitor`` and a fake notifier.
+Early (50%) and cadence (p99) stay in the monitor state (dashboard table
++ logs) and do **not** page Telegram/Discord. Imminent (90%) — the last
+checkpoint before the outage — pages at error severity, exactly once per
+silence episode (fire-once ``warned_90_pct``, reset on ``beat()``). A real
+outage — ``check()`` crossing 100% → ``FEED SILENT`` — sends the final
+alert. Builds a bare TradingEngine (``__new__``, no ``__init__``) with a
+real ``FeedSilenceMonitor`` and a fake notifier.
 """
 
 from __future__ import annotations
@@ -87,10 +89,10 @@ def _messages(notifier) -> list:
     return [msg for msg, _ in notifier.alerts]
 
 
-def test_early_and_imminent_are_log_only_not_telegram(
+def test_early_is_log_only_not_telegram(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Crossing 50% / 90% updates monitor state but does not page Telegram."""
+    """Crossing 50% updates monitor state but does not page Telegram."""
 
     async def scenario() -> None:
         clock = {"t": 1_000_000.0}
@@ -109,10 +111,39 @@ def test_early_and_imminent_are_log_only_not_telegram(
         assert notifier.alerts == []
         assert mon.snapshot()["liquidation_okx"]["warn_level"] == "early"
 
-        clock["t"] += 0.40 * 3600.0  # 95%
+    asyncio.run(scenario())
+
+
+def test_imminent_pages_telegram_once_per_episode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At 90% the imminent alert pages the notifier at error severity, exactly
+    once per silence episode (fire-once warned_90_pct, reset on beat)."""
+
+    async def scenario() -> None:
+        clock = {"t": 1_000_000.0}
+        engine, mon, notifier = _bare_engine(clock, monkeypatch)
+
+        mon.beat("liquidation_okx", timestamp_ms=int(clock["t"] * 1000))
+        clock["t"] += 0.95 * 3600.0  # 95%
         await _refresh(engine)
-        assert notifier.alerts == []
         assert mon.snapshot()["liquidation_okx"]["warn_level"] == "imminent"
+        assert len(notifier.alerts) == 1
+        msg, level = notifier.alerts[0]
+        assert "FEED QUIET (imminent)" in msg
+        assert level == "error"
+
+        # the same episode continuing does not re-fire
+        clock["t"] += 0.01 * 3600.0
+        await _refresh(engine)
+        assert len(notifier.alerts) == 1
+
+        # a beat resets the fire-once flag -> a new episode pages again
+        mon.beat("liquidation_okx", timestamp_ms=int(clock["t"] * 1000))
+        clock["t"] += 0.95 * 3600.0
+        await _refresh(engine)
+        assert len(notifier.alerts) == 2
+        assert "FEED QUIET (imminent)" in notifier.alerts[-1][0]
 
     asyncio.run(scenario())
 
@@ -134,6 +165,37 @@ def test_degraded_owns_the_telegram_alert(
         assert any("FEED SILENT" in msg for msg in _messages(notifier))
         assert not any("FEED QUIET" in msg for msg in _messages(notifier))
         assert not any("FEED CADENCE" in msg for msg in _messages(notifier))
+
+    asyncio.run(scenario())
+
+
+def test_outage_episode_pages_imminent_then_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One outage episode escalates: imminent (90%) pages first, FEED SILENT
+    (100%) owns the final alert — never the reverse order."""
+
+    async def scenario() -> None:
+        clock = {"t": 1_000_000.0}
+        engine, mon, notifier = _bare_engine(clock, monkeypatch)
+        # production gates repeat FEED SILENT with a 1h cooldown
+        mon._alert_cooldown_sec = 3600.0
+
+        mon.beat("liquidation_okx", timestamp_ms=int(clock["t"] * 1000))
+        clock["t"] += 0.95 * 3600.0  # 95% -> imminent
+        await _refresh(engine)
+        assert len(notifier.alerts) == 1
+        assert "FEED QUIET (imminent)" in notifier.alerts[0][0]
+
+        clock["t"] += 0.15 * 3600.0  # 110% -> degraded
+        await _refresh(engine)
+        assert len(notifier.alerts) == 2
+        assert "FEED SILENT" in notifier.alerts[-1][0]
+
+        # still degraded inside the cooldown: no further pages
+        clock["t"] += 0.5 * 3600.0
+        await _refresh(engine)
+        assert len(notifier.alerts) == 2
 
     asyncio.run(scenario())
 

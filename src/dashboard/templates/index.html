@@ -6,7 +6,7 @@
 <title>Hyperliquid Trading Bot Dashboard</title>
 <script src="/socket.io.min.js"></script>
 <script src="/static/lightweight-charts.standalone.production.js"></script>
-<link rel="stylesheet" href="/static/dashboard.css?v=6">
+<link rel="stylesheet" href="/static/dashboard.css?v=7">
 <style>
 /* Inline fallback — guaranteed to apply */
 :root {
@@ -118,15 +118,6 @@ tr:hover td { background: var(--panel-hover); }
 .section-system .bar { background: var(--yellow); }
 .section-intel .bar { background: var(--accent2); }
 .section-logs .bar { background: var(--dim); }
-details.research-fold { margin: 8px 0 4px 0; }
-details.research-fold > summary { cursor: pointer; list-style: none; }
-details.research-fold > summary::-webkit-details-marker { display: none; }
-details.research-fold:not([open]) > summary .text::after {
-    content: " · click to load";
-    font-weight: 400;
-    text-transform: none;
-    letter-spacing: 0;
-}
 </style>
 </head>
 <body>
@@ -396,12 +387,14 @@ details.research-fold:not([open]) > summary .text::after {
     </div>
 </div>
 
-<!-- Feed silence — threshold vs age per feed (anticipate silences) -->
+<!-- Feed silence — threshold vs age per feed -->
+<div class="grid" style="margin-top:var(--gap);">
+<div class="g-12">
 <div class="panel" style="max-height:260px;">
     <div class="panel-header">Feed Silence <span class="dim" id="feed-silence-meta">threshold vs age</span></div>
     <div class="panel-body" style="padding:6px 8px; max-height:220px; overflow-y:auto;">
         <div id="feed-silence-help" class="muted" style="font-size:10px;line-height:1.4;margin-bottom:6px;">
-            Age vs max-silence. Telegram only when a feed is <b>DEGRADED</b>. Early / cadence stay in this table.
+            Age vs max-silence. Telegram on <b>imminent (90%)</b> and <b>DEGRADED</b>. Early / cadence stay in this table.
         </div>
         <table style="width:100%; font-size:11px; border-collapse:collapse;">
             <thead>
@@ -420,6 +413,8 @@ details.research-fold:not([open]) > summary .text::after {
             </tbody>
         </table>
     </div>
+</div>
+</div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -455,10 +450,6 @@ details.research-fold:not([open]) > summary .text::after {
     </div>
 </div>
 
-<details class="research-fold">
-<summary class="section-label section-intel">
-    <span class="bar"></span><span class="text">Research</span><span class="line"></span>
-</summary>
 <!-- Shadow observability (Phase08) -->
 <div class="section-label section-intel">
     <span class="bar"></span><span class="text">Shadow / Gate progress</span><span class="line"></span>
@@ -726,7 +717,6 @@ details.research-fold:not([open]) > summary .text::after {
         </div>
     </div>
 </div>
-</details>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
 <!-- SECTION: LOGS                                                    -->
@@ -853,6 +843,7 @@ async function verifyAuthAndConnect() {
         hideAuthGate();
         connectSocket();
         pollAll();
+        pollResearch();
         scheduleChartInit();
         return;
     }
@@ -874,6 +865,7 @@ async function verifyAuthAndConnect() {
         hideAuthGate();
         connectSocket();
         pollAll();
+        pollResearch();
         scheduleChartInit();
     } catch (e) {
         showAuthGate("Connection failed.");
@@ -2013,8 +2005,6 @@ pollAll = function pollAll() {
     authFetch("/api/market_data_health").then(r => r.json()).then(d => renderFeedSilence(d)).catch(() => {});
 };
 pollResearch = function pollResearch() {
-    const fold = document.querySelector("details.research-fold");
-    if (fold && !fold.open) return;
     authFetch("/api/shadow_panel?evaluate=0").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
     authFetch("/api/top_traders").then(r => r.json()).then(d => renderTopTradersPanel(d)).catch(() => {});
     authFetch("/api/research_watchdogs").then(r => r.json()).then(d => renderResearchWatchdogs(d)).catch(() => {});
@@ -2038,14 +2028,9 @@ if (!window.__hlDashTimers) {
     }, 5000);
     setInterval(pollAll, 5000);
     setInterval(pollResearch, 60000);
-    document.querySelectorAll("details.research-fold").forEach((el) => {
-        el.addEventListener("toggle", () => { if (el.open) pollResearch(); });
-    });
     // Full hypothetical evaluation is heavy (can block Flask for minutes on large
-    // shadow DBs). Refresh rarely, and only while the research fold is open.
+    // shadow DBs). Refresh rarely; light panel already updates via pollResearch.
     setInterval(() => {
-        const fold = document.querySelector("details.research-fold");
-        if (fold && !fold.open) return;
         authFetch("/api/shadow_panel?evaluate=1").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
     }, 600000);
     setInterval(() => {

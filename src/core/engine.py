@@ -1311,13 +1311,17 @@ class TradingEngine:
                 self._notify(
                     lambda m=msg: self._notifier.send_alert(m, "error")
                 )
-            # Early (50%) / imminent (90%) / cadence (p99) stay in the
-            # monitor + dashboard table. Telegram only for the real outage
-            # (FEED SILENT at 100%) — the 50/90/p99 layers were paging
-            # operators on normal quiet.
+            # Early (50%) and cadence (p99) stay in the monitor + dashboard
+            # table (log-only). Imminent (90%) — the last checkpoint before
+            # the outage — also pages Telegram/Discord at error severity,
+            # exactly once per episode (fire-once warned_90_pct, reset on
+            # beat). FEED SILENT at 100% still owns the real outage alert.
             for msg in self._feed_silence.check_early_warnings():
                 if "(imminent)" in msg:
-                    logger.warning("%s", msg)
+                    logger.error("%s", msg)
+                    self._notify(
+                        lambda m=msg: self._notifier.send_alert(m, "error")
+                    )
                 else:
                     logger.debug("%s", msg)
             for msg in self._feed_silence.check_cadence():
