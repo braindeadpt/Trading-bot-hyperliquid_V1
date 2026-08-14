@@ -6,7 +6,7 @@ import collections
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Deque, Dict, List, Optional, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -236,13 +236,11 @@ class FeedSilenceState:
 
         Nearest-rank percentile over the rolling gap deque — the cadence the
         feed normally keeps. A current gap above the p99 means delivery is
-        thinning out long before the 6h silence threshold trips.
+        thinning out long before the 6h silence threshold trips. Delegates
+        to the module-level ``cadence_percentile`` (single source of truth
+        shared with the lead-time validator).
         """
-        if len(self.gaps) < min_samples:
-            return None
-        ordered = sorted(self.gaps)
-        idx = min(len(ordered) - 1, int(pct * len(ordered)))
-        return float(ordered[idx])
+        return cadence_percentile(self.gaps, pct=pct, min_samples=min_samples)
 
     def cadence_p95_sec(self, min_samples: int = 100) -> Optional[float]:
         """Historical p95 of inter-event gaps (typical quiet ceiling)."""
@@ -251,6 +249,27 @@ class FeedSilenceState:
     def cadence_p99_sec(self, min_samples: int = 100) -> Optional[float]:
         """Historical p99 of inter-event gaps (anomalous-quiet threshold)."""
         return self.cadence_percentile_sec(0.99, min_samples=min_samples)
+
+
+def cadence_percentile(
+    gaps: Sequence[float],
+    pct: float = 0.99,
+    min_samples: int = 100,
+) -> Optional[float]:
+    """Nearest-rank ``pct`` percentile of inter-event gaps, or None with too
+    few samples.
+
+    The cadence the feed normally keeps. Single source of truth: the
+    monitor's ``FeedSilenceState.cadence_percentile_sec`` and the cadence
+    lead-time validator (``scripts/validate_feed_cadence_leadtime.py``)
+    both call this, so the walk-forward simulation measures exactly the
+    production rule and can never drift from it.
+    """
+    if len(gaps) < min_samples:
+        return None
+    ordered = sorted(gaps)
+    idx = min(len(ordered) - 1, int(pct * len(ordered)))
+    return float(ordered[idx])
 
 
 class FeedSilenceMonitor:
