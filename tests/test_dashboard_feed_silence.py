@@ -151,6 +151,84 @@ class TestFeedSilencePayload:
         assert d["feed_silence_degraded"] is False
         assert d["feed_silence_imminent"] is True
 
+    def test_payload_carries_warn_level_per_feed(self) -> None:
+        """Each feed's JSON carries its own warn_level (none/early/imminent/
+        degraded) — the escalation level the panel's State column renders."""
+        silence = _SilenceStub(
+            {
+                "funding_hl": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 30.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                    "warned_50_pct": False,
+                    "warned_90_pct": False,
+                    "warn_level": "none",
+                },
+                "liquidation_okx": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 1980.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                    "warned_50_pct": True,
+                    "warned_90_pct": False,
+                    "warn_level": "early",
+                },
+                "liquidation_bybit": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 3564.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                    "warned_50_pct": True,
+                    "warned_90_pct": True,
+                    "warn_level": "imminent",
+                },
+                "funding_binance": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 7200.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": True,
+                    "warned_50_pct": True,
+                    "warned_90_pct": True,
+                    "warn_level": "degraded",
+                },
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        fs = d["feed_silence"]
+        assert fs["funding_hl"]["warn_level"] == "none"
+        assert fs["liquidation_okx"]["warn_level"] == "early"
+        assert fs["liquidation_bybit"]["warn_level"] == "imminent"
+        assert fs["funding_binance"]["warn_level"] == "degraded"
+
+    def test_payload_warn_level_from_real_monitor(self) -> None:
+        """End-to-end: a real FeedSilenceMonitor wired to the endpoint — the
+        escalation level computed by the monitor (early -> imminent) flows
+        into the payload JSON, not just a stub pass-through."""
+        from src.data.market_data_health import FeedSilenceMonitor
+
+        mon = FeedSilenceMonitor(
+            alert_cooldown_sec=0.0,
+            feeds={"liquidation_okx": 3600.0},
+        )
+        for name in list(mon._enabled_feeds):
+            if name != "liquidation_okx":
+                mon.disable_feed(name)
+        mon.beat("liquidation_okx", timestamp_ms=1_000_000)
+        mon.check_early_warnings(now_ms=1_000_000 + int(0.5 * 3600_000))
+        self._web._engine = _EngineStub(mon, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        assert d["feed_silence"]["liquidation_okx"]["warn_level"] == "early"
+
+        # escalate to 90% -> the same endpoint now reports imminent
+        # (bust the endpoint TTL cache so the refresh re-snapshots the monitor)
+        mon.check_early_warnings(now_ms=1_000_000 + int(0.9 * 3600_000))
+        self._web._ttl_clear()
+        d = self._client.get("/api/market_data_health").get_json()
+        assert d["feed_silence"]["liquidation_okx"]["warn_level"] == "imminent"
+        assert d["feed_silence"]["liquidation_okx"]["degraded"] is False
+
     def test_imminent_flag_false_when_feed_degraded(self) -> None:
         """Once the feed degrades, imminent yields to degraded (never both)."""
         silence = _SilenceStub(
