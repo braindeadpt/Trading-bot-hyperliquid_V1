@@ -1639,6 +1639,11 @@ function renderFeedSilence(payload) {
         // normal quiet (age < p99) from anomalous thinning (age > p99).
         const p95 = st.cadence_p95_sec == null ? null : Number(st.cadence_p95_sec);
         const p99 = st.cadence_p99_sec == null ? null : Number(st.cadence_p99_sec);
+        const p50 = st.cadence_p50_sec == null ? null : Number(st.cadence_p50_sec);
+        const gapPct = st.cadence_pct_current == null ? null : Number(st.cadence_pct_current);
+        // where the CURRENT gap sits in the feed's recorded distribution
+        const gapPctTxt = gapPct != null
+            ? ' · gap actual no percentil ' + gapPct.toFixed(0) + ' do histórico' : '';
         const nSamples = st.cadence_samples == null ? 0 : Number(st.cadence_samples);
         // Cadence breach: the current gap is ABOVE the feed's own rolling p99
         // (the same condition that fires check_cadence) — delivery is thinning
@@ -1717,7 +1722,7 @@ function renderFeedSilence(payload) {
         return '<tr style="border-top:1px solid var(--border);">' +
             '<td style="padding:3px 4px;font-family:monospace;">' + feed + ' ' + creepBadge + ' ' + cadenceBadge + '</td>' +
             '<td style="padding:3px 4px;">' + ageTxt +
-                '<div style="font-size:9px;color:' + expColor + ';white-space:nowrap;" title="Historical p95/p99 inter-event gap of this feed (' + (p95 == null ? "—" : fmtDur(p95)) + ' / ' + (p99 == null ? "—" : fmtDur(p99)) + ') · learning needs ' + (st.cadence_min_samples == null ? 100 : Number(st.cadence_min_samples)) + ' gap samples (FEED_CADENCE_MIN_SAMPLES)">' + expTxt + '</div>' +
+                '<div style="font-size:9px;color:' + expColor + ';white-space:nowrap;" title="Distribuição de gaps do feed (p50/p95/p99 = ' + (p50 == null ? "—" : fmtDur(p50)) + ' / ' + (p95 == null ? "—" : fmtDur(p95)) + ' / ' + (p99 == null ? "—" : fmtDur(p99)) + ')' + gapPctTxt + ' · learning needs ' + (st.cadence_min_samples == null ? 100 : Number(st.cadence_min_samples)) + ' gap samples (FEED_CADENCE_MIN_SAMPLES)">' + expTxt + '</div>' +
             '</td>' +
             '<td style="padding:3px 4px;">' + maxTxt + '</td>' +
             '<td style="padding:3px 4px;width:26%;">' +

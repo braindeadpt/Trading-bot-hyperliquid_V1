@@ -585,6 +585,63 @@ def test_feed_silence_cadence_snapshot_exposes_effective_config() -> None:
     assert mon2.snapshot()["liquidation_okx"]["cadence_min_samples"] == 100
 
 
+def test_feed_silence_cadence_snapshot_distribution() -> None:
+    """The snapshot exposes the real gap distribution (p50/p95/p99) and where
+    the CURRENT gap sits in it (percentile rank, no learning gate)."""
+    mon = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+        cadence_min_samples=5,
+    )
+    for name in list(mon._enabled_feeds):
+        if name != "liquidation_okx":
+            mon.disable_feed(name)
+    base = 1_000_000
+    mon.beat("liquidation_okx", timestamp_ms=base)
+    for gap in (30, 60, 90, 120, 150):  # gaps: 30..150s
+        base += gap * 1000
+        mon.beat("liquidation_okx", timestamp_ms=base)
+    now = base + 60_000  # age = 60s
+    snap = mon.snapshot(now_ms=now)["liquidation_okx"]
+    # nearest-rank over [30,60,90,120,150]: p50 idx=int(2.5)=2 -> 90
+    assert snap["cadence_p50_sec"] == 90.0
+    # p95/p99: idx=int(4.75)=4 -> 150
+    assert snap["cadence_p95_sec"] == 150.0
+    assert snap["cadence_p99_sec"] == 150.0
+    assert snap["cadence_samples"] == 5
+    # current 60s: gaps <= 60 are {30,60} -> 2/5 = 40%
+    assert snap["cadence_pct_current"] == 40.0
+
+    # before min_samples: percentiles are None (still learning) but the
+    # descriptive percentile of the current gap works regardless
+    mon2 = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+        cadence_min_samples=100,
+    )
+    for name in list(mon2._enabled_feeds):
+        if name != "liquidation_okx":
+            mon2.disable_feed(name)
+    b2 = 1_000_000
+    mon2.beat("liquidation_okx", timestamp_ms=b2)
+    mon2.beat("liquidation_okx", timestamp_ms=b2 + 30_000)
+    snap2 = mon2.snapshot(now_ms=b2 + 60_000)["liquidation_okx"]
+    assert snap2["cadence_p50_sec"] is None  # still learning
+    assert snap2["cadence_pct_current"] == 100.0  # age 30 >= the one gap
+
+    # never-seen feed: no distribution at all
+    mon3 = FeedSilenceMonitor(
+        alert_cooldown_sec=0.0,
+        feeds={"liquidation_okx": 3600.0},
+    )
+    for name in list(mon3._enabled_feeds):
+        if name != "liquidation_okx":
+            mon3.disable_feed(name)
+    snap3 = mon3.snapshot(now_ms=1_000_000)["liquidation_okx"]
+    assert snap3["cadence_pct_current"] is None
+    assert snap3["cadence_p50_sec"] is None
+
+
 def test_feed_silence_on_alert_records_every_emission() -> None:
     """The on_alert sink receives (feed, alert_type, fired_ms, message) for
     every emitted early/imminent/degraded alert — the audit trail of WHEN

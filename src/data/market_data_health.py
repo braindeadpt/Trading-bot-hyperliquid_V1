@@ -573,6 +573,9 @@ class FeedSilenceMonitor:
                 "early_count_today": st.early_count_today,
                 "imminent_count_today": st.imminent_count_today,
                 "warned_cadence": st.warned_cadence,
+                "cadence_p50_sec": st.cadence_percentile_sec(
+                    0.50, min_samples=self._cadence_min_samples
+                ),
                 "cadence_p95_sec": st.cadence_p95_sec(
                     min_samples=self._cadence_min_samples
                 ),
@@ -581,6 +584,9 @@ class FeedSilenceMonitor:
                 ),
                 "cadence_samples": len(st.gaps),
                 "cadence_min_samples": self._cadence_min_samples,
+                # Where the CURRENT gap sits in the recorded distribution
+                # (0-100, rank-based; None with no age or no gaps yet).
+                "cadence_pct_current": self._current_gap_percentile(st, age),
                 "warn_fraction": round(self._warn_fraction, 4),
                 "imminent_fraction": round(self._imminent_fraction, 4),
                 "warn_level": (
@@ -591,6 +597,23 @@ class FeedSilenceMonitor:
                 ),
             }
         return out
+
+    @staticmethod
+    def _current_gap_percentile(
+        st: FeedSilenceState,
+        age_sec: Optional[float],
+    ) -> Optional[float]:
+        """Rank-based percentile of the current gap within the recorded gaps.
+
+        ``100 * (# recorded gaps <= current age) / len(gaps)`` — where the
+        current silence sits in the feed's own distribution, no learning
+        gate (it is a descriptive stat, not a detector threshold). None
+        when the feed was never seen or has no recorded gaps.
+        """
+        if age_sec is None or not st.gaps:
+            return None
+        below = sum(1 for g in st.gaps if g <= age_sec)
+        return round(100.0 * below / len(st.gaps), 1)
 
     @property
     def any_degraded(self) -> bool:

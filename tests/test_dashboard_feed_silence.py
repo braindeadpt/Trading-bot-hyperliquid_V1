@@ -250,6 +250,35 @@ class TestFeedSilencePayload:
         assert d["feed_silence"]["liquidation_okx"]["warn_level"] == "imminent"
         assert d["feed_silence"]["liquidation_okx"]["degraded"] is False
 
+    def test_payload_carries_gap_distribution(self) -> None:
+        """The endpoint exposes the real gap distribution (p50/p95/p99) and
+        where the current gap sits in it, from a real monitor with history."""
+        from src.data.market_data_health import FeedSilenceMonitor
+
+        mon = FeedSilenceMonitor(
+            alert_cooldown_sec=0.0,
+            feeds={"liquidation_okx": 3600.0},
+            cadence_min_samples=3,
+        )
+        for name in list(mon._enabled_feeds):
+            if name != "liquidation_okx":
+                mon.disable_feed(name)
+        base = int(time.time() * 1000)
+        # beats with gaps 150/90/60/20s; the last beat 40s before now
+        for t in (base - 360_000, base - 210_000, base - 120_000,
+                  base - 60_000, base - 40_000):
+            mon.beat("liquidation_okx", timestamp_ms=t)
+        self._web._engine = _EngineStub(mon, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        fs = d["feed_silence"]["liquidation_okx"]
+        # age ~40s -> gaps <= age = {20} -> 25%
+        assert fs["cadence_pct_current"] == 25.0
+        # nearest-rank over [20,60,90,150]: p50 idx=2 -> 90; p95/p99 -> 150
+        assert fs["cadence_p50_sec"] == 90.0
+        assert fs["cadence_p95_sec"] == 150.0
+        assert fs["cadence_p99_sec"] == 150.0
+        assert fs["cadence_samples"] == 4
+
     def test_imminent_flag_false_when_feed_degraded(self) -> None:
         """Once the feed degrades, imminent yields to degraded (never both)."""
         silence = _SilenceStub(
@@ -638,3 +667,14 @@ class TestFeedSilenceTemplate:
         assert "st.cadence_min_samples" in html
         assert "learning needs " in html
         assert "FEED_CADENCE_MIN_SAMPLES" in html
+
+    def test_template_tooltip_shows_gap_distribution(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # the exp-gap tooltip carries the real distribution + current pct
+        assert "st.cadence_p50_sec" in html
+        assert "st.cadence_pct_current" in html
+        assert "gapPct" in html
+        assert "gapPctTxt" in html
+        assert "Distribuição de gaps do feed" in html
+        assert "p50/p95/p99" in html
+        assert "gap actual no percentil " in html
