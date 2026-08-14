@@ -404,12 +404,13 @@ tr:hover td { background: var(--panel-hover); }
                     <th title="Max allowed silence before degraded">Threshold</th>
                     <th title="age / threshold — how close to degrading">% of threshold</th>
                     <th title="Max % of threshold per 10-min bucket, last 24h — a rising sawtooth = age growing between resets">24h %</th>
+                    <th title="Max age per UTC day, last 14 days — a rising staircase = age creeping between resets">14d max age</th>
                     <th title="Fire-once early/imminent alerts already sent this silence episode (reset on beat)">Alerted</th>
                     <th title="Silence watchdog state">State</th>
                 </tr>
             </thead>
             <tbody id="feed-silence-tbody">
-                <tr><td colspan="7" class="muted">Waiting...</td></tr>
+                <tr><td colspan="8" class="muted">Waiting...</td></tr>
             </tbody>
         </table>
     </div>
@@ -1503,15 +1504,38 @@ function sparklineSvg(series, w, h) {
         '</svg>';
 }
 
+function sparklineAbs(series, w, h, maxSilenceSec) {
+    // series: [[ts_ms, max_age_sec], ...] — daily max age, last 14 days.
+    // Raw seconds scaled to the cell; color by fraction of the feed's
+    // silence threshold so a stair to 90%+ reads red like the % columns.
+    if (!series || !series.length) return '<span class="muted">—</span>';
+    const vals = series.map(p => Math.max(0, Number(p[1])));
+    const minV = Math.min.apply(null, vals);
+    const maxV = Math.max.apply(null, vals);
+    const span = Math.max(1, maxV - minV);
+    const pad = 2;
+    const x = (i) => pad + (i / Math.max(1, vals.length - 1)) * (w - 2 * pad);
+    const y = (v) => (h - pad) - ((v - minV) / span) * (h - 2 * pad);
+    const pts = vals.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
+    const th = Math.max(1, Number(maxSilenceSec) || 1);
+    const lastPct = (vals[vals.length - 1] / th) * 100;
+    const color = lastPct >= 90 ? "var(--down)" : lastPct >= 60 ? "var(--warn, #d29922)" : "var(--up)";
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block;">' +
+        '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.2" />' +
+        '<circle cx="' + x(vals.length - 1).toFixed(1) + '" cy="' + y(vals[vals.length - 1]).toFixed(1) + '" r="1.6" fill="' + color + '" />' +
+        '</svg>';
+}
+
 function renderFeedSilence(payload) {
     const tbody = document.getElementById("feed-silence-tbody");
     const meta = document.getElementById("feed-silence-meta");
     if (!tbody) return;
     const sil = (payload && payload.feed_silence) || {};
     const sparks = (payload && payload.feed_silence_spark) || {};
+    const daily = (payload && payload.feed_silence_daily) || {};
     const entries = Object.entries(sil);
     if (!entries.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="muted">No silence data (feed_silence monitor off)</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="muted">No silence data (feed_silence monitor off)</td></tr>';
         if (meta) meta.textContent = "threshold vs age";
         return;
     }
@@ -1599,6 +1623,7 @@ function renderFeedSilence(payload) {
                 '</div>' +
             '</td>' +
             '<td style="padding:3px 4px;width:96px;">' + sparklineSvg(sparks[feed] || [], 92, 20) + '</td>' +
+            '<td style="padding:3px 4px;width:96px;" title="Daily max age (seconds) per UTC day, last 14 days">' + sparklineAbs(daily[feed] || [], 92, 20, max) + '</td>' +
             '<td style="padding:3px 4px;font-weight:600;color:' + alertedColor + ';">' + alertedTxt + '</td>' +
             '<td style="padding:3px 4px;font-weight:600;color:' + stateColor + ';">' + stateTxt + '</td>' +
             '</tr>';

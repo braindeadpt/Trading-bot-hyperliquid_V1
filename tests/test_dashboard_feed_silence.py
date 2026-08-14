@@ -288,6 +288,66 @@ class TestFeedSilencePayload:
         assert len(spark) == 2
         assert spark[1] == [float(bucket), 55.0]
 
+    def test_payload_carries_daily_max_age_series(self, monkeypatch, tmp_path) -> None:
+        """The 14d column reads feed_age_history (daily max age per feed)."""
+        import src.data.research_database as rdb_mod
+        from src.data.research_database import ResearchDatabase
+
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        now = int(time.time() * 1000)
+        day = now - (now % 86_400_000)
+        rdb.save_feed_age_history(
+            [
+                ("funding_hl", day - 2 * 86_400_000, 300.0, 4),
+                ("funding_hl", day - 86_400_000, 1200.0, 5),
+                ("funding_hl", day, 2700.0, 3),
+            ]
+        )
+
+        def fake_research_db(*a, **k):
+            return rdb
+
+        monkeypatch.setattr(rdb_mod, "ResearchDatabase", fake_research_db)
+        silence = _SilenceStub(
+            {
+                "funding_hl": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 15.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                }
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        daily = d["feed_silence_daily"]["funding_hl"]
+        assert len(daily) == 3
+        assert [p[1] for p in daily] == [300.0, 1200.0, 2700.0]
+        # ascending by UTC day
+        assert daily[0][0] < daily[1][0] < daily[2][0]
+
+    def test_daily_series_best_effort_on_missing_db(self, monkeypatch) -> None:
+        """A broken research DB degrades to empty daily series, never an error."""
+        import src.data.research_database as rdb_mod
+
+        def boom(*a, **k):
+            raise RuntimeError("db broken")
+
+        monkeypatch.setattr(rdb_mod, "ResearchDatabase", boom)
+        silence = _SilenceStub(
+            {
+                "funding_hl": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 15.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                }
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        assert d["feed_silence_daily"] == {}  # best-effort empty
+
     def test_sparkline_best_effort_on_missing_db(self, monkeypatch) -> None:
         """A broken research DB degrades to empty series, never an error."""
         import src.data.research_database as rdb_mod
@@ -367,3 +427,12 @@ class TestFeedSilenceTemplate:
         assert "state-degraded" in html
         assert "hdr.classList.toggle" in html
         assert "warned_90_pct && !st.degraded" in html
+
+    def test_template_has_14d_daily_max_age_column(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # 8 columns now: the extra one renders the daily max-age sparkline
+        assert ">14d max age</th>" in html
+        assert 'colspan="8"' in html
+        assert "feed_silence_daily" in html
+        assert "function sparklineAbs(" in html
+        assert "sparklineAbs(daily[feed] || [], 92, 20, max)" in html

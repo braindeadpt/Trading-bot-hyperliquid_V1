@@ -146,6 +146,36 @@ def _feed_silence_sparklines(feed_silence: Dict[str, Any]) -> Dict[str, List[Lis
     return _ttl_put("feed_silence_sparklines", out, _FEED_SPARK_TTL_S)
 
 
+def _feed_silence_daily(feed_silence: Dict[str, Any]) -> Dict[str, List[List[float]]]:
+    """Daily max-age series per feed (last 14 days) for the panel sparkline.
+
+    Reads ``feed_age_history`` — the daily rollup the FeedAgeRecorder writes
+    at each day rollover (max age per feed per UTC day, raised on later
+    samples). Best-effort: a missing/broken research DB degrades to empty
+    series, never an error. Values are absolute seconds, so the template
+    scales them against each feed's own threshold for the color.
+    """
+    cached = _ttl_get("feed_silence_daily")
+    if cached is not None:
+        return cached
+    out: Dict[str, List[List[float]]] = {}
+    if not feed_silence:
+        return out
+    try:
+        from src.data.research_database import ResearchDatabase
+
+        rdb = ResearchDatabase()
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - 14 * 86_400_000
+        for feed in feed_silence:
+            series = rdb.load_feed_age_history(feed, start_ms, now_ms)
+            out[feed] = [[float(day), float(max_age)] for day, max_age, _ in series]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("feed_silence_daily failed: %s", exc)
+        return out
+    return _ttl_put("feed_silence_daily", out, _FEED_SPARK_TTL_S)
+
+
 def _feed_silence_imminent(feed_silence: Dict[str, Any]) -> bool:
     """True when any contracted feed is past ~90% of its silence threshold
     but not yet degraded — the window where the header should warn early.
@@ -1077,6 +1107,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
             body["feed_silence_spark"] = _feed_silence_sparklines(
                 body.get("feed_silence", {})
             )
+            body["feed_silence_daily"] = _feed_silence_daily(
+                body.get("feed_silence", {})
+            )
             return jsonify(_ttl_put("market_data_health", body, _MD_HEALTH_TTL_S))
         health = getattr(_engine, "_market_data_health", {}) or {}
         rows = [h.to_dict() for h in health.values()]
@@ -1094,6 +1127,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 body["feed_silence"]
             )
         body["feed_silence_spark"] = _feed_silence_sparklines(
+            body.get("feed_silence", {})
+        )
+        body["feed_silence_daily"] = _feed_silence_daily(
             body.get("feed_silence", {})
         )
         return jsonify(_ttl_put("market_data_health", body, _MD_HEALTH_TTL_S))
