@@ -73,6 +73,8 @@ tr:hover td { background: var(--panel-hover); }
 .yellow { color: var(--yellow); font-weight: 600; }
 .pill { display: inline-block; padding: 0px 4px; border-radius: 3px; font-size: 8px; font-weight: 700; text-transform: uppercase; }
 .pill-pending { background: rgba(217,119,6,0.15); color: #d97706; }
+.pill-creep { background: rgba(210,153,34,0.18); color: #d29922; }
+.pill-creep-hi { background: rgba(239,68,68,0.18); color: #ef4444; }
 .pill-approved { background: rgba(26,71,42,0.3); color: var(--up); }
 .pill-rejected { background: rgba(239,68,68,0.15); color: #ef4444; }
 .pill-executed { background: rgba(59,130,246,0.15); color: #3b82f6; }
@@ -1545,6 +1547,7 @@ function renderFeedSilence(payload) {
     const sil = (payload && payload.feed_silence) || {};
     const sparks = (payload && payload.feed_silence_spark) || {};
     const daily = (payload && payload.feed_silence_daily) || {};
+    const creep = (payload && payload.feed_silence_creep) || {};
     const entries = Object.entries(sil);
     if (!entries.length) {
         tbody.innerHTML = '<tr><td colspan="8" class="muted">No silence data (feed_silence monitor off)</td></tr>';
@@ -1620,8 +1623,16 @@ function renderFeedSilence(payload) {
             : (pct != null && pct >= 90 ? "var(--down)" : pct != null && pct >= 60 ? "var(--warn, #d29922)" : "var(--up)");
         const barW = Math.max(2, Math.min(100, pct == null ? 0 : pct));
         const barColor = barCls === "crit" ? "var(--down)" : barCls === "warn" ? "#d29922" : "var(--up)";
+        // Creep badge: the production staircase rule (feed_silence_creep) sees
+        // the daily max age rising consistently — same signal as the
+        // feed_age_creep watchdog. Amber normally, red when the staircase is
+        // already >=90% of the threshold.
+        const cr = creep[feed];
+        const creepBadge = cr && cr.creeping
+            ? '<span class="pill ' + ((pct != null && pct >= 90) ? "pill-creep-hi" : "pill-creep") + '" title="max age diário a subir há ' + cr.days + ' dias (+' + Math.round(cr.growth_frac * 100) + '% do threshold) — cadência a degradar">creeping</span>'
+            : '';
         return '<tr style="border-top:1px solid var(--border);">' +
-            '<td style="padding:3px 4px;font-family:monospace;">' + feed + '</td>' +
+            '<td style="padding:3px 4px;font-family:monospace;">' + feed + ' ' + creepBadge + '</td>' +
             '<td style="padding:3px 4px;">' + ageTxt +
                 '<div style="font-size:9px;color:' + expColor + ';white-space:nowrap;" title="Historical p95/p99 inter-event gap of this feed (' + (p95 == null ? "—" : fmtDur(p95)) + ' / ' + (p99 == null ? "—" : fmtDur(p99)) + ')">' + expTxt + '</div>' +
             '</td>' +

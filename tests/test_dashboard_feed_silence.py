@@ -326,6 +326,105 @@ class TestFeedSilencePayload:
         # ascending by UTC day
         assert daily[0][0] < daily[1][0] < daily[2][0]
 
+    def test_payload_carries_creep_verdict_per_feed(self, monkeypatch, tmp_path) -> None:
+        """A rising daily-max staircase (production rule) flags the feed in
+        feed_silence_creep — the badge source."""
+        import src.data.research_database as rdb_mod
+        from src.data.research_database import ResearchDatabase
+
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        now = int(time.time() * 1000)
+        day = now - (now % 86_400_000)
+        rdb.save_feed_age_history(
+            [
+                ("funding_hl", day - 4 * 86_400_000, 600.0, 5),
+                ("funding_hl", day - 3 * 86_400_000, 900.0, 5),
+                ("funding_hl", day - 2 * 86_400_000, 1200.0, 5),
+                ("funding_hl", day - 86_400_000, 1600.0, 5),
+                ("funding_hl", day, 2100.0, 5),
+            ]
+        )
+
+        def fake_research_db(*a, **k):
+            return rdb
+
+        monkeypatch.setattr(rdb_mod, "ResearchDatabase", fake_research_db)
+        silence = _SilenceStub(
+            {
+                "funding_hl": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 15.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                }
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        cr = d["feed_silence_creep"]["funding_hl"]
+        assert cr["creeping"] is True
+        assert cr["days"] == 5
+        assert cr["growth_frac"] == pytest.approx(1500 / 3600, abs=1e-4)
+        assert cr["last_max_age_sec"] == 2100.0
+
+    def test_creep_quiet_for_flat_feed(self, monkeypatch, tmp_path) -> None:
+        """No staircase -> the feed is absent from feed_silence_creep (no badge)."""
+        import src.data.research_database as rdb_mod
+        from src.data.research_database import ResearchDatabase
+
+        rdb = ResearchDatabase(tmp_path / "research.db")
+        now = int(time.time() * 1000)
+        day = now - (now % 86_400_000)
+        rdb.save_feed_age_history(
+            [
+                ("funding_hl", day - 4 * 86_400_000, 600.0, 5),
+                ("funding_hl", day - 3 * 86_400_000, 610.0, 5),
+                ("funding_hl", day - 2 * 86_400_000, 590.0, 5),
+                ("funding_hl", day - 86_400_000, 620.0, 5),
+                ("funding_hl", day, 600.0, 5),
+            ]
+        )
+
+        def fake_research_db(*a, **k):
+            return rdb
+
+        monkeypatch.setattr(rdb_mod, "ResearchDatabase", fake_research_db)
+        silence = _SilenceStub(
+            {
+                "funding_hl": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 15.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                }
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        assert d["feed_silence_creep"] == {}
+
+    def test_creep_best_effort_on_missing_db(self, monkeypatch) -> None:
+        """A broken research DB degrades to an empty creep map, never an error."""
+        import src.data.research_database as rdb_mod
+
+        def boom(*a, **k):
+            raise RuntimeError("db broken")
+
+        monkeypatch.setattr(rdb_mod, "ResearchDatabase", boom)
+        silence = _SilenceStub(
+            {
+                "funding_hl": {
+                    "last_event_ms": 1_000,
+                    "age_sec": 15.0,
+                    "max_silence_sec": 3600.0,
+                    "degraded": False,
+                }
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        assert d["feed_silence_creep"] == {}
+
     def test_daily_series_best_effort_on_missing_db(self, monkeypatch) -> None:
         """A broken research DB degrades to empty daily series, never an error."""
         import src.data.research_database as rdb_mod
@@ -436,3 +535,13 @@ class TestFeedSilenceTemplate:
         assert "feed_silence_daily" in html
         assert "function sparklineAbs(" in html
         assert "sparklineAbs(daily[feed] || [], 92, 20, max)" in html
+
+    def test_template_renders_creeping_badge(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # the feed row shows a 'creeping' pill when feed_silence_creep flags it
+        assert "feed_silence_creep" in html
+        assert "pill-creep" in html
+        assert "pill-creep-hi" in html
+        assert "creepBadge" in html
+        assert ">creeping</span>" in html
+        assert "cr.growth_frac" in html

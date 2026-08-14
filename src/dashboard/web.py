@@ -176,6 +176,46 @@ def _feed_silence_daily(feed_silence: Dict[str, Any]) -> Dict[str, List[List[flo
     return _ttl_put("feed_silence_daily", out, _FEED_SPARK_TTL_S)
 
 
+def _feed_silence_creep(feed_silence: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Per-feed creep verdict for the panel badge.
+
+    Runs the SAME production rule the research supervisor watchdog uses
+    (``staircase_verdict`` in ``scripts/feed_age_creep_recheck.py`` — daily
+    max age non-decreasing over >=5 days with meaningful growth on the
+    feed's own threshold), so the Feed Silence badge always agrees with the
+    ``feed_age_creep`` watchdog panel. Best-effort: broken DB / missing
+    history degrades to no badge, never an error.
+    """
+    cached = _ttl_get("feed_silence_creep")
+    if cached is not None:
+        return cached
+    out: Dict[str, Dict[str, Any]] = {}
+    if not feed_silence:
+        return out
+    try:
+        from scripts.feed_age_creep_recheck import (  # lazy, like other scripts
+            load_daily_history,
+            staircase_verdict,
+        )
+        from src.data.research_database import ResearchDatabase
+
+        rdb = ResearchDatabase()
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - 14 * 86_400_000
+        for feed, st in feed_silence.items():
+            max_silence = float(st.get("max_silence_sec") or 0.0)
+            if max_silence <= 0:
+                continue
+            rows = load_daily_history(rdb, feed, start_ms, now_ms)
+            verdict = staircase_verdict(rows, max_silence)
+            if verdict is not None:
+                out[feed] = verdict
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("feed_silence_creep failed: %s", exc)
+        return out
+    return _ttl_put("feed_silence_creep", out, _FEED_SPARK_TTL_S)
+
+
 def _feed_silence_imminent(feed_silence: Dict[str, Any]) -> bool:
     """True when any contracted feed is past ~90% of its silence threshold
     but not yet degraded — the window where the header should warn early.
@@ -1110,6 +1150,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
             body["feed_silence_daily"] = _feed_silence_daily(
                 body.get("feed_silence", {})
             )
+            body["feed_silence_creep"] = _feed_silence_creep(
+                body.get("feed_silence", {})
+            )
             return jsonify(_ttl_put("market_data_health", body, _MD_HEALTH_TTL_S))
         health = getattr(_engine, "_market_data_health", {}) or {}
         rows = [h.to_dict() for h in health.values()]
@@ -1130,6 +1173,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
             body.get("feed_silence", {})
         )
         body["feed_silence_daily"] = _feed_silence_daily(
+            body.get("feed_silence", {})
+        )
+        body["feed_silence_creep"] = _feed_silence_creep(
             body.get("feed_silence", {})
         )
         return jsonify(_ttl_put("market_data_health", body, _MD_HEALTH_TTL_S))
