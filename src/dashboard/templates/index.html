@@ -2069,7 +2069,8 @@ function renderPositions(data) {
         const pnlClass = pnl >= 0 ? "up" : "down";
         const unreal = p.unrealized_pnl || 0;
         const unrealClass = unreal >= 0 ? "up" : "down";
-        return `<tr>
+        const ivTip = ivTipTxt(p.iv_percentile, p.iv_threshold, p.iv_class);
+        return `<tr title="${ivTip}">
             <td><span class="highlight">${p.symbol}</span></td>
             <td class="${sideClass}">${p.side ? p.side.toUpperCase() : "--"}</td>
             <td class="num">${fmtNum(p.size, 6)}</td>
@@ -2091,6 +2092,25 @@ function ivBadge(cls) {
     if (!cls || cls === "unknown") return '<span class="muted">—</span>';
     const color = cls === "high_iv" ? "var(--up)" : "var(--down)";
     return '<span style="color:' + color + ';font-weight:600;">' + cls.replace("_", " ") + '</span>';
+}
+
+// Classification slack: how far the percentile sits from the IV threshold
+// (e.g. "+5.3 acima de 66.7"). Shared by the trade and position tooltips so
+// both read the same delta. Points of percentile, not %.
+function ivDeltaTxt(pct, threshold) {
+    if (pct == null || threshold == null) return "";
+    const d = pct - threshold;
+    const dir = d >= 0 ? "acima de" : "abaixo de";
+    return "Δ " + (d >= 0 ? "+" : "−") + Math.abs(d).toFixed(1) + " " + dir + " " + threshold;
+}
+
+function ivTipTxt(pct, threshold, cls) {
+    if (pct == null) return "IV: sem decisão shadow";
+    const thr = threshold != null ? threshold : 66.7;
+    let tip = `IV ${pct.toFixed(1)}% (threshold ${thr}) → ${cls || "unknown"}`;
+    const delta = ivDeltaTxt(pct, thr);
+    if (delta) tip += " · " + delta;
+    return tip;
 }
 
 let _tradesIvFilter = "all";
@@ -2175,9 +2195,7 @@ function renderTrades(data) {
         const fund = typeof t.funding_paid === "number" ? t.funding_paid : 0;
         const fundDisplay = fund === 0 ? "<span class='muted'>0.00</span>" : ((fund >= 0 ? "+" : "") + "$" + Math.abs(fund).toFixed(2));
         const fundClass = fund > 0 ? "down" : (fund < 0 ? "up" : "muted");
-        const ivTip = t.iv_percentile != null
-            ? `IV ${t.iv_percentile.toFixed(1)}% (threshold ${t.iv_threshold != null ? t.iv_threshold : 66.7}) → ${t.iv_class}`
-            : "IV: sem decisão shadow";
+        const ivTip = ivTipTxt(t.iv_percentile, t.iv_threshold, t.iv_class);
         const liqBadge = t.exit_reason === "liquidation_stop_out"
             ? '<span class="pill pill-liq" style="color:var(--down);font-weight:600;" title="Flush de liquidações validou o side — stop-out forçado">LIQ STOP-OUT</span>'
             : (t.exit_reason || (isOpen ? "● Active" : ""));

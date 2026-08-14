@@ -329,9 +329,12 @@ class TestIvGateShadowTemplate:
             encoding="utf-8"
         )
         assert "ivTip" in html
-        assert "IV ${t.iv_percentile.toFixed(1)}%" in html
-        assert "threshold ${t.iv_threshold != null ? t.iv_threshold : 66.7}" in html
-        assert "→ ${t.iv_class}" in html
+        # The exact-percentile + threshold formatting now lives in the shared
+        # ivTipTxt helper (used by trades AND positions rows).
+        assert "IV ${pct.toFixed(1)}% (threshold ${thr})" in html
+        assert 'const thr = threshold != null ? threshold : 66.7;' in html
+        assert '${cls || "unknown"}' in html
+        assert "ivTipTxt(t.iv_percentile, t.iv_threshold, t.iv_class)" in html
         assert 'title="Funding paid: $${fund.toFixed(4)} · ${ivTip}"' in html
 
     def test_trades_log_has_iv_class_filter(self) -> None:
@@ -359,6 +362,25 @@ class TestIvGateShadowTemplate:
         assert "ivBadge(p.iv_class)" in html
         assert 'colspan="12"' in html
         assert html.count("IV pct") >= 2  # trades + positions headers
+
+    def test_iv_tooltip_shows_delta_to_threshold(self) -> None:
+        """Trade and position tooltips show the classification slack: the
+        percentile's distance to the threshold (e.g. +5.3 acima de 66.7) so
+        the operator sees at a glance how close the class is to flipping."""
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        # Shared helper: delta = pct - threshold, signed, with direction.
+        assert 'function ivDeltaTxt(pct, threshold)' in html
+        assert 'const d = pct - threshold;' in html
+        assert 'd >= 0 ? "acima de" : "abaixo de"' in html
+        assert '"Δ " + (d >= 0 ? "+" : "−") + Math.abs(d).toFixed(1)' in html
+        # Shared tooltip builder used by BOTH trades and positions rows.
+        assert 'function ivTipTxt(pct, threshold, cls)' in html
+        assert 'ivTipTxt(t.iv_percentile, t.iv_threshold, t.iv_class)' in html
+        assert 'ivTipTxt(p.iv_percentile, p.iv_threshold, p.iv_class)' in html
+        # Positions rows now carry the tooltip (they had none before).
+        assert '<tr title="${ivTip}">' in html
 
     def test_trades_panel_has_liquidation_stop_out_counter_and_badge(self) -> None:
         """The trades panel surfaces liquidation stop-outs: a counter in the
