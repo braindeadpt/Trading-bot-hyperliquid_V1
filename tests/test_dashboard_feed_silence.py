@@ -678,3 +678,16 @@ class TestFeedSilenceTemplate:
         assert "Distribuição de gaps do feed" in html
         assert "p50/p95/p99" in html
         assert "gap actual no percentil " in html
+
+    def test_template_exp_gap_colored_by_current_percentile(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # the exp-gap color is a continuous 0-100 ramp of the current gap's
+        # rank in the feed's own distribution, not the p95/p99 ternary
+        assert "function cadenceColor(" in html
+        assert "colorPct" in html
+        assert "hsl(" in html
+        assert "130 * (1 - t)" in html
+        assert 'expColor = colorPct == null ? "var(--muted)" : cadenceColor(colorPct)' in html
+        # the p95/p99 vars survive for the badge and the comparison text
+        assert "gapOverP99" in html
+        assert "gapOverP95" in html
