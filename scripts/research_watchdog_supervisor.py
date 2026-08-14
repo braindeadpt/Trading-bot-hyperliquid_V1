@@ -18,8 +18,13 @@ Unifies the three auto-rerun evidence gates that previously ran as separate
     consistent staircase (non-decreasing daily max over ≥5 days, growing a
     meaningful fraction of its silence threshold) — fire-once per episode,
     re-armed when the feed recovers.
+  * **Feed cadence** (``scripts/feed_cadence_diagnostic.py``) compares each
+    contracted feed's recent inter-event gaps against its own historical
+    p95/p99 and alerts when a feed turns **DEGRADING** (recent median above
+    its historical p99 — consistently slower than it used to be) —
+    fire-once per episode, re-armed on recovery.
 
-All four are **read-only evidence gates**: they run probes and write decision
+All five are **read-only evidence gates**: they run probes and write decision
 reports; nothing here trades or touches the OMS.
 
 State is held in ONE gitignored file (``data/research/research_watchdogs_state.json``)
@@ -64,6 +69,7 @@ WATCHDOG_IDS = (
     "liquidation_flush",
     "iv_gate_shadow",
     "feed_age_creep",
+    "feed_cadence",
 )
 
 # ── helpers reused from the per-gate scripts (single source of truth) ──
@@ -99,6 +105,12 @@ from scripts.feed_age_creep_recheck import (  # noqa: E402
     resolve_contracts,
     write_report as write_creep_report,
 )
+from scripts.feed_cadence_diagnostic import (  # noqa: E402
+    DEFAULT_DB as CADENCE_DEFAULT_DB,
+    run_cadence_diagnostic,
+)
+from src.core.engine import feed_silence_contracts  # noqa: E402
+from src.utils.config import load_config  # noqa: E402
 
 # Legacy per-watchdog state files (migration source on first run).
 LEGACY_STATE_PATHS: Dict[str, Path] = {
@@ -187,6 +199,11 @@ def fresh_state() -> Dict[str, Dict[str, Any]]:
         "liquidation_flush": {"triggered": False, "runs": []},
         "iv_gate_shadow": {"triggered": False, "runs": []},
         "feed_age_creep": {
+            "triggered": False,
+            "runs": [],
+            "feeds_alerted": {},
+        },
+        "feed_cadence": {
             "triggered": False,
             "runs": [],
             "feeds_alerted": {},
@@ -490,16 +507,117 @@ def check_creeping_age(
     return fired
 
 
+# ── feed cadence watchdog ────────────────────────────────────────────
+
+def cadence_diagnostic() -> Dict[str, Any]:
+    """Live cadence verdict per contracted feed (OK/WATCH/DEGRADING...).
+
+    Reuses ``run_cadence_diagnostic`` from the diagnostic script with THIS
+    deployment's contracts and live DB — the single function the CLI, the
+    dashboard and this watchdog all read, so the panel and the alert can
+    never disagree on a feed's status.
+    """
+    contracts = feed_silence_contracts(load_config())
+    return run_cadence_diagnostic(CADENCE_DEFAULT_DB, contracts)
+
+
+def notify_cadence_degrading(feed: str, d: Dict[str, Any], run: Dict[str, Any]) -> None:
+    """Fire the DEGRADING alert best-effort — never blocks the detector.
+
+    Same contract as ``notify_creeping_age``: build the notifier per call,
+    send with a timeout, swallow every failure.
+    """
+    notifier = build_alert_notifier()
+    if notifier is None:
+        log(f"cadence: alert skipped for `{feed}` — no notifier")
+        return
+    msg = (
+        f"⚠️ <b>FEED CADENCE DEGRADING</b>\n"
+        f"`{feed}` está consistentemente mais lento que o seu histórico: "
+        f"mediana recente {d['recent_median_sec'] / 60:.1f}m vs p99 "
+        f"histórico {d['hist_p99_sec'] / 60:.1f}m "
+        f"(trend {d.get('trend_sec_per_gap', 0):+.2f}s/gap)\n"
+        f"Entrega a degradar antes do silêncio — verificar o path. "
+        f"Episódio: {run['ts']}"
+    )
+    try:
+        asyncio.run(
+            asyncio.wait_for(notifier.send(msg, "warning"), timeout=15)
+        )
+        log(f"cadence: alert sent for `{feed}`")
+    except Exception as exc:  # noqa: BLE001
+        log(f"cadence: alert failed for `{feed}` (best-effort): {exc}")
+
+
+def check_cadence_degrading(
+    shared: Dict[str, Dict[str, Any]],
+    *,
+    force: bool = False,
+) -> bool:
+    """Alert when any contracted feed turns DEGRADING (recent cadence
+    consistently slower than its own historical p99).
+
+    Edge-triggered per feed, exactly like ``check_creeping_age``: a feed
+    alerts once when it *starts* DEGRADING (enters ``feeds_alerted``) and
+    stays quiet while the episode continues; when the verdict recovers
+    (OK/WATCH/insufficient/no_data), it is dropped and a later re-degrading
+    alerts again. ``--force`` only forces a fresh diagnostic; it never
+    consumes episode state.
+    """
+    sub = shared["feed_cadence"]
+    report = cadence_diagnostic()
+    degrading = {
+        f: d for f, d in (report.get("feeds") or {}).items()
+        if d.get("status") == "DEGRADING"
+    }
+    alerted = dict(sub.get("feeds_alerted") or {})
+    fired = False
+    for feed, d in sorted(degrading.items()):
+        if feed in alerted:
+            continue  # already alerting this episode
+        alerted[feed] = int(report.get("now_ms") or time.time() * 1000)
+        run = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "feed": feed,
+            "status": "DEGRADING",
+            "recent_median_sec": d.get("recent_median_sec"),
+            "hist_p99_sec": d.get("hist_p99_sec"),
+            "hist_p95_sec": d.get("hist_p95_sec"),
+            "latest_gap_sec": d.get("latest_gap_sec"),
+            "trend_sec_per_gap": d.get("trend_sec_per_gap"),
+            "verdict": "DEGRADING",
+        }
+        sub["runs"].append(run)
+        sub["triggered"] = True
+        fired = True
+        notify_cadence_degrading(feed, d, run)
+    recovered = [f for f in alerted if f not in degrading]
+    for feed in recovered:
+        del alerted[feed]
+    sub["feeds_alerted"] = alerted
+    save_shared_state(shared)
+    if recovered:
+        log(f"cadence: {len(recovered)} feed(s) recuperaram — episódio fechado "
+            f"({', '.join(sorted(recovered))})")
+    if degrading:
+        log(f"cadence: {len(degrading)} feed(s) DEGRADING "
+            f"({', '.join(sorted(degrading))})")
+    else:
+        log("cadence: todos os feeds contratados mantêm a cadência histórica")
+    return fired
+
+
 def check_all(
     shared: Dict[str, Dict[str, Any]], *, force: bool = False
-) -> Tuple[bool, bool, bool, bool]:
-    """Run all four gates once. Returns (bias_ran, flush_ran, iv_ran,
-    creep_ran)."""
+) -> Tuple[bool, bool, bool, bool, bool]:
+    """Run all five gates once. Returns (bias_ran, flush_ran, iv_ran,
+    creep_ran, cadence_ran)."""
     bias_ran = check_bias(shared, force=force)
     flush_ran = check_flush(shared, force=force)
     iv_ran = check_iv_gate(shared, force=force)
     creep_ran = check_creeping_age(shared, force=force)
-    return bias_ran, flush_ran, iv_ran, creep_ran
+    cadence_ran = check_cadence_degrading(shared, force=force)
+    return bias_ran, flush_ran, iv_ran, creep_ran, cadence_ran
 
 
 def main() -> int:
@@ -516,6 +634,7 @@ def main() -> int:
         f"(bias >= {BIAS_TARGET_DATES} datas, flush >= {FLUSH_TARGET_DAYS}d real, "
         f"iv >= {IV_TARGET_CLOSED} closed com decisão, "
         f"creep >= {CREEP_MIN_DAYS}d de escada no max diário, "
+        f"cadence DEGRADING (rec mediana > p99 histórico), "
         f"check a cada {args.hours:.0f}h) ===")
     shared = load_shared_state()
     # Always persist the canonical shared file (fresh or migrated) so the

@@ -456,3 +456,158 @@ class TestCreepingAgeGate:
         loaded = sup.load_shared_state(path=p)
         assert loaded["feed_age_creep"]["feeds_alerted"] == {"liquidation_okx": 123}
         assert loaded["feed_age_creep"]["triggered"] is True
+
+
+class TestCadenceGate:
+    """Edge-triggered per feed, like the creep gate: alerts once when a feed
+    turns DEGRADING (recent median > its own historical p99), stays quiet
+    while the episode continues, re-arms on recovery."""
+
+    def _stub_diagnostic(self, monkeypatch, degrading=None):
+        feeds = {}
+        for f in (degrading or []):
+            feeds[f] = {
+                "status": "DEGRADING",
+                "recent_median_sec": 600.0,
+                "hist_p99_sec": 45.0,
+                "hist_p95_sec": 30.0,
+                "latest_gap_sec": 650.0,
+                "trend_sec_per_gap": 8.0,
+            }
+        monkeypatch.setattr(
+            sup, "cadence_diagnostic",
+            lambda: {"now_ms": 1_752_000_000_000, "feeds": feeds},
+        )
+
+    def test_fires_once_per_episode_and_rearms_on_recovery(
+        self, monkeypatch, tmp_path
+    ):
+        shared = sup.fresh_state()
+        sup.STATE_PATH = tmp_path / "state.json"
+        notified: list = []
+        try:
+            monkeypatch.setattr(sup, "notify_cadence_degrading",
+                                lambda f, d, r: notified.append((f, r["verdict"])))
+            self._stub_diagnostic(monkeypatch, ["liquidation_okx"])
+
+            # episode starts -> one alert + run persisted
+            assert sup.check_cadence_degrading(shared, force=False) is True
+            assert notified == [("liquidation_okx", "DEGRADING")]
+            assert shared["feed_cadence"]["triggered"] is True
+            assert len(shared["feed_cadence"]["runs"]) == 1
+            assert shared["feed_cadence"]["feeds_alerted"]["liquidation_okx"] \
+                == 1_752_000_000_000
+
+            # same episode continuing -> no re-alert, no new run
+            assert sup.check_cadence_degrading(shared, force=False) is False
+            assert len(notified) == 1
+            assert len(shared["feed_cadence"]["runs"]) == 1
+
+            # recovery (verdict no longer DEGRADING) -> episode closed
+            self._stub_diagnostic(monkeypatch, [])
+            assert sup.check_cadence_degrading(shared, force=False) is False
+            assert shared["feed_cadence"]["feeds_alerted"] == {}
+
+            # re-degrading -> new episode alerts again
+            self._stub_diagnostic(monkeypatch, ["liquidation_okx"])
+            assert sup.check_cadence_degrading(shared, force=False) is True
+            assert len(notified) == 2
+            assert len(shared["feed_cadence"]["runs"]) == 2
+        finally:
+            sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
+
+    def test_alert_has_warning_severity_and_feed_detail(
+        self, monkeypatch, tmp_path
+    ):
+        shared = sup.fresh_state()
+        sup.STATE_PATH = tmp_path / "state.json"
+        captured: list = []
+        try:
+            class _FakeNotifier:
+                async def send(self, msg, level="info", *, force=False):
+                    captured.append((msg, level))
+
+            monkeypatch.setattr(sup, "build_alert_notifier",
+                                lambda: _FakeNotifier())
+            self._stub_diagnostic(monkeypatch, ["liquidation_okx"])
+
+            assert sup.check_cadence_degrading(shared, force=False) is True
+            assert len(captured) == 1
+            msg, level = captured[0]
+            assert level == "warning"
+            assert "FEED CADENCE DEGRADING" in msg
+            assert "liquidation_okx" in msg
+            assert "10.0m" in msg  # 600s median
+            assert "0.8m" in msg  # 45s p99
+        finally:
+            sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
+
+    def test_no_notifier_does_not_break(self, monkeypatch, tmp_path):
+        shared = sup.fresh_state()
+        sup.STATE_PATH = tmp_path / "state.json"
+        try:
+            monkeypatch.setattr(sup, "build_alert_notifier", lambda: None)
+            self._stub_diagnostic(monkeypatch, ["liquidation_okx"])
+            assert sup.check_cadence_degrading(shared, force=False) is True
+            assert shared["feed_cadence"]["runs"][-1]["verdict"] == "DEGRADING"
+        finally:
+            sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
+
+    def test_shared_state_roundtrip_preserves_feeds_alerted(self, tmp_path):
+        p = tmp_path / "state.json"
+        state = sup.fresh_state()
+        state["feed_cadence"]["feeds_alerted"] = {"liquidation_okx": 123}
+        state["feed_cadence"]["triggered"] = True
+        sup.save_shared_state(state, path=p)
+        loaded = sup.load_shared_state(path=p)
+        assert loaded["feed_cadence"]["feeds_alerted"] == {"liquidation_okx": 123}
+        assert loaded["feed_cadence"]["triggered"] is True
+
+    def test_real_diagnostic_drives_alert(self, monkeypatch, tmp_path):
+        """End-to-end: a real temp DB with okx events (fast history, slow
+        recent) -> the diagnostic says DEGRADING -> the watchdog alerts."""
+        import sqlite3
+        import time as _time
+
+        db_path = tmp_path / "live.db"
+        con = sqlite3.connect(db_path)
+        con.execute(
+            "CREATE TABLE liquidation_events (symbol TEXT, timestamp_ms INTEGER, "
+            "notional_usd REAL, side TEXT, source TEXT)"
+        )
+        now = int(_time.time() * 1000)
+        cutoff = now - 48 * 3600_000
+        ts = cutoff - 199 * 30_000  # history: 200 events every 30s
+        for _ in range(200):
+            con.execute(
+                "INSERT INTO liquidation_events VALUES ('OKX', ?, 1.0, 'buy', 'okx')",
+                (ts,),
+            )
+            ts += 30_000
+        for _ in range(60):  # recent: 60 events every 600s
+            con.execute(
+                "INSERT INTO liquidation_events VALUES ('OKX', ?, 1.0, 'buy', 'okx')",
+                (ts,),
+            )
+            ts += 600_000
+        con.commit()
+        con.close()
+
+        shared = sup.fresh_state()
+        sup.STATE_PATH = tmp_path / "state.json"
+        notified: list = []
+        try:
+            monkeypatch.setattr(sup, "notify_cadence_degrading",
+                                lambda f, d, r: notified.append(f))
+            monkeypatch.setattr(sup, "CADENCE_DEFAULT_DB", db_path)
+            monkeypatch.setattr(sup, "feed_silence_contracts",
+                                lambda cfg: {"liquidation_okx": 6 * 3600.0})
+
+            assert sup.check_cadence_degrading(shared, force=False) is True
+            assert notified == ["liquidation_okx"]
+            run = shared["feed_cadence"]["runs"][-1]
+            assert run["status"] == "DEGRADING"
+            assert run["recent_median_sec"] == 600.0
+            assert run["hist_p99_sec"] == 30.0
+        finally:
+            sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")

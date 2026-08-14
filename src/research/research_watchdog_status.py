@@ -24,6 +24,12 @@ from scripts.feed_age_creep_recheck import (  # noqa: E402
     detect_creeping_age,
     resolve_contracts as resolve_creep_contracts,
 )
+from scripts.feed_cadence_diagnostic import (  # noqa: E402
+    DEFAULT_DB as CADENCE_DEFAULT_DB,
+    run_cadence_diagnostic,
+)
+from src.core.engine import feed_silence_contracts  # noqa: E402
+from src.utils.config import load_config  # noqa: E402
 from scripts.liquidation_flush_recheck import (
     TARGET_DAYS as FLUSH_TARGET_DAYS,
 )
@@ -168,14 +174,60 @@ def _creeping_age_watchdog() -> Dict[str, Any]:
     }
 
 
+def _cadence_watchdog() -> Dict[str, Any]:
+    """Feed cadence — contracted feeds whose recent cadence is consistently
+    slower than their own historical p99 (DEGRADING).
+
+    Runs the same live diagnostic the supervisor's watchdog uses
+    (``run_cadence_diagnostic`` + this deployment's contracts), so the panel
+    and the alert never disagree. ``current`` is the number of feeds
+    DEGRADING right now; ``feeds`` carries the comparison detail.
+    """
+    contracts = feed_silence_contracts(load_config())
+    report = run_cadence_diagnostic(CADENCE_DEFAULT_DB, contracts)
+    state = load_shared_state()["feed_cadence"]
+    runs = state.get("runs") or []
+    feeds = [
+        {
+            "feed": f,
+            "status": d["status"],
+            "hist_p95_sec": d.get("hist_p95_sec"),
+            "hist_p99_sec": d.get("hist_p99_sec"),
+            "recent_median_sec": d.get("recent_median_sec"),
+            "recent_p95_sec": d.get("recent_p95_sec"),
+            "latest_gap_sec": d.get("latest_gap_sec"),
+            "trend_sec_per_gap": d.get("trend_sec_per_gap"),
+        }
+        for f, d in sorted((report.get("feeds") or {}).items())
+        if d.get("status") == "DEGRADING"
+    ]
+    return {
+        "id": "feed_cadence",
+        "label": "Feed cadence (gaps vs p95/p99)",
+        "script": "scripts/research_watchdog_supervisor.py",
+        "metric_label": "feeds DEGRADING (mediana recente > p99 histórico)",
+        "unit": "feeds",
+        "current": len(feeds),
+        "target": 0,
+        "progress_pct": 0.0,
+        "samples": len(runs),
+        "feeds": feeds,
+        "triggered": bool(state.get("triggered")),
+        "last_run": runs[-1] if runs else None,
+        "report_path": "",
+    }
+
+
 def build_research_watchdogs_payload() -> Dict[str, Any]:
-    """Assemble the read-only watchdog status (bias + flush + iv + creep)."""
+    """Assemble the read-only watchdog status (bias + flush + iv + creep +
+    cadence)."""
     watchdogs: List[Dict[str, Any]] = []
     builders = [
         ("top_trader_bias", _bias_watchdog),
         ("liquidation_flush", _flush_watchdog),
         ("iv_gate_shadow", _iv_gate_watchdog),
         ("feed_age_creep", _creeping_age_watchdog),
+        ("feed_cadence", _cadence_watchdog),
     ]
     for wd_id, builder in builders:
         try:

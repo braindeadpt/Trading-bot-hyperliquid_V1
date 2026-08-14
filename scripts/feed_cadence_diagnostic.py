@@ -59,36 +59,48 @@ def _event_timestamps(
 
 
 def _feed_timestamps(db: sqlite3.Connection) -> dict:
-    """Sorted event timestamps per feed key (ascending). Absent = no data."""
+    """Sorted event timestamps per feed key (ascending). Absent = no data.
+
+    Best-effort per table: a live DB missing a table (fresh deployment,
+    research-only instance) degrades that feed to no data instead of
+    blowing up the whole diagnostic."""
+    queries = {
+        "liquidation_okx": (
+            "SELECT timestamp_ms FROM liquidation_events "
+            "WHERE source='okx' ORDER BY timestamp_ms ASC"
+        ),
+        "liquidation_bybit": (
+            "SELECT timestamp_ms FROM liquidation_events "
+            "WHERE source='bybit' ORDER BY timestamp_ms ASC"
+        ),
+        "liquidation_binance": (
+            "SELECT timestamp_ms FROM liquidation_events "
+            "WHERE source='binance' ORDER BY timestamp_ms ASC"
+        ),
+        # funding_history holds one row per symbol per poll — the cadence of
+        # the *table* is the funding_hl/cex delivery cadence (same rows feed
+        # both).
+        "funding_hl": (
+            "SELECT timestamp FROM funding_history ORDER BY timestamp ASC"
+        ),
+        "funding_cex": (
+            "SELECT timestamp FROM funding_history ORDER BY timestamp ASC"
+        ),
+        "taker_split": (
+            "SELECT timestamp_ms FROM candles_1m "
+            "WHERE (buy_volume > 0 OR sell_volume > 0) ORDER BY timestamp_ms ASC"
+        ),
+        "binance_perp": (
+            "SELECT timestamp_ms FROM binance_perp_prices "
+            "ORDER BY timestamp_ms ASC"
+        ),
+    }
     out: dict = {}
-    out["liquidation_okx"] = _event_timestamps(
-        db, "SELECT timestamp_ms FROM liquidation_events "
-        "WHERE source='okx' ORDER BY timestamp_ms ASC"
-    )
-    out["liquidation_bybit"] = _event_timestamps(
-        db, "SELECT timestamp_ms FROM liquidation_events "
-        "WHERE source='bybit' ORDER BY timestamp_ms ASC"
-    )
-    out["liquidation_binance"] = _event_timestamps(
-        db, "SELECT timestamp_ms FROM liquidation_events "
-        "WHERE source='binance' ORDER BY timestamp_ms ASC"
-    )
-    # funding_history holds one row per symbol per poll — the cadence of the
-    # *table* is the funding_hl/cex delivery cadence (same rows feed both).
-    out["funding_hl"] = _event_timestamps(
-        db, "SELECT timestamp FROM funding_history ORDER BY timestamp ASC"
-    )
-    out["funding_cex"] = _event_timestamps(
-        db, "SELECT timestamp FROM funding_history ORDER BY timestamp ASC"
-    )
-    out["taker_split"] = _event_timestamps(
-        db, "SELECT timestamp_ms FROM candles_1m "
-        "WHERE (buy_volume > 0 OR sell_volume > 0) ORDER BY timestamp_ms ASC"
-    )
-    out["binance_perp"] = _event_timestamps(
-        db, "SELECT timestamp_ms FROM binance_perp_prices "
-        "ORDER BY timestamp_ms ASC"
-    )
+    for feed, query in queries.items():
+        try:
+            out[feed] = _event_timestamps(db, query)
+        except sqlite3.OperationalError:
+            out[feed] = []  # table missing — feed has no persisted events
     return out
 
 
@@ -186,6 +198,38 @@ def analyze_feed(
     }
 
 
+def run_cadence_diagnostic(
+    db_path: Path,
+    contracts: dict,
+    *,
+    now_ms: int | None = None,
+    recent_hours: float = 48.0,
+    min_history: int = 50,
+) -> dict:
+    """Per-feed cadence verdict for the contracted feeds, from the live DB.
+
+    Pure read — the reusable core behind the CLI and the research watchdog
+    (``scripts/research_watchdog_supervisor.py`` / dashboard): one function
+    computes the status every gate reads, so the dashboard and the watchdog
+    can never disagree on a feed's verdict.
+    """
+    if not Path(db_path).exists():
+        return {"now_ms": now_ms, "recent_hours": recent_hours, "feeds": {}}
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    recent_ms = int(recent_hours * 3600_000)
+    timestamps = _feed_timestamps(db)
+    db.close()
+    report: dict = {"now_ms": now, "recent_hours": recent_hours, "feeds": {}}
+    for feed in sorted(contracts):
+        report["feeds"][feed] = analyze_feed(
+            feed, timestamps.get(feed, []),
+            now_ms=now, recent_ms=recent_ms,
+            min_history=min_history,
+        )
+    return report
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default=str(DEFAULT_DB),
@@ -206,22 +250,15 @@ def main() -> int:
     if not db_path.exists():
         print(f"ERROR: bot DB not found: {db_path}", file=sys.stderr)
         return 1
-    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     now_ms = int(time.time() * 1000)
-    recent_ms = int(args.recent_hours * 3600_000)
-    timestamps = _feed_timestamps(db)
-    db.close()
-
-    report: dict = {"now_ms": now_ms, "recent_hours": args.recent_hours, "feeds": {}}
+    report = run_cadence_diagnostic(
+        db_path, contracts,
+        now_ms=now_ms, recent_hours=args.recent_hours,
+        min_history=args.min_history,
+    )
     codes = {"OK": 0, "WATCH": 2, "DEGRADING": 1, "insufficient": 0, "no_data": 0}
     worst = 0
-    for feed in sorted(contracts):
-        st = analyze_feed(
-            feed, timestamps.get(feed, []),
-            now_ms=now_ms, recent_ms=recent_ms,
-            min_history=args.min_history,
-        )
-        report["feeds"][feed] = st
+    for st in report["feeds"].values():
         worst = max(worst, codes.get(st["status"], 0))
 
     if args.json:

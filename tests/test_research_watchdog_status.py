@@ -66,6 +66,12 @@ def _stub_metrics(monkeypatch):
                            "feed": "liquidation_okx"}],
                 "feeds_alerted": {"liquidation_okx": 1},
             },
+            "feed_cadence": {
+                "triggered": True,
+                "runs": [{"ts": "2026-08-13T03:00:00", "verdict": "DEGRADING",
+                           "feed": "liquidation_okx"}],
+                "feeds_alerted": {"liquidation_okx": 1},
+            },
         },
     )
     monkeypatch.setattr(wd, "resolve_creep_contracts",
@@ -84,18 +90,37 @@ def _stub_metrics(monkeypatch):
             }
         },
     )
+    monkeypatch.setattr(wd, "feed_silence_contracts",
+                        lambda cfg: {"liquidation_okx": 21600.0})
+    monkeypatch.setattr(
+        wd, "run_cadence_diagnostic",
+        lambda db, contracts, **k: {
+            "now_ms": 1_752_000_000_000,
+            "feeds": {
+                "liquidation_okx": {
+                    "status": "DEGRADING",
+                    "hist_p95_sec": 30.0,
+                    "hist_p99_sec": 45.0,
+                    "recent_median_sec": 600.0,
+                    "recent_p95_sec": 900.0,
+                    "latest_gap_sec": 650.0,
+                    "trend_sec_per_gap": 8.0,
+                }
+            },
+        },
+    )
 
 
 def _by_id(payload):
     return {w.get("id"): w for w in payload["watchdogs"]}
 
 
-def test_four_watchdogs_present(_stub_metrics):
+def test_five_watchdogs_present(_stub_metrics):
     payload = wd.build_research_watchdogs_payload()
     by_id = _by_id(payload)
     assert set(by_id) == {
         "top_trader_bias", "liquidation_flush", "iv_gate_shadow",
-        "feed_age_creep",
+        "feed_age_creep", "feed_cadence",
     }
     assert payload["generated_ms"] > 0
 
@@ -248,6 +273,41 @@ def test_creeping_age_quiet_when_nothing_detected(_stub_metrics, monkeypatch):
     assert creep_wd["triggered"] is True
 
 
+def test_cadence_watchdog_payload(_stub_metrics):
+    """The cadence watchdog reports feeds DEGRADING now (recent median > own
+    historical p99) + the episode state."""
+    by_id = _by_id(wd.build_research_watchdogs_payload())
+    cad = by_id["feed_cadence"]
+    assert cad["current"] == 1
+    assert cad["target"] == 0
+    assert cad["progress_pct"] == 0.0
+    assert cad["triggered"] is True
+    assert cad["samples"] == 1  # alert episodes so far
+    assert cad["last_run"]["verdict"] == "DEGRADING"
+    feeds = cad["feeds"]
+    assert len(feeds) == 1
+    assert feeds[0]["feed"] == "liquidation_okx"
+    assert feeds[0]["recent_median_sec"] == 600.0
+    assert feeds[0]["hist_p99_sec"] == 45.0
+    assert feeds[0]["trend_sec_per_gap"] == 8.0
+
+
+def test_cadence_watchdog_ok_when_nothing_degrading(_stub_metrics, monkeypatch):
+    monkeypatch.setattr(
+        wd, "run_cadence_diagnostic",
+        lambda db, contracts, **k: {
+            "now_ms": 1,
+            "feeds": {"liquidation_okx": {"status": "OK", "events": 999}},
+        },
+    )
+    by_id = _by_id(wd.build_research_watchdogs_payload())
+    cad = by_id["feed_cadence"]
+    assert cad["current"] == 0
+    assert cad["feeds"] == []
+    # episode state persists even while quiet (triggered stays sticky)
+    assert cad["triggered"] is True
+
+
 class TestResearchWatchdogsEndpoint:
     """The /api/research_watchdogs REST endpoint serves both watchdogs."""
 
@@ -271,7 +331,7 @@ class TestResearchWatchdogsEndpoint:
         ids = {w.get("id") for w in r.get_json()["watchdogs"]}
         assert ids == {
             "top_trader_bias", "liquidation_flush", "iv_gate_shadow",
-            "feed_age_creep",
+            "feed_age_creep", "feed_cadence",
         }
 
 
@@ -301,3 +361,16 @@ class TestResearchWatchdogsTemplate:
         assert "w.feeds" in html
         assert "growth_frac" in html
         assert "sem creep — ok" in html
+
+    def test_panel_renders_feed_cadence_degrading(self) -> None:
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        # the cadence watchdog renders DEGRADING feeds in red with the
+        # recent-median-vs-historical-p99 comparison
+        assert "w.id === \"feed_cadence\"" in html
+        assert "DEGRADING (" in html
+        assert "cadência ok" in html
+        assert "recent_median_sec" in html
+        assert "hist_p99_sec" in html
+        assert "med " in html and " > p99 " in html

@@ -1468,6 +1468,11 @@ function renderResearchWatchdogs(payload) {
                 ? "⚠ CREEP ATIVO (" + w.feeds.length + " feed(s))"
                 : (w.triggered ? "episódio anterior — a vigiar" : "sem creep — ok");
         }
+        if (w.id === "feed_cadence") {
+            status = w.feeds && w.feeds.length
+                ? "⚠ DEGRADING (" + w.feeds.length + " feed(s))"
+                : (w.triggered ? "episódio anterior — a vigiar" : "cadência ok");
+        }
         // Projected decision for the IV gate: the direction the current slices
         // point to BEFORE the n>=30 trigger fires (provisional while small).
         let projected = null;
@@ -1487,6 +1492,13 @@ function renderResearchWatchdogs(payload) {
             const names = w.feeds.map(f => "<b>" + f.feed + "</b> (" + f.days + "d, +" + Math.round(f.growth_frac * 100) + "% thr)").join(", ");
             creep = '<div style="font-size:10px;color:var(--down);font-weight:600;" title="Max age diário a subir ' + w.feeds[0].days + ' dias consecutivos (escada de ' + (w.feeds[0].first_max_age_sec / 3600).toFixed(1) + 'h → ' + (w.feeds[0].last_max_age_sec / 3600).toFixed(1) + 'h) — cadência a degradar antes do silêncio">⚠ ' + names + '</div>';
         }
+        // Feed cadence DEGRADING: recent median ABOVE the feed's own
+        // historical p99 (consistently slower than it used to be).
+        let cadence = null;
+        if (w.id === "feed_cadence" && w.feeds && w.feeds.length) {
+            const names = w.feeds.map(f => "<b>" + f.feed + "</b> (med " + fmtDur(f.recent_median_sec) + " > p99 " + fmtDur(f.hist_p99_sec) + ")").join(", ");
+            cadence = '<div style="font-size:10px;color:var(--down);font-weight:600;" title="Mediana recente ' + fmtDur(w.feeds[0].recent_median_sec) + ' vs p99 histórico ' + fmtDur(w.feeds[0].hist_p99_sec) + ' — consistentemente mais lento que o próprio histórico, antes do silêncio">⚠ ' + names + '</div>';
+        }
         const last = w.last_run
             ? (String(w.last_run.ts || "").slice(0, 16).replace("T", " ") + " · " + (w.last_run.verdict || ""))
             : "—";
@@ -1499,7 +1511,7 @@ function renderResearchWatchdogs(payload) {
             '<td><div style="background:var(--border);height:8px;width:120px;border-radius:4px;display:inline-block;vertical-align:middle;">' +
                 '<div style="height:8px;width:' + pct + '%;background:' + barCol + ';border-radius:4px;"></div></div>' +
                 '<span class="dim" style="margin-left:6px;">' + pct.toFixed(0) + '%</span></td>' +
-            '<td>' + status + (projected ? '<div>' + projected + '</div>' : '') + (creep ? '<div>' + creep + '</div>' : '') + '</td>' +
+            '<td>' + status + (projected ? '<div>' + projected + '</div>' : '') + (creep ? '<div>' + creep + '</div>' : '') + (cadence ? '<div>' + cadence + '</div>' : '') + '</td>' +
             '<td class="muted" style="font-size:10px;">' + last + '</td></tr>';
     }).join("");
 }
