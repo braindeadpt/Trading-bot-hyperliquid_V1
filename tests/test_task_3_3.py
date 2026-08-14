@@ -200,6 +200,66 @@ def test_exit_max_hold():
     print("[PASS]\n")
 
 
+def test_confirmation_delay_holds_and_emits_after_wait():
+    """confirmation_delay_ms > 0: the flush is detected but the signal waits
+    N minutes, then enters at the CURRENT price (the reversal has started)."""
+    catcher = LiquidationCatcher({
+        "min_notional_usd": 50_000_000,
+        "require_oi_decreasing": False,
+        "confirmation_delay_ms": 10 * 60_000,  # 10 min
+    })
+
+    def ev(ts, price):
+        return MarketEvent(
+            symbol="BTC", price=price, timestamp_ms=ts,
+            funding=0.001, predicted_funding=0.001,
+            liquidation_notional_5m=80_000_000,
+            liquidation_side_5m="long",
+            liquidation_count_5m=25,
+            liquidation_data_source="binance",
+        )
+
+    # Flush at t=0 — the signal must NOT be emitted immediately.
+    sig0 = catcher.on_data(ev(0, 48_000.0))
+    assert sig0 is None, "delay > 0 must hold the signal at flush time"
+
+    # Before the delay elapses — still held.
+    sig_early = catcher.on_data(ev(5 * 60_000, 48_100.0))
+    assert sig_early is None, "still inside the confirmation window"
+
+    # At t=10min the wait elapses — emit at the current (post-flush) price.
+    sig = catcher.on_data(ev(10 * 60_000, 48_300.0))
+    assert sig is not None, "candidate must emit once the delay elapses"
+    assert sig.side == "long"
+    assert sig.entry_price == 48_300.0, "entry at current price, not flush price"
+    assert "d10m" in sig.reason, "reason carries the delay"
+    assert sig.metadata["entry_delay_ms"] == 10 * 60_000
+
+    # One flush, one fade: after emitting, no lingering pending candidate.
+    assert catcher._state["BTC"].pending is None
+
+
+def test_confirmation_delay_zero_emits_immediately():
+    """Default (0) preserves the immediate-entry behaviour — the reason has
+    no delay suffix and metadata carries 0."""
+    catcher = LiquidationCatcher({
+        "min_notional_usd": 50_000_000,
+        "require_oi_decreasing": False,
+    })
+    event = MarketEvent(
+        symbol="BTC", price=48000.0, timestamp_ms=0,
+        funding=0.001, predicted_funding=0.001,
+        liquidation_notional_5m=75_000_000,
+        liquidation_side_5m="long",
+        liquidation_count_5m=25,
+        liquidation_data_source="binance",
+    )
+    sig = catcher.on_data(event)
+    assert sig is not None
+    assert "_d" not in sig.reason
+    assert sig.metadata["entry_delay_ms"] == 0
+
+
 if __name__ == "__main__":
     test_entry_on_liquidation()
     test_entry_shorts_liquidated()

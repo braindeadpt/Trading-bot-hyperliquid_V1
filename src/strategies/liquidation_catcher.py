@@ -45,6 +45,11 @@ class _LiqCatcherState:
     last_signal_ms: int = 0
     last_liq_notional: float = 0.0
     last_liq_side: Optional[str] = None
+    # Confirmation-delay candidate: the flush is detected, but entry waits
+    # N minutes for the overshoot to start reverting (breaks the
+    # entry→stop-out loop the real-feed backtest exposed). Populated by
+    # ``on_data`` when ``confirmation_delay_ms > 0``, emitted later.
+    pending: Optional[Dict[str, Any]] = None
 
 
 class LiquidationCatcher(Strategy):
@@ -76,6 +81,10 @@ class LiquidationCatcher(Strategy):
         self.MIN_CONFIDENCE = cfg.get("min_confidence", 0.70)
         # Throttle
         self.SIGNAL_THROTTLE_MS = cfg.get("signal_throttle_ms", 7_200_000)  # 2h
+        # Confirmation delay (ms) — entry waits N minutes after the flush
+        # minute so the fade rides the reversal instead of the peak. Hash
+        # neutral (strategy config, not a gate). 0 = enter immediately.
+        self.CONFIRMATION_DELAY_MS = int(cfg.get("confirmation_delay_ms", 0) or 0)
 
         self._state: Dict[str, _LiqCatcherState] = {}
         self.REQUIRE_REAL_LIQUIDATION = cfg.get("require_real_liquidation_data", True)
@@ -123,9 +132,66 @@ class LiquidationCatcher(Strategy):
     # Entry logic
     # ------------------------------------------------------------------
 
+    def _signal_from_candidate(
+        self,
+        event: MarketEvent,
+        cand: Dict[str, Any],
+    ) -> Signal:
+        """Build the fade Signal from a (possibly delayed) candidate.
+
+        Uses the CURRENT event price — with a confirmation delay the entry
+        happens after the flush minute, so the fade rides the reversal at a
+        better price, which is the whole point of the delay.
+        """
+        reason = f"liq_catch_{cand['liq_side']}_${cand['liq_notional'] / 1_000_000:.0f}M"
+        if cand.get("delay_ms"):
+            reason += f"_d{cand['delay_ms'] // 60_000}m"
+        return Signal(
+            strategy=self.name,
+            symbol=event.symbol,
+            side=cand["target_side"],
+            confidence=cand["confidence"],
+            size_pct=cand["size_pct"],
+            entry_price=event.price,
+            stop_loss_pct=cand["stop_loss_pct"],
+            take_profit_pct=cand["stop_loss_pct"] * self.TAKE_PROFIT_R,  # 2R
+            reason=reason,
+            metadata={
+                "liq_notional": cand["liq_notional"],
+                "liq_side": cand["liq_side"],
+                "liq_count": cand["liq_count"],
+                "adx": cand.get("adx"),
+                "oi_delta": cand.get("oi_delta"),
+                "atr": cand.get("atr"),
+                "stop_loss_pct": cand["stop_loss_pct"],
+                "take_profit_r": self.TAKE_PROFIT_R,
+                "entry_delay_ms": cand.get("delay_ms", 0),
+            },
+        )
+
     def on_data(self, event: MarketEvent) -> Optional[Signal]:
         """Evaluate liquidation cascade fade opportunity."""
         if not self._operational_gate(event):
+            return None
+
+        state = self._get_state(event.symbol)
+
+        # Confirmation delay: a pending candidate waits N minutes after the
+        # flush before entering. When the wait elapses, emit at the current
+        # price (the reversal has started). While waiting, no new candidate
+        # is created — one flush, one fade.
+        if state.pending is not None:
+            if event.timestamp_ms >= state.pending["emit_at_ms"]:
+                cand = state.pending
+                state.pending = None
+                logger.info(
+                    "LiquidationCatcher %s confirmed signal for %s after %d min "
+                    "(flush notional=$%.1fM)",
+                    cand["target_side"], event.symbol,
+                    cand["delay_ms"] // 60_000,
+                    cand["liq_notional"] / 1_000_000,
+                )
+                return self._signal_from_candidate(event, cand)
             return None
 
         liq_notional = event.liquidation_notional_5m
@@ -246,27 +312,33 @@ class LiquidationCatcher(Strategy):
             confidence, size_pct * 100, stop_loss_pct * 100,
         )
 
-        return Signal(
-            strategy=self.name,
-            symbol=event.symbol,
-            side=target_side,
-            confidence=confidence,
-            size_pct=size_pct,
-            entry_price=event.price,
-            stop_loss_pct=stop_loss_pct,
-            take_profit_pct=stop_loss_pct * self.TAKE_PROFIT_R,  # 2R
-            reason=f"liq_catch_{liq_side}_${liq_notional/1_000_000:.0f}M",
-            metadata={
-                "liq_notional": liq_notional,
-                "liq_side": liq_side,
-                "liq_count": liq_count,
-                "adx": adx,
-                "oi_delta": event.oi_delta,
-                "atr": atr,
-                "stop_loss_pct": stop_loss_pct,
-                "take_profit_r": self.TAKE_PROFIT_R,
-            },
-        )
+        cand: Dict[str, Any] = {
+            "target_side": target_side,
+            "liq_side": liq_side,
+            "liq_notional": liq_notional,
+            "liq_count": liq_count,
+            "adx": adx,
+            "oi_delta": event.oi_delta,
+            "atr": atr,
+            "stop_loss_pct": stop_loss_pct,
+            "confidence": confidence,
+            "size_pct": size_pct,
+            "delay_ms": self.CONFIRMATION_DELAY_MS,
+        }
+
+        if self.CONFIRMATION_DELAY_MS > 0:
+            # Hold the candidate: entry waits for the overshoot to revert.
+            state.pending = {**cand, "emit_at_ms": event.timestamp_ms + self.CONFIRMATION_DELAY_MS}
+            logger.info(
+                "LiquidationCatcher holding %s candidate for %s — "
+                "entry delayed %d min (flush notional=$%.1fM)",
+                target_side, event.symbol,
+                self.CONFIRMATION_DELAY_MS // 60_000,
+                liq_notional / 1_000_000,
+            )
+            return None
+
+        return self._signal_from_candidate(event, cand)
 
     # ------------------------------------------------------------------
     # Exit logic

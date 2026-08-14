@@ -14,9 +14,28 @@ true` — the production contract) over the 08-09+ window and reports the
 effective manifest, including the per-strategy fidelity tier with
 liquidation provenance.
 
+The real-feed backtest (docs/LIQUIDATION_CATCHER_REAL_BACKTEST.md) exposed a
+structural loop: the strategy enters at the flush peak and the liquidation
+stop-out (which validates the position side from the SAME window that
+generated the signal) exits ~1 minute later — 16/16 trades at -142.42 USD.
+
+This script also runs the variants that break the loop (--delay-min /
+--stopout-off / --variants):
+
+  * ``--delay-min N`` — entry waits N minutes after the flush (confirmation
+    delay, the same idea as the ETH p90/30m fade harness) so the fade rides
+    the reversal instead of the peak.
+  * ``--stopout-off`` — bypass the liquidation stop-out for this strategy
+    (the fade needs the flush to revert; exiting when the window validates
+    the side is the loop). Hash-neutral: ``liquidation_stopout_min_notional_usd
+    = inf`` in the BacktestConfig.
+  * ``--variants`` — run the grid (delay x stopout) and print a comparison
+    table against the current -142.42 baseline.
+
 Usage:
     python scripts/backtest_liquidation_catcher_real.py [--start 2026-08-09]
         [--end 2026-08-14] [--symbols BTC ETH] [--json out.json]
+    python scripts/backtest_liquidation_catcher_real.py --variants
 """
 
 from __future__ import annotations
@@ -124,26 +143,15 @@ def _copy_funding(
     return len(rows)
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--start", default="2026-08-09")
-    ap.add_argument("--end", default="2026-08-14")
-    ap.add_argument("--symbols", default="BTC,ETH")
-    ap.add_argument("--json", type=Path, help="write full result as JSON")
-    args = ap.parse_args()
-
-    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
-    start_ms = ms(args.start)
-    end_ms = ms(args.end, end=True)
-    cfg = load_config(ROOT / "config" / "settings.yaml")
-
+def _prepare_db(cfg: Any, symbols: List[str], start_ms: int, end_ms: int) -> ResearchDatabase:
+    """Copy candles (research) + liquidations/funding (live) into a temp DB."""
     research_src = ResearchDatabase(ResearchDatabase.resolve_path(cfg))
     fd, tmp_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     bt_db = ResearchDatabase(tmp_path)
 
     print("=" * 78)
-    print(f"  LiquidationCatcher backtest - REAL feed {args.start} -> {args.end}")
+    print(f"  LiquidationCatcher backtest - REAL feed {ms_to_dt(start_ms)} -> {ms_to_dt(end_ms, end=True)}")
     print(f"  symbols: {', '.join(symbols)}")
 
     for sym in symbols:
@@ -156,11 +164,34 @@ def main() -> int:
             f"15m={candle_counts['15m']} 1h={candle_counts['1h']} · "
             f"liquidations real={n_real} proxy={liq_counts.get('proxy', 0)} · funding={n_funding}"
         )
+    return bt_db
 
+
+def run_cell(
+    cfg: Any,
+    bt_db: ResearchDatabase,
+    symbols: List[str],
+    start_ms: int,
+    end_ms: int,
+    *,
+    delay_min: int = 0,
+    stopout_on: bool = True,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """Run one LiquidationCatcher backtest cell with the given variant knobs.
+
+    ``delay_min`` → confirmation_delay_ms on the strategy (entry waits N min
+    post-flush). ``stopout_on=False`` → liquidation stop-out disabled (inf
+    floor, hash-neutral) so the fade can let the flush revert.
+    """
     # Force-enable LiquidationCatcher with the production data contract.
     section = get_strategy_section(cfg, "liquidation_catcher")
     section["enabled"] = True
     section["auto_enable"] = True
+    if delay_min:
+        section["confirmation_delay_ms"] = delay_min * 60_000
+    else:
+        section.pop("confirmation_delay_ms", None)
     strategy = LiquidationCatcher(section)
 
     # Production contract FIRST: what strict research would decide on this
@@ -219,6 +250,9 @@ def main() -> int:
         use_external_feeds_replay=True,
         max_daily_trades=0,
         warmup_15m_bars=110,
+        # Variant knob: None → calibrated constant (loop), inf → bypass
+        # (the fade needs the flush to revert, not validate the side).
+        liquidation_stopout_min_notional_usd=None if stopout_on else float("inf"),
     )
 
     engine = BacktestEngine(
@@ -229,12 +263,13 @@ def main() -> int:
         risk_config=risk_cfg,
     )
 
-    print("-" * 78)
+    if verbose:
+        print("-" * 78)
     try:
         result = engine.run(start_ms=start_ms, end_ms=end_ms)
     except Exception as exc:
         print(f"  BACKTEST FAILED: {exc}")
-        return 1
+        return {"error": str(exc)}
 
     metrics = result.get("metrics", {})
     trades = result.get("trades", [])
@@ -243,31 +278,32 @@ def main() -> int:
     wins = sum(1 for t in trades if float(t.get("pnl_usd", 0)) > 0)
     total_pnl = sum(float(t.get("pnl_usd", 0)) for t in trades)
 
-    print()
-    print(f"  n_trades      : {n}")
-    print(f"  win_rate      : {(wins / n * 100 if n else 0):.1f}%")
-    print(f"  profit_factor : {float(metrics.get('profit_factor', 0)):.3f}")
-    print(f"  total_pnl_usd : {total_pnl:.2f}")
-    print(f"  total_return  : {float(metrics.get('total_return', 0)) * 100:.2f}%")
-    print()
+    if verbose:
+        print()
+        print(f"  n_trades      : {n}")
+        print(f"  win_rate      : {(wins / n * 100 if n else 0):.1f}%")
+        print(f"  profit_factor : {float(metrics.get('profit_factor', 0)):.3f}")
+        print(f"  total_pnl_usd : {total_pnl:.2f}")
+        print(f"  total_return  : {float(metrics.get('total_return', 0)) * 100:.2f}%")
+        print()
 
-    print("  MANIFEST — effective fidelity:")
-    print(f"    data_source        : {manifest.get('data_source')}")
-    print(f"    fidelity_tier      : {manifest.get('fidelity_tier')}")
-    sf = manifest.get("strategy_fidelity") or {}
-    for strat, v in sf.items():
-        print(
-            f"    strategy_fidelity[{strat}]: "
-            f"tier={v.get('fidelity_tier')} "
-            f"tier_a={v.get('tier_a_eligible')} "
-            f"missing={','.join(v.get('missing_feeds') or []) or '-'} "
-            f"liq_provenance={v.get('liquidation_provenance')}"
-        )
-    dc = manifest.get("data_contract") or {}
-    print(f"    data_contract.refused : {dc.get('refused')}")
-    print(f"    data_contract.reasons : {dc.get('reasons')}")
+        print("  MANIFEST — effective fidelity:")
+        print(f"    data_source        : {manifest.get('data_source')}")
+        print(f"    fidelity_tier      : {manifest.get('fidelity_tier')}")
+        sf = manifest.get("strategy_fidelity") or {}
+        for strat, v in sf.items():
+            print(
+                f"    strategy_fidelity[{strat}]: "
+                f"tier={v.get('fidelity_tier')} "
+                f"tier_a={v.get('tier_a_eligible')} "
+                f"missing={','.join(v.get('missing_feeds') or []) or '-'} "
+                f"liq_provenance={v.get('liquidation_provenance')}"
+            )
+        dc = manifest.get("data_contract") or {}
+        print(f"    data_contract.refused : {dc.get('refused')}")
+        print(f"    data_contract.reasons : {dc.get('reasons')}")
 
-    from collections import Counter, defaultdict
+    from collections import defaultdict
 
     exit_stats: Dict[str, Dict[str, float]] = defaultdict(lambda: {"n": 0, "pnl": 0.0})
     for t in trades:
@@ -275,23 +311,116 @@ def main() -> int:
         exit_stats[r]["n"] += 1
         exit_stats[r]["pnl"] += float(t.get("pnl_usd", 0.0))
 
-    out = {
-        "window": {"start": args.start, "end": args.end},
-        "symbols": symbols,
-        "metrics": metrics,
+    return {
+        "delay_min": delay_min,
+        "stopout_on": stopout_on,
         "n_trades": n,
         "wins": wins,
         "losses": n - wins,
         "total_pnl_usd": round(total_pnl, 2),
+        "total_return_pct": float(metrics.get("total_return", 0)) * 100,
+        "win_rate": (wins / n * 100 if n else 0.0),
         "trades_summary": {
             k: {"n": int(v["n"]), "pnl_usd": round(v["pnl"], 2)}
             for k, v in sorted(exit_stats.items())
         },
         "manifest": manifest,
     }
+
+
+def _print_cell(header: str, cell: Dict[str, Any]) -> None:
+    print(f"\n  {header}:")
+    print(f"    n_trades      : {cell.get('n_trades', 0)}")
+    print(f"    win_rate      : {cell.get('win_rate', 0):.1f}%")
+    print(f"    total_pnl_usd : {cell.get('total_pnl_usd', 0):.2f}")
+    ts = cell.get("trades_summary") or {}
+    for reason, v in sorted(ts.items()):
+        print(f"    {str(reason)[:30]:30} n={v['n']:3d} pnl=${v['pnl_usd']:8.2f}")
+
+
+BASELINE_CELL = "delay=0 · stopout=ON (loop actual)"
+
+
+def ms_to_dt(ts: int, end: bool = False) -> str:
+    dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+    return (dt.replace(hour=23, minute=59, second=59, microsecond=999000)
+            .strftime("%Y-%m-%d") if end else dt.strftime("%Y-%m-%d"))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--start", default="2026-08-09")
+    ap.add_argument("--end", default="2026-08-14")
+    ap.add_argument("--symbols", default="BTC,ETH")
+    ap.add_argument("--json", type=Path, help="write full result as JSON")
+    ap.add_argument("--delay-min", type=int, default=0,
+                    help="entry confirmation delay in minutes (0 = immediate)")
+    ap.add_argument("--stopout-off", action="store_true",
+                    help="disable the liquidation stop-out for this strategy")
+    ap.add_argument("--variants", action="store_true",
+                    help="run the delay x stopout grid and compare vs baseline")
+    args = ap.parse_args()
+
+    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    start_ms = ms(args.start)
+    end_ms = ms(args.end, end=True)
+    cfg = load_config(ROOT / "config" / "settings.yaml")
+
+    if args.variants:
+        bt_db = _prepare_db(cfg, symbols, start_ms, end_ms)
+        grid = [
+            (0, True),      # baseline: the loop (flush → stop-out next minute)
+            (0, False),     # stop-out bypass only
+            (10, True),     # 10 min confirmation delay, stop-out still on
+            (10, False),    # delay + bypass
+            (30, True),     # 30 min delay (harness fade hold)
+            (30, False),    # delay + bypass
+        ]
+        print("\n  Variantes (delay-min x stopout):")
+        results: Dict[str, Dict[str, Any]] = {}
+        for delay, stopout_on in grid:
+            tag = f"delay={delay} stopout={'ON' if stopout_on else 'OFF'}"
+            print(f"\n  >>> {tag}")
+            cell = run_cell(cfg, bt_db, symbols, start_ms, end_ms,
+                            delay_min=delay, stopout_on=stopout_on, verbose=False)
+            results[tag] = cell
+
+        print("\n" + "=" * 78)
+        print("  COMPARAÇÃO (vs baseline atual: 16 trades, -142.42 USD)")
+        print("=" * 78)
+        print(f"  {'variante':34} {'n':>3} {'WR':>6} {'pnl':>10}")
+        for tag, cell in results.items():
+            print(f"  {tag:34} {cell.get('n_trades', 0):>3} "
+                  f"{cell.get('win_rate', 0):>5.1f}% "
+                  f"{cell.get('total_pnl_usd', 0):>10.2f}")
+        base = results.get(BASELINE_CELL, {})
+        base_pnl = base.get("total_pnl_usd", 0)
+        for tag, cell in results.items():
+            if tag == BASELINE_CELL:
+                continue
+            pnl = cell.get("total_pnl_usd", 0)
+            print(f"  {('delta vs baseline: ' + tag):34} {'':>3} {'':>6} "
+                  f"{pnl - base_pnl:>+10.2f}")
+        if args.json:
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            args.json.write_text(
+                json.dumps({"window": {"start": args.start, "end": args.end},
+                            "symbols": symbols,
+                            "baseline": base,
+                            "cells": results}, indent=2, default=str),
+                encoding="utf-8",
+            )
+            print(f"\n  JSON -> {args.json}")
+        return 0
+
+    bt_db = _prepare_db(cfg, symbols, start_ms, end_ms)
+    cell = run_cell(cfg, bt_db, symbols, start_ms, end_ms,
+                    delay_min=args.delay_min, stopout_on=not args.stopout_off)
+    _print_cell(f"Resultado (delay={args.delay_min}min, stopout="
+                f"{'ON' if not args.stopout_off else 'OFF'})", cell)
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
-        args.json.write_text(json.dumps(out, indent=2, default=str), encoding="utf-8")
+        args.json.write_text(json.dumps(cell, indent=2, default=str), encoding="utf-8")
         print(f"\n  JSON -> {args.json}")
     return 0
 

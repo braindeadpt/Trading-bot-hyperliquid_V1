@@ -86,6 +86,11 @@ favor de **não promover** o LiquidationCatcher com a configuração actual: o
 sinal de entrada e o stop-out de saída são alimentados pela **mesma** janela de
 liquidações, criando um loop entrada→stop-out que sangra.
 
+**A variante que quebra o loop está testada em
+`docs/LIQUIDATION_CATCHER_VARIANTS.md`: o stop-out bypass sozinho recupera
++85.72 USD (−150.90 → −65.18, WR 0% → 15.8%) — o loop é o exit, não a entrada.
+O delay de confirmação não ajuda (dilui o ganho do bypass).**
+
 ## Artefactos
 
 - Script: `scripts/backtest_liquidation_catcher_real.py`
