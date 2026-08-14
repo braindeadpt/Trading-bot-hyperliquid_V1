@@ -469,6 +469,7 @@ class FeedSilenceMonitor:
                     min_samples=self._cadence_min_samples
                 ),
                 "cadence_samples": len(st.gaps),
+                "warn_fraction": round(self._warn_fraction, 4),
                 "warn_level": (
                     "degraded" if st.degraded
                     else "imminent" if st.warned_90_pct

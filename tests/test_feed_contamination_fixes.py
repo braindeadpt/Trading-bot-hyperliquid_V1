@@ -422,6 +422,8 @@ def test_feed_silence_warn_fraction_constructor_override() -> None:
     assert len(warns) == 1
     assert "FEED QUIET (early)" in warns[0]
     assert "20%" in warns[0]
+    # the effective warn_fraction is exposed in the snapshot
+    assert mon.snapshot()["liquidation_okx"]["warn_fraction"] == 0.2
 
 
 def test_feed_silence_warn_fraction_default_still_50() -> None:
@@ -437,6 +439,7 @@ def test_feed_silence_warn_fraction_default_still_50() -> None:
     warns = mon.check_early_warnings(now_ms=1_000_000 + int(0.5 * 3600_000))
     assert len(warns) == 1
     assert "50%" in warns[0]
+    assert mon.snapshot()["liquidation_okx"]["warn_fraction"] == 0.5
 
 
 def test_feed_silence_warn_fraction_env_wiring(
