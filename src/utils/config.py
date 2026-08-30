@@ -526,25 +526,37 @@ def _sanitize_config_for_hash(data: Dict[str, Any]) -> Dict[str, Any]:
     and destinations affect no trading/risk parameter, so they are excluded
     from the frozen Fase-10 window hash — toggling the feeds or relocating
     their storage must not trip the mid-window drift assert.
+
+    ``research.database`` (the research DB destination) is skipped by PATH
+    rather than by name: a bare ``database`` block also exists at top level
+    for the operational DB, whose settings (prune_days, backfill windows) must
+    stay frozen. Skipping by name would silently unfreeze both. Note that the
+    rest of ``research`` — ``strict_mode``, ``min_coverage_pct``,
+    ``gap_intervals`` — are data-quality gates and REMAIN hashed.
     """
     skip_keys = {
         "password", "token", "secret", "secret_key", "api_key", "api_secret",
         "telegram_bot_token", "telegram_chat_id", "coinalyze_api_key",
         "dvol_feed", "feed_age_history", "l2_recording",
     }
+    # Dotted paths (lowercased) excluded regardless of their key name.
+    skip_paths = {("research", "database")}
 
-    def _walk(node: Any) -> Any:
+    def _walk(node: Any, path: tuple = ()) -> Any:
         if isinstance(node, Config) or isinstance(getattr(node, "raw", None), dict):
-            return _walk(node.raw)
+            return _walk(node.raw, path)
         if isinstance(node, dict):
             out: Dict[str, Any] = {}
             for k, v in node.items():
                 if str(k).lower() in skip_keys or str(k).endswith("_key"):
                     continue
-                out[str(k)] = _walk(v)
+                child = path + (str(k).lower(),)
+                if child in skip_paths:
+                    continue
+                out[str(k)] = _walk(v, child)
             return out
         if isinstance(node, (list, tuple)):
-            return [_walk(x) for x in node]
+            return [_walk(x, path) for x in node]
         if isinstance(node, (str, int, float, bool)) or node is None:
             return node
         return str(node)

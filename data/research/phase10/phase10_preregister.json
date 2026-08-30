@@ -1,9 +1,9 @@
 {
-  "config_hash": "4984555298afe7c8",
+  "config_hash": "b208601c78f467af",
   "execution_strategies": [
     "VWAPDeviation"
   ],
-  "experiment_id": "ab03bf10-5b8b-45d5-bd84-0f10609247ad",
+  "experiment_id": "fb1c400b-1eb8-42a8-a3dc-4624e96af3fc",
   "gate_note": "All four criteria must be a real PASS (not merely 'no FAIL yet due to insufficient data') for the frozen window to be considered met. Drift in execution_strategies or config_hash after freeze invalidates the window \u2014 see assert_config_matches_preregister().",
   "gate_thresholds": {
     "expectancy_r_gt": 0.0,
@@ -11,12 +11,12 @@
     "min_profit_factor": 1.2,
     "min_trades": 100
   },
-  "in_sample_selection_note": "Storage relocation only. VWAPDeviation remains the sole paper execution control (INCONCLUSIVE sample). No promotion; mainnet still blocked. Accumulated OOS evidence intentionally retained.",
-  "manifest_hash": "863f9e775d2d85850c6f325a95b4e839df8c88b3cf0fcc89747a3d3ddee1fec0",
+  "in_sample_selection_note": "Research DB relocation only. VWAPDeviation remains the sole paper execution control (INCONCLUSIVE sample). No promotion; mainnet still blocked. Accumulated OOS evidence intentionally retained.",
+  "manifest_hash": "290bebf256eae3caf39c9618d63cb046e1dfb1ba3a603a436ed9f8d033579ff8",
   "protocol": "phase10-frozen-window-v1",
-  "registered_at_ms": 1786725694215,
-  "reregistration_reason": "research data-collection change only \u2014 l2_recording made hash-neutral (joins dvol_feed / feed_age_history in _sanitize_config_for_hash) and its path relocated back to the E: HDD, undoing the a26dee1 regression that wrote ~29 MB/day of research data to the system SSD and split the dataset. No strategy, risk, fee or execution_strategies change. OOS window PRESERVED \u2014 window_start_ms unchanged.",
-  "supersedes_experiment_id": "efb4f1fb-7dbc-463a-830e-6c00c9f24e7a",
+  "registered_at_ms": 1786731051459,
+  "reregistration_reason": "research data-collection change only \u2014 research.database excluded from the config hash BY PATH (a bare `database` key also exists at top level for the operational DB and must stay frozen; research strict_mode / min_coverage_pct / gap_intervals remain hashed). The 3.8 GB research DB moves to the E: HDD per docs/DATA_ARCHITECTURE.md. No strategy, risk, fee or execution_strategies change. OOS window PRESERVED.",
+  "supersedes_experiment_id": "ab03bf10-5b8b-45d5-bd84-0f10609247ad",
   "window": {
     "max_end_ms": 1793714897421,
     "max_weeks": 12,

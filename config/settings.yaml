@@ -980,7 +980,13 @@ database:
 # ═══════════════════════════════════════════════════════════
 research:
   database:
-    path: data/research/hyperliquid.db
+    # 2026-08-14: moved to the E: HDD (466 GB free) — 3.8 GB of tape/L2 research
+    # data off the system SSD, matching docs/DATA_ARCHITECTURE.md. Skipped from
+    # the config hash BY PATH (research.database) in _sanitize_config_for_hash:
+    # a bare `database` key also exists at top level for the operational DB and
+    # must stay frozen. The rest of `research` (strict_mode, min_coverage_pct,
+    # gap_intervals) remains hashed — those are data-quality gates.
+    path: E:/hyperliquid_research/hyperliquid.db
   strict_mode: true
   continuous_sampling_enabled: true
   ws_microstructure_enabled: true    # DataBus trade + orderbook → research DB
