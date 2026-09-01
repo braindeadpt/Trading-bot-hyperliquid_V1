@@ -1,7 +1,45 @@
 # Strategy Audit — Backtest Profundo
 
-**Última actualização:** 2026-06-29 19:55 UTC
-**Estado:** pós walk-forward optimisation sweep (45 runs, 3 windows, Monte Carlo 1000x)
+**Última actualização:** 2026-09-01 UTC (v3.1.48 / Phase08)
+**Estado:** **1 execução paper** (VWAPDeviation) + **10 shadow**; restantes OFF ou research-only
+
+## Portfolio activo (Phase08 — autoritativo)
+
+Config: `strategy.phase08` em `config/settings.yaml`.
+
+| Papel | Estratégias | Notas |
+|-------|-------------|-------|
+| **Execution (paper)** | **VWAPDeviation** | Única que coloca ordens; `paper_only: true` |
+| **Shadow** | VolatilityBreakout, ChecklistMeta, CVDOrderFlow, OrderBookScalper, FundingArbitrage, FundingMomentum, SpotPerpCarry, LeadLag, LiquidationCatcher, TopTraderFlow | Sinais registados; **nunca executados** |
+| **Regime router** | ON | ADX 15m — low_vol / expansion / trend; fallback VWAPDeviation |
+
+Log de arranque esperado:
+```
+Phase08 edge isolation — execution=['VWAPDeviation'] shadow=[...]
+```
+
+### Histórico de promoções / demotions
+
+| Data | Mudança |
+|------|---------|
+| v3.1.38 | ChecklistMeta activado (walk-forward W2 winner) |
+| v3.1.48 | ChecklistMeta **demoted → shadow** após baseline-signal FAIL (W2/W3) |
+| Phase08 | Só **VWAPDeviation** em execution até OOS validado |
+
+### Resumo — estratégias que **não** passaram nos testes
+
+| Veredicto | Estratégias | Motivo |
+|-----------|-------------|--------|
+| ❌ **KILL** | SmartMoneyFlow, DonchianBreakout, OrderBookScalper, RangeGrid, FundingArbitrage (live) | PF < 1 / Sharpe negativo / killed v3.1.18 |
+| ⏳ **NO_DATA** | LeadLag, LiquidationCatcher, FundingMomentum, SpotPerpCarry | 0 trades backtest — dados ou filtros |
+| ⚠️ **WATCH** | CVDOrderFlow, TrendPyramid, FundingExtreme | Marginal / inconsistente |
+| ❌ **FAIL → shadow** | ChecklistMeta | Baseline gate FAIL — não re-promover sem PASS |
+| ✅ **KEEP (shadow)** | VolatilityBreakout | Edge walk-forward; shadow até promoção |
+| ✅ **KEEP (execution)** | VWAPDeviation | Única execução paper actual |
+
+**NO_DATA ≠ estratégia má:** significa 0 trades no backtest — falta dados ou condições nunca ocorreram. Ver secção abaixo.
+
+---
 
 ## ⚠️ Nota sobre audits anteriores
 
@@ -127,35 +165,48 @@ nas 2 janelas boas** e minimizam perda na má — claramente superiores ao basel
 **Conclusão:** PF alto em B_2weeks vem com Sharpe negativo (equity curve choppy).
 Só config tight em D_full tem PF>1 + Sharpe>0 simultaneamente, mas marginal (n=42, PnL +$18).
 
-## Config activa em paper (Fase 1 + v3.1.26 optimisations)
+## Config activa em paper (Phase08 v3.1.48)
 
 ```yaml
 strategy:
-  volatility_breakout:
+  phase08:
     enabled: true
-    min_confidence: 0.55
-    volume_surge: 1.5              # was 1.3
-    use_trailing_stop: true        # NEW
-    trailing_method: ema9          # NEW
-    trailing_start_r: 1.0
+    paper_only: true
+    execution_strategies:
+      - VWAPDeviation          # única execução paper
+    shadow_strategies:
+      - VolatilityBreakout
+      - ChecklistMeta          # demoted após baseline FAIL — não re-promover sem PASS
+      - CVDOrderFlow
+      # ... (ver settings.yaml completo)
+    regime_router:
+      enabled: true
   vwap_deviation:
     enabled: true
-    min_confidence: 0.70
-    use_session_filter: true       # NEW
-    session_start_utc_h: 7
-    session_end_utc_h: 22
-  # tudo o resto: enabled: false
-  ensemble: {enabled: false}    # direct mode
+  volatility_breakout:
+    enabled: true               # shadow — sinais only
+  checklist_meta:
+    enabled: true               # shadow — module on, não executa
+  ensemble:
+    enabled: false              # consensus OFF
 ```
+
+## Porque existem estratégias NO_DATA?
+
+**NO_DATA** = 0 trades no backtest → **impossível validar PF/Sharpe**. Causas:
+
+1. **Dados em falta** — LeadLag (perp ticks), SpotPerpCarry (spot), LiquidationCatcher (eventos raros)
+2. **Filtros demasiado apertados** — thresholds nunca atingidos em ~6 semanas de histórico
+3. **≠ KILL** — KILL teve trades e perdeu; NO_DATA não foi testada
+
+Re-testar só após backfill + audit isolado (≥30 trades, PF ≥ 1.3).
 
 ## Próximos passos
 
-1. **Manter config optimizada** — VB+VWAP com vencedores v3.1.26, paper trading 30-60 dias
-2. **Próximo optimisation cycle em 30 dias** com walk-forward em 4 janelas (regime balanceado)
-3. **Re-test CVD** com config tight quando houver 60+ dias de dados
-4. **Backfill LeadLag** com tick data real se quiser explorar latency arb
-5. **Regime filter futuro** — VWAP desligar em ADX>30 (trending), VB desligar em ADX<10 (choppy)
-6. **Nunca escalar** sem 3 meses de paper PF ≥ 1.3
+1. **Paper Phase08** — acumular trades VWAPDeviation (execution); comparar shadow vs live
+2. **Não re-promover ChecklistMeta** sem baseline-signal PASS fresh
+3. **Re-test NO_DATA** — backfill feeds → audit isolado → shadow antes de execution
+4. **Nunca escalar** sem 3 meses paper PF ≥ 1.3 na estratégia de execução
 
 ## Scripts para re-correr
 

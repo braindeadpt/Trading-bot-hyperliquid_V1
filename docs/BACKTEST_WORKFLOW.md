@@ -59,6 +59,16 @@ python scripts/backfill_candles.py --days 30
 1. Backfill dados em falta
 2. `python scripts/backtest_strategy_audit.py --quick`
 3. Rever `docs/STRATEGY_AUDIT.md`
-4. Atualizar `settings.yaml` (só KEEP + WATCH promovidos)
+4. Atualizar `settings.yaml` (**só KEEP** → execution ou shadow; KILL/NO_DATA ficam OFF)
 5. Paper 2 semanas → comparar live vs backtest
 6. Mainnet só com PF ≥ 1.3 em paper
+
+## Portfolio activo (Phase08 v3.1.48)
+
+| Papel | Estratégias |
+|-------|-------------|
+| **Execution (paper)** | VWAPDeviation |
+| **Shadow** | VolatilityBreakout, ChecklistMeta, CVD, OBScalper, funding/carry/lead-lag/liq, TopTraderFlow |
+| **OFF / research** | SMF, Donchian, RangeGrid, FundingExtreme, etc. |
+
+Ver `docs/STRATEGY_AUDIT.md` para NO_DATA vs KILL vs FAIL.
