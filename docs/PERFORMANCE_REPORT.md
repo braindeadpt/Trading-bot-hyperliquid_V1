@@ -1,5 +1,10 @@
 # Relatório de Performance & Plano para PnL Positivo
 
+> **Actualização 2026-09-01 (v3.1.48):** O bot migrou para **Phase08 edge isolation**.
+> Estado actual: **1 execução paper** (`VWAPDeviation`) + **10 shadow** (incl. VolatilityBreakout,
+> ChecklistMeta demoted após baseline FAIL). Ver `docs/STRATEGY_AUDIT.md` para veredictos
+> actualizados. O resto deste relatório documenta o diagnóstico histórico (Jun 2026).
+
 **Data:** 2026-06-29
 **Versão bot:** v3.1.28 (paper trading)
 **Capital:** $10,000 → **$9,699** (-3.0% all-time)
