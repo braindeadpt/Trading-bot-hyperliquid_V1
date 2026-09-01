@@ -14,6 +14,7 @@ from src.research.shadow_outcome_evaluator import (
     run_evaluation,
 )
 from src.research.shadow_recorder import ShadowRecorder
+from src.data.research_database import ResearchDatabase
 from src.utils.config import Config, get_trading_symbols, load_config
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -114,13 +115,9 @@ def _liquidation_provenance(
     (panel falls back to the hardcoded tier).
     """
     try:
-        from src.data.research_database import (
-            DEFAULT_RESEARCH_DB_PATH,
-            ResearchDatabase,
-        )
+        from src.data.research_database import ResearchDatabase
 
-        rel = config.get("research.database.path", str(DEFAULT_RESEARCH_DB_PATH))
-        db = ResearchDatabase(rel)
+        db = ResearchDatabase.open(config)
         rows = db.get_liquidation_events(symbol, limit=200)
         if not rows:
             return "none"
@@ -143,7 +140,7 @@ def build_shadow_panel_payload(
 ) -> Dict[str, Any]:
     """Assemble per-shadow strategy stats for ``/api/shadow_panel``."""
     cfg = config or load_config(ROOT / "config" / "settings.yaml")
-    recorder = ShadowRecorder()
+    recorder = ShadowRecorder(db=ResearchDatabase.open(cfg))
     now_ms = int(time.time() * 1000)
     day_ms = now_ms - 86400 * 1000
     week_ms = now_ms - 7 * 86400 * 1000

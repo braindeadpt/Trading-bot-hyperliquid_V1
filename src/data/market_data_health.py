@@ -455,9 +455,10 @@ class FeedSilenceMonitor:
             if st.last_event_ms is None:
                 # Never seen — degrade only after max_silence from *monitor start*
                 # (not raw monotonic, which can be days since boot on Windows).
-                if not st.degraded and uptime_sec > st.max_silence_sec:
+                if uptime_sec > st.max_silence_sec:
+                    newly_degraded = not st.degraded
                     st.degraded = True
-                    if mono - st.last_alert_mono >= self._alert_cooldown_sec:
+                    if newly_degraded or mono - st.last_alert_mono >= self._alert_cooldown_sec:
                         st.last_alert_mono = mono
                         self._emit_alert(
                             alerts, name, "degraded", now,
@@ -468,8 +469,9 @@ class FeedSilenceMonitor:
                 continue
             age = (now - st.last_event_ms) / 1000.0
             if age >= st.max_silence_sec:
+                newly_degraded = not st.degraded
                 st.degraded = True
-                if mono - st.last_alert_mono >= self._alert_cooldown_sec:
+                if newly_degraded or mono - st.last_alert_mono >= self._alert_cooldown_sec:
                     st.last_alert_mono = mono
                     self._emit_alert(
                         alerts, name, "degraded", now,

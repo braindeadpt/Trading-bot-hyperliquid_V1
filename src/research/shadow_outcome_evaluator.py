@@ -58,7 +58,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.data.database import Candle
-from src.data.research_database import DEFAULT_RESEARCH_DB_PATH, ResearchDatabase
+from src.data.research_database import ResearchDatabase
 from src.research.phase10_gate_metrics import compute_profit_factor
 from src.research.shadow_recorder import (
     ShadowDecision,
@@ -868,7 +868,7 @@ def evaluate_shadow_decisions(
     decisions: Sequence[ShadowDecision],
     *,
     config: Optional[Config] = None,
-    research_db_path: Path = DEFAULT_RESEARCH_DB_PATH,
+    research_db_path: Optional[Path] = None,
     live_db_path: Optional[Path] = LIVE_DB_DEFAULT,
     candle_loader: Optional[Any] = None,
 ) -> Dict[str, StrategyScoreboard]:
@@ -883,6 +883,11 @@ def evaluate_shadow_decisions(
             cfg = load_config(Path("config/settings.yaml"))
         except Exception:  # noqa: BLE001
             cfg = Config({})
+
+    if research_db_path is None:
+        research_db_path = ResearchDatabase.resolve_path(cfg)
+    else:
+        research_db_path = Path(research_db_path)
 
     by_key: Dict[Tuple[str, str], List[ShadowDecision]] = {}
     for d in decisions:
@@ -991,7 +996,7 @@ def persist_scoreboards(
     evaluated_at_ms: Optional[int] = None,
 ) -> int:
     """Persist scoreboard snapshots. Returns rows written."""
-    research = db or ResearchDatabase(DEFAULT_RESEARCH_DB_PATH)
+    research = db or ResearchDatabase.open()
     ensure_scoreboard_table(research)
     ts = int(evaluated_at_ms if evaluated_at_ms is not None else time.time() * 1000)
     written = 0
@@ -1075,12 +1080,22 @@ def run_evaluation(
     strategy: Optional[str] = None,
     variant: Optional[str] = None,
     since_days: Optional[float] = None,
-    research_db_path: Path = DEFAULT_RESEARCH_DB_PATH,
+    research_db_path: Optional[Path] = None,
     live_db_path: Optional[Path] = LIVE_DB_DEFAULT,
     config: Optional[Config] = None,
     persist: bool = False,
 ) -> Dict[str, Any]:
     """Load decisions, evaluate, optionally persist. Returns JSON-able summary."""
+    cfg = config
+    if cfg is None:
+        try:
+            cfg = load_config(Path("config/settings.yaml"))
+        except Exception:  # noqa: BLE001
+            cfg = Config({})
+    if research_db_path is None:
+        research_db_path = ResearchDatabase.resolve_path(cfg)
+    else:
+        research_db_path = Path(research_db_path)
     db = ResearchDatabase(research_db_path)
     recorder = ShadowRecorder(db)
     since_ms: Optional[int] = None

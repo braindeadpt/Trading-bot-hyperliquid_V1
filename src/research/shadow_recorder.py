@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from src.data.research_database import ResearchDatabase, DEFAULT_RESEARCH_DB_PATH
+from src.data.research_database import ResearchDatabase
 from src.utils.helpers import safe_float
 
 logger = logging.getLogger(__name__)
@@ -125,7 +125,7 @@ class ShadowRecorder:
     """
 
     def __init__(self, db: Optional[ResearchDatabase] = None) -> None:
-        self._db = db or ResearchDatabase(DEFAULT_RESEARCH_DB_PATH)
+        self._db = db or ResearchDatabase.open()
         self._lock = threading.Lock()
         self._ensure_table()
 

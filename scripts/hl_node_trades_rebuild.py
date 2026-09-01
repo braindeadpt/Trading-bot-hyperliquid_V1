@@ -124,7 +124,12 @@ def main() -> int:
         logger.error("%s", exc)
         return 2
 
-    db = ResearchDatabase(Path(args.db) if args.db else None)
+    if args.db:
+        db = ResearchDatabase(Path(args.db))
+    else:
+        from src.utils.config import load_config
+
+        db = ResearchDatabase.open(load_config(ROOT / "config" / "settings.yaml"))
     result = rebuild_from_support_package(
         package_path, fetcher, db, symbols=symbols, interval=args.interval,
     )

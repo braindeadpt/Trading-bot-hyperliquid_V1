@@ -339,10 +339,14 @@ class TradingEngine:
                 strat.set_governor(self._strategy_governor)
 
         self._shadow_recorder: Optional[Any] = None
+        from src.data.research_database import ResearchDatabase
+
+        self._research_db = ResearchDatabase.open(config)
+        self._feed_silence_alert_db: Optional[ResearchDatabase] = self._research_db
         if self._shadow_strategies:
             from src.research.shadow_recorder import ShadowRecorder
 
-            self._shadow_recorder = ShadowRecorder()
+            self._shadow_recorder = ShadowRecorder(db=self._research_db)
             logger.info(
                 "Phase08 shadow mode: %d strategies (no execution) — %s",
                 len(self._shadow_strategies),
@@ -843,7 +847,7 @@ class TradingEngine:
             if db is None:
                 from src.data.research_database import ResearchDatabase
 
-                db = ResearchDatabase()
+                db = ResearchDatabase.open(self._config)
                 self._feed_silence_alert_db = db
             db.save_feed_silence_alerts([(feed, alert_type, fired_ms, message)])
         except Exception as exc:  # noqa: BLE001
@@ -2303,7 +2307,7 @@ class TradingEngine:
         try:
             from src.research.shadow_recorder import ShadowRecorder
 
-            self._shadow_recorder = ShadowRecorder()
+            self._shadow_recorder = ShadowRecorder(db=self._research_db)
             return self._shadow_recorder
         except Exception as exc:  # noqa: BLE001
             logger.debug("ShadowRecorder lazy init failed: %s", exc)

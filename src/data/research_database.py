@@ -19,7 +19,22 @@ from src.data.series_metadata import SeriesMetadata
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_RESEARCH_DB_PATH = Path("data") / "research" / "hyperliquid.db"
+# Legacy relative default — used ONLY as the ghost-DB migration source path hint.
+# Do not pass to ResearchDatabase(); use ResearchDatabase.open() or resolve_path().
+_LEGACY_DEFAULT_RESEARCH_DB_PATH = Path("data") / "research" / "hyperliquid.db"
+DEFAULT_RESEARCH_DB_PATH = _LEGACY_DEFAULT_RESEARCH_DB_PATH  # deprecated alias
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def ghost_research_db_path() -> Path:
+    """Absolute path to the legacy C:/workspace ghost DB (migration source only)."""
+    p = _LEGACY_DEFAULT_RESEARCH_DB_PATH
+    if not p.is_absolute():
+        p = (_project_root() / p).resolve()
+    return p
 
 RESEARCH_CANDLE_EXTRA_COLS = (
     ("source", "TEXT"),
@@ -76,9 +91,32 @@ class TradeTapeRecord:
 class ResearchDatabase(Database):
     """Research-only SQLite store — never pruned, never mixed with live bot.db."""
 
-    def __init__(self, db_path: Path | str | None = None) -> None:
-        path = Path(db_path) if db_path is not None else DEFAULT_RESEARCH_DB_PATH
+    def __init__(self, db_path: Path | str) -> None:
+        if db_path is None:
+            raise TypeError(
+                "ResearchDatabase requires an explicit db_path — use "
+                "ResearchDatabase.open(config) or "
+                "ResearchDatabase(ResearchDatabase.resolve_path(config))"
+            )
+        path = Path(db_path)
+        if not path.is_absolute():
+            path = (_project_root() / path).resolve()
         super().__init__(path)
+
+    @classmethod
+    def open(
+        cls,
+        config: Any = None,
+        *,
+        config_path: Path | str | None = None,
+    ) -> ResearchDatabase:
+        """Open the research DB at ``research.database.path`` from config."""
+        if config is None:
+            from src.utils.config import load_config
+
+            cp = config_path or (_project_root() / "config" / "settings.yaml")
+            config = load_config(cp)
+        return cls(cls.resolve_path(config))
 
     def _init_db(self) -> None:
         super()._init_db()
@@ -905,5 +943,17 @@ class ResearchDatabase(Database):
 
     @staticmethod
     def resolve_path(config: Any) -> Path:
-        rel = config.get("research.database.path", str(DEFAULT_RESEARCH_DB_PATH))
-        return Path(str(rel))
+        raw = config.get("research.database.path")
+        if raw is None or str(raw).strip() == "":
+            from src.utils.config import DEFAULT_CONFIG
+
+            raw = (DEFAULT_CONFIG.get("research") or {}).get("database", {}).get("path")
+        if raw is None or str(raw).strip() == "":
+            raise ValueError(
+                "research.database.path is missing from config — "
+                "refusing to guess a research DB location"
+            )
+        p = Path(str(raw))
+        if not p.is_absolute():
+            p = (_project_root() / p).resolve()
+        return p

@@ -245,7 +245,7 @@ def current_dvol_percentile(
     the backtest evidence attaches to a trade entering on day ``ts_ms``.
     """
     ts = int(ts_ms if ts_ms is not None else time.time() * 1000)
-    rdb = db if db is not None else ResearchDatabase()
+    rdb = db if db is not None else ResearchDatabase.open()
     lookback = int(max(2 * window_days + 5, 45)) * 86_400_000
     closes = rdb.load_dvol_daily(currency.upper(), ts - lookback, ts)
     if not closes:

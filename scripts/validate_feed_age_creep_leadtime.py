@@ -215,7 +215,7 @@ def analyse_all(
     """Run the lead-time analysis over every contracted feed."""
     from src.data.research_database import ResearchDatabase
 
-    rdb = db or ResearchDatabase()
+    rdb = db or ResearchDatabase.open()
     now = now_ms if now_ms is not None else int(time.time() * 1000)
     # full available window: from the earliest daily row to now
     start = now - 400 * DAY_MS  # generous cap; rows outside simply won't exist
