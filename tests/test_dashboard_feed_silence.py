@@ -344,7 +344,7 @@ class TestFeedSilencePayload:
 
     def test_payload_carries_sparkline_series(self, monkeypatch, tmp_path) -> None:
         """Sparkline data comes from the research DB feed_age_samples table."""
-        import src.data.research_database as rdb_mod
+        import src.dashboard.web as web_mod
         from src.data.research_database import ResearchDatabase
 
         rdb = ResearchDatabase(tmp_path / "research.db")
@@ -357,10 +357,7 @@ class TestFeedSilencePayload:
             ]
         )
 
-        def fake_research_db(*a, **k):
-            return rdb
-
-        monkeypatch.setattr(rdb_mod, "ResearchDatabase", fake_research_db)
+        monkeypatch.setattr(web_mod, "_open_research_db", lambda: rdb)
         silence = _SilenceStub(
             {
                 "funding_hl": {
@@ -379,7 +376,7 @@ class TestFeedSilencePayload:
 
     def test_payload_carries_daily_max_age_series(self, monkeypatch, tmp_path) -> None:
         """The 14d column reads feed_age_history (daily max age per feed)."""
-        import src.data.research_database as rdb_mod
+        import src.dashboard.web as web_mod
         from src.data.research_database import ResearchDatabase
 
         rdb = ResearchDatabase(tmp_path / "research.db")
@@ -393,10 +390,7 @@ class TestFeedSilencePayload:
             ]
         )
 
-        def fake_research_db(*a, **k):
-            return rdb
-
-        monkeypatch.setattr(rdb_mod, "ResearchDatabase", fake_research_db)
+        monkeypatch.setattr(web_mod, "_open_research_db", lambda: rdb)
         silence = _SilenceStub(
             {
                 "funding_hl": {
@@ -418,7 +412,7 @@ class TestFeedSilencePayload:
     def test_payload_carries_creep_verdict_per_feed(self, monkeypatch, tmp_path) -> None:
         """A rising daily-max staircase (production rule) flags the feed in
         feed_silence_creep — the badge source."""
-        import src.data.research_database as rdb_mod
+        import src.dashboard.web as web_mod
         from src.data.research_database import ResearchDatabase
 
         rdb = ResearchDatabase(tmp_path / "research.db")
@@ -434,10 +428,7 @@ class TestFeedSilencePayload:
             ]
         )
 
-        def fake_research_db(*a, **k):
-            return rdb
-
-        monkeypatch.setattr(rdb_mod, "ResearchDatabase", fake_research_db)
+        monkeypatch.setattr(web_mod, "_open_research_db", lambda: rdb)
         silence = _SilenceStub(
             {
                 "funding_hl": {
@@ -458,7 +449,7 @@ class TestFeedSilencePayload:
 
     def test_creep_quiet_for_flat_feed(self, monkeypatch, tmp_path) -> None:
         """No staircase -> the feed is absent from feed_silence_creep (no badge)."""
-        import src.data.research_database as rdb_mod
+        import src.dashboard.web as web_mod
         from src.data.research_database import ResearchDatabase
 
         rdb = ResearchDatabase(tmp_path / "research.db")
@@ -474,10 +465,7 @@ class TestFeedSilencePayload:
             ]
         )
 
-        def fake_research_db(*a, **k):
-            return rdb
-
-        monkeypatch.setattr(rdb_mod, "ResearchDatabase", fake_research_db)
+        monkeypatch.setattr(web_mod, "_open_research_db", lambda: rdb)
         silence = _SilenceStub(
             {
                 "funding_hl": {
@@ -494,12 +482,12 @@ class TestFeedSilencePayload:
 
     def test_creep_best_effort_on_missing_db(self, monkeypatch) -> None:
         """A broken research DB degrades to an empty creep map, never an error."""
-        import src.data.research_database as rdb_mod
+        import src.dashboard.web as web_mod
 
-        def boom(*a, **k):
+        def boom() -> None:
             raise RuntimeError("db broken")
 
-        monkeypatch.setattr(rdb_mod, "ResearchDatabase", boom)
+        monkeypatch.setattr(web_mod, "_open_research_db", boom)
         silence = _SilenceStub(
             {
                 "funding_hl": {
@@ -516,12 +504,12 @@ class TestFeedSilencePayload:
 
     def test_daily_series_best_effort_on_missing_db(self, monkeypatch) -> None:
         """A broken research DB degrades to empty daily series, never an error."""
-        import src.data.research_database as rdb_mod
+        import src.dashboard.web as web_mod
 
-        def boom(*a, **k):
+        def boom() -> None:
             raise RuntimeError("db broken")
 
-        monkeypatch.setattr(rdb_mod, "ResearchDatabase", boom)
+        monkeypatch.setattr(web_mod, "_open_research_db", boom)
         silence = _SilenceStub(
             {
                 "funding_hl": {
@@ -538,12 +526,12 @@ class TestFeedSilencePayload:
 
     def test_sparkline_best_effort_on_missing_db(self, monkeypatch) -> None:
         """A broken research DB degrades to empty series, never an error."""
-        import src.data.research_database as rdb_mod
+        import src.dashboard.web as web_mod
 
-        def boom(*a, **k):
+        def boom() -> None:
             raise RuntimeError("db broken")
 
-        monkeypatch.setattr(rdb_mod, "ResearchDatabase", boom)
+        monkeypatch.setattr(web_mod, "_open_research_db", boom)
         silence = _SilenceStub(
             {
                 "funding_hl": {

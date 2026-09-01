@@ -53,14 +53,11 @@ class TestDashboardDvolEndpoint:
         self._tmp.cleanup()
 
     def _get(self):
-        import src.data.research_database as rdb_mod
+        import src.dashboard.web as web_mod
 
-        orig_cls = rdb_mod.ResearchDatabase
+        rdb = ResearchDatabase(self._db_path)
 
-        def _factory(*_a, **_k):
-            return orig_cls(self._db_path)
-
-        with patch.object(rdb_mod, "ResearchDatabase", _factory):
+        with patch.object(web_mod, "_open_research_db", lambda: rdb):
             return self._client.get("/api/dvol")
 
     def test_shape_and_current_classification(self) -> None:
@@ -91,19 +88,13 @@ class TestDashboardDvolEndpoint:
         assert all(0.0 <= row["pct"] <= 100.0 for row in populated)
 
     def test_empty_db_yields_unknown(self) -> None:
-        empty = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        empty.close()
-        os.unlink(empty.name)  # ResearchDatabase creates the file itself
-        import src.data.research_database as rdb_mod
+        empty_path = os.path.join(self._tmp.name, "empty.db")
+        import src.dashboard.web as web_mod
 
-        orig_cls = rdb_mod.ResearchDatabase
+        rdb = ResearchDatabase(empty_path)
 
-        def _factory(*_a, **_k):
-            return orig_cls(empty.name)
-
-        with patch.object(rdb_mod, "ResearchDatabase", _factory):
+        with patch.object(web_mod, "_open_research_db", lambda: rdb):
             r = self._client.get("/api/dvol")
-        os.unlink(empty.name)
         assert r.status_code == 200
         d = r.get_json()
         for sym in ("BTC", "ETH", "SOL", "HYPE"):

@@ -26,6 +26,13 @@ from src.utils.helpers import safe_float
 logger = logging.getLogger(__name__)
 
 
+def _open_research_db() -> "ResearchDatabase":
+    """Central research DB accessor for dashboard read paths (config-resolved)."""
+    from src.data.research_database import ResearchDatabase
+
+    return ResearchDatabase.open()
+
+
 class _PositionsCapitalView:
     """Minimal portfolio view for sync risk metric reads in the dashboard."""
 
@@ -134,7 +141,7 @@ def _feed_silence_sparklines(feed_silence: Dict[str, Any]) -> Dict[str, List[Lis
     try:
         from src.data.research_database import ResearchDatabase
 
-        rdb = ResearchDatabase()
+        rdb = _open_research_db()
         now_ms = int(time.time() * 1000)
         start_ms = now_ms - 24 * 3_600_000
         for feed in feed_silence:
@@ -164,7 +171,7 @@ def _feed_silence_daily(feed_silence: Dict[str, Any]) -> Dict[str, List[List[flo
     try:
         from src.data.research_database import ResearchDatabase
 
-        rdb = ResearchDatabase()
+        rdb = _open_research_db()
         now_ms = int(time.time() * 1000)
         start_ms = now_ms - 14 * 86_400_000
         for feed in feed_silence:
@@ -199,7 +206,7 @@ def _feed_silence_creep(feed_silence: Dict[str, Any]) -> Dict[str, Dict[str, Any
         )
         from src.data.research_database import ResearchDatabase
 
-        rdb = ResearchDatabase()
+        rdb = _open_research_db()
         now_ms = int(time.time() * 1000)
         start_ms = now_ms - 14 * 86_400_000
         for feed, st in feed_silence.items():
@@ -1404,7 +1411,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
             )
             from src.data.research_database import ResearchDatabase
 
-            rdb = ResearchDatabase()
+            rdb = _open_research_db()
             try:
                 symbols = sorted(_allowed_symbols()) or ["BTC", "ETH", "SOL", "HYPE"]
                 now_ms = int(time.time() * 1000)

@@ -22,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.data.research_database import DEFAULT_RESEARCH_DB_PATH
+from src.data.research_database import ResearchDatabase
 from src.research.shadow_outcome_evaluator import (
     IDEALIZED_FILL_DISCLAIMER,
     LIVE_DB_DEFAULT,
@@ -70,8 +70,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--research-db",
-        default=str(DEFAULT_RESEARCH_DB_PATH),
-        help="Research DB path (shadow_decisions + optional scoreboard persist)",
+        default=None,
+        help="Research DB path (default: research.database.path from config)",
     )
     parser.add_argument(
         "--live-db",
@@ -104,7 +104,7 @@ def main() -> int:
         strategy=args.strategy,
         variant=args.variant,
         since_days=args.since_days,
-        research_db_path=Path(args.research_db),
+        research_db_path=Path(args.research_db) if args.research_db else None,
         live_db_path=Path(args.live_db) if args.live_db else None,
         persist=persist,
     )

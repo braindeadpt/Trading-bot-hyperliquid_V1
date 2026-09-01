@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
-from src.data.research_database import DEFAULT_RESEARCH_DB_PATH, ResearchDatabase
+from src.data.research_database import ResearchDatabase
 from src.exchanges.top_trader_tracker import TopTraderSymbolSnapshot
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ class TopTraderStore:
     """Append-only bias samples + virtual trade ledger in the research DB."""
 
     def __init__(self, db: Optional[ResearchDatabase] = None) -> None:
-        self._db = db or ResearchDatabase(DEFAULT_RESEARCH_DB_PATH)
+        self._db = db or ResearchDatabase.open()
         self._lock = threading.Lock()
         self._ensure_tables()
 

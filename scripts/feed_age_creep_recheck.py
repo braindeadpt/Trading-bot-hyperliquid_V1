@@ -141,7 +141,7 @@ def detect_creeping_age(
     try:
         from src.data.research_database import ResearchDatabase
 
-        rdb = db or ResearchDatabase()
+        rdb = db or ResearchDatabase.open()
         now = now_ms if now_ms is not None else int(time.time() * 1000)
         start = now - lookback_days * 86_400_000
         for feed, max_silence in sorted(contracts.items()):
