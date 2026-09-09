@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import Optional
 from datetime import datetime
 
+from src.utils.http import make_client_session
+
 logger = logging.getLogger("alerts")
 
 @dataclass
@@ -33,7 +35,7 @@ class AlertNotifier:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._http is None or self._http.closed:
-            self._http = aiohttp.ClientSession()
+            self._http = make_client_session()
         return self._http
 
     async def send(self, message: str, level: str = "info", *, force: bool = False) -> None:
@@ -88,7 +90,7 @@ class AlertNotifier:
         """Send message via Discord webhook."""
         try:
             payload = {"content": message}
-            async with aiohttp.ClientSession() as session:
+            async with make_client_session() as session:
                 async with session.post(
                     self.cfg.discord_webhook_url,
                     json=payload,

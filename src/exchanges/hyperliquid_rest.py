@@ -16,6 +16,7 @@ from src.exchanges.hl_predicted_funding import (
     HyperliquidPredictedFundingClient,
     parse_predicted_fundings_response,
 )
+from src.utils.http import make_client_session
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ class HyperliquidRESTClient:
     async def open(self) -> None:
         """Create the aiohttp session."""
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
+            self._session = make_client_session(
                 headers={"Content-Type": "application/json"},
                 timeout=aiohttp.ClientTimeout(total=30),
             )

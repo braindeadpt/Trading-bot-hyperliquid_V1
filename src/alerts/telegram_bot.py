@@ -17,6 +17,7 @@ from alerts.telegram_reports import (
     build_strategy_message,
     build_trades_message,
 )
+from src.utils.http import make_client_session
 
 logger = logging.getLogger("alerts.telegram_bot")
 
@@ -73,7 +74,7 @@ class TelegramCommandBot:
             logger.warning("TelegramCommandBot not started: missing token or chat_id")
             return
         self._running = True
-        self._session = aiohttp.ClientSession()
+        self._session = make_client_session()
         self._poll_task = asyncio.create_task(self._poll_loop(), name="telegram_poll")
         self._digest_task = asyncio.create_task(self._digest_loop(), name="telegram_digest")
         logger.info(

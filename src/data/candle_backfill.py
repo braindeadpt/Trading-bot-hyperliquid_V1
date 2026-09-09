@@ -27,6 +27,7 @@ import aiohttp
 from src.data.database import Candle, Database
 from src.data.hl_research_backfill import split_taker_volume_from_kline
 from src.utils.config import get_trading_symbols
+from src.utils.http import make_client_session
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +203,7 @@ def needs_backfill(
 
 
 def _new_session() -> aiohttp.ClientSession:
-    return aiohttp.ClientSession(
+    return make_client_session(
         timeout=aiohttp.ClientTimeout(total=PER_REQUEST_TIMEOUT_SEC)
     )
 

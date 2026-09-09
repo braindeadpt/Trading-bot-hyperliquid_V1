@@ -21,6 +21,7 @@ from websockets.exceptions import ConnectionClosed
 from src.exchanges.binance_api import to_binance_symbol
 from src.exchanges.hyperliquid_ws import DataBus
 from src.exchanges.liquidation_event import LiquidationEvent
+from src.utils.http import make_client_session
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ class BinanceFuturesFeed:
     async def start(self) -> None:
         if self._ws_task is not None:
             return
-        self._session = aiohttp.ClientSession(
+        self._session = make_client_session(
             timeout=aiohttp.ClientTimeout(total=15),
             headers={"Accept": "application/json"},
         )

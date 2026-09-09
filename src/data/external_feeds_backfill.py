@@ -25,6 +25,7 @@ import aiohttp
 
 from src.data.database import BinancePerpPriceRecord, Candle, Database, LiquidationRecord
 from src.exchanges.binance_api import to_binance_symbol
+from src.utils.http import make_client_session
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +212,7 @@ async def _async_backfill_perp(
     start_ms = end_ms - days * 86_400_000
     total = 0
     timeout = aiohttp.ClientTimeout(total=PER_REQUEST_TIMEOUT_SEC)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with make_client_session(timeout=timeout) as session:
         for symbol in symbols:
             sym = symbol.upper()
             try:

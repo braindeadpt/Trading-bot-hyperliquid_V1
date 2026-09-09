@@ -16,6 +16,7 @@ from src.exchanges.funding_normalize import (
     normalize_funding_to_8h,
     parse_optional_rate,
 )
+from src.utils.http import make_client_session
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,12 @@ class HyperliquidPredictedFundingClient:
         self._stale_max_sec = float(stale_max_sec)
         self._connect_timeout = float(connect_timeout)
         self._total_timeout = float(total_timeout)
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    async def close(self) -> None:
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
 
     @property
     def cache(self) -> Dict[str, HlSymbolFundingSnapshot]:
@@ -134,11 +141,13 @@ class HyperliquidPredictedFundingClient:
         """Fetch and cache predicted fundings; return stale cache on failure."""
         own_session = session is None
         if own_session:
-            timeout = aiohttp.ClientTimeout(
-                total=self._total_timeout,
-                connect=self._connect_timeout,
-            )
-            session = aiohttp.ClientSession(timeout=timeout)
+            if self._session is None or self._session.closed:
+                timeout = aiohttp.ClientTimeout(
+                    total=self._total_timeout,
+                    connect=self._connect_timeout,
+                )
+                self._session = make_client_session(timeout=timeout)
+            session = self._session
 
         now_ms = int(time.time() * 1000)
         parsed: Dict[str, HlSymbolFundingSnapshot] = {}
@@ -154,9 +163,6 @@ class HyperliquidPredictedFundingClient:
             parsed = parse_predicted_fundings_response(raw)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Hyperliquid predictedFundings fetch failed: %s", exc)
-        finally:
-            if own_session and session is not None:
-                await session.close()
 
         if symbols is not None:
             want = set(symbols)

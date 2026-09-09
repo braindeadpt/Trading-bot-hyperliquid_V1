@@ -18,6 +18,7 @@ from src.data.candle_providers.base import (
     ProviderName,
 )
 from src.data.candle_providers.validation import validate_page_order
+from src.utils.http import make_client_session
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ class GoldrushHypercoreCandleProvider(CandleProvider):
 
     async def connect(self) -> None:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
+            self._session = make_client_session(
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {self._api_key}",

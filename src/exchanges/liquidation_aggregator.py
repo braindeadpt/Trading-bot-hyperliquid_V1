@@ -60,6 +60,7 @@ from websockets.exceptions import ConnectionClosed
 
 from src.exchanges.hyperliquid_ws import DataBus
 from src.exchanges.liquidation_event import LiquidationEvent
+from src.utils.http import make_client_session
 
 logger = logging.getLogger(__name__)
 
@@ -326,7 +327,7 @@ class MultiVenueLiquidationAggregator:
         if self._tasks:
             return
         self._shutdown = False
-        self._session = aiohttp.ClientSession(
+        self._session = make_client_session(
             timeout=aiohttp.ClientTimeout(total=20),
             headers={"Accept": "application/json"},
         )

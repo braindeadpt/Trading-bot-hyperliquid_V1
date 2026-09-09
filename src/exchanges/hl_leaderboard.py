@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import aiohttp
 
 from src.utils.helpers import safe_float
+from src.utils.http import make_client_session
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +240,7 @@ async def fetch_leaderboard_rows(
 ) -> List[Dict[str, Any]]:
     """Download full leaderboard JSON (can be tens of thousands of rows)."""
     own_session = session is None
-    sess = session or aiohttp.ClientSession(
+    sess = session or make_client_session(
         timeout=aiohttp.ClientTimeout(total=timeout_sec),
         headers={"User-Agent": "hl-premium-bot/top-trader-leaderboard"},
     )

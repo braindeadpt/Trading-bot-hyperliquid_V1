@@ -18,6 +18,8 @@ import aiohttp
 import websockets
 from websockets.typing import Data
 
+from src.utils.http import make_client_session
+
 logger = logging.getLogger(__name__)
 
 REST_BASE = "https://api.binance.com"
@@ -104,7 +106,7 @@ class BinanceRESTClient:
 
     async def open(self) -> None:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
+            self._session = make_client_session(
                 timeout=aiohttp.ClientTimeout(total=15),
                 headers={"Accept": "application/json"},
             )

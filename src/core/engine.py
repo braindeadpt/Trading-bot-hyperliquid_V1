@@ -1634,6 +1634,25 @@ class TradingEngine:
                 except asyncio.CancelledError:
                     pass
 
+        agg = getattr(self, "_funding_aggregator", None)
+        closer = getattr(agg, "close", None)
+        if callable(closer):
+            maybe = closer()
+            if asyncio.iscoroutine(maybe):
+                try:
+                    await maybe
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Funding aggregator close: %s", exc)
+        hl_pred = getattr(self, "_hl_predicted", None)
+        closer = getattr(hl_pred, "close", None)
+        if callable(closer):
+            maybe = closer()
+            if asyncio.iscoroutine(maybe):
+                try:
+                    await maybe
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("HL predicted funding close: %s", exc)
+
         # getattr: unit stubs use TradingEngine.__new__ without full __init__
         tracker = getattr(self, "_top_trader_tracker", None)
         if tracker is not None:

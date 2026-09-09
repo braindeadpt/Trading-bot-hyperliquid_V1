@@ -24,6 +24,7 @@ from typing import Any, List, Optional, Sequence, Tuple
 import aiohttp
 
 from src.data.research_database import ResearchDatabase
+from src.utils.http import make_client_session
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ async def fetch_dvol(
         f"&end_timestamp={end_ms}&resolution=86400"
     )
     timeout = aiohttp.ClientTimeout(total=25)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with make_client_session(timeout=timeout) as session:
         async with session.get(url, headers={"User-Agent": "research/1.0"}) as resp:
             resp.raise_for_status()
             payload = await resp.json()

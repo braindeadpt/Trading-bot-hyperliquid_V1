@@ -19,6 +19,7 @@ from src.exchanges.funding_normalize import (
     EXCHANGE_FUNDING_INTERVAL_HOURS,
     normalize_funding_to_8h,
 )
+from src.utils.http import make_client_session
 
 logger = logging.getLogger(__name__)
 
@@ -389,6 +390,25 @@ class FundingOIAggregator:
         self._connect_timeout = float(connect_timeout)
         self._total_timeout = float(total_timeout)
         self._max_retries = int(max_retries)
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        """Reuse one session so DNS cache survives the 30s poll loop."""
+        if self._session is None or self._session.closed:
+            self._session = make_client_session(
+                timeout=aiohttp.ClientTimeout(
+                    total=self._total_timeout,
+                    connect=self._connect_timeout,
+                ),
+                limit=30,
+            )
+        return self._session
+
+    async def close(self) -> None:
+        """Close the shared HTTP session (engine shutdown)."""
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
 
     async def _fetch_with_retry(
         self,
@@ -557,118 +577,108 @@ class FundingOIAggregator:
         results: Dict[str, AggregatedFundingOI] = {}
         now_ms = int(time.time() * 1000)
 
-        connector = aiohttp.TCPConnector(
-            ttl_dns_cache=300,
-            use_dns_cache=True,
-            limit=30,
-            enable_cleanup_closed=True,
+        session = await self._ensure_session()
+        sym_list = [s for s in symbols if s in self.SYMBOL_MAP]
+        polled = await asyncio.gather(
+            *[self._poll_symbol(session, sym) for sym in sym_list],
+            return_exceptions=True,
         )
-        timeout = aiohttp.ClientTimeout(
-            total=self._total_timeout,
-            connect=self._connect_timeout,
-        )
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            sym_list = [s for s in symbols if s in self.SYMBOL_MAP]
-            polled = await asyncio.gather(
-                *[self._poll_symbol(session, sym) for sym in sym_list],
-                return_exceptions=True,
-            )
 
-            for sym, item in zip(sym_list, polled):
-                if isinstance(item, Exception):
-                    logger.warning("Funding poll error for %s: %s", sym, item)
-                    fresh = None
-                    failed = ["poll_exception"]
-                else:
-                    fresh, failed = item
+        for sym, item in zip(sym_list, polled):
+            if isinstance(item, Exception):
+                logger.warning("Funding poll error for %s: %s", sym, item)
+                fresh = None
+                failed = ["poll_exception"]
+            else:
+                fresh, failed = item
 
-                if fresh is not None:
-                    # v3.1.21: even on a "fresh" poll, the underlying
-                    # exchange data may already be hours old (e.g. we
-                    # just polled but the venue hasn't published a new
-                    # funding tick since the last settlement). Flag
-                    # that case here so downstream consumers know.
-                    exchange_age_sec = 0.0
-                    if fresh.exchange_timestamp_ms > 0:
-                        exchange_age_sec = max(
-                            0.0,
-                            (now_ms - fresh.exchange_timestamp_ms) / 1000.0,
-                        )
-                    if exchange_age_sec > self._stale_max_sec:
-                        logger.warning(
-                            "Funding %s: exchange data is stale "
-                            "(exchange_age=%.0fs > %.0fs, venues=%d)",
-                            sym,
-                            exchange_age_sec,
-                            self._stale_max_sec,
-                            fresh.exchange_count,
-                        )
-                        fresh = replace(
-                            fresh,
-                            stale=True,
-                            exchange_age_sec=exchange_age_sec,
-                        )
-                    self._cache[sym] = fresh
-                    results[sym] = fresh
-                    if failed:
-                        logger.info(
-                            "Funding %s: OK (%d exchanges, partial fail: %s)",
-                            sym,
-                            fresh.exchange_count,
-                            ",".join(failed),
-                        )
-                    continue
-
-                cached = self._cache.get(sym)
-                if cached is None:
-                    logger.warning("Funding %s: no data and no cache", sym)
-                    continue
-
-                # v3.1.21: staleness = max(cache age, exchange age).
-                # The previous code only looked at cache age, so a
-                # row we cached 30s ago whose underlying exchange
-                # tick is 4h old would have been reported as fresh.
-                cache_age_sec = (
-                    (now_ms - (cached.cache_insertion_ms or cached.timestamp_ms)) / 1000.0
-                    if (cached.cache_insertion_ms or cached.timestamp_ms)
-                    else 0.0
-                )
+            if fresh is not None:
+                # v3.1.21: even on a "fresh" poll, the underlying
+                # exchange data may already be hours old (e.g. we
+                # just polled but the venue hasn't published a new
+                # funding tick since the last settlement). Flag
+                # that case here so downstream consumers know.
                 exchange_age_sec = 0.0
-                if cached.exchange_timestamp_ms > 0:
+                if fresh.exchange_timestamp_ms > 0:
                     exchange_age_sec = max(
                         0.0,
-                        (now_ms - cached.exchange_timestamp_ms) / 1000.0,
+                        (now_ms - fresh.exchange_timestamp_ms) / 1000.0,
                     )
-                worst_age_sec = max(cache_age_sec, exchange_age_sec)
-
-                if worst_age_sec > self._stale_max_sec:
+                if exchange_age_sec > self._stale_max_sec:
                     logger.warning(
-                        "Funding %s: poll failed and cache expired "
-                        "(cache_age=%.0fs, exchange_age=%.0fs > %.0fs)",
+                        "Funding %s: exchange data is stale "
+                        "(exchange_age=%.0fs > %.0fs, venues=%d)",
                         sym,
-                        cache_age_sec,
                         exchange_age_sec,
                         self._stale_max_sec,
+                        fresh.exchange_count,
                     )
-                    continue
+                    fresh = replace(
+                        fresh,
+                        stale=True,
+                        exchange_age_sec=exchange_age_sec,
+                    )
+                self._cache[sym] = fresh
+                results[sym] = fresh
+                if failed:
+                    logger.info(
+                        "Funding %s: OK (%d exchanges, partial fail: %s)",
+                        sym,
+                        fresh.exchange_count,
+                        ",".join(failed),
+                    )
+                continue
 
-                stale_row = replace(
-                    cached,
-                    stale=True,
-                    age_sec=cache_age_sec,
-                    exchange_age_sec=exchange_age_sec,
-                    failed_exchanges=failed,
+            cached = self._cache.get(sym)
+            if cached is None:
+                logger.warning("Funding %s: no data and no cache", sym)
+                continue
+
+            # v3.1.21: staleness = max(cache age, exchange age).
+            # The previous code only looked at cache age, so a
+            # row we cached 30s ago whose underlying exchange
+            # tick is 4h old would have been reported as fresh.
+            cache_age_sec = (
+                (now_ms - (cached.cache_insertion_ms or cached.timestamp_ms)) / 1000.0
+                if (cached.cache_insertion_ms or cached.timestamp_ms)
+                else 0.0
+            )
+            exchange_age_sec = 0.0
+            if cached.exchange_timestamp_ms > 0:
+                exchange_age_sec = max(
+                    0.0,
+                    (now_ms - cached.exchange_timestamp_ms) / 1000.0,
                 )
-                self._cache[sym] = stale_row
-                results[sym] = stale_row
+            worst_age_sec = max(cache_age_sec, exchange_age_sec)
+
+            if worst_age_sec > self._stale_max_sec:
                 logger.warning(
-                    "Funding %s: using STALE cache "
-                    "(cache_age=%.0fs, exchange_age=%.0fs, last_exchanges=%d)",
+                    "Funding %s: poll failed and cache expired "
+                    "(cache_age=%.0fs, exchange_age=%.0fs > %.0fs)",
                     sym,
                     cache_age_sec,
                     exchange_age_sec,
-                    stale_row.exchange_count,
+                    self._stale_max_sec,
                 )
+                continue
+
+            stale_row = replace(
+                cached,
+                stale=True,
+                age_sec=cache_age_sec,
+                exchange_age_sec=exchange_age_sec,
+                failed_exchanges=failed,
+            )
+            self._cache[sym] = stale_row
+            results[sym] = stale_row
+            logger.warning(
+                "Funding %s: using STALE cache "
+                "(cache_age=%.0fs, exchange_age=%.0fs, last_exchanges=%d)",
+                sym,
+                cache_age_sec,
+                exchange_age_sec,
+                stale_row.exchange_count,
+            )
 
         self._last_poll_ms = now_ms
         return results
@@ -682,7 +692,10 @@ class FundingOIAggregator:
 async def main():
     logging.basicConfig(level=logging.INFO)
     agg = FundingOIAggregator()
-    results = await agg.poll(["BTC", "ETH", "SOL"])
+    try:
+        results = await agg.poll(["BTC", "ETH", "SOL"])
+    finally:
+        await agg.close()
     for sym, data in results.items():
         print(f"\n{sym}:")
         print(f"  Funding avg: {data.funding_avg}")
