@@ -128,6 +128,22 @@ execution — no `settings.yaml`, no `src/`, no window re-registration, no
 Session results land in `docs/OVERNIGHT_RESEARCH_LOG.md` (queue format,
 verdict schema and a worked example are in its reference header).
 
+**Nightly schedule.** `overnight_nightly.bat` runs the session automatically
+via Windows Task Scheduler (task "Hyperliquid Overnight Research", daily at
+02:00 local — registered with `schtasks /Create ... /SC DAILY /ST 02:00`,
+runs while the user is logged in). The wrapper `scripts/overnight_nightly.py`
+reads the preregistered queue, runs the first READY family in compact
+`--summary` mode, and enforces the K=4 window floor at runtime: a selection
+that yields fewer than 4 non-overlapping windows is **refused** (the paired
+sign-flip gate cannot pass at K=3), and nothing-READY is a normal outcome
+(exit 0, reason in the status file). Cron output goes to
+`logs/overnight_nightly_cron.log`; a PID lockfile prevents overlapping
+sessions. The dashboard's **Research watchdogs** panel carries the
+`overnight_session` row: next READY entry (or the queue's nothing-READY
+state), the last session's verdicts and exit code, and the recent verdict
+history — fed by `data/research/overnight_experiments/NIGHTLY_STATUS.json`,
+never by a live run.
+
 ---
 
 ## Project Structure
