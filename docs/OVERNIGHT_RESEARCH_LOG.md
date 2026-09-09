@@ -87,13 +87,31 @@ noise-model commit would add a `noise gate:` line here; this run predates
 it, and its per-trade PnL is not stored in the artifact, so none is shown.)
 
 ---
-## Morning report — 2026-09-09 16:15 UTC — family `flush_fade`
+## Morning report — 2026-09-09 17:30 UTC — family `vwap_thresholds`
 
-- span: 2026-08-09..2026-09-09 (4 non-overlapping windows of 10d) · symbols: BTC, ETH
-- verdicts: 0 KEEP · 0 INCONCLUSIVE · 3 DISCARD
-- artifact: `data\research\overnight_experiments\20260909_121824_flush_fade.json`
+- span: 2026-05-18..2026-09-08 (4 non-overlapping windows of 30d) · symbols: BTC, ETH, HYPE
+- verdicts: 0 KEEP · 0 INCONCLUSIVE · 2 DISCARD
+- artifact: `data\research\overnight_experiments\20260909_173039_vwap_thresholds.json`
 
 ---
+### 2026-09-09 17:30 UTC — vwap_thresholds/z=2.5+HYPE:3.0 — DISCARD
+- hypothesis: per-symbol thresholds: HYPE trades later and thinner, so its fade plausibly needs a wider 3.0σ band; a single 2.5σ threshold treats all listings as the same animal
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (z=2.5 (baseline)): net=-151.09 n=251 PF=0.9
+- variant: net=-37.27 n=240 PF=0.973
+- per-window delta: 2026-05(+0.0), 2026-06(+137.82), 2026-07(-14.48), 2026-08(-9.52)
+- reasons: windows improved 1/4 (majority=no); aggregate n=240 (gate >=30); aggregate PF=0.973 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-09 17:30 UTC — vwap_thresholds/z=3.0 all — DISCARD
+- hypothesis: a uniformly stricter band trades less everywhere and filters low-quality extensions at the cost of missed valid ones
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (z=2.5 (baseline)): net=-151.09 n=251 PF=0.9
+- variant: net=-119.02 n=184 PF=0.892
+- per-window delta: 2026-05(-5.91), 2026-06(+59.43), 2026-07(-0.14), 2026-08(-21.31)
+- reasons: windows improved 1/4 (majority=no); aggregate n=184 (gate >=30); aggregate PF=0.892 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
 ### 2026-09-09 16:15 UTC — flush_fade/delay=0 stopout=OFF — DISCARD
 - hypothesis: the fade needs the flush to revert; the stop-out exits on the same window that generated the signal — bypassing it removes the loop
 - windows: 2026-08-09..2026-09-09 (4 windows of 10d, non-overlapping)
