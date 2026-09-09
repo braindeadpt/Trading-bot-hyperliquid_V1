@@ -34,6 +34,7 @@ from src.utils.config import load_config  # noqa: E402
 from scripts.liquidation_flush_recheck import (
     TARGET_DAYS as FLUSH_TARGET_DAYS,
 )
+from scripts.overnight_nightly import build_nightly_status  # noqa: E402
 from scripts.liquidation_flush_recheck import real_span_days
 from scripts.research_watchdog_supervisor import load_shared_state
 from scripts.top_trader_bias_recheck import (
@@ -227,9 +228,40 @@ def _cadence_watchdog() -> Dict[str, Any]:
     }
 
 
+def _overnight_watchdog() -> Dict[str, Any]:
+    """Overnight research sessions — the nightly runner's queue + verdicts.
+
+    Reads the wrapper's status file (NIGHTLY_STATUS.json): what is READY next,
+    whether the last session completed, and the recent verdict history. Never
+    runs the runner — a dashboard poll must stay cheap.
+    """
+    status = build_nightly_status()
+    last = status.get("last_session") or {}
+    ready = status.get("next_ready")
+    recent = status.get("recent_sessions") or []
+    return {
+        "id": "overnight_session",
+        "label": "Overnight research (nightly runner)",
+        "script": "scripts/overnight_nightly.py",
+        "metric_label": "sessões recentes com veredicto",
+        "unit": "sessions",
+        "current": len(recent),
+        "target": 5,
+        "progress_pct": _progress_pct(len(recent), 5),
+        "next_ready": ready,
+        "last_session": last,
+        "recent_sessions": recent[:5],
+        "reason": status.get("reason", ""),
+        "triggered": bool(last and last.get("returncode") == 0
+                          and any(v == "KEEP" for v in last.get("verdicts", []))),
+        "last_run": last or None,
+        "report_path": str(status.get("ledger_path", "")),
+    }
+
+
 def build_research_watchdogs_payload() -> Dict[str, Any]:
     """Assemble the read-only watchdog status (bias + flush + iv + creep +
-    cadence)."""
+    cadence + overnight sessions)."""
     watchdogs: List[Dict[str, Any]] = []
     builders = [
         ("top_trader_bias", _bias_watchdog),
@@ -237,6 +269,7 @@ def build_research_watchdogs_payload() -> Dict[str, Any]:
         ("iv_gate_shadow", _iv_gate_watchdog),
         ("feed_age_creep", _creeping_age_watchdog),
         ("feed_cadence", _cadence_watchdog),
+        ("overnight_session", _overnight_watchdog),
     ]
     for wd_id, builder in builders:
         try:

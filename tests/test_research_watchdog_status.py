@@ -92,6 +92,26 @@ def _stub_metrics(monkeypatch):
     )
     monkeypatch.setattr(wd, "feed_silence_contracts",
                         lambda cfg: {"liquidation_okx": 21600.0})
+    # Overnight watchdog: the wrapper's status builder is stubbed — the
+    # dashboard payload must never run the runner or depend on cron state.
+    monkeypatch.setattr(
+        wd, "build_nightly_status",
+        lambda: {
+            "generated_ms": 1_752_000_000_000,
+            "next_ready": {"family": "vwap_thresholds", "windows": 4,
+                           "k_floor_ok": True},
+            "last_session": {"family": "vwap_thresholds", "returncode": 0,
+                             "verdicts": ["DISCARD", "KEEP"],
+                             "started": "2026-09-09 02:00 UTC",
+                             "duration_s": 42.0},
+            "recent_sessions": [
+                {"family": "vwap_thresholds", "verdicts": ["DISCARD"]},
+                {"family": "flush_fade", "verdicts": ["DISCARD"]},
+            ],
+            "ledger_path": "docs/OVERNIGHT_RESEARCH_LOG.md",
+            "reason": "",
+        },
+    )
     monkeypatch.setattr(
         wd, "run_cadence_diagnostic",
         lambda db, contracts, **k: {
@@ -115,14 +135,28 @@ def _by_id(payload):
     return {w.get("id"): w for w in payload["watchdogs"]}
 
 
-def test_five_watchdogs_present(_stub_metrics):
+def test_six_watchdogs_present(_stub_metrics):
     payload = wd.build_research_watchdogs_payload()
     by_id = _by_id(payload)
     assert set(by_id) == {
         "top_trader_bias", "liquidation_flush", "iv_gate_shadow",
-        "feed_age_creep", "feed_cadence",
+        "feed_age_creep", "feed_cadence", "overnight_session",
     }
     assert payload["generated_ms"] > 0
+
+
+def test_overnight_watchdog_payload(_stub_metrics, monkeypatch):
+    by_id = _by_id(wd.build_research_watchdogs_payload())
+    ov = by_id["overnight_session"]
+    # The stub's build_nightly_status returns a session with one KEEP →
+    # triggered green, recent sessions counted, ledger path exposed.
+    assert ov["unit"] == "sessions"
+    assert ov["current"] == 2
+    assert ov["target"] == 5
+    assert ov["triggered"] is True
+    assert ov["report_path"] == "docs/OVERNIGHT_RESEARCH_LOG.md"
+    assert ov["next_ready"]["family"] == "vwap_thresholds"
+    assert ov["last_session"]["returncode"] == 0
 
 
 def test_bias_progress_and_trigger(_stub_metrics):
@@ -376,7 +410,7 @@ class TestResearchWatchdogsEndpoint:
         ids = {w.get("id") for w in r.get_json()["watchdogs"]}
         assert ids == {
             "top_trader_bias", "liquidation_flush", "iv_gate_shadow",
-            "feed_age_creep", "feed_cadence",
+            "feed_age_creep", "feed_cadence", "overnight_session",
         }
 
 
@@ -419,6 +453,19 @@ class TestResearchWatchdogsTemplate:
         assert "recent_median_sec" in html
         assert "hist_p99_sec" in html
         assert "med " in html and " > p99 " in html
+
+    def test_panel_renders_overnight_session(self) -> None:
+        html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        # the overnight watchdog renders the queue state + last session
+        assert "w.id === \"overnight_session\"" in html
+        assert "w.next_ready" in html
+        assert "k_floor_ok" in html
+        assert "nada READY" in html
+        assert "w.last_session" in html
+        # the unit label for the sessions progress bar
+        assert "sessões" in html
 
     def test_panel_marks_concentration_caveat_yellow(self) -> None:
         html = (ROOT / "src" / "dashboard" / "templates" / "index.html").read_text(
