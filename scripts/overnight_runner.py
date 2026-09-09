@@ -877,6 +877,27 @@ def selftest() -> int:
     return 0
 
 
+def summarize(session: Dict[str, Any], artifact: Path, ledger: Path) -> str:
+    """One compact line per variant — the cron log / notifier surface.
+
+    The runner's normal output block stays human-first; this is the compact
+    echo the nightly wrapper captures into its status file (and the only
+    thing a scheduled task needs to read at a glance).
+    """
+    lines = [f"overnight: family={session['family']} "
+             f"span={session['span']['start']}..{session['span']['end']} "
+             f"windows={len(session['windows'])}K",
+             f"ledger: {ledger}",
+             f"artifact: {artifact}"]
+    for r in session["results"]:
+        av, ab = r["aggregate_variant"], r["aggregate_baseline"]
+        lines.append(
+            f"  {r['tag']}: net={av['pnl']:.2f} n={av['n']} "
+            f"PF={av['pf']:.3f} vs base {ab['pnl']:.2f} -> {r['verdict']}"
+        )
+    return "\n".join(lines)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--family", choices=sorted(FAMILIES), default=None)
@@ -891,6 +912,8 @@ def main() -> int:
                          "baseline and is always included (default: all)")
     ap.add_argument("--selftest", action="store_true",
                     help="validate verdict/report logic on canned results, no backtests")
+    ap.add_argument("--summary", action="store_true",
+                    help="compact one-line-per-variant output (cron/scheduled use)")
     args = ap.parse_args()
 
     if args.selftest:
@@ -905,6 +928,10 @@ def main() -> int:
                     log=lambda m: print(m, flush=True))
     artifact = write_artifact(session)
     ledger = write_ledger(session, artifact)
+
+    if args.summary:
+        print(summarize(session, artifact, ledger))
+        return 0
 
     print("\n" + "=" * 78)
     for r in session["results"]:
