@@ -82,8 +82,23 @@ def _copy_candles(
     start_ms: int, end_ms: int,
 ) -> Dict[str, int]:
     counts: Dict[str, int] = {}
+    live_fallback_used = False
     for tf in ("1m", "5m", "15m", "1h"):
         rows = src.get_candles(symbol, tf, limit=500_000, start_ms=start_ms, end_ms=end_ms)
+        if not rows:
+            # Research DB has no candles for this symbol/tf/window — the live
+            # bot DB persists everything the connector sees. LOUD fallback
+            # (logged once), never a silent redirect.
+            if not live_fallback_used:
+                logger.warning(
+                    "Research DB has no candles for %s %s..%s — falling back "
+                    "to live bot.db candles (loud, logged)",
+                    symbol, ms_to_dt(start_ms), ms_to_dt(end_ms, end=True),
+                )
+                live_fallback_used = True
+            from src.data.database import Database
+            live = Database(str(LIVE_DB))
+            rows = live.get_candles(symbol, tf, limit=500_000, start_ms=start_ms, end_ms=end_ms)
         if rows:
             dst.save_research_candles(rows, tf, SeriesMetadata.hl_candles())
         counts[tf] = len(rows)
@@ -277,6 +292,8 @@ def run_cell(
     n = int(metrics.get("n_trades", 0))
     wins = sum(1 for t in trades if float(t.get("pnl_usd", 0)) > 0)
     total_pnl = sum(float(t.get("pnl_usd", 0)) for t in trades)
+    gross_win = sum(float(t.get("pnl_usd", 0)) for t in trades if float(t.get("pnl_usd", 0)) > 0)
+    gross_loss = abs(sum(float(t.get("pnl_usd", 0)) for t in trades if float(t.get("pnl_usd", 0)) < 0))
 
     if verbose:
         print()
@@ -320,6 +337,14 @@ def run_cell(
         "total_pnl_usd": round(total_pnl, 2),
         "total_return_pct": float(metrics.get("total_return", 0)) * 100,
         "win_rate": (wins / n * 100 if n else 0.0),
+        "profit_factor": float(metrics.get("profit_factor", 0.0)),
+        "gross_win_usd": round(gross_win, 2),
+        "gross_loss_usd": round(gross_loss, 2),
+        # Per-trade net PnL for the overnight runner's paired per-window
+        # noise gate (research_program.md: KEEP must reject the window-level
+        # sign-flip null, not just print a positive delta). Simulation
+        # output, not telemetry.
+        "trade_pnls": [round(float(t.get("pnl_usd", 0)), 2) for t in trades],
         "trades_summary": {
             k: {"n": int(v["n"]), "pnl_usd": round(v["pnl"], 2)}
             for k, v in sorted(exit_stats.items())
