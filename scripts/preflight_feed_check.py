@@ -27,6 +27,27 @@ gates the boot (after any downtime it is stale by definition); the runtime
 FeedSilenceMonitor keeps degrading it while the bot runs. See
 ``src.core.engine.SELF_PRODUCED_FEEDS``.
 
+**Stale vs dead (generalization, 2026-09-09).** The same "evidence only
+exists while the bot runs" logic applies to EVERY feed after a long
+downtime: the evidence lives in the local DB and is only written while the
+bot is up, so after any long stop ALL feeds look stale and the boot gate
+deadlocks (this is why ``--skip-preflight`` crept into the launchers —
+which silently disabled the fstream-outage protection for every boot).
+The gate therefore distinguishes the two causes:
+
+  * ``age_sec <= downtime_sec + DOWNTIME_TOLERANCE_SEC`` → the feed's
+    staleness is fully explained by the bot being OFF ("stale-since-
+    downtime"): reported in output + JSON, counted as a warning, never a
+    failure — boot proceeds and the runtime monitor takes over;
+  * otherwise the feed was already dead WHILE the bot ran — the original
+    failure mode — and still fails (exit 1), preserving the 2026-06-29
+    fstream lesson.
+
+downtime_sec is derived per-run from the evidence itself:
+``last_alive_ms = max(evidence)`` (the last instant the bot demonstrably
+wrote anything). With NO evidence at all the behavior is unchanged — no
+downtime is invented.
+
 Per-symbol candle freshness (1m/15m) is also validated for every trading
 symbol — a data backlog (the collector fell behind) shows up here before a
 backtest silently reads a window that ends days ago. Two modes:
@@ -70,6 +91,16 @@ from src.utils.config import get_trading_symbols, load_config  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = ROOT / "data" / "live" / "bot.db"
 L2_BOOKS_DIR = ROOT / "data" / "research" / "l2_books"
+
+# Grace added to the computed downtime when classifying an over-threshold
+# feed as "stale-since-downtime": collectors flush on different cadences and
+# writes are asynchronous, so the youngest evidence can lag the actual
+# shutdown instant by minutes. A feed whose age fits inside downtime+grace
+# went stale because the bot was OFF; anything older was already dead while
+# the bot ran (the fstream failure mode) and still blocks boot. Module
+# constant on purpose — NOT config (a new key would drift the Fase-10
+# config_hash manifest).
+DOWNTIME_TOLERANCE_SEC = 300.0
 
 
 def _db_latest(db: sqlite3.Connection, table: str, col: str,
@@ -197,6 +228,16 @@ def main() -> int:
     l2_dir = Path(args.l2_dir)
     evidence = collect_evidence(db, l2_dir=l2_dir)
 
+    # Downtime inference: the newest persisted artifact is the last instant
+    # the bot demonstrably wrote anything, so everything older may simply
+    # reflect the bot being off. Zero evidence (first run / empty DB) means
+    # NO downtime is invented — the classic gate applies unchanged.
+    positive = [v for v in evidence.values() if v and v > 0]
+    last_alive_ms = max(positive) if positive else 0
+    downtime_sec = (
+        max(0.0, (now_ms - last_alive_ms) / 1000.0) if last_alive_ms else 0.0
+    )
+
     report: dict = {"now_ms": now_ms, "feeds": {}, "candles": {}}
     failures = 0
     warnings = 0
@@ -227,11 +268,23 @@ def main() -> int:
             else:
                 age_sec = max(0.0, (now_ms - latest) / 1000.0)
                 if age_sec >= max_sec:
-                    status = "fail"
-                    failures += 1
+                    if last_alive_ms and age_sec <= downtime_sec + DOWNTIME_TOLERANCE_SEC:
+                        # Staleness fully explained by the bot being off:
+                        # same reasoning as SELF_PRODUCED_FEEDS, generalized.
+                        # Warn (visible in output/JSON) but never gate boot —
+                        # the runtime FeedSilenceMonitor owns it once live.
+                        # Anything OLDER than downtime+grace was already dead
+                        # while the bot ran -> still a hard fail below.
+                        status = "stale-since-downtime"
+                        warnings += 1
+                    else:
+                        status = "fail"
+                        failures += 1
                 elif age_sec >= max_sec * warn_frac:
                     status = "warn"
                     warnings += 1
+                else:
+                    status = "ok"
             report["feeds"][feed] = {
                 "max_silence_sec": max_sec,
                 "age_sec": None if age_sec is None else round(age_sec, 1),
@@ -241,6 +294,7 @@ def main() -> int:
                 ),
                 "status": status,
                 "self_produced": feed in SELF_PRODUCED_FEEDS,
+                "stale_since_downtime": status == "stale-since-downtime",
             }
 
     # Per-symbol 1m/15m candle freshness / coverage.
@@ -303,9 +357,16 @@ def main() -> int:
               f"candle(s) — check before starting (silence/backlog would only degrade later).",
               file=sys.stderr if not args.json else sys.stdout)
         return 1
+    stale = [f for f, st in report["feeds"].items()
+             if st["status"] == "stale-since-downtime"]
     if warnings:
         print(f"\n[WARN] {warnings} check(s) past {warn_frac * 100:.0f}% "
               "of threshold — delivery/backlog forming?", file=sys.stderr)
+        if stale:
+            print(f"       {len(stale)} feed(s) stale-since-downtime "
+                  f"({', '.join(sorted(stale))}) — ages consistent with the bot "
+                  f"being off ~{downtime_sec / 3600:.1f}h; boot proceeds, the "
+                  "runtime FeedSilenceMonitor owns them.", file=sys.stderr)
         return 2
     if not args.json:
         print("\n[PASS] all contracted feeds fresh and candles up to date.")

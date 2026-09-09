@@ -28,6 +28,8 @@ RECOVERY_CONFIG = {
     "backoff_multiplier": 2.0,
     "crash_log_lines": 50,
     "bot_script": "main.py",
+    # Preflight gate restored: the preflight distinguishes stale-because-off
+    # (warn, proceed) from dead-while-running (block, fstream lesson).
     "bot_args": ["--mode", "paper"],
 }
 

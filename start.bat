@@ -66,6 +66,7 @@ echo.
 :: Open dashboard in default browser after server is ready (non-blocking, 3s delay)
 start "" cmd /c "timeout /t 3 /nobreak >nul && start "" http://localhost:5000"
 
+:: Preflight gate restored (stale-vs-dead fix; --skip-preflight remains a manual escape only).
 python "%~dp0main.py" --mode paper 2>logs\paper_errors.log
 if errorlevel 1 (
     echo [ERROR] Bot crashed. Check logs\paper_errors.log

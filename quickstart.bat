@@ -26,14 +26,16 @@ echo.
 :: Open dashboard in default browser after server is ready (non-blocking, 3s delay)
 start "" cmd /c "timeout /t 3 /nobreak >nul && start "" http://localhost:5000"
 
-:: Run bot - errors go to fatal_errors.log via main.py
+:: Preflight gate restored: the check now distinguishes "stale because the
+:: bot was off" (warns, boot proceeds) from "dead while the bot ran" (blocks,
+:: the 2026-06-29 fstream lesson). No --skip-preflight by default.
 python "%~dp0main.py" --mode paper
 
 :: If python crashed, show error and pause
 if errorlevel 1 (
     echo.
-    echo [ERROR] Bot crashed. Check logs\fatal_errors.log for details.
-    type logs\fatal_errors.log 2>nul
+    echo [ERROR] Bot crashed. Last fatal (not the whole history):
+    powershell -NoProfile -Command "if (Test-Path 'logs\fatal_errors.log') { Get-Content 'logs\fatal_errors.log' -Tail 40 }"
     echo.
     pause
 )

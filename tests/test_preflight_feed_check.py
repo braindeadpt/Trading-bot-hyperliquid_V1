@@ -365,3 +365,132 @@ def test_missing_db_fails() -> None:
         r = _run(["--db", os.path.join(tmp, "nope.db")])
         assert r.returncode == 1
         assert "not found" in r.stderr
+
+
+# ---------------------------------------------------------------------------
+# Stale vs dead — downtime-aware classification of over-threshold feeds
+# (the --skip-preflight-by-default fix; preserves the fstream lesson)
+# ---------------------------------------------------------------------------
+
+
+def _make_old_l2_dir(tmp: str, age_ms: int) -> str:
+    """L2 evidence aged like the rest of a post-downtime DB.
+
+    The probe file's mtime IS bot-life evidence (l2_book_recording participates
+    in the downtime inference) — after a real stop it is as old as everything
+    else, NOT fresh.
+    """
+    d = Path(tmp) / "l2_books" / "BTC"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / "old.jsonl"
+    f.write_text("{}\n", encoding="utf-8")
+    ts = age_ms / 1000.0
+    os.utime(f, (ts, ts))
+    return str(Path(tmp) / "l2_books")
+
+
+def test_downtime_tolerance_is_module_constant_not_config() -> None:
+    """The grace must stay a module constant: a config key would drift the
+    Fase-10 config_hash manifest. Pins the documented value (300s)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("pfc", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.DOWNTIME_TOLERANCE_SEC == 300.0
+
+
+def test_feed_dead_while_bot_ran_still_blocks_boot() -> None:
+    """fstream protection intact: liquidation_okx 7h old while OTHER evidence
+    is 30s old -> the bot was alive 30s ago, so okx was ALREADY dead during
+    uptime (7h >> downtime + 300s grace) -> exit 1."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        _make_db(db, liq_okx_ms=NOW - 7 * 3600_000, liq_bybit_ms=NOW - 30_000,
+                 funding_ms=NOW - 30_000, candle_ms=_now() - 30_000,
+                 candle_15m_ms=_now() - 60_000)
+        r = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp)])
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "liquidation_okx" in r.stdout
+        assert "FAIL" in r.stdout
+        assert "STALE-SINCE-DOWNTIME" not in r.stdout
+
+
+def test_all_feeds_stale_consistent_with_downtime_do_not_block() -> None:
+    """Bot off for ~8h: EVERY feed's age matches the downtime -> all classified
+    stale-since-downtime, zero failures -> exit 2 (warnings), boot proceeds.
+    Candle max-ages are raised via their CLI flags (they are CLI-tunable on
+    purpose) so the candle backlog check doesn't mask the feed semantics."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        old = NOW - 8 * 3600_000
+        _make_db(db, liq_okx_ms=old - 60_000, liq_bybit_ms=old - 90_000,
+                 funding_ms=old - 30_000, candle_ms=old,
+                 candle_15m_ms=old - 120_000)
+        r = _run(["--db", db, "--l2-dir", _make_old_l2_dir(tmp, old),
+                  "--candle-1m-max-age-sec", "36000",
+                  "--candle-15m-max-age-sec", "36000"])
+        assert r.returncode == 2, r.stdout + r.stderr
+        assert "STALE-SINCE-DOWNTIME" in r.stdout
+        assert "FAIL" not in r.stdout
+        assert "stale-since-downtime" in r.stderr
+        assert "boot proceeds" in r.stderr
+
+
+def test_mixed_case_dead_feed_blocks_while_stale_ones_warn() -> None:
+    """One feed dead during uptime (bybit 30h old vs ~8h downtime) plus one
+    stale-by-downtime (okx ~8h) -> the dead one fails (exit 1) and the stale
+    one is still reported for visibility."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        old = NOW - 8 * 3600_000
+        dead = NOW - 30 * 3600_000
+        _make_db(db, liq_okx_ms=old - 60_000, liq_bybit_ms=dead,
+                 funding_ms=old - 30_000, candle_ms=old,
+                 candle_15m_ms=old - 120_000)
+        r = _run(["--db", db, "--l2-dir", _make_old_l2_dir(tmp, old),
+                  "--candle-1m-max-age-sec", "36000",
+                  "--candle-15m-max-age-sec", "36000"])
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "liquidation_bybit" in r.stdout          # dead while running
+        assert "FAIL" in r.stdout
+        assert "STALE-SINCE-DOWNTIME" in r.stdout       # okx explained by off
+
+
+def test_stale_since_downtime_marked_in_json_report() -> None:
+    """The JSON report carries the new status + flag so the boot wiring and
+    humans see WHY the feed didn't block."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        old = NOW - 8 * 3600_000
+        _make_db(db, liq_okx_ms=old - 60_000, liq_bybit_ms=old - 90_000,
+                 funding_ms=old - 30_000, candle_ms=old,
+                 candle_15m_ms=old - 120_000)
+        r = _run(["--db", db, "--l2-dir", _make_old_l2_dir(tmp, old), "--json",
+                  "--candle-1m-max-age-sec", "36000",
+                  "--candle-15m-max-age-sec", "36000"])
+        assert r.returncode == 2, r.stdout + r.stderr
+        report = _json.loads(r.stdout)
+        feeds = report["feeds"]
+        stale = [f for f, st in feeds.items()
+                 if st.get("stale_since_downtime")]
+        assert stale, _json.dumps(feeds, indent=2)[:800]
+        assert all(st["status"] == "stale-since-downtime"
+                   for f, st in feeds.items() if f in stale)
+        assert all(st["status"] != "fail" for st in feeds.values())
+
+
+def test_empty_db_no_downtime_invented_unchanged_behavior() -> None:
+    """No evidence at all (first run / empty DB): the classic gate applies
+    unchanged — missing feeds fail (exit 1), no downtime is invented, so a
+    genuinely dead feed can never hide behind the downtime classification."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        _make_db(db, liq_okx_ms=0, liq_bybit_ms=0, funding_ms=0, candle_ms=0)
+        r = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp)])
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "liquidation_okx" in r.stdout
+        assert "STALE-SINCE-DOWNTIME" not in r.stdout
+        assert "stale-since-downtime" not in r.stderr
