@@ -468,6 +468,346 @@ def test_experiment_block_carries_preregistered_vwap_hypotheses():
     assert "parameter variant" in fallback
 
 
+# --- iv_thresholds family (Night 3) ------------------------------------------
+
+class TestIvThresholdsFamily:
+    """The high/low-IV cut sweep preregistered in QUEUE.md (Night 3)."""
+
+    def test_grid_is_preregistered_four_cells(self):
+        # QUEUE.md Night 3: baseline (no gate) vs 63.3 / 66.7 / 70. The
+        # baseline must be cell 0 (None = no gate).
+        assert len(mod.IV_THRESHOLDS_GRID) == 4
+        assert mod.IV_THRESHOLDS_GRID[0] is None
+        assert mod.IV_THRESHOLDS_GRID[1] == 63.3
+        assert mod.IV_THRESHOLDS_GRID[2] == 66.7
+        assert mod.IV_THRESHOLDS_GRID[3] == 70.0
+
+    def test_span_is_dvol_bounded(self):
+        # The preregistered span starts where the DVOL feed starts. If DVOL
+        # history is ever extended/rebased, this pin must be revisited
+        # deliberately (it fixes the K=3 accumulator reality).
+        assert mod.IV_THRESHOLDS_SPAN == ("2026-06-14", "2026-09-08")
+
+    def test_family_registered(self):
+        assert "iv_thresholds" in mod.FAMILIES
+
+
+def test_apply_iv_gate_semantics():
+    """Pure gate: keep iff pct > cut; None NEVER survives; baseline keeps all."""
+    raw = [
+        {"pnl_usd": 10.0, "_iv_pct": 80.0},   # above every cut
+        {"pnl_usd": -5.0, "_iv_pct": 70.0},   # above 63.3/66.7, blocked at 70
+        {"pnl_usd": -8.0, "_iv_pct": 40.0},   # blocked everywhere
+        {"pnl_usd": 3.0, "_iv_pct": None},    # unclassifiable — blocked everywhere
+    ]
+    kept, blocked = mod.apply_iv_gate(raw, None)
+    assert len(kept) == 4 and not blocked          # baseline: no gate at all
+    kept, blocked = mod.apply_iv_gate(raw, 63.3)
+    assert [t["pnl_usd"] for t in kept] == [10.0, -5.0]
+    assert {t["pnl_usd"] for t in blocked} == {-8.0, 3.0}
+    kept, blocked = mod.apply_iv_gate(raw, 70.0)
+    assert [t["pnl_usd"] for t in kept] == [10.0]  # 70.0 is not > 70.0
+    # Unclassifiable never survives a gate — it is not evidence.
+    kept, _ = mod.apply_iv_gate([{"pnl_usd": 99.0, "_iv_pct": None}], 1.0)
+    assert kept == []
+
+
+def test_iv_cell_from_raw_contract():
+    """Cell dicts carry the full runner contract incl. per-trade PnLs for
+    the noise gate, plus the IV-specific forensics."""
+    raw = [
+        {"pnl_usd": 10.0, "_iv_pct": 80.0, "_strategy": "VWAPDeviation"},
+        {"pnl_usd": -4.0, "_iv_pct": 50.0, "_strategy": "VWAPDeviation"},
+        {"pnl_usd": -1.0, "_iv_pct": None, "_strategy": "VolatilityBreakout"},
+    ]
+    kept, blocked = mod.apply_iv_gate(raw, 66.7)
+    c = mod.iv_cell_from_raw(raw, kept, blocked, 66.7, ["VolatilityBreakout", "VWAPDeviation"])
+    assert c["iv_cut"] == 66.7
+    assert c["n_trades"] == 1 and c["total_pnl_usd"] == 10.0
+    assert c["trade_pnls"] == [10.0]
+    assert c["n_raw"] == 3 and c["n_no_iv"] == 1 and c["n_blocked"] == 2
+    assert c["blocked_pnl_usd"] == -5.0
+    assert c["n_by_strategy"] == {"VolatilityBreakout": 0, "VWAPDeviation": 1}
+
+
+def test_sweep_dispatches_iv_cuts_to_family(monkeypatch):
+    """sweep() must hand the real IV_THRESHOLDS_GRID values (None/63.3/66.7/70)
+    to run_one — cuts, not indices (the Night 2 dispatch lesson)."""
+    seen: list = []
+
+    def fake_run_one(start, end, symbols, params):
+        seen.append((start, end, tuple(symbols), params))
+        if params is None:                    # baseline bleeds
+            c = cell(-30.0, 30, 10.0, 40.0)
+            c["trade_pnls"] = [-1.0] * 30
+        else:                                 # every cut 'improves' by pruning
+            c = cell(12.0, 10, 20.0, 8.0)
+            c["trade_pnls"] = [1.2] * 10
+        return c
+
+    tags = ["no gate (baseline)", "high_iv>63.3", "high_iv>66.7", "high_iv>70"]
+    monkeypatch.setitem(mod.FAMILIES, "iv_thresholds",
+                        lambda: (tags, fake_run_one, None))
+
+    session = mod.sweep("iv_thresholds", "2026-06-14", "2026-09-08",
+                        ["BTC"], split_days=30)
+
+    assert session["family"] == "iv_thresholds"
+    cuts_seen = {s[3] for s in seen}
+    assert cuts_seen == {None, 63.3, 66.7, 70.0}
+    # 4 cells × 3 windows = 12 calls
+    assert len(seen) == 12
+    # Pruning losses can 'improve' every window (and even carry PF>1), but
+    # n=10 < 30 -> INCONCLUSIVE, never KEEP: the gate cannot be promoted on a
+    # shrunken sample. (And at K=3 the sign-flip floor is 0.125 > alpha — a
+    # second, independent reason this session can never KEEP.)
+    for r in session["results"]:
+        assert r["verdict"] == "INCONCLUSIVE"
+        assert any("n=" in x for x in r["reasons"])
+
+
+def test_experiment_block_carries_preregistered_iv_hypothesis():
+    windows = [["2026-06-14", "2026-07-13"], ["2026-07-14", "2026-08-12"],
+               ["2026-08-13", "2026-09-08"]]
+    result = {
+        "tag": "high_iv>66.7", "verdict": "INCONCLUSIVE", "windows": windows,
+        "deltas": [1.0, 1.0, None],
+        "aggregate_baseline": {"pnl": -100.0, "n": 40, "pf": 0.8},
+        "aggregate_variant": {"pnl": -90.0, "n": 20, "pf": 0.9},
+        "reasons": ["n=20 (gate >=30)"], "baseline_tag": "no gate (baseline)",
+    }
+    session = {"family": "iv_thresholds", "baseline_tag": "no gate (baseline)",
+               "span": {"start": "2026-06-14", "end": "2026-09-08", "split_days": 30}}
+    blk = mod.experiment_block(result, session)
+    assert "high_iv regime concentrates" in blk
+    assert "63.3/66.7/70" in blk
+
+
+def test_iv_run_one_caches_engine_pass(monkeypatch):
+    """The engine pass is identical for every cut — run_one must reuse the
+    cached raw trades (1 engine run per window, not 1 per cell)."""
+    calls = {"n": 0}
+
+    class FakeDB:
+        def close(self):
+            pass
+
+    import scripts.iv_high_only_ab_split as ivmod
+    from src.data.dvol_feed import DVOL_WINDOW_DAYS, build_iv_percentile
+
+    # Deterministic DVOL: 60 flat days then 3 extreme-high closes. A trade
+    # entering the day AFTER a high close carries that day's percentile
+    # (iv_pct_at uses the last completed DVOL day) — >70 for all three.
+    base = 1_740_000_000_000
+    day = 86_400_000
+    closes = [(base + i * day, 50.0) for i in range(60)]
+    closes += [(base + 60 * day, 100.0), (base + 61 * day, 90.0),
+               (base + 62 * day, 80.0)]
+    iv_series = build_iv_percentile(closes, DVOL_WINDOW_DAYS)
+
+    raw_trades = [
+        {"symbol": "BTC", "entry_time": base + 61 * day + 12 * 3_600_000,
+         "pnl_usd": 5.0},
+        {"symbol": "BTC", "entry_time": base + 62 * day + 12 * 3_600_000,
+         "pnl_usd": -2.0},
+        {"symbol": "ETH", "entry_time": base + 63 * day + 12 * 3_600_000,
+         "pnl_usd": 3.0},
+    ]
+
+    monkeypatch.setattr(ivmod, "SPECS",
+                        [("VWAPDeviation", object, "strategy.vwap_deviation")])
+
+    import scripts.regime_router_a_b_test as rr
+
+    def fake_run_strategy(cfg, db, cls, path, s_ms, e_ms, symbols):
+        calls["n"] += 1
+        return [dict(t) for t in raw_trades]
+
+    monkeypatch.setattr(rr, "run_strategy", fake_run_strategy)
+
+    # DB constructor + DVOL loader stubbed; loader returns one shared series.
+    monkeypatch.setattr("src.data.database.Database", lambda _p: FakeDB())
+    monkeypatch.setattr(
+        mod, "_load_dvol_series",
+        lambda symbols, s_ms, e_ms: ({s: iv_series for s in symbols}, iv_series))
+
+    mod._IV_RAW_CACHE.clear()
+    tags, run_one, _cfg = mod.iv_thresholds_family()
+    assert tags[0] == "no gate (baseline)"
+
+    c1 = run_one("2026-06-14", "2026-07-13", ["BTC", "ETH"], None)
+    c2 = run_one("2026-06-14", "2026-07-13", ["BTC", "ETH"], 66.7)
+    c3 = run_one("2026-06-14", "2026-07-13", ["BTC", "ETH"], 70.0)
+    assert calls["n"] == 1, "engine pass must be cached across cuts"
+    assert c1["n_trades"] == 3 and c2["n_trades"] == 3 and c3["n_trades"] == 3
+    assert c2["n_no_iv"] == 0 and c3["n_no_iv"] == 0
+    assert c2["n_raw"] == 3 and c2["n_blocked"] == 0
+
+
+# --- per-symbol noise slices (advisory) ---------------------------------------
+
+def _sym_cell(pnl: float, n: int, gw: float, gl: float,
+              sym_pnls: dict) -> dict:
+    c = cell(pnl, n, gw, gl)
+    c["trade_pnls"] = [x for v in sym_pnls.values() for x in v]
+    syms = []
+    for s, v in sym_pnls.items():
+        syms += [s] * len(v)
+    c["trade_symbols"] = syms
+    return c
+
+
+class TestSymbolNoiseGate:
+    """The cell-level sign-flip test restricted to one symbol — advisory."""
+
+    def test_all_positive_k4_passes_and_reports_symbol(self):
+        base = [_sym_cell(-20.0, 10, 5.0, 25.0, {"BTC": [-2.0] * 10}),
+                _sym_cell(-10.0, 10, 4.0, 14.0, {"BTC": [-1.0] * 10}),
+                _sym_cell(-15.0, 10, 5.0, 20.0, {"BTC": [-1.5] * 10}),
+                _sym_cell(-12.0, 10, 4.0, 16.0, {"BTC": [-1.2] * 10})]
+        good = [_sym_cell(10.0, 10, 20.0, 10.0, {"BTC": [1.0] * 10}),
+                _sym_cell(12.0, 10, 22.0, 10.0, {"BTC": [1.2] * 10}),
+                _sym_cell(8.0, 10, 18.0, 10.0, {"BTC": [0.8] * 10}),
+                _sym_cell(9.0, 10, 19.0, 10.0, {"BTC": [0.9] * 10})]
+        g = mod.symbol_noise_gate(base, good, "BTC")
+        assert g["evaluated"] is True and g["pass"] is True
+        assert g["p_value"] == 0.0625            # 2^-4: all deltas positive
+        assert g["symbol"] == "BTC" and g["advisory_only"] is True
+        assert g["n_variant"] == 40 and g["n_windows"] == 4
+
+    def test_one_negative_window_raises_p_like_cell_gate(self):
+        base = [_sym_cell(-20.0, 10, 5.0, 25.0, {"BTC": [-2.0] * 10}),
+                _sym_cell(-10.0, 10, 4.0, 14.0, {"BTC": [-1.0] * 10}),
+                _sym_cell(-15.0, 10, 5.0, 20.0, {"BTC": [-1.5] * 10}),
+                _sym_cell(-12.0, 10, 4.0, 16.0, {"BTC": [-1.2] * 10})]
+        good = [_sym_cell(10.0, 10, 20.0, 10.0, {"BTC": [1.0] * 10}),
+                _sym_cell(12.0, 10, 22.0, 10.0, {"BTC": [1.2] * 10}),
+                _sym_cell(8.0, 10, 18.0, 10.0, {"BTC": [0.8] * 10}),
+                _sym_cell(-30.0, 10, 5.0, 35.0, {"BTC": [-3.0] * 10})]
+        g = mod.symbol_noise_gate(base, good, "BTC")
+        assert g["evaluated"] is True and g["pass"] is False
+        assert g["p_value"] == 0.125             # ties count in the null
+
+    def test_missing_per_symbol_data_is_skipped_not_invented(self):
+        base = [cell(-20.0, 10, 5.0, 25.0),       # no trade_pnls at all
+                cell(-10.0, 10, 4.0, 14.0)]
+        var = [_sym_cell(10.0, 10, 20.0, 10.0, {"BTC": [1.0] * 10}),
+               cell(12.0, 10, 22.0, 10.0)]        # second window lacks the map
+        g = mod.symbol_noise_gate(base, var, "BTC")
+        assert g["evaluated"] is False and g["pass"] is None
+        assert "skipped" in g["reason"]
+
+    def test_double_zero_window_is_no_evidence_not_improvement(self):
+        base = [_sym_cell(-20.0, 10, 5.0, 25.0, {"BTC": [-2.0] * 10}),
+                _sym_cell(0.0, 0, 0.0, 0.0, {"BTC": []})]
+        var = [_sym_cell(10.0, 10, 20.0, 10.0, {"BTC": [1.0] * 10}),
+               _sym_cell(0.0, 0, 0.0, 0.0, {"BTC": []})]
+        g = mod.symbol_noise_gate(base, var, "BTC")
+        assert g["evaluated"] is True
+        assert g["n_windows"] == 1               # only the traded pair
+
+
+def test_no_weakening_cell_gate_ignores_symbol_slices():
+    """THE invariant: decide() output is byte-identical with and without
+    per-symbol data, and a slice that looks great can never flip a cell
+    verdict. The cell-level gate stays the only promotion gate."""
+    base = [dict(cell(-20.0, 20, 10.0, 30.0), trade_pnls=[-1.0] * 20,
+                 trade_pnls_by_symbol={"BTC": [-1.0] * 20, "HYPE": []}),
+            dict(cell(-10.0, 15, 6.0, 16.0), trade_pnls=[-0.7] * 15,
+                 trade_pnls_by_symbol={"BTC": [-0.7] * 15, "HYPE": []}),
+            dict(cell(-15.0, 18, 8.0, 23.0), trade_pnls=[-0.8] * 18,
+                 trade_pnls_by_symbol={"BTC": [-0.8] * 18, "HYPE": []}),
+            dict(cell(-12.0, 16, 7.0, 19.0), trade_pnls=[-0.75] * 16,
+                 trade_pnls_by_symbol={"BTC": [-0.75] * 16, "HYPE": []})]
+    # Variant: HYPE slice is stellar (all windows positive, would pass the
+    # sign-flip at K=4) — but the CELL aggregate loses and PF<1.
+    var = [dict(cell(-30.0, 25, 12.0, 42.0), trade_pnls=[-1.2] * 25,
+                trade_pnls_by_symbol={"BTC": [-2.0] * 25,
+                                      "HYPE": [1.0] * 5}),
+           dict(cell(-25.0, 22, 10.0, 35.0), trade_pnls=[-1.1] * 22,
+                trade_pnls_by_symbol={"BTC": [-1.8] * 22,
+                                      "HYPE": [0.9] * 4}),
+           dict(cell(-28.0, 24, 11.0, 39.0), trade_pnls=[-1.15] * 24,
+                trade_pnls_by_symbol={"BTC": [-1.9] * 24,
+                                      "HYPE": [1.1] * 5}),
+           dict(cell(-22.0, 20, 9.0, 31.0), trade_pnls=[-1.05] * 20,
+                trade_pnls_by_symbol={"BTC": [-1.7] * 20,
+                                      "HYPE": [0.8] * 4})]
+    without = mod.decide(base, var, noise_model=True)
+    hype_slice = mod.symbol_noise_gate(base, var, "HYPE")
+    assert hype_slice["evaluated"] is True and hype_slice["pass"] is True
+    with_slices = mod.decide(base, var, noise_model=True)
+    assert without == with_slices
+    assert without[0] != "KEEP"                # cell gate says no — slices can't overrule
+
+
+def test_sweep_attaches_symbol_gates_and_decide_reasons_stay_clean(monkeypatch):
+    """sweep() attaches evaluated slices to the result; decide() reasons
+    never mention them (advisory stays out of the verdict vocabulary)."""
+    def fake_run_one(start, end, symbols, params):
+        if params == {"HYPE": 3.0}:
+            c = _sym_cell(40.0, 20, 60.0, 20.0,
+                          {"BTC": [2.0] * 10, "HYPE": [2.0] * 10})
+        else:
+            c = _sym_cell(-20.0, 20, 10.0, 30.0,
+                          {"BTC": [-1.0] * 10, "HYPE": [-1.0] * 10})
+        return c
+
+    tags = ["z=2.5 (baseline)", "z=2.5+HYPE:3.0"]
+    monkeypatch.setitem(mod.FAMILIES, "vwap_thresholds",
+                        lambda: (tags, fake_run_one, None))
+    session = mod.sweep("vwap_thresholds", "2026-05-18", "2026-09-08",
+                        ["BTC", "HYPE"], split_days=30)
+    r = session["results"][0]
+    syms = {g["symbol"] for g in r["symbol_gates"] if g.get("evaluated")}
+    assert syms == {"BTC", "HYPE"}
+    for g in r["symbol_gates"]:
+        assert g.get("advisory_only") is True
+    assert all("symbol" not in x.lower() for x in r["reasons"])
+
+
+def test_ledger_block_renders_advisory_symbol_line():
+    windows = [["2026-05-18", "2026-06-16"], ["2026-06-17", "2026-07-16"],
+               ["2026-07-17", "2026-08-15"], ["2026-08-16", "2026-09-08"]]
+    result = {
+        "tag": "z=2.5+HYPE:3.0", "verdict": "DISCARD", "windows": windows,
+        "deltas": [1.0, 1.0, -1.0, -1.0],
+        "aggregate_baseline": {"pnl": -100.0, "n": 40, "pf": 0.8},
+        "aggregate_variant": {"pnl": -96.0, "n": 38, "pf": 0.82},
+        "reasons": ["windows improved 2/4"], "baseline_tag": "z=2.5 (baseline)",
+        "symbol_gates": [
+            {"evaluated": True, "symbol": "HYPE", "observed_delta": 5.34,
+             "n_variant": 39, "p_value": 0.125, "pass": False},
+            {"evaluated": False, "symbol": "SOL", "pass": None,
+             "reason": "per-symbol PnL unavailable — slice skipped"},
+        ],
+    }
+    session = {"family": "vwap_thresholds", "baseline_tag": "z=2.5 (baseline)",
+               "span": {"start": "2026-05-18", "end": "2026-09-08",
+                        "split_days": 30}}
+    blk = mod.experiment_block(result, session)
+    assert "symbol slices (ADVISORY" in blk
+    assert "HYPE delta=+5.34" in blk and "p=0.125" in blk
+    assert "SOL" not in blk                    # skipped slices stay out
+    # And the advisory marker is present so no one reads it as a gate.
+    assert "the cell verdict is the only gate" in blk
+
+
+def test_trade_pnls_by_symbol_extractor():
+    good = {"total_pnl_usd": 3.0, "n_trades": 2,
+            "trade_pnls": [1.0, 2.0], "trade_symbols": ["BTC", "HYPE"]}
+    maps = mod.trade_pnls_by_symbol([good])
+    assert maps[0] == {"BTC": [1.0], "HYPE": [2.0]}
+    assert good["trade_pnls_by_symbol"] == maps[0]   # attached in place
+    bad = {"total_pnl_usd": 1.0, "n_trades": 1,
+           "trade_pnls": [1.0], "trade_symbols": ["BTC", "ETH"]}  # misaligned
+    maps = mod.trade_pnls_by_symbol([bad])
+    assert maps[0] is None and "trade_pnls_by_symbol" not in bad
+    legacy = cell(1.0, 1, 1.0, 0.0)            # no symbol lists at all
+    maps = mod.trade_pnls_by_symbol([legacy])
+    assert maps[0] is None and "trade_pnls_by_symbol" not in legacy
+
+
 # --- artifact shape --------------------------------------------------------
 
 def test_artifact_json_roundtrip(tmp_path, monkeypatch):

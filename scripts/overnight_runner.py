@@ -28,6 +28,10 @@ Usage:
   # 3.0σ HYPE-only vs 3.0σ everywhere
   python scripts/overnight_runner.py --family vwap_thresholds --start 2026-05-18 --end 2026-09-08
 
+  # IV high/low cut sweep (Night 3 accumulator, QUEUE.md — K-capped by DVOL
+  # coverage: INCONCLUSIVE/DISCARD are the only possible verdicts):
+  python scripts/overnight_runner.py --family iv_thresholds --start 2026-06-14 --end 2026-09-08 --symbols BTC,ETH,SOL,HYPE
+
   # Self-test: verdict + report logic only, canned results, no backtests:
   python scripts/overnight_runner.py --selftest
 """
@@ -105,9 +109,14 @@ baseline tag and aggregate (net, n, PF) · variant aggregate · per-window
 delta (`n/e` marks a no-evidence window) · reasons · audit line. The JSON
 artifact (same data, machine-readable, gitignored) carries per-cell
 details: `total_pnl_usd`, `n_trades`, `gross_win/loss_usd`,
-`trades_summary`, `trade_pnls` (per-window paired noise gate needs these),
-`manifest`, and the `noise_gate` dict per variant (p_value, alpha, method,
-per-window deltas).
+`trades_summary`, `trade_pnls` + `trade_symbols` (the per-window paired
+noise gate and its per-symbol slices need these), `manifest`, the
+`noise_gate` dict per variant (p_value, alpha, method, per-window deltas),
+and `symbol_gates` per variant (the SAME paired sign-flip test restricted
+to each symbol — **advisory only**: it answers "does the variant fix symbol
+X specifically?" but never feeds the verdict; the cell-level gate is the
+only promotion gate, and a great slice on a losing cell is a forensics
+lead, not an edge).
 
 ## Worked example — Night 1, flush_fade `delay=0 stopout=OFF` (real run)
 
@@ -218,6 +227,39 @@ def paired_window_deltas(baseline_windows: Sequence[Dict[str, Any]],
     return deltas
 
 
+def signflip_null(
+    deltas: Sequence[float], resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = BOOTSTRAP_SEED,
+) -> Tuple[List[float], str]:
+    """Null distribution of the paired sign-flip randomization test.
+
+    * K <= SIGNFLIP_MAX_EXACT_K: all 2^K sign patterns enumerated — exact
+      and fully deterministic (no RNG anywhere in the verdict).
+    * K > SIGNFLIP_MAX_EXACT_K: ``resamples`` seeded random patterns —
+      reproducible, resolution 1/resamples.
+
+    Returns ``(null_aggs, method_label)``. Shared by the cell-level gate
+    and the per-symbol slices so both use the SAME randomization test.
+    """
+    k = len(deltas)
+    if k <= SIGNFLIP_MAX_EXACT_K:
+        null_aggs = []
+        for mask in range(1 << k):
+            s = 0.0
+            for i in range(k):
+                s += deltas[i] if (mask >> i) & 1 else -deltas[i]
+            null_aggs.append(s)
+        return null_aggs, f"paired_window_signflip_exact_k{k}"
+    rng = random.Random(seed)
+    null_aggs = []
+    for _ in range(resamples):
+        s = 0.0
+        for i in range(k):
+            s += deltas[i] if rng.random() < 0.5 else -deltas[i]
+        null_aggs.append(s)
+    return null_aggs, f"paired_window_signflip_sampled_k{k}_n{resamples}"
+
+
 def paired_bootstrap_noise_gate(baseline_windows: Sequence[Dict[str, Any]],
                                 variant_windows: Sequence[Dict[str, Any]],
                                 alpha: float = NOISE_ALPHA,
@@ -252,25 +294,8 @@ def paired_bootstrap_noise_gate(baseline_windows: Sequence[Dict[str, Any]],
     if not deltas:
         return {"evaluated": False, "pass": None,
                 "reason": "no valid window pairs — noise gate skipped"}
-    k = len(deltas)
     observed = sum(deltas)
-    if k <= SIGNFLIP_MAX_EXACT_K:
-        null_aggs = []
-        for mask in range(1 << k):
-            s = 0.0
-            for i in range(k):
-                s += deltas[i] if (mask >> i) & 1 else -deltas[i]
-            null_aggs.append(s)
-        method = f"paired_window_signflip_exact_k{k}"
-    else:
-        rng = random.Random(seed)
-        null_aggs = []
-        for _ in range(resamples):
-            s = 0.0
-            for i in range(k):
-                s += deltas[i] if rng.random() < 0.5 else -deltas[i]
-            null_aggs.append(s)
-        method = f"paired_window_signflip_sampled_k{k}_n{resamples}"
+    null_aggs, method = signflip_null(deltas, resamples=resamples, seed=seed)
     ge = sum(1 for x in null_aggs if x >= observed - 1e-9)
     p_value = ge / len(null_aggs)
     required = float(np_percentile(null_aggs, BOOTSTRAP_CI_PCTL))
@@ -283,9 +308,93 @@ def paired_bootstrap_noise_gate(baseline_windows: Sequence[Dict[str, Any]],
         "observed_delta": round(observed, 2),
         "required_delta": round(required, 2),  # null p90 — informative
         "null_p" + str(BOOTSTRAP_CI_PCTL): round(required, 2),
-        "n_windows": k,
+        "n_windows": len(deltas),
         "per_window_deltas": [round(d, 2) for d in deltas],
         "method": method,
+    }
+
+
+def _symbol_pnl_map(c: Dict[str, Any]) -> Optional[Dict[str, List[float]]]:
+    """Per-symbol PnL map of one cell — attached map, or derived from the
+    parallel ``trade_pnls``/``trade_symbols`` lists. ``None`` when neither
+    exists (the slice is then skipped, never invented)."""
+    m = c.get("trade_pnls_by_symbol")
+    if isinstance(m, dict):
+        return m
+    pnls = c.get("trade_pnls")
+    syms = c.get("trade_symbols")
+    if (not isinstance(pnls, (list, tuple))
+            or not isinstance(syms, (list, tuple))
+            or len(pnls) != len(syms)):
+        return None
+    out: Dict[str, List[float]] = {}
+    for p, s in zip(pnls, syms):
+        out.setdefault(str(s), []).append(float(p))
+    return out
+
+
+def symbol_noise_gate(
+    baseline_windows: Sequence[Dict[str, Any]],
+    variant_windows: Sequence[Dict[str, Any]],
+    symbol: str,
+    alpha: float = NOISE_ALPHA,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = BOOTSTRAP_SEED,
+) -> Dict[str, Any]:
+    """The SAME exact paired sign-flip test, restricted to one symbol.
+
+    ADVISORY ONLY — it never feeds ``decide()``. It answers a different
+    question than the cell-level gate: does the variant fix symbol X
+    specifically? Deltas stay window-PAIRED (same pairing rule as the
+    cell-level gate, so within-window regime correlation is preserved);
+    a double-zero window for this symbol is no evidence, not improvement.
+    Skipped (never invented) when either side lacks per-symbol PnL for the
+    symbol (an attached ``trade_pnls_by_symbol`` map or aligned parallel
+    ``trade_pnls``/``trade_symbols`` lists both work). The cell-level
+    verdict remains the only promotion gate.
+    """
+    deltas: List[float] = []
+    n_base = n_var = 0
+    for bc, vc in zip(baseline_windows, variant_windows):
+        if "error" in bc or "error" in vc:
+            continue
+        bm = _symbol_pnl_map(bc)
+        vm = _symbol_pnl_map(vc)
+        if bm is None or vm is None:
+            return {"evaluated": False, "pass": None, "symbol": symbol,
+                    "reason": "per-symbol PnL unavailable — slice skipped"}
+        # A present-but-empty map means zero trades for the symbol (e.g. a
+        # listing that starts mid-span) — a double-zero window is no
+        # evidence (skipped), a one-sided empty is a delta against zero
+        # (same rule as the cell-level gate). Missing maps entirely are
+        # unavailable data (skip the slice), never zero.
+        bp = [float(x) for x in bm.get(symbol, [])]
+        vp = [float(x) for x in vm.get(symbol, [])]
+        n_base += len(bp)
+        n_var += len(vp)
+        if not bp and not vp:
+            continue  # double-zero window for this symbol: absence of data
+        deltas.append(sum(vp) - sum(bp))
+    if not deltas:
+        return {"evaluated": False, "pass": None, "symbol": symbol,
+                "reason": "no valid window pairs for this symbol — slice skipped"}
+    observed = sum(deltas)
+    null_aggs, method = signflip_null(deltas, resamples=resamples, seed=seed)
+    ge = sum(1 for x in null_aggs if x >= observed - 1e-9)
+    p_value = ge / len(null_aggs)
+    return {
+        "evaluated": True,
+        "pass": bool(p_value <= alpha),
+        "symbol": symbol,
+        "alpha": alpha,
+        "p_value": round(p_value, 4),
+        "observed_delta": round(observed, 2),
+        "n_baseline": n_base,
+        "n_variant": n_var,
+        "n_windows": len(deltas),
+        "per_window_deltas": [round(d, 2) for d in deltas],
+        "method": method,
+        "advisory_only": True,
     }
 
 
@@ -294,6 +403,38 @@ def cell_pnl(cell: Dict[str, Any]) -> float:
     if "error" in cell:
         return float("nan")
     return float(cell.get("total_pnl_usd", 0.0))
+
+
+def trade_pnls_by_symbol(
+    cells: Sequence[Dict[str, Any]]
+) -> List[Optional[Dict[str, List[float]]]]:
+    """Attach per-symbol per-trade PnL to window cells (in place, best-effort).
+
+    Cells carry ``trade_pnls`` plus a parallel ``trade_symbols`` list (same
+    order); when both are present and aligned, each cell gains
+    ``trade_pnls_by_symbol = {sym: [pnl, ...]}`` for the per-symbol noise
+    slices. Cells without symbols (older artifacts, minimal tests) are left
+    untouched — the slice is then skipped downstream instead of inventing
+    data. Returns the per-cell maps (None where unavailable).
+    """
+    out: List[Optional[Dict[str, List[float]]]] = []
+    for c in cells:
+        if "error" in c:
+            out.append(None)
+            continue
+        pnls = c.get("trade_pnls")
+        syms = c.get("trade_symbols")
+        if (not isinstance(pnls, (list, tuple))
+                or not isinstance(syms, (list, tuple))
+                or len(pnls) != len(syms)):
+            out.append(None)
+            continue
+        m: Dict[str, List[float]] = {}
+        for p, s in zip(pnls, syms):
+            m.setdefault(str(s), []).append(float(p))
+        c["trade_pnls_by_symbol"] = m
+        out.append(m)
+    return out
 
 
 def delta_per_window(baseline: Sequence[Dict[str, Any]],
@@ -565,6 +706,7 @@ def vwap_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], 
                 trs = list(res.get("trades", []) or [])
                 for t in trs:
                     t["z_threshold"] = z
+                    t["trade_symbol"] = sym
                 trades_all.extend(trs)
                 per_symbol[sym] = {
                     "z_threshold": z,
@@ -588,6 +730,8 @@ def vwap_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], 
             "gross_win_usd": round(sum(p for p in pnls if p > 0), 2),
             "gross_loss_usd": round(abs(sum(p for p in pnls if p < 0)), 2),
             "trade_pnls": [round(p, 2) for p in pnls],
+            "trade_symbols": [str(t.get("trade_symbol") or t.get("symbol") or "")
+                              for t in trades_all],
             "trades_summary": {
                 k: {"n": int(v["n"]), "pnl_usd": round(v["pnl_usd"], 2)}
                 for k, v in sorted(exits.items())
@@ -601,9 +745,191 @@ def vwap_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], 
     return tags, run_one, cfg
 
 
+# ---------------------------------------------------------------------------
+# Family: iv_thresholds — high/low-IV cut sweep (Night 3).
+#
+# QUEUE.md preregistration: the IV gate variant "both strategies only in
+# high_iv" showed +42.99 USD (n=13) on the single 05-18..08-07 window and
+# was never confirmed robustly on independent windows. This family sweeps
+# the high_iv cut itself — the canonical cut lives in
+# src/data/dvol_feed.py (IV_HIGH_PCT = 66.7): baseline = NO IV gate (raw
+# strategies) vs high_iv-only at 63.3 (lower tercile) / 66.7 (canonical) /
+# 70 (strict). The gate is applied POST-HOC per trade — a filter on the
+# SAME raw trade set the production shadow decision (iv_gate_shadow)
+# classifies — so no strategy code, settings.yaml, or frozen-window value
+# moves (allowed surface).
+#
+# DVOL loads from the persisted research DB (dvol_daily, written by the
+# production DvolFeed) — NO network fetch: an overnight run must not
+# depend on Deribit being reachable. Missing coverage is a hard error (a
+# silent empty classification would fabricate evidence).
+#
+# Statistical reality (QUEUE.md, data facts 2026-09-09): DVOL starts
+# 2026-06-14, so the historical span clamps to 06-14..09-08 → K=3 windows.
+# At K=3 the exact sign-flip noise gate cannot pass (all-positive floors
+# at p=2^-3 = 12.5% > alpha=0.10) — this session is the pre-declared
+# ACCUMULATOR: INCONCLUSIVE/DISCARD are the only possible verdicts; the
+# run grows the artifact sample and exercises the harness end-to-end.
+# ---------------------------------------------------------------------------
+
+IV_THRESHOLDS_GRID: Tuple[Optional[float], ...] = (
+    None,   # baseline: no IV gate — the raw strategies as production runs them
+    63.3,   # high_iv-only, lower tercile cut
+    66.7,   # high_iv-only, canonical cut (matches the +42.99 evidence)
+    70.0,   # high_iv-only, strict cut
+)
+
+IV_THRESHOLDS_SPAN = ("2026-06-14", "2026-09-08")  # DVOL-bounded; see block docstring
+
+# Raw-trade cache: the engine pass per (window, symbols) is IDENTICAL for
+# every cut (the gate only filters), so a 4-cell sweep pays one engine run
+# per window per strategy, not one per cell.
+_IV_RAW_CACHE: Dict[Tuple[str, str, Tuple[str, ...]], List[Dict[str, Any]]] = {}
+
+
+def apply_iv_gate(
+    raw: List[Dict[str, Any]], cut: Optional[float]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split raw trades into (kept, blocked) at the cut — pure, no DB.
+
+    A trade is kept iff its trailing-30d IV percentile (last completed DVOL
+    day, no lookahead) is strictly above the cut. Trades with no percentile
+    (``_iv_pct`` None — before DVOL coverage) are ALWAYS blocked: an
+    unclassifiable trade must never silently survive an IV gate.
+    """
+    if cut is None:
+        return list(raw), []
+    kept: List[Dict[str, Any]] = []
+    blocked: List[Dict[str, Any]] = []
+    for t in raw:
+        pct = t.get("_iv_pct")
+        if pct is not None and float(pct) > float(cut):
+            kept.append(t)
+        else:
+            blocked.append(t)
+    return kept, blocked
+
+
+def iv_cell_from_raw(
+    raw: List[Dict[str, Any]], kept: List[Dict[str, Any]],
+    blocked: List[Dict[str, Any]], cut: Optional[float],
+    spec_names: Sequence[str],
+) -> Dict[str, Any]:
+    """Build the runner's per-window cell dict from a raw/kept split."""
+    pnls = [float(t.get("pnl_usd", 0.0) or 0.0) for t in kept]
+    return {
+        "iv_cut": cut,
+        "n_trades": len(pnls),
+        "total_pnl_usd": round(sum(pnls), 2),
+        "gross_win_usd": round(sum(p for p in pnls if p > 0), 2),
+        "gross_loss_usd": round(abs(sum(p for p in pnls if p < 0)), 2),
+        "trade_pnls": [round(p, 2) for p in pnls],
+        "trade_symbols": [str(t.get("symbol") or "") for t in kept],
+        "n_raw": len(raw),
+        "n_no_iv": sum(1 for t in raw if t.get("_iv_pct") is None),
+        "n_blocked": len(blocked),
+        "blocked_pnl_usd": round(
+            sum(float(t.get("pnl_usd", 0.0) or 0.0) for t in blocked), 2
+        ),
+        "n_by_strategy": {
+            name: sum(1 for t in kept if t.get("_strategy") == name)
+            for name in spec_names
+        },
+    }
+
+
+def _load_dvol_series(
+    symbols: List[str], start_ms: int, end_ms: int
+) -> Tuple[Dict[str, List[Tuple[int, Optional[float]]]], List[Tuple[int, Optional[float]]]]:
+    """Per-symbol daily IV-percentile series from the persisted ``dvol_daily``.
+
+    Same shape the A/B harness builds from ``fetch_dvol`` — without touching
+    the network. Both currencies are loaded (SOL/HYPE inherit the BTC index
+    via ``dvol_series_for``). Raises if a currency has no closes: an
+    overnight run must fail loud rather than classify everything low_iv.
+    """
+    from src.data.dvol_feed import (  # noqa: E402
+        DVOL_WINDOW_DAYS,
+        build_iv_percentile,
+        dvol_series_for,
+    )
+    from src.data.research_database import ResearchDatabase  # noqa: E402
+
+    rdb = ResearchDatabase.open()
+    try:
+        raw: Dict[str, List[Tuple[int, float]]] = {}
+        for ccy in ("BTC", "ETH"):
+            # +60d lookback so the first labels have a full trailing window
+            rows = rdb.load_dvol_daily(ccy, start_ms - 60 * 86_400_000, end_ms)
+            if not rows:
+                raise RuntimeError(
+                    f"dvol_daily has no {ccy} closes — run the bot's DVOL "
+                    f"feed first; refusing to fabricate IV classifications"
+                )
+            raw[ccy] = rows
+    finally:
+        rdb.close()
+    btc_iv = build_iv_percentile(raw["BTC"], DVOL_WINDOW_DAYS)
+    eth_iv = build_iv_percentile(raw["ETH"], DVOL_WINDOW_DAYS)
+    return {s: dvol_series_for(s, btc_iv, eth_iv) for s in symbols}, btc_iv
+
+
+def iv_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], Callable[..., Any]]:
+    """Wire the iv_thresholds family — post-hoc IV-gate cut sweep.
+
+    Raw trades come from the regime-router harness (``run_strategy``: full
+    production gate chain, router OFF — the same raw-trade convention as the
+    regime-router and iv_high_only A/Bs). The gate itself is applied post-hoc
+    per trade exactly like ``iv_high_only_ab_split`` and the production shadow
+    decision: keep iff trailing-30d DVOL percentile > cut. SOL/HYPE inherit
+    the BTC index (global proxy rule).
+
+    Imports inside this function so ``--selftest`` never pulls the strategies.
+    """
+    from scripts.iv_high_only_ab_split import SPECS  # noqa: E402
+    from scripts.regime_router_a_b_test import ms, run_strategy  # noqa: E402
+    from src.data.database import Database  # noqa: E402
+    from src.data.dvol_feed import iv_pct_at  # noqa: E402
+    from src.utils.config import load_config  # noqa: E402
+
+    cfg = load_config(str(ROOT / "config" / "settings.yaml"))
+    db = Database(str(cfg.get("database.path", "data/live/bot.db")))
+    spec_names = [name for name, _cls, _path in SPECS]
+
+    def tag_for(cut: Optional[float]) -> str:
+        return "no gate (baseline)" if cut is None else f"high_iv>{cut}"
+
+    def run_one(start: str, end: str, symbols: List[str],
+                cut: Optional[float]) -> Dict[str, Any]:
+        try:
+            s_ms, e_ms = ms(start), ms(end, True)
+            key = (start, end, tuple(symbols))
+            raw = _IV_RAW_CACHE.get(key)
+            if raw is None:
+                trades: List[Dict[str, Any]] = []
+                for name, cls, path in SPECS:
+                    for t in run_strategy(cfg, db, cls, path, s_ms, e_ms, symbols):
+                        t["_strategy"] = name
+                        trades.append(t)
+                iv_by_sym, btc_iv = _load_dvol_series(symbols, s_ms, e_ms)
+                for t in trades:
+                    series = iv_by_sym.get(str(t.get("symbol")), btc_iv)
+                    t["_iv_pct"] = iv_pct_at(series, int(t.get("entry_time") or 0))
+                _IV_RAW_CACHE[key] = trades
+                raw = trades
+            kept, blocked = apply_iv_gate(raw, cut)
+            return iv_cell_from_raw(raw, kept, blocked, cut, spec_names)
+        except Exception as exc:  # noqa: BLE001 — a failed cell must not kill the sweep
+            return {"error": f"{type(exc).__name__}: {exc}", "iv_cut": cut}
+
+    tags = [tag_for(c) for c in IV_THRESHOLDS_GRID]
+    return tags, run_one, cfg
+
+
 FAMILIES = {
     "flush_fade": flush_fade_family,
     "vwap_thresholds": vwap_thresholds_family,
+    "iv_thresholds": iv_thresholds_family,
 }
 
 
@@ -644,6 +970,8 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
         grid_params: List[Any] = [FLUSH_FADE_GRID[i] for i in sel]
     elif family == "vwap_thresholds":
         grid_params = [VWAP_THRESHOLDS_GRID[i] for i in sel]
+    elif family == "iv_thresholds":
+        grid_params = [IV_THRESHOLDS_GRID[i] for i in sel]
     else:  # generic families: params parallel to tags via sel
         grid_params = list(sel)
     windows = split_windows(start, end, split_days)
@@ -679,6 +1007,16 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
     for tag, cells in variants.items():
         verdict, reasons = decide(baseline, cells, noise_model=True)
         noise = paired_bootstrap_noise_gate(baseline, cells)
+        # Per-symbol slices — the SAME paired sign-flip test restricted to
+        # each symbol. Advisory only: they never feed decide(); the
+        # cell-level verdict above is the only promotion gate.
+        trade_pnls_by_symbol(baseline)
+        trade_pnls_by_symbol(cells)
+        sym_universe = sorted(
+            {s for m in [c.get("trade_pnls_by_symbol") for c in baseline + cells]
+             if isinstance(m, dict) for s in m}
+        )
+        sym_gates = [symbol_noise_gate(baseline, cells, s) for s in sym_universe]
         results.append({
             "tag": tag,
             "windows": windows,
@@ -688,6 +1026,7 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
             "aggregate_baseline": aggregate(baseline),
             "aggregate_variant": aggregate(cells),
             "noise_gate": noise,
+            "symbol_gates": sym_gates,
             "verdict": verdict,
             "reasons": reasons,
             "baseline_tag": tags[0],
@@ -725,6 +1064,7 @@ def experiment_block(result: Dict[str, Any], session: Dict[str, Any]) -> str:
         "delay=": "a confirmation delay avoids entering at the flush extreme",
         "z=2.5+": "per-symbol thresholds: HYPE trades later and thinner, so its fade plausibly needs a wider 3.0σ band; a single 2.5σ threshold treats all listings as the same animal",
         "z=3.0 all": "a uniformly stricter band trades less everywhere and filters low-quality extensions at the cost of missed valid ones",
+        "high_iv>": "the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict",
     }
     hyp_txt = next((v for k, v in hyp.items() if result["tag"].startswith(k)
                     or k in result["tag"]), "parameter variant")
@@ -738,6 +1078,19 @@ def experiment_block(result: Dict[str, Any], session: Dict[str, Any]) -> str:
         f"- baseline ({base_tag}): net={ab['pnl']} n={ab['n']} PF={ab['pf']}",
         f"- variant: net={av['pnl']} n={av['n']} PF={av['pf']}",
         f"- per-window delta: {per_window}",
+    ]
+    sg = [g for g in (result.get("symbol_gates") or []) if g.get("evaluated")]
+    if sg:
+        lines.append(
+            "- symbol slices (ADVISORY — the cell verdict is the only gate): "
+            + "; ".join(
+                f"{g['symbol']} delta={g['observed_delta']:+.2f} "
+                f"(n={g['n_variant']}, p={g['p_value']}, "
+                f"{'beyond' if g['pass'] else 'within'} sign-flip null)"
+                for g in sg
+            )
+        )
+    lines += [
         f"- reasons: {'; '.join(result['reasons'])}",
         f"- audit line: verdict DRAFTED by overnight_runner — advisory; "
         f"promotion only via shadow + watchdog recheck.",

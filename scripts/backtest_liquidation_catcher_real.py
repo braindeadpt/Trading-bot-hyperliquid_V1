@@ -345,6 +345,9 @@ def run_cell(
         # sign-flip null, not just print a positive delta). Simulation
         # output, not telemetry.
         "trade_pnls": [round(float(t.get("pnl_usd", 0)), 2) for t in trades],
+        # Parallel to trade_pnls — feeds the overnight runner's per-symbol
+        # noise slices (advisory diagnostics, never a promotion gate).
+        "trade_symbols": [str(t.get("symbol", "")) for t in trades],
         "trades_summary": {
             k: {"n": int(v["n"]), "pnl_usd": round(v["pnl"], 2)}
             for k, v in sorted(exit_stats.items())

@@ -114,6 +114,15 @@ Map to the standing rules in `docs/RESEARCH_BACKLOG.md` and
   sensitivity noted in the backlog's tier-0 note).
 - **INCONCLUSIVE** — `n < 30`. Park with the evidence bar attached, exactly
   like the IV gate's n=13 verdict: direction is noted, promotion is not.
+
+**Per-symbol slices are diagnostics, never gates.** The runner also computes
+the same paired sign-flip test restricted to each symbol
+(`symbol_gates` in the artifact/ledger) so a verdict can say whether a
+variant fixes symbol X specifically (e.g. does a wider band repair HYPE).
+They are advisory: a slice can be stellar while the cell-level verdict is
+DISCARD — that combination is a forensics lead ("the edge lives only in one
+listing"), not an override. Promotions are decided exclusively by the
+cell-level gates above, computed over the full cell.
 - **BLOCKED** — the experiment needs code/config changes you are not allowed
   to make. State what's needed; a human decides.
 
