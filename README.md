@@ -109,6 +109,27 @@ the current paper config (direct Phase08 routing).
 
 ---
 
+## Research Program (overnight agent)
+
+New strategies and parameter variants are not hand-picked into the bot: they
+go through the standing research contract in [`research_program.md`](research_program.md).
+It defines the overnight loop — an agent (or cron) proposes variants from the
+backlog queue, sweeps them across **all non-overlapping windows** of a fixed
+span with the existing backtest harnesses, and keeps/discards them using the
+same gates the bot already enforces (≥2 valid windows with majority
+improvement, aggregate n≥30, PF>1, no catastrophic window, and a paired
+per-window sign-flip noise gate at α=0.10 — a positive delta is not enough,
+KEEP means *beyond luck*). A KEEP is only ever a **shadow candidate**;
+promotion runs through shadow accumulation + watchdog recheck with a human
+reading the dashboard. The agent never touches anything that affects
+execution — no `settings.yaml`, no `src/`, no window re-registration, no
+`.env` — and that invariant is enforced by
+`tests/test_research_program_never_rules.py` (softening the rules fails CI).
+Session results land in `docs/OVERNIGHT_RESEARCH_LOG.md` (queue format,
+verdict schema and a worked example are in its reference header).
+
+---
+
 ## Project Structure
 
 ```
@@ -116,6 +137,7 @@ trading-bot-hyperliquid/
   main.py                      # Entry point + arg parsing
   run_with_recovery.py         # Crash-recovery wrapper
   audit_all.py                 # Component health check (imports every module)
+  research_program.md          # Contract for the overnight research agent (see Research Program)
   requirements.txt             # Fully pinned deps
   config/
     settings.yaml              # Main configuration
