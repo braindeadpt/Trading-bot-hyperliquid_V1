@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import os
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -175,6 +176,68 @@ class TestStrategyPnlEndpoint:
         assert kwargs["strategy"] is None
 
 
+class TestLiveDataPredictedAndBook:
+    """REST live tape should use HL predicted + L2 bid/ask, not mids zeros."""
+
+    def setup_method(self):
+        self._orig = web._engine
+
+    def teardown_method(self):
+        web._engine = self._orig
+
+    def test_predicted_falls_back_to_hl_8h(self):
+        snap = type("S", (), {"predicted_funding_hl_8h": 0.00012})()
+        web._engine = type("E", (), {
+            "_hl_predicted": {"BTC": snap},
+            "_latest_agg_funding": {},
+        })()
+        ctx = type("C", (), {"predicted_funding": None})()
+        assert web._predicted_funding_for("BTC", ctx) == 0.00012
+
+    def test_api_live_data_uses_orderbook_when_mids_bid_zero(self):
+        price = type("P", (), {"mid": 100.0, "bid": 0.0, "ask": 0.0})()
+        ob = type("O", (), {"best_bid": 99.9, "best_ask": 100.1})()
+        web._engine = type("E", (), {
+            "_symbols": ["BTC"],
+            "_latest_price": {"BTC": price},
+            "_latest_ctx": {"BTC": type("C", (), {
+                "funding_rate": 0.0001,
+                "predicted_funding": None,
+                "open_interest": 1.0,
+            })()},
+            "_latest_agg_funding": {},
+            "_hl_predicted": {"BTC": type("S", (), {"predicted_funding_hl_8h": 0.0002})()},
+            "_market_data_health": {},
+            "_latest_orderbook": {"BTC": ob},
+            "_last_market_events": {},
+        })()
+        app, _, _ = web.create_app({"mode": "paper"})
+        client = app.test_client()
+        r = client.get("/api/live_data")
+        assert r.status_code == 200
+        row = r.get_json()[0]
+        assert row["bid"] == 99.9
+        assert row["ask"] == 100.1
+        assert row["predicted"] == 0.0002
+
+
+class TestDashboardLayout:
+    def test_unique_chart_ids_and_no_junk_panels(self):
+        html = (
+            Path(__file__).resolve().parents[1]
+            / "src" / "dashboard" / "templates" / "index.html"
+        ).read_text(encoding="utf-8")
+        assert html.count('id="chart-container"') == 1
+        assert html.count('id="chart-symbol"') == 1
+        assert 'id="vol-indicators-tbody"' not in html
+        assert ">Candle Watch" not in html
+        assert "portfolio.daily_trades ||" not in html
+        assert "Risk limit" not in html
+        assert 'id="kpi-daily-total"' in html
+        assert "Top Traders (aggregate)" in html
+        assert 'id="ivshadow-tbody"' in html
+        assert 'class="research-fold"' not in html
+
+
 if __name__ == "__main__":
-    import pytest
     pytest.main([__file__, "-v"])

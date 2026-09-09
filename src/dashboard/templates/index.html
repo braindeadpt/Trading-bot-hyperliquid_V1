@@ -6,7 +6,7 @@
 <title>Hyperliquid Trading Bot Dashboard</title>
 <script src="/socket.io.min.js"></script>
 <script src="/static/lightweight-charts.standalone.production.js"></script>
-<link rel="stylesheet" href="/static/dashboard.css?v=7">
+<link rel="stylesheet" href="/static/dashboard.css?v=9">
 <style>
 /* Inline fallback — guaranteed to apply */
 :root {
@@ -40,19 +40,42 @@ h1 { font-size: 14px; margin: 0; color: var(--accent); font-weight: 600; }
 .badge-red { background: #450a0a; color: var(--down); }
 .badge-blue { background: #1e3a5f; color: var(--accent); }
 .badge-purple { background: #2e1065; color: var(--accent2); }
-.kpi-bar { display: flex; gap: var(--gap); margin-bottom: var(--gap); overflow-x: auto; }
-.kpi-bar::-webkit-scrollbar { height: 3px; }
-.kpi-cell { flex: 1; min-width: 140px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+.kpi-bar { display: flex; gap: var(--gap); margin-bottom: var(--gap); }
+.kpi-cell { flex: 1 1 0; min-width: 0; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }
 .kpi-cell .label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.3px; }
 .kpi-cell .value { font-size: 18px; font-weight: 700; font-family: 'SF Mono', 'Consolas', monospace; letter-spacing: -0.5px; }
 .kpi-cell .sub { font-size: 9px; color: var(--dim); margin-top: 1px; }
-.grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: var(--gap); max-width: 1920px; margin: 0 auto; }
+.grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: var(--gap); width: 100%; max-width: none; margin: 0; align-items: stretch; }
 .g-3 { grid-column: span 3; }
 .g-4 { grid-column: span 4; }
 .g-5 { grid-column: span 5; }
 .g-6 { grid-column: span 6; }
 .g-8 { grid-column: span 8; }
 .g-12 { grid-column: span 12; }
+.grid > [class^="g-"] { display: flex; flex-direction: column; min-width: 0; }
+.grid > [class^="g-"] > .panel { flex: 1; width: 100%; }
+.grid > [class^="g-"]:not(.desk-side) > .panel { height: 100%; }
+.section-label { margin: 8px 0 4px 0; }
+.desk-grid { min-height: min(42vh, 440px); }
+.desk-side { display: flex; flex-direction: column; gap: var(--gap); height: 100%; min-height: 0; }
+.desk-side > .panel { flex: 1; min-height: 0; height: auto; }
+.desk-side > .panel.pos-panel { flex: 0 0 auto; max-height: 120px; }
+.sys-strip > .sys-cols { display: grid; grid-template-columns: 1.4fr 1.2fr 1fr 0.8fr; gap: 0; }
+.sys-strip > .sys-cols > div { padding: 8px 10px; border-right: 1px solid var(--border); min-width: 0; }
+.sys-strip > .sys-cols > div:last-child { border-right: none; }
+.sys-col-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent); margin-bottom: 6px; }
+#chart-container { width: 100%; height: 100%; min-height: 360px; }
+.panel.chart-panel { min-height: 360px; }
+.panel.chart-panel > .panel-body { padding: 0; flex: 1; min-height: 0; display: flex; }
+.trades-panel { min-height: 280px; max-height: 340px; }
+.sys-grid .panel { max-height: none; min-height: 0; }
+.mini-stats-2 { display: grid; grid-template-columns: 1fr 1fr; column-gap: 12px; }
+.mini-stats-2 .mini-row { min-height: 18px; }
+@media (max-width: 1100px) {
+    .g-8, .g-6 { grid-column: span 12; }
+    .g-4 { grid-column: span 12; }
+    .g-3 { grid-column: span 6; }
+}
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); display: flex; flex-direction: column; overflow: hidden; }
 .panel-header { height: 24px; min-height: 24px; padding: 0 8px; background: rgba(88,166,255,0.06); border-bottom: 1px solid rgba(48,54,61,0.5); display: flex; justify-content: space-between; align-items: center; font-size: 10px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
 .panel-header .dim { font-size: 9px; color: var(--muted); font-weight: 400; text-transform: none; }
@@ -111,7 +134,7 @@ tr:hover td { background: var(--panel-hover); }
 .stat-label { color: var(--dim); font-size: 10px; }
 .stat-value { font-weight: 600; font-size: 10px; }
 /* v3.1.23: Section labels for visual grouping */
-.section-label { display: flex; align-items: center; gap: 8px; margin: 14px 0 6px 0; padding: 0 2px; }
+.section-label { display: flex; align-items: center; gap: 8px; margin: 8px 0 4px 0; padding: 0 2px; }
 .section-label:first-of-type { margin-top: 4px; }
 .section-label .bar { width: 3px; height: 14px; border-radius: 2px; }
 .section-label .text { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
@@ -121,6 +144,21 @@ tr:hover td { background: var(--panel-hover); }
 .section-system .bar { background: var(--yellow); }
 .section-intel .bar { background: var(--accent2); }
 .section-logs .bar { background: var(--dim); }
+:root { --panel-bg: var(--panel); }
+details.fold { margin-top: var(--gap); background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+details.fold > summary { list-style: none; cursor: pointer; min-height: 32px; padding: 6px 12px; display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: var(--accent2); background: rgba(163,113,247,0.08); user-select: none; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: "▸"; font-size: 10px; color: var(--muted); }
+details.fold[open] > summary::before { content: "▾"; }
+details.fold > summary .dim { font-weight: 400; text-transform: none; letter-spacing: 0; margin-left: auto; }
+details.fold .fold-inner { padding: 8px; display: flex; flex-direction: column; gap: var(--gap); }
+details.fold .panel { max-height: none; }
+body { font-size: 13px; }
+table { font-size: 11px; }
+th { font-size: 10px; }
+.kpi-cell .value { font-size: 20px; }
+.panel-header { height: 28px; min-height: 28px; font-size: 11px; }
+@media (max-width: 900px) { .g-3 { grid-column: span 12; } }
 </style>
 </head>
 <body>
@@ -142,9 +180,7 @@ tr:hover td { background: var(--panel-hover); }
     </div>
 </div>
 
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- KPI BAR — 6 compact cells                                        -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- KPI BAR -->
 <div class="kpi-bar" id="kpi-bar">
     <div class="kpi-cell">
         <span class="label">Capital</span>
@@ -152,168 +188,132 @@ tr:hover td { background: var(--panel-hover); }
         <span class="sub" id="kpi-capital-time">--</span>
     </div>
     <div class="kpi-cell">
-        <span class="label">Daily Realized</span>
-        <span class="value" id="kpi-daily-realized">$--</span>
-        <span class="sub" id="kpi-realized-pct" title="Closed trades + funding today (fixed until next close)">--%</span>
+        <span class="label">Today P&amp;L</span>
+        <span class="value" id="kpi-daily-total">$--</span>
+        <span class="sub" title="Closed trades + funding today vs open-position mark">
+            Closed <span id="kpi-daily-realized">$--</span>
+            · Open <span id="kpi-daily-unrealized">$--</span>
+            <span id="kpi-realized-pct" style="display:none;"></span>
+        </span>
     </div>
     <div class="kpi-cell">
-        <span class="label">Daily Unrealized</span>
-        <span class="value" id="kpi-daily-unrealized">$--</span>
-        <span class="sub" id="kpi-unrealized-hint" title="Open positions — moves with live price">Open positions</span>
-    </div>
-    <div class="kpi-cell">
-        <span class="label">Open Positions</span>
+        <span class="label">Positions</span>
         <span class="value" id="kpi-open-pos">--</span>
-        <span class="sub" id="kpi-trades-count">Daily: -- | Total: --</span>
+        <span class="sub" id="kpi-trades-count">Today: -- · Total: --</span>
+        <span id="kpi-unrealized-hint" style="display:none;"></span>
     </div>
     <div class="kpi-cell">
         <span class="label">Max Drawdown</span>
         <span class="value" id="kpi-max-dd">--%</span>
-        <span class="sub">Risk limit</span>
+        <span class="sub" title="Peak-to-trough from peak equity this session — not the circuit-breaker limit">Observed</span>
     </div>
     <div class="kpi-cell">
-        <span class="label">Engine / Latency</span>
+        <span class="label">Engine</span>
         <span class="value" id="kpi-engine">--</span>
-        <span class="sub" id="kpi-latency">Socket: -- | Data: --</span>
+        <span class="sub" id="kpi-latency">Socket: --</span>
     </div>
 </div>
 
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- SECTION: MARKET                                                  -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- DESK: chart | market + positions -->
 <div class="section-label section-market">
-    <span class="bar"></span><span class="text">Market Data</span><span class="line"></span>
+    <span class="bar"></span><span class="text">Desk</span><span class="line"></span>
 </div>
-<div class="grid">
+<div class="grid desk-grid">
     <div class="g-8">
-        <div class="panel" style="max-height:210px;">
+        <div class="panel chart-panel">
+            <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                <span>Chart <span class="dim">Candles + trades</span></span>
+                <div style="display:flex;gap:6px;align-items:center;">
+                    <select id="chart-symbol" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:10px;height:22px;"></select>
+                    <select id="chart-tf" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:10px;height:22px;">
+                        <option value="1m">1m</option>
+                        <option value="5m" selected>5m</option>
+                        <option value="15m">15m</option>
+                        <option value="1h">1h</option>
+                    </select>
+                    <span id="chart-status" class="dim" style="font-size:9px;"></span>
+                    <span class="live-dot"></span>
+                </div>
+            </div>
+            <div class="panel-body">
+                <div id="chart-container"><span class="muted" style="text-align:center;display:block;padding:100px 0;">Loading chart...</span></div>
+            </div>
+        </div>
+    </div>
+    <div class="g-4 desk-side">
+        <div class="panel">
             <div class="panel-header">
-                <span>Live Market Data <span class="dim">All Symbols</span></span>
+                <span>Live market</span>
                 <span class="live-dot"></span>
             </div>
-            <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:186px;">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Sym</th><th class="num">Price</th><th class="num">Bid</th><th class="num">Ask</th>
-                                <th class="num">Spr%</th><th class="num">Fund</th><th class="num">Pred</th>
-                                <th class="num">OI($M)</th><th class="num">Vol1m</th><th class="num">Imbal</th>
-                                <th class="num">OIR</th><th class="num">Depth</th><th class="num">RVol</th>
-                                <th class="num">VWAP</th><th class="num">Age</th>
-                            </tr>
-                        </thead>
-                        <tbody id="live-data-tbody">
-                            <tr><td colspan="15" class="muted" style="text-align:center;">Waiting for data...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
+            <div class="panel-body" style="padding:0;overflow:auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Sym</th>
+                            <th class="num">Price</th>
+                            <th class="num" title="Bid–ask spread %">Spr%</th>
+                            <th class="num" title="Current 8h funding">Fund</th>
+                            <th class="num" title="Predicted 8h funding (HL, else CEX avg)">Pred</th>
+                            <th class="num">OI</th>
+                            <th class="num" title="1m volume">Vol</th>
+                            <th class="num" title="Bid/ask imbalance">Imb</th>
+                            <th class="num">Age</th>
+                        </tr>
+                    </thead>
+                    <tbody id="live-data-tbody">
+                        <tr><td colspan="9" class="muted" style="text-align:center;">Waiting for data...</td></tr>
+                    </tbody>
+                </table>
             </div>
         </div>
-    </div>
-    <div class="g-4">
-        <div class="panel" style="max-height:210px;">
-            <div class="panel-header">Candle Watch <span class="dim">OHLCV</span></div>
-            <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:186px;">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Sym</th><th>TF</th><th class="num">Open</th><th class="num">High</th>
-                                <th class="num">Low</th><th class="num">Close</th><th class="num">Vol</th>
-                                <th class="num">Buy%</th><th class="num">VWAP</th>
-                                <th class="num">Age</th>
-                            </tr>
-                        </thead>
-                        <tbody id="candles-tbody">
-                            <tr><td colspan="10" class="muted" style="text-align:center;">No candles yet</td></tr>
-                        </tbody>
-                    </table>
-                </div>
+        <div class="panel pos-panel">
+            <div class="panel-header">Open Positions <span class="dim">Active</span>
+                <span>
+                    <label class="dim tiny" for="positions-iv-filter">IV</label>
+                    <select id="positions-iv-filter" onchange="setPositionsIvFilter(this.value)" style="font-size:11px;padding:1px 4px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:3px;">
+                        <option value="all">all</option>
+                        <option value="high_iv">high_iv</option>
+                        <option value="low_iv">low_iv</option>
+                        <option value="unknown">sem decisão</option>
+                    </select>
+                </span>
             </div>
-        </div>
-    </div>
-</div>
-<div class="grid" style="margin-top:var(--gap);">
-    <div class="g-12">
-        <div class="panel" style="max-height:140px;">
-            <div class="panel-header">Volume Indicators <span class="dim">OBV slope / MFI / VWAP multi-TF (observability only)</span></div>
-            <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:116px;">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Sym</th>
-                                <th class="num">OBV &Delta;5m</th>
-                                <th class="num">MFI 5m</th>
-                                <th class="num">VWAP 1m</th>
-                                <th class="num">VWAP 5m</th>
-                                <th class="num">VWAP 15m</th>
-                                <th class="num">VWAP 1h</th>
-                                <th class="num">Price vs VWAP5m</th>
-                            </tr>
-                        </thead>
-                        <tbody id="vol-indicators-tbody">
-                            <tr><td colspan="8" class="muted" style="text-align:center;">Waiting for data...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
+            <div class="panel-body" style="padding:0;overflow:auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Sym</th><th>Side</th><th class="num">Size</th><th class="num">Entry</th>
+                            <th class="num">Current</th><th class="num">PnL%</th><th class="num">Unreal</th>
+                            <th>Strat</th><th>SL</th><th>TP</th>
+                            <th title="IV percentile at entry (shadow decision)">IV pct</th>
+                            <th title="IV class at entry — high_iv / low_iv">IV</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positions-tbody">
+                        <tr><td colspan="12" class="muted" style="text-align:center;">No positions</td></tr>
+                    </tbody>
+                </table>
             </div>
         </div>
     </div>
 </div>
 
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- SECTION: EXECUTION                                               -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="section-label section-execution">
     <span class="bar"></span><span class="text">Execution</span><span class="line"></span>
 </div>
 <div class="grid">
-    <div class="g-6">
-        <div class="panel" style="max-height:180px;">
-            <div class="panel-header">Open Positions <span class="dim">Active</span>
-                <span style="float:right;">
-                    <label class="dim tiny" for="positions-iv-filter">IV</label>
-                    <select id="positions-iv-filter" onchange="setPositionsIvFilter(this.value)" style="font-size:11px;padding:1px 4px;background:var(--panel-bg);color:var(--text);border:1px solid var(--border);border-radius:3px;">
-                        <option value="all">all</option>
-                        <option value="high_iv">high_iv</option>
-                        <option value="low_iv">low_iv</option>
-                        <option value="unknown">sem decisão</option>
-                    </select>
-                </span>
-            </div>
-            <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:156px;">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Sym</th><th>Side</th><th class="num">Size</th><th class="num">Entry</th>
-                                <th class="num">Current</th><th class="num">PnL%</th><th class="num">Unreal</th>
-                                <th>Strat</th><th>SL</th><th>TP</th>
-                                <th title="IV percentile at entry (shadow decision)">IV pct</th>
-                                <th title="IV class at entry — high_iv / low_iv">IV</th>
-                            </tr>
-                        </thead>
-                        <tbody id="positions-tbody">
-                            <tr><td colspan="12" class="muted" style="text-align:center;">No positions</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div class="g-6">
-        <div class="panel" style="max-height:180px;">
+    <div class="g-12">
+        <div class="panel trades-panel">
             <div class="panel-header">Trade History <span class="dim">Last 50</span>
                 <span class="dim tiny" id="trades-liq-count" style="margin-left:8px;" title="Trades fechados por liquidation stop-out (flush valida o side)"></span>
                 <span id="trades-filter-stats" class="tiny" style="margin-left:8px;" title="n e net PnL dos trades do filtro IV activo (fechados)"></span>
-                <span style="float:right;">
+                <span style="margin-left:auto;">
                     <label class="dim tiny" style="cursor:pointer;" title="Liga o filtro à projecção do gate IV: PROMOTE → mostra low_iv (o que o enforcement bloquearia) · REJECT → mostra high_iv (a classe que não confirma)">
                         <input type="checkbox" id="trades-gate-toggle" onchange="setGateFilter(this.checked)" style="vertical-align:-2px;"> gate
                     </label>
                     <label class="dim tiny" for="trades-iv-filter">IV</label>
-                    <select id="trades-iv-filter" onchange="setTradesIvFilter(this.value)" style="font-size:11px;padding:1px 4px;background:var(--panel-bg);color:var(--text);border:1px solid var(--border);border-radius:3px;">
+                    <select id="trades-iv-filter" onchange="setTradesIvFilter(this.value)" style="font-size:11px;padding:1px 4px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:3px;">
                         <option value="all">all</option>
                         <option value="high_iv">high_iv</option>
                         <option value="low_iv">low_iv</option>
@@ -321,84 +321,65 @@ tr:hover td { background: var(--panel-hover); }
                     </select>
                 </span>
             </div>
-            <div class="panel-body" style="padding:0;">
-                <div style="overflow:auto; max-height:156px;">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Time</th><th>Sym</th><th>Side</th><th class="num">Entry</th>
-                                <th class="num">Exit</th><th class="num">Size</th><th class="num">PnL</th>
-                                <th class="num">PnL%</th><th class="num">Fund</th><th>Strat</th><th>Reason</th><th>IV pct</th><th>IV</th><th>Sts</th>
-                            </tr>
-                        </thead>
-                        <tbody id="trades-tbody">
-                            <tr><td colspan="12" class="muted" style="text-align:center;">Loading...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
+            <div class="panel-body" style="padding:0;overflow:auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th><th>Sym</th><th>Side</th><th class="num">Entry</th>
+                            <th class="num">Exit</th><th class="num">Size</th><th class="num">PnL</th>
+                            <th class="num">PnL%</th><th class="num">Fund</th><th>Strat</th><th>Reason</th><th>IV pct</th><th>IV</th><th>Sts</th>
+                        </tr>
+                    </thead>
+                    <tbody id="trades-tbody">
+                        <tr><td colspan="12" class="muted" style="text-align:center;">Loading...</td></tr>
+                    </tbody>
+                </table>
             </div>
         </div>
     </div>
 </div>
 
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- SECTION: SYSTEM HEALTH — 4 compact panels in one row            -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="section-label section-system">
     <span class="bar"></span><span class="text">System Health</span><span class="line"></span>
 </div>
 <div class="grid">
-    <div class="g-3">
-        <div class="panel" style="max-height:200px;">
-            <div class="panel-header">Engine <span class="dim">Health</span></div>
-            <div class="panel-body" style="padding:6px 8px;">
-                <div class="mini-stats">
-                    <div class="mini-row"><span class="mini-label">State</span><span class="mini-value highlight" id="eng-state">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Uptime</span><span class="mini-value" id="eng-uptime">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Ticks/s</span><span class="mini-value" id="eng-ticks">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Total</span><span class="mini-value" id="eng-total">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Memory</span><span class="mini-value" id="eng-mem">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Daily DD</span><span class="mini-value" id="eng-daily-dd">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Max DD</span><span class="mini-value" id="eng-max-dd">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Exposure</span><span class="mini-value" id="eng-exposure">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Portfolio Lev</span><span class="mini-value" id="eng-portfolio-lev">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Open Risk</span><span class="mini-value" id="eng-open-risk">--</span></div>
-                    <div class="mini-row"><span class="mini-label">Last Error</span><span class="mini-value" id="eng-error" style="color:var(--down);">--</span></div>
+    <div class="g-12">
+        <div class="panel sys-strip">
+            <div class="sys-cols">
+                <div>
+                    <div class="sys-col-title">Engine</div>
+                    <div class="mini-stats mini-stats-2">
+                        <div class="mini-row"><span class="mini-label">State</span><span class="mini-value highlight" id="eng-state">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Uptime</span><span class="mini-value" id="eng-uptime">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Ticks/s</span><span class="mini-value" id="eng-ticks">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Total</span><span class="mini-value" id="eng-total">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Memory</span><span class="mini-value" id="eng-mem">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Daily DD</span><span class="mini-value" id="eng-daily-dd">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Max DD</span><span class="mini-value" id="eng-max-dd">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Exposure</span><span class="mini-value" id="eng-exposure">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Portfolio Lev</span><span class="mini-value" id="eng-portfolio-lev">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Open Risk</span><span class="mini-value" id="eng-open-risk">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Last Error</span><span class="mini-value" id="eng-error" style="color:var(--down);">--</span></div>
+                    </div>
                 </div>
-                <div class="tick-bar" id="tick-bar">
-                    <div class="tick-cell"></div><div class="tick-cell"></div><div class="tick-cell"></div>
-                    <div class="tick-cell"></div><div class="tick-cell"></div><div class="tick-cell"></div>
-                    <div class="tick-cell"></div><div class="tick-cell"></div><div class="tick-cell"></div>
-                    <div class="tick-cell"></div>
+                <div>
+                    <div class="sys-col-title">Risk gates</div>
+                    <div class="mini-stats" id="risk-gates-panel">
+                        <div class="muted" style="text-align:center;padding:8px 0;">Waiting...</div>
+                    </div>
                 </div>
-            </div>
-        </div>
-    </div>
-    <div class="g-3">
-        <div class="panel" style="max-height:200px;">
-            <div class="panel-header">Risk Gates <span class="dim">Soft + hard</span></div>
-            <div class="panel-body" style="padding:6px 8px;">
-                <div class="mini-stats" id="risk-gates-panel">
-                    <div class="muted" style="text-align:center;padding:20px 0;">Waiting...</div>
+                <div>
+                    <div class="sys-col-title">Regime</div>
+                    <div class="mini-stats" id="regime-panel">
+                        <div class="muted" style="text-align:center;padding:8px 0;">Waiting...</div>
+                    </div>
                 </div>
-            </div>
-        </div>
-    </div>
-    <div class="g-3">
-        <div class="panel" style="max-height:200px;">
-            <div class="panel-header">Regime <span class="dim">ADX per symbol</span></div>
-            <div class="panel-body" style="padding:6px 8px;">
-                <div class="mini-stats" id="regime-panel">
-                    <div class="muted" style="text-align:center;padding:20px 0;">Waiting...</div>
+                <div>
+                    <div class="sys-col-title">Governor</div>
+                    <div id="governor-panel">
+                        <span class="muted">Waiting...</span>
+                    </div>
                 </div>
-            </div>
-        </div>
-    </div>
-    <div class="g-3">
-        <div class="panel" style="max-height:200px;">
-            <div class="panel-header">Governor <span class="dim">Auto-disable</span></div>
-            <div class="panel-body" id="governor-panel" style="padding:6px 8px; max-height:176px; overflow-y:auto;">
-                <span class="muted">Waiting...</span>
             </div>
         </div>
     </div>
@@ -407,12 +388,10 @@ tr:hover td { background: var(--panel-hover); }
 <!-- Feed silence — threshold vs age per feed -->
 <div class="grid" style="margin-top:var(--gap);">
 <div class="g-12">
-<div class="panel" style="max-height:260px;">
+<div class="panel">
     <div class="panel-header">Feed Silence <span class="dim" id="feed-silence-meta">threshold vs age</span></div>
-    <div class="panel-body" style="padding:6px 8px; max-height:220px; overflow-y:auto;">
-        <div id="feed-silence-help" class="muted" style="font-size:10px;line-height:1.4;margin-bottom:6px;">
-            Age vs max-silence. Telegram on <b>imminent (90%)</b> and <b>DEGRADED</b>. Early / cadence stay in this table.
-        </div>
+    <div class="panel-body" style="padding:6px 8px; overflow-y:auto;">
+        <div id="feed-silence-help" class="muted" style="display:none;" title="Telegram on imminent (90%) and DEGRADED. Early / cadence stay in this table."></div>
         <table style="width:100%; font-size:11px; border-collapse:collapse;">
             <thead>
                 <tr style="color:var(--muted); text-align:left;">
@@ -439,39 +418,38 @@ tr:hover td { background: var(--panel-hover); }
 <!-- SECTION: INTELLIGENCE — Strategies + Signals/Decisions          -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="section-label section-intel">
-    <span class="bar"></span><span class="text">Intelligence</span><span class="line"></span>
+    <span class="bar"></span><span class="text">Strategies</span><span class="line"></span>
 </div>
-<div class="grid">
+<div class="grid" style="align-items:start;">
     <div class="g-8">
-        <div class="panel" style="max-height:240px;">
+        <div class="panel">
             <div class="panel-header">Strategies <span class="dim">Click for detail</span></div>
-            <div class="panel-body" id="strategies-panel" style="padding:6px 8px; max-height:216px; overflow-y:auto;">
+            <div class="panel-body" id="strategies-panel" style="padding:6px 8px; overflow-y:auto;">
                 <span class="muted">Waiting...</span>
             </div>
         </div>
     </div>
-    <div class="g-4">
-        <div style="display:flex; flex-direction:column; gap:var(--gap); max-height:240px;">
-            <div class="panel" style="flex:1; max-height:115px;">
-                <div class="panel-header">Signals <span class="dim">Last 20</span></div>
-                <div class="panel-body" style="padding:4px 6px; max-height:91px; overflow-y:auto;">
-                    <div id="signals-list" class="stream-list"><span class="muted">No signals yet</span></div>
-                </div>
+    <div class="g-4 desk-side">
+        <div class="panel">
+            <div class="panel-header">Signals <span class="dim">Last 20</span></div>
+            <div class="panel-body" style="padding:4px 6px; overflow-y:auto;">
+                <div id="signals-list" class="stream-list"><span class="muted">No signals yet</span></div>
             </div>
-            <div class="panel" style="flex:1; max-height:115px;">
-                <div class="panel-header">Decisions <span class="dim">Risk + Exec</span></div>
-                <div class="panel-body" style="padding:4px 6px; max-height:91px; overflow-y:auto;">
-                    <div id="decisions-list" class="stream-list"><span class="muted">No decisions yet</span></div>
-                </div>
+        </div>
+        <div class="panel">
+            <div class="panel-header">Decisions <span class="dim">Risk + Exec</span></div>
+            <div class="panel-body" style="padding:4px 6px; overflow-y:auto;">
+                <div id="decisions-list" class="stream-list"><span class="muted">No decisions yet</span></div>
             </div>
         </div>
     </div>
 </div>
 
+<details class="fold">
+<summary>Research <span class="dim">shadow · top traders · watchdogs · DVOL · IV gate</span></summary>
+<div class="fold-inner">
+
 <!-- Shadow observability (Phase08) -->
-<div class="section-label section-intel">
-    <span class="bar"></span><span class="text">Shadow / Gate progress</span><span class="line"></span>
-</div>
 <div class="grid">
     <div class="g-12">
         <div class="panel" style="max-height:280px;">
@@ -480,13 +458,7 @@ tr:hover td { background: var(--panel-hover); }
                 <span class="dim" id="shadow-disclaimer">Idealized fills — not executable edge</span>
             </div>
             <div class="panel-body" style="padding:6px 8px; max-height:240px; overflow-y:auto;">
-                <div class="muted" style="font-size:10px;margin-bottom:6px;line-height:1.35;">
-                    <b>INCONCLUSIVE</b> = sample &lt;30 trades (not tested yet — not a FAIL).
-                    <b>FAIL</b> = enough trades AND lost the baseline gate (direction ≤ random and/or loses money).
-                    <b>WR / E[R] / Hyp.n</b> fill only after closed hypothetical trades.
-                    <b>tier_b</b> = needs L2/tape/funding feeds; candle-only gate stays weak.
-                    Hover <b>Last gate</b> for the exact failed conditions.
-                </div>
+                <div class="muted" style="display:none;" title="INCONCLUSIVE = sample &lt;30 (not tested). FAIL = powered sample lost the baseline gate. WR / E[R] / Hyp.n fill after closed hypothetical trades. tier_b needs L2/tape/funding."></div>
                 <table style="width:100%; font-size:11px; border-collapse:collapse;">
                     <thead>
                         <tr style="color:var(--muted); text-align:left;">
@@ -511,26 +483,18 @@ tr:hover td { background: var(--panel-hover); }
 </div>
 
 <!-- Top Traders aggregate bias + virtual swing -->
-<div class="section-label section-intel">
-    <span class="bar"></span><span class="text">Top Traders (aggregate)</span><span class="line"></span>
-</div>
 <div class="grid">
     <div class="g-12">
         <div class="panel" style="max-height:420px;">
             <div class="panel-header">
-                Research bias + simulated swing
+                Top Traders (aggregate)
                 <span class="dim" id="tt-meta">research only</span>
             </div>
             <div class="panel-body" style="padding:6px 8px; max-height:380px; overflow-y:auto;">
-                <div id="tt-help" class="muted" style="font-size:10px;line-height:1.4;margin-bottom:8px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;">
-                    <b>What this is:</b> polls top Hyperliquid wallets, measures if they are more long or short
-                    (notional-weighted), then opens a <b>simulated</b> position when bias is strong.
-                    <b>No real orders</b> — OMS never sees these.
-                    <br><b>Bias:</b> −1 = all short · 0 = flat · +1 = all long. Opens when |bias| ≥ threshold.
-                    <br><b>Exit (hybrid):</b> bias flips the other way (needs ≥3 wallets + 2 polls),
-                    <span id="tt-help-sl">SL</span>,
-                    <span id="tt-help-tp">TP</span>, or max hold <span id="tt-help-hold">—</span>.
-                    Thin/partial wallet polls are ignored (avoids fake flips).
+                <div id="tt-help" class="muted" style="display:none;" title="Polls top Hyperliquid wallets. Simulated positions only — OMS never sees these.">
+                    <span id="tt-help-sl">SL</span>
+                    <span id="tt-help-tp">TP</span>
+                    <span id="tt-help-hold">—</span>
                 </div>
                 <div id="tt-empty" class="muted" style="display:none;margin-bottom:6px;"></div>
                 <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">
@@ -588,11 +552,7 @@ tr:hover td { background: var(--panel-hover); }
     </div>
 </div>
 
-<!-- ═══════════════════════════════════════════════════════════════ -->
 <!-- Research watchdogs (auto re-run gates) -->
-<div class="section-label section-intel">
-    <span class="bar"></span><span class="text">Research watchdogs</span><span class="line"></span>
-</div>
 <div class="grid">
     <div class="g-12">
         <div class="panel">
@@ -601,11 +561,7 @@ tr:hover td { background: var(--panel-hover); }
                 <span class="dim" id="wd-meta">bias ≥20 datas · flush ≥30 dias · IV ≥30 trades</span>
             </div>
             <div class="panel-body" style="padding:6px 8px;">
-                <div id="wd-help" class="muted" style="font-size:10px;line-height:1.4;margin-bottom:8px;">
-                    Background watchdogs re-run research probes once enough out-of-sample data accumulates
-                    (bias screening ≥20 datas, liquidation flush ≥30 dias, IV gate shadow ≥30 trades com decisão).
-                    Evidence gates only — nothing here trades.
-                </div>
+                <div id="wd-help" class="muted" style="display:none;" title="Watchdogs re-run research probes once enough OOS data accumulates. Evidence only — nothing here trades."></div>
                 <table style="width:100%; font-size:11px; border-collapse:collapse;">
                     <thead>
                         <tr style="color:var(--muted); text-align:left;">
@@ -624,12 +580,7 @@ tr:hover td { background: var(--panel-hover); }
     </div>
 </div>
 
-<!-- ═══════════════════════════════════════════════════════════ -->
-<!-- DVOL / IV regime (Deribit vol index)                            -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="section-label section-intel">
-    <span class="bar"></span><span class="text">DVOL · IV regime</span><span class="line"></span>
-</div>
+<!-- DVOL / IV regime (Deribit vol index) -->
 <div class="grid">
     <div class="g-12">
         <div class="panel">
@@ -638,10 +589,7 @@ tr:hover td { background: var(--panel-hover); }
                 <span class="dim" id="dvol-meta">high_iv &gt; p66.7 · BTC/ETH nativo, SOL/HYPE proxy BTC</span>
             </div>
             <div class="panel-body" style="padding:8px;">
-                <div class="muted" style="font-size:10px;line-height:1.4;margin-bottom:8px;">
-                    Percentil do DVOL diário (janela 30d). O gate IV corre em <b>shadow</b> — regista a
-                    decisão high/low-IV por trade (<code>variant=iv_gate_shadow</code>), nunca bloqueia execução.
-                </div>
+                <div class="muted" style="display:none;">DVOL 30d percentile. IV gate is shadow-only.</div>
                 <div id="dvol-current" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px;font-size:11px;">Waiting...</div>
                 <div id="dvol-chart" style="width:100%;height:150px;"></div>
             </div>
@@ -649,12 +597,7 @@ tr:hover td { background: var(--panel-hover); }
     </div>
 </div>
 
-<!-- ═══════════════════════════════════════════════════════════ -->
-<!-- IV gate shadow — amostra high/low por trade                   -->
-<!-- ═══════════════════════════════════════════════════════════ -->
-<div class="section-label section-intel">
-    <span class="bar"></span><span class="text">IV gate shadow · amostra</span><span class="line"></span>
-</div>
+<!-- IV gate shadow — amostra high/low por trade -->
 <div class="grid">
     <div class="g-12">
         <div class="panel">
@@ -735,56 +678,26 @@ tr:hover td { background: var(--panel-hover); }
         </div>
     </div>
 </div>
-
-<!-- ═══════════════════════════════════════════════════════════ -->
-<!-- SECTION: LOGS                                                    -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="section-label section-logs">
-    <span class="bar"></span><span class="text">Logs</span><span class="line"></span>
 </div>
+</details>
+
+<details class="fold" open>
+<summary>Logs <span class="dim">last 50</span></summary>
+<div class="fold-inner">
 <div class="grid">
     <div class="g-12">
-        <div class="panel" style="max-height:120px;">
-            <div class="panel-header">Live Logs <span class="dim">Last 50</span></div>
+        <div class="panel" style="max-height:160px;">
+            <div class="panel-header">Live Logs</div>
             <div class="panel-body" style="padding:4px 8px;">
-                <div id="logs-container" class="log-container" style="max-height:96px; overflow-y:auto;">
+                <div id="logs-container" class="log-container" style="max-height:128px; overflow-y:auto;">
                     <span class="muted">Waiting for logs...</span>
                 </div>
             </div>
         </div>
     </div>
 </div>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- SECTION: CHARTS — Candlestick + trades overlay              -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="section-label section-market">
-    <span class="bar"></span><span class="text">Chart</span><span class="line"></span>
 </div>
-<div class="grid">
-    <div class="g-12">
-        <div class="panel" style="max-height:450px;">
-            <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-                <span>Chart <span class="dim">Candlestick + Trades</span></span>
-                <div style="display:flex;gap:6px;align-items:center;">
-                    <select id="chart-symbol" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:10px;height:20px;">
-                    </select>
-                    <select id="chart-tf" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:10px;height:20px;">
-                        <option value="1m">1m</option>
-                        <option value="5m" selected>5m</option>
-                        <option value="15m">15m</option>
-                        <option value="1h">1h</option>
-                    </select>
-                    <span id="chart-status" class="dim" style="font-size:9px;"></span>
-                    <span class="live-dot"></span>
-                </div>
-            </div>
-            <div class="panel-body" style="padding:4px;">
-                <div id="chart-container" style="width:100%;height:380px;"><span class="muted" style="text-align:center;display:block;padding:100px 0;">Loading chart...</span></div>
-            </div>
-        </div>
-    </div>
-</div>
+</details>
 
 <div id="auth-gate" class="modal-overlay">
     <div class="modal-box" style="max-width:360px;">
@@ -990,25 +903,32 @@ function updateKPIs(portfolio, engine) {
     document.getElementById("kpi-capital").textContent = "$" + fmtNum(capital);
     document.getElementById("kpi-capital-time").textContent = fmtTime(portfolio.timestamp_ms);
 
+    setPnlDisplay("kpi-daily-total", totalDaily);
     setPnlDisplay("kpi-daily-realized", realized);
-    document.getElementById("kpi-realized-pct").textContent =
-        (realizedPct >= 0 ? "+" : "") + realizedPct.toFixed(2) + "% realised";
+    const pctEl = document.getElementById("kpi-realized-pct");
+    if (pctEl) {
+        pctEl.textContent = (realizedPct >= 0 ? "+" : "") + realizedPct.toFixed(2) + "% realised";
+    }
 
     setPnlDisplay("kpi-daily-unrealized", unrealDaily);
     const openN = portfolio.open_positions || 0;
-    document.getElementById("kpi-unrealized-hint").textContent =
-        openN > 0
-            ? openN + " open | Total day: " + (totalPct >= 0 ? "+" : "") + totalPct.toFixed(2) + "%"
-            : "No open positions";
+    const hint = document.getElementById("kpi-unrealized-hint");
+    if (hint) {
+        hint.textContent =
+            openN > 0
+                ? openN + " open | Total day: " + (totalPct >= 0 ? "+" : "") + totalPct.toFixed(2) + "%"
+                : "No open positions";
+    }
 
-    document.getElementById("kpi-open-pos").textContent = portfolio.open_positions || 0;
-    document.getElementById("kpi-trades-count").textContent = "Daily: " + (portfolio.daily_trades || "--") + " | Total: " + (portfolio.total_trades || "--");
+    document.getElementById("kpi-open-pos").textContent = openN;
+    const dailyT = portfolio.daily_trades != null ? portfolio.daily_trades : "--";
+    const totalT = portfolio.total_trades != null ? portfolio.total_trades : "--";
+    document.getElementById("kpi-trades-count").textContent = "Today: " + dailyT + " · Total: " + totalT;
     document.getElementById("kpi-max-dd").textContent = (portfolio.max_drawdown_pct || 0).toFixed(2) + "%";
     const ticks = engine && engine.ticks_per_second != null ? engine.ticks_per_second.toFixed(1) : "--";
     document.getElementById("kpi-engine").textContent = ticks + " t/s";
     const lat = lastSocketLatency != null ? lastSocketLatency + "ms" : "--";
-    const dataLat = document.getElementById("kpi-data-lat") ? document.getElementById("kpi-data-lat").textContent : "--";
-    document.getElementById("kpi-latency").textContent = "Socket: " + lat + " | Data: " + dataLat;
+    document.getElementById("kpi-latency").textContent = "Socket: " + lat;
 }
 
 // ── Tick bar ──
@@ -1022,36 +942,42 @@ function updateTickBar() {
 }
 
 // ── Live Data ──
+let _lastLiveRows = null;
+let _fundingPred = {};
+function _predictedOf(r) {
+    if (r && r.predicted != null) return r.predicted;
+    const f = r && _fundingPred[r.symbol];
+    return f && f.predicted != null ? f.predicted : null;
+}
 function renderLiveData(rows) {
     const tbody = document.getElementById("live-data-tbody");
+    if (!tbody) return;
     if (!rows || rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="15" class="muted" style="text-align:center;">Waiting for data...</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;">Waiting for data...</td></tr>';
         return;
     }
+    _lastLiveRows = rows;
     const now = Date.now() / 1000;
     let totalLatency = 0, count = 0;
     tbody.innerHTML = rows.map(r => {
-        const priceClass = r.price > r.vwap ? "up" : r.price < r.vwap ? "down" : "";
+        const priceClass = (r.vwap != null && r.price != null)
+            ? (r.price > r.vwap ? "up" : r.price < r.vwap ? "down" : "")
+            : "";
         const age = r.last_update ? now - r.last_update : null;
         const ageClass = age != null ? (age > 30 ? "down" : age > 5 ? "yellow" : "") : "";
-        const oirClass = r.ob_oir > 0.5 ? "up" : r.ob_oir < -0.5 ? "down" : "";
-        const rvolClass = r.rvol != null ? (r.rvol > 0.40 ? "yellow" : r.rvol < 0.20 ? "up" : "") : "";
         if (age != null) { totalLatency += age * 1000; count++; }
+        const spr = (r.spread_pct != null && Math.abs(Number(r.spread_pct)) > 1e-8)
+            ? fmtNum(r.spread_pct, 3) : "--";
+        const imb = r.imbalance;
         return `<tr>
             <td><span class="highlight">${r.symbol}</span></td>
             <td class="num ${priceClass}">$${fmtNum(r.price)}</td>
-            <td class="num tiny muted">${fmtNum(r.bid, 2)}</td>
-            <td class="num tiny muted">${fmtNum(r.ask, 2)}</td>
-            <td class="num tiny">${fmtNum(r.spread_pct, 4)}</td>
+            <td class="num tiny">${spr}</td>
             <td class="num">${fmtPct(r.funding, 4)}</td>
-            <td class="num">${fmtPct(r.predicted, 4)}</td>
+            <td class="num">${fmtPct(_predictedOf(r), 4)}</td>
             <td class="num">${fmtM(r.oi_usd != null ? r.oi_usd : (r.oi && r.price ? r.oi * r.price : null))}</td>
             <td class="num">${fmtNum(r.volume_1m)}</td>
-            <td class="num ${r.imbalance > 0 ? 'up' : r.imbalance < 0 ? 'down' : ''}">${fmtNum(r.imbalance, 3)}</td>
-            <td class="num ${oirClass}">${r.ob_oir != null ? r.ob_oir.toFixed(2) : "--"}</td>
-            <td class="num">${r.ob_depth != null ? (r.ob_depth * 100).toFixed(0) + "%" : "--"}</td>
-            <td class="num ${rvolClass}">${r.rvol != null ? (r.rvol * 100).toFixed(0) + "%" : "--"}</td>
-            <td class="num">$${fmtNum(r.vwap)}</td>
+            <td class="num ${imb > 0 ? 'up' : imb < 0 ? 'down' : ''}">${fmtNum(imb, 3)}</td>
             <td class="num tiny ${ageClass}">${fmtAge(age)}</td>
         </tr>`;
     }).join('');
@@ -1069,6 +995,7 @@ function renderLiveData(rows) {
 // ── Candles ──
 function renderCandles(rows) {
     const tbody = document.getElementById("candles-tbody");
+    if (!tbody) return;
     if (!rows || rows.length === 0) {
         tbody.innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;">No candles yet</td></tr>';
         return;
@@ -1106,7 +1033,7 @@ function renderCandles(rows) {
     }).join('');
 }
 
-// ── Volume Indicators (v3.1.15) ──
+// ── Volume indicators (legacy renderer; panel removed) ──
 function renderVolIndicators(rows) {
     const tbody = document.getElementById("vol-indicators-tbody");
     if (!tbody) return;
@@ -1522,11 +1449,40 @@ function renderResearchWatchdogs(payload) {
             const names = w.feeds.map(f => "<b>" + f.feed + "</b> (med " + fmtDur(f.recent_median_sec) + " > p99 " + fmtDur(f.hist_p99_sec) + ")").join(", ");
             cadence = '<div style="font-size:10px;color:var(--down);font-weight:600;" title="Mediana recente ' + fmtDur(w.feeds[0].recent_median_sec) + ' vs p99 histórico ' + fmtDur(w.feeds[0].hist_p99_sec) + ' — consistentemente mais lento que o próprio histórico, antes do silêncio">⚠ ' + names + '</div>';
         }
-        const last = w.last_run
+        // Overnight research: the nightly runner's queue + verdicts (status
+        // file, never a live run). KEEP turns the row green via triggered.
+        let overnight = null;
+        if (w.id === "overnight_session") {
+            const nr = w.next_ready;
+            const ls = w.last_session;
+            if (ls && ls.family) {
+                const keeps = (ls.verdicts || []).filter(v => v === "KEEP").length;
+                overnight = keeps
+                    ? "✓ KEEP ×" + keeps + " — ver ledger"
+                    : (ls.returncode === 0
+                        ? "última sessão ok: " + ls.family + " (" + (ls.verdicts || []).join(", ") + ")"
+                        : "⚠ última sessão falhou (rc=" + ls.returncode + ")");
+            } else if (nr) {
+                overnight = nr.k_floor_ok === false
+                    ? "⚠ READY mas K=" + nr.windows + " < 4 — recusado pelo guard"
+                    : "READY: " + nr.family + " (K=" + nr.windows + ")";
+            } else {
+                overnight = "nada READY — a aguardar reopen do queue";
+            }
+            if (w.reason && w.reason.indexOf("nothing READY") >= 0) {
+                overnight += " · cron ok";
+            }
+        }
+        const last = w.id === "overnight_session"
+            ? ((w.last_session && w.last_session.started)
+                ? w.last_session.started.slice(0, 16) + " · " + w.last_session.family
+                : "—")
+            : (w.last_run
             ? (String(w.last_run.ts || "").slice(0, 16).replace("T", " ") + " · " + (w.last_run.verdict || ""))
-            : "—";
+            : "—");
         const unit = w.unit === "datas" ? " datas"
-            : (w.unit === "trades" ? " trades" : " dias");
+            : (w.unit === "trades" ? " trades"
+            : (w.unit === "sessions" ? " sessões" : " dias"));
         const samples = w.samples != null ? " · " + w.samples + " amostras" : "";
         return '<tr style="border-top:1px solid var(--border);">' +
             '<td class="highlight" title="' + (w.script || "") + '">' + (w.label || "") +
@@ -1534,7 +1490,7 @@ function renderResearchWatchdogs(payload) {
             '<td><div style="background:var(--border);height:8px;width:120px;border-radius:4px;display:inline-block;vertical-align:middle;">' +
                 '<div style="height:8px;width:' + pct + '%;background:' + barCol + ';border-radius:4px;"></div></div>' +
                 '<span class="dim" style="margin-left:6px;">' + pct.toFixed(0) + '%</span></td>' +
-            '<td>' + status + (projected ? '<div>' + projected + '</div>' : '') + (creep ? '<div>' + creep + '</div>' : '') + (cadence ? '<div>' + cadence + '</div>' : '') + '</td>' +
+            '<td>' + status + (projected ? '<div>' + projected + '</div>' : '') + (creep ? '<div>' + creep + '</div>' : '') + (cadence ? '<div>' + cadence + '</div>' : '') + (overnight ? '<div style="font-size:10px;font-weight:600;">' + overnight + '</div>' : '') + '</td>' +
             '<td class="muted" style="font-size:10px;">' + last + '</td></tr>';
     }).join("");
     // The gate toggle follows the projection live: if it is ON, the
@@ -2279,7 +2235,6 @@ socket.on("status", (data) => {
         document.getElementById("latency-badge").textContent = lastSocketLatency + "ms";
     }
     updateKPIs(_lastPortfolio, _lastEngine);
-    updateTickBar();
 });
 
 let _lastPortfolio = null;
@@ -2287,6 +2242,10 @@ let _lastEngine = null;
 socket.on("portfolio", (data) => { _lastPortfolio = data; updateKPIs(data, _lastEngine); });
 socket.on("engine_monitor", (data) => { _lastEngine = data; renderEngine(data); renderRegime(data); renderRiskGates(data); renderGovernor(data); updateKPIs(_lastPortfolio, data); });
 socket.on("live_data", (data) => { renderLiveData(data); renderVolIndicators(data); });
+socket.on("funding_update", (data) => {
+    _fundingPred = data || {};
+    if (_lastLiveRows) renderLiveData(_lastLiveRows);
+});
 socket.on("candles", (data) => renderCandles(data));
 socket.on("signals", (data) => renderSignals(data));
 socket.on("decisions", (data) => renderDecisions(data));
@@ -2436,8 +2395,7 @@ function initChart() {
     try {
         container.innerHTML = "";
         const width = Math.max(container.clientWidth || 0, 320);
-        const height = Math.max(container.clientHeight || 0, 380);
-
+        const height = Math.max(container.clientHeight || 0, 320);
         chart = LightweightCharts.createChart(container, {
             width,
             height,
@@ -2468,10 +2426,15 @@ function initChart() {
         });
 
         chartInitialized = true;
-        window.addEventListener("resize", () => {
+        const fitChart = () => {
             if (!chart || !container) return;
-            chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
-        });
+            const w = container.clientWidth, h = container.clientHeight;
+            if (w > 0 && h > 0) chart.applyOptions({ width: w, height: h });
+        };
+        window.addEventListener("resize", fitChart);
+        if (typeof ResizeObserver !== "undefined") {
+            new ResizeObserver(fitChart).observe(container);
+        }
     } catch (err) {
         console.error("initChart failed:", err);
         showChartMessage("Chart init failed — see browser console");

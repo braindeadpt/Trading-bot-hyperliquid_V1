@@ -83,6 +83,33 @@ def _ttl_clear() -> None:
         _ttl_store.clear()
 
 
+def _nonzero_px(v: Any) -> bool:
+    try:
+        return v is not None and float(v) != 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _predicted_funding_for(sym: str, ctx: Any = None) -> Optional[float]:
+    """Prefer HL predicted 8h, then CEX aggregate, then ctx field."""
+    if ctx is not None:
+        pred = getattr(ctx, "predicted_funding", None)
+        if pred is not None:
+            return pred
+    if _engine is None:
+        return None
+    hl = getattr(_engine, "_hl_predicted", None)
+    hl_snap = hl.get(sym) if hl else None
+    if hl_snap is not None:
+        v = getattr(hl_snap, "predicted_funding_hl_8h", None)
+        if v is not None:
+            return v
+    agg = getattr(_engine, "_latest_agg_funding", {}).get(sym)
+    if agg is not None:
+        return getattr(agg, "predicted_funding_avg", None)
+    return None
+
+
 def set_engine(engine: Any) -> None:
     global _engine
     _engine = engine
@@ -531,14 +558,31 @@ class DashboardEmitter:
             if oi_coins is not None and price_mid:
                 oi_usd = float(oi_coins) * float(price_mid)
 
+            bid = getattr(price, "bid", None) if price else None
+            ask = getattr(price, "ask", None) if price else None
+            if not _nonzero_px(bid) and ob is not None:
+                bid = getattr(ob, "best_bid", None)
+            if not _nonzero_px(ask) and ob is not None:
+                ask = getattr(ob, "best_ask", None)
+            if not _nonzero_px(bid):
+                bid = None
+            if not _nonzero_px(ask):
+                ask = None
+
+            spread_pct = None
+            if bid is not None and ask is not None and price_mid:
+                spread_pct = round((float(ask) - float(bid)) / float(price_mid) * 100, 4)
+            elif evt.get("orderbook_spread_pct") is not None:
+                spread_pct = evt.get("orderbook_spread_pct")
+
             rows.append({
                 "symbol": sym,
                 "price": price_mid,
-                "bid": getattr(price, "bid", None) if price else None,
-                "ask": getattr(price, "ask", None) if price else None,
-                "spread_pct": round((getattr(price, "ask", 0) - getattr(price, "bid", 0)) / getattr(price, "mid", 1) * 100, 4) if price else None,
+                "bid": bid,
+                "ask": ask,
+                "spread_pct": spread_pct,
                 "funding": getattr(ctx, "funding_rate", None) if ctx else None,
-                "predicted": getattr(ctx, "predicted_funding", None) if ctx else None,
+                "predicted": _predicted_funding_for(sym, ctx),
                 "oi": oi_coins,
                 "oi_usd": oi_usd,
                 "volume_1m": evt.get("volume_1m"),
@@ -1194,18 +1238,22 @@ def create_app(config: Dict[str, Any]) -> tuple:
         for sym in getattr(_engine, "_symbols", []):
             price = getattr(_engine, "_latest_price", {}).get(sym)
             ctx = getattr(_engine, "_latest_ctx", {}).get(sym)
-            evt = getattr(_engine, "_last_market_events", {}).get(sym, {})
             agg = getattr(_engine, "_latest_agg_funding", {}).get(sym)
-            hl = getattr(_engine, "_hl_predicted", None)
-            hl_snap = hl.get(sym) if hl else None
             feed = getattr(_engine, "_market_data_health", {}).get(sym)
+            ob = getattr(_engine, "_latest_orderbook", {}).get(sym)
+            bid = getattr(price, "bid", None) if price else None
+            ask = getattr(price, "ask", None) if price else None
+            if not _nonzero_px(bid) and ob is not None:
+                bid = getattr(ob, "best_bid", None)
+            if not _nonzero_px(ask) and ob is not None:
+                ask = getattr(ob, "best_ask", None)
             rows.append({
                 "symbol": sym,
                 "price": getattr(price, "mid", None) if price else None,
+                "bid": bid if _nonzero_px(bid) else None,
+                "ask": ask if _nonzero_px(ask) else None,
                 "funding": getattr(ctx, "funding_rate", None) if ctx else None,
-                "predicted": (
-                    hl_snap.predicted_funding_hl_8h if hl_snap else None
-                ),
+                "predicted": _predicted_funding_for(sym, ctx),
                 "funding_cex_avg": agg.funding_avg if agg else None,
                 "oi": getattr(ctx, "open_interest", None) if ctx else None,
                 "oi_cex_usd": agg.oi_total if agg else None,
