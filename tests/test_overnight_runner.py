@@ -363,6 +363,111 @@ def test_select_cells_rejects_out_of_range_and_garbage():
         mod.select_cells(6, "a,b")
 
 
+# --- vwap_thresholds family (Night 2) ---------------------------------------
+
+class TestVwapThresholdsFamily:
+    """The per-symbol z_threshold sweep preregistered in QUEUE.md."""
+
+    def test_resolve_z_precedence(self):
+        # Explicit symbol wins over '*', which wins over the production base.
+        ov = {"HYPE": 3.0}
+        assert mod.resolve_z(ov, "HYPE", 2.5) == 3.0
+        assert mod.resolve_z(ov, "BTC", 2.5) == 2.5
+        assert mod.resolve_z({"*": 3.0}, "BTC", 2.5) == 3.0
+        assert mod.resolve_z({"HYPE": 3.0, "*": 2.8}, "HYPE", 2.5) == 3.0
+        assert mod.resolve_z({"*": 2.8}, "HYPE", 2.5) == 2.8
+        assert mod.resolve_z({}, "BTC", 2.5) == 2.5
+
+    def test_grid_is_preregistered_three_cells(self):
+        # QUEUE.md Night 2: baseline (production everywhere) vs HYPE-only 3.0σ
+        # vs everywhere 3.0σ. The baseline must be cell 0 and untouched.
+        assert len(mod.VWAP_THRESHOLDS_GRID) == 3
+        assert mod.VWAP_THRESHOLDS_GRID[0] == {}
+        assert mod.VWAP_THRESHOLDS_GRID[1] == {"HYPE": 3.0}
+        assert mod.VWAP_THRESHOLDS_GRID[2] == {"*": 3.0}
+
+    def test_family_registered(self):
+        assert "vwap_thresholds" in mod.FAMILIES
+        assert "flush_fade" in mod.FAMILIES
+
+
+def test_sweep_dispatches_dict_params_to_family(tmp_path, monkeypatch):
+    """sweep() must pass the real vwap_thresholds grid dicts straight through
+    to run_one — params is a z_overrides dict, not a tuple and not an index."""
+    seen: list = []
+
+    def fake_run_one(start, end, symbols, params):
+        seen.append((start, end, tuple(symbols), dict(params)))
+        if params == {"HYPE": 3.0}:
+            c = cell(40.0, 20, 60.0, 20.0)          # variant improves every window
+            c["trade_pnls"] = [2.0] * 20
+        elif params == {}:                           # baseline
+            c = cell(-20.0, 20, 10.0, 30.0)
+            c["trade_pnls"] = [-1.0] * 20
+        else:                                        # "*": 3.0 loses everywhere
+            c = cell(-40.0, 20, 20.0, 60.0)
+            c["trade_pnls"] = [-2.0] * 20
+        return c
+
+    tags = ["z=2.5 (baseline)", "z=2.5+HYPE:3.0", "z=3.0 all"]
+    # Swap the family factory, keep sweep()'s own grid branch: this proves the
+    # dict params move from VWAP_THRESHOLDS_GRID to run_one untouched.
+    monkeypatch.setitem(mod.FAMILIES, "vwap_thresholds",
+                        lambda: (tags, fake_run_one, None))
+
+    session = mod.sweep("vwap_thresholds", "2026-05-18", "2026-09-08",
+                        ["BTC", "HYPE"], split_days=30)
+
+    assert session["family"] == "vwap_thresholds"
+    assert len(session["windows"]) == 4
+    # 3 cells × 4 windows = 12 run_one calls, params passed through verbatim.
+    assert len(seen) == 12
+    baseline_calls = [s for s in seen if s[3] == {}]
+    hype_calls = [s for s in seen if s[3] == {"HYPE": 3.0}]
+    assert len(baseline_calls) == 4 and len(hype_calls) == 4
+    assert all(s[2] == ("BTC", "HYPE") for s in seen)
+
+    by_tag = {r["tag"]: r for r in session["results"]}
+    improved = by_tag["z=2.5+HYPE:3.0"]
+    assert improved["aggregate_variant"]["pnl"] == 160.0
+    assert improved["noise_gate"]["evaluated"] is True
+    # 4/4 windows improved → sign-flip p=2^-4=0.0625 ≤ 0.10.
+    assert improved["verdict"] == "KEEP"
+    worse = by_tag["z=3.0 all"]
+    assert worse["verdict"] == "DISCARD"
+
+
+def test_experiment_block_carries_preregistered_vwap_hypotheses():
+    """Night 2 ledger blocks must state the hypothesis fixed a priori,
+    not a post-hoc rationalisation."""
+    windows = [["2026-05-18", "2026-06-16"], ["2026-06-17", "2026-07-16"],
+               ["2026-07-17", "2026-08-15"], ["2026-08-16", "2026-09-08"]]
+
+    def result_for(tag: str) -> dict:
+        return {
+            "tag": tag, "verdict": "INCONCLUSIVE",
+            "windows": windows, "deltas": [1.0, 1.0, 1.0, None],
+            "aggregate_baseline": {"pnl": -100.0, "n": 40, "pf": 0.8},
+            "aggregate_variant": {"pnl": -96.0, "n": 38, "pf": 0.82},
+            "reasons": ["n=38 (gate >=30)"],
+            "baseline_tag": "z=2.5 (baseline)",
+        }
+
+    session = {"family": "vwap_thresholds", "baseline_tag": "z=2.5 (baseline)",
+               "span": {"start": "2026-05-18", "end": "2026-09-08",
+                        "split_days": 30}}
+
+    hype = mod.experiment_block(result_for("z=2.5+HYPE:3.0"), session)
+    assert "wider 3.0" in hype
+    assert "same animal" in hype
+
+    all_sym = mod.experiment_block(result_for("z=3.0 all"), session)
+    assert "uniformly stricter" in all_sym
+
+    fallback = mod.experiment_block(result_for("z=9.9 unknown-tag"), session)
+    assert "parameter variant" in fallback
+
+
 # --- artifact shape --------------------------------------------------------
 
 def test_artifact_json_roundtrip(tmp_path, monkeypatch):

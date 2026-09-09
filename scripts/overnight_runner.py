@@ -24,6 +24,10 @@ Usage:
   # LiquidationCatcher flush-fade sweep (delay x stopout), non-overlapping 30d windows
   python scripts/overnight_runner.py --family flush_fade --start 2026-05-18 --end 2026-08-07
 
+  # VWAP per-symbol z_threshold sweep (Night 2, QUEUE.md): baseline 2.5σ vs
+  # 3.0σ HYPE-only vs 3.0σ everywhere
+  python scripts/overnight_runner.py --family vwap_thresholds --start 2026-05-18 --end 2026-09-08
+
   # Self-test: verdict + report logic only, canned results, no backtests:
   python scripts/overnight_runner.py --selftest
 """
@@ -472,6 +476,138 @@ FAMILIES = {
 
 
 # ---------------------------------------------------------------------------
+# Family: vwap_thresholds — per-symbol VWAP z_threshold sweep (Night 2).
+#
+# QUEUE.md preregistration: a single 2.5σ threshold treats BTC and HYPE as
+# the same animal; HYPE trades later (data from 06-19 only) and thinner, so
+# its fade plausibly needs a wider band. Grid: production 2.5σ everywhere
+# (baseline) vs 3.0σ HYPE-only vs 3.0σ everywhere. Override surface is a
+# config-dict on top of the production strategy.vwap_deviation section —
+# NOTHING else moves (session filter, exits, confidence all as production).
+# ---------------------------------------------------------------------------
+
+VWAP_THRESHOLDS_GRID: Tuple[Dict[str, float], ...] = (
+    {},            # baseline: production z_threshold everywhere
+    {"HYPE": 3.0}, # 3.0σ HYPE-only
+    {"*": 3.0},    # 3.0σ everywhere
+)
+
+
+def resolve_z(overrides: Dict[str, float], symbol: str, base_z: float) -> float:
+    """Per-symbol z_threshold: explicit symbol wins, then ``*``, then base."""
+    if symbol in overrides:
+        return float(overrides[symbol])
+    if "*" in overrides:
+        return float(overrides["*"])
+    return float(base_z)
+
+
+def vwap_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], Callable[..., Any]]:
+    """Wire the vwap_thresholds family to the vwap trend-vs-fade harness.
+
+    Reuses that harness's ``light_replay`` (15m confirm bars, 1h VWAP, tier-0
+    fee model: commission + slippage per side) — the same engine that produced
+    the session-filter winners. Each symbol is replayed separately (the
+    strategy carries one z_threshold per instance), each with the configured
+    initial capital — the SAME convention for baseline and variants, so the
+    comparison stays internally consistent; cross-symbol capital sharing is
+    out of scope for the sweep. ``require_oir_confirm`` is disabled exactly as
+    the harness's own fade path does (light replay has no OIR feed).
+
+    Imports inside this function so ``--selftest`` never pulls the strategies.
+    """
+    from scripts.backtest_vwap_trend_vs_fade import light_replay  # noqa: E402
+    from src.data.database import Database  # noqa: E402
+    from src.strategies.vwap_deviation import VWAPDeviation  # noqa: E402
+    from src.utils.config import load_config  # noqa: E402
+
+    cfg = load_config(str(ROOT / "config" / "settings.yaml"))
+    fade_section = dict(cfg.get("strategy.vwap_deviation", {}) or {})
+    base_z = float(fade_section.get("z_threshold", 2.5))
+    db = Database(str(cfg.get("database.path", "data/live/bot.db")))
+    initial_capital = float(
+        cfg.get("backtest.initial_capital", cfg.get("risk.initial_capital", 10_000.0))
+    )
+    commission_pct = float(cfg.get("backtest.commission_pct", 0.04))
+    slippage_bps = float(cfg.get("backtest.slippage_bps", 2.0))
+
+    def tag_for(ov: Dict[str, float]) -> str:
+        if not ov:
+            return f"z={base_z} (baseline)"
+        if "*" in ov:
+            return f"z={ov['*']} all"
+        rest = ",".join(f"{k}:{v}" for k, v in sorted(ov.items()))
+        return f"z={base_z}+{rest}"
+
+    def run_one(start: str, end: str, symbols: List[str],
+                z_overrides: Dict[str, float]) -> Dict[str, Any]:
+        s_ms = int(datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+        e_ms = int(datetime.strptime(end, "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59, microsecond=999000,
+            tzinfo=timezone.utc).timestamp() * 1000)
+        trades_all: List[Dict[str, Any]] = []
+        per_symbol: Dict[str, Dict[str, Any]] = {}
+        try:
+            for sym in symbols:
+                z = resolve_z(z_overrides, sym, base_z)
+                section = dict(fade_section)
+                section["z_threshold"] = z
+                section["enabled"] = True
+                section["require_oir_confirm"] = False
+                strategy = VWAPDeviation(section)
+                res = light_replay(
+                    db, strategy, [sym], s_ms, e_ms,
+                    bar_tf="15m",
+                    initial_capital=initial_capital,
+                    commission_pct=commission_pct,
+                    slippage_bps=slippage_bps,
+                )
+                trs = list(res.get("trades", []) or [])
+                for t in trs:
+                    t["z_threshold"] = z
+                trades_all.extend(trs)
+                per_symbol[sym] = {
+                    "z_threshold": z,
+                    "n_trades": len(trs),
+                    "total_pnl_usd": round(sum(float(t.get("pnl_usd", 0.0)) for t in trs), 2),
+                }
+        except Exception as exc:  # noqa: BLE001 — a failed cell must not kill the sweep
+            return {"error": f"{type(exc).__name__}: {exc}", "z_overrides": dict(z_overrides)}
+
+        pnls = [float(t.get("pnl_usd", 0.0)) for t in trades_all]
+        exits: Dict[str, Dict[str, float]] = {}
+        for t in trades_all:
+            r = str(t.get("exit_reason") or "unknown")
+            exits.setdefault(r, {"n": 0, "pnl_usd": 0.0})
+            exits[r]["n"] += 1
+            exits[r]["pnl_usd"] += float(t.get("pnl_usd", 0.0))
+        return {
+            "z_overrides": dict(z_overrides),
+            "n_trades": len(pnls),
+            "total_pnl_usd": round(sum(pnls), 2),
+            "gross_win_usd": round(sum(p for p in pnls if p > 0), 2),
+            "gross_loss_usd": round(abs(sum(p for p in pnls if p < 0)), 2),
+            "trade_pnls": [round(p, 2) for p in pnls],
+            "trades_summary": {
+                k: {"n": int(v["n"]), "pnl_usd": round(v["pnl_usd"], 2)}
+                for k, v in sorted(exits.items())
+            },
+            "per_symbol": per_symbol,
+            "cost_model": {"commission_pct": commission_pct, "slippage_bps": slippage_bps},
+            "sizing_convention": "per-symbol isolated capital (same for baseline and variants)",
+        }
+
+    tags = [tag_for(ov) for ov in VWAP_THRESHOLDS_GRID]
+    return tags, run_one, cfg
+
+
+FAMILIES = {
+    "flush_fade": flush_fade_family,
+    "vwap_thresholds": vwap_thresholds_family,
+}
+
+
+# ---------------------------------------------------------------------------
 # Sweep, artifacts, ledger
 # ---------------------------------------------------------------------------
 
@@ -504,8 +640,11 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
     tags_all, run_one, _cfg = FAMILIES[family]()
     sel = select_cells(len(tags_all), cell_spec)
     tags = [tags_all[i] for i in sel]
-    grid_params = [FLUSH_FADE_GRID[i] for i in sel] if family == "flush_fade" else None
-    if grid_params is None:  # generic families: params parallel to tags via sel
+    if family == "flush_fade":
+        grid_params: List[Any] = [FLUSH_FADE_GRID[i] for i in sel]
+    elif family == "vwap_thresholds":
+        grid_params = [VWAP_THRESHOLDS_GRID[i] for i in sel]
+    else:  # generic families: params parallel to tags via sel
         grid_params = list(sel)
     windows = split_windows(start, end, split_days)
     if max_windows:
@@ -584,6 +723,8 @@ def experiment_block(result: Dict[str, Any], session: Dict[str, Any]) -> str:
     hyp = {
         "stopout=OFF": "the fade needs the flush to revert; the stop-out exits on the same window that generated the signal — bypassing it removes the loop",
         "delay=": "a confirmation delay avoids entering at the flush extreme",
+        "z=2.5+": "per-symbol thresholds: HYPE trades later and thinner, so its fade plausibly needs a wider 3.0σ band; a single 2.5σ threshold treats all listings as the same animal",
+        "z=3.0 all": "a uniformly stricter band trades less everywhere and filters low-quality extensions at the cost of missed valid ones",
     }
     hyp_txt = next((v for k, v in hyp.items() if result["tag"].startswith(k)
                     or k in result["tag"]), "parameter variant")
