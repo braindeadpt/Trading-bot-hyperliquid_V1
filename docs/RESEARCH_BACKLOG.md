@@ -318,10 +318,83 @@ than intuition.
 |---|---|---|---|
 | 1.1 | **Deceleration confirmation** — don't enter on the threshold cross; wait for the z-score to stop making new extremes (e.g. retraced ≥0.15σ off the low, or a 5m candle closing against the move) | Trade #315: z went −1.81 → −2.43 → −2.51 in 6 minutes. The rule fired mid-impulse. Trades worse entry price for better win rate — may well be net negative, hence "test, don't assume" | Blocked on Fase 06 OOS (needs certified data) |
 | 1.2 | **Invert the volume filter for mean reversion** — currently requires volume ≥1.5× as "confirmation"; for reversion we arguably want *exhaustion* (seller volume dying), not confirmation of the move | We persist `buy_volume`/`sell_volume`, so this is directly testable. The Fase 2 liquidation study pointed the same way: 12/15 flushes continued short-term | Blocked on Fase 06 OOS |
-| 1.3 | **Per-symbol thresholds** — a single 2.5σ threshold treats BTC and HYPE as the same animal; HYPE plausibly needs ≥3σ | Thin-book assets stretch further before reverting | Blocked on Fase 06 OOS |
+| 1.3 | **Per-symbol thresholds** — a single 2.5σ threshold treats BTC and HYPE as the same animal; HYPE plausibly needs ≥3σ | Thin-book assets stretch further before reverting | Blocked on Fase 06 OOS → **phase-2 design preregistered 2026-09-09, see "§1.3 phase 2" below** |
 | 1.4 | **Liquidity-map veto** — don't take a long when a long-liquidation cluster sits between entry and stop (the magnet pulls price exactly where we die) | Depends on the liquidation map having proven predictive value first (see §3) | Blocked on §3 |
 | 1.5 | **VolatilityBreakout follow-through** — require the candle *after* the breakout to hold above the range before entering | The `failed_breakout_below_mid` exit already rescues some (trade #314: +$44.65), but not entering the false break is strictly better | Blocked on Fase 06 OOS |
 | 1.6 | **Breakout fuel from liquidation clusters** — a breakout heading *into* a short-liquidation cluster has forced buying behind it; one with nothing ahead tends to fizzle | Same infrastructure as 1.4, applied in the opposite direction | Blocked on §3 |
+
+### §1.3 phase 2 — HYPE-only refinement (preregistered design, 2026-09-09)
+
+Night 2's verdict was correct (both variants DISCARD), but its per-symbol
+forensics created a sharper, falsifiable question. HYPE @2.5σ is the book's
+worst bleeder (n=50, −108.49; BTC +3.38, ETH −45.98) and @3.0σ it nets
++5.34 — yet that +5.34 is entirely the W2 flush episode (+96.38): W3 went
+−30.99 (vs baseline −16.52) and W4 −60.05 (vs −50.53), both WORSE. "A wider
+band repairs HYPE" is currently a one-window story. This design tests
+whether a wider band or a stronger flush-participation filter repairs HYPE
+across windows — or whether the thin-book hypothesis (§1.3) dies here.
+
+**Variants — grid preregistered, 4 cells.** The override surface stays
+config-only: `z_threshold` and `volume_surge` are both pre-existing keys of
+`strategy.vwap_deviation` (HYPE overrides only; BTC/ETH untouched).
+
+| Cell | Override (HYPE only) | Rationale |
+|---|---|---|
+| 0 | — (baseline 2.5σ) | reference, run HYPE-only on the new span |
+| 1 | `z_threshold: 3.5` | +1σ beyond the Night 2 variant |
+| 2 | `z_threshold: 4.0` | +2σ — if 4.0 doesn't repair W3/W4, nothing wider will |
+| 3 | `volume_surge: 2.0` (z stays 2.5) | flush-intensity floor: require 200% volume on the sweep bar, drop low-conviction bleeders |
+
+Note: `volume_surge` is a MINIMUM volume ratio for entry (production 1.5),
+so raising it is the "minimum-flush-size filter" expressed in the only
+intensity knob the config surface has.
+
+**Window set — 6 non-overlapping 30d windows, 2026-03-13..2026-09-08.**
+W1–W4 read the E: research DB (HYPE 15m+1h from 2026-01-11, ~100% coverage
+in every planned window; the DB ends exactly 2026-07-10, so W4 seals the
+seam); W5–W6 read the live `bot.db`. One source per window, preregistered —
+never mixed mid-window. Wiring needed: new family `hype_vwap_refine`
+(reusing the `vwap_thresholds` machinery and the harness `light_replay`)
+that accepts a nested per-symbol config-dict and a per-window DB argument.
+
+**Budget:** 4 cells × 6 windows = 24 > 20 → two preregistered sessions:
+A `--cells 0,1,2` = 18 runs; B `--cells 0,3` = 12 runs. Both ≤20. No third
+session without a new preregistration.
+
+**Evidence bar (fixed now):** a variant is a KEEP candidate only with
+majority improvement ≥4/6 windows, aggregate n≥30, PF>1, no catastrophic
+window, and the paired per-window sign-flip gate at α=0.10 (K=6: exact
+floor p=1/64=0.0156; at most 6 of 64 flips may match/exceed the observed
+delta). **Kill criteria:** if neither 3.5/4.0σ nor vs2.0 improves ≥4/6
+windows, the §1.3 thin-book hypothesis is dead for this regime — HYPE moves
+to exclude-candidates and NO further threshold iteration is run (the fixed
++1σ/+2σ steps and the single 2.0 value exist precisely to prevent
+grid-shopping).
+
+**Selection-bias note:** 3.5σ, 4.0σ and vs2.0 have never produced a result —
+they are preregistered before any run. That their values were chosen after
+reading Night 2's forensics is legitimate hypothesis generation; the fixed
+step sizes and the no-iteration kill rule are the protection.
+
+**Can it clear the multi-window gate? (the design question)** Structurally
+yes — but on shape, not on n:
+
+- **K=6 makes the noise gate passable** (at K=3 it is mathematically
+  impossible; at K=6 the all-positive floor is p=0.0156 < 0.10).
+- **Aggregate n≥30 clears at every tested parameter.** Night 2 actual
+  per-window rates (16.7 @2.5σ, 13 @3.0σ) project n≈100/78/63/45 over 6
+  windows for 2.5/3.0/3.5/4.0σ. The n≈40/window intuition does not survive
+  contact with wider bands: widening the band IS the trade-count reduction,
+  so per-window n at 3.5–4.0σ is ~7–13, not 40. That is acceptable — the
+  gate operates on window-level paired signs — but per-window deltas will
+  be chunky (one or two trades dominate a window's PnL).
+- **The binding constraint is shape.** If the (hypothetical) edge is again
+  concentrated in one flush episode, the majority gate and the sign-flip
+  both fail — exactly as they should. Passing requires improvement
+  distributed across ≥4 windows: a regime-stable repair, not another W2.
+  Night 2's W3/W4 regression at 3.0σ is the empirical warning that wider
+  bands may help only inside flush episodes; if that pattern repeats, the
+  honest verdict is DISCARD and HYPE goes to the exclude list.
 
 ## 2. ORB — known defect
 

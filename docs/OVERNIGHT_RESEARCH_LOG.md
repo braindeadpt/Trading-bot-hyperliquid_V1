@@ -87,13 +87,43 @@ noise-model commit would add a `noise gate:` line here; this run predates
 it, and its per-trade PnL is not stored in the artifact, so none is shown.)
 
 ---
-## Morning report — 2026-09-09 17:30 UTC — family `vwap_thresholds`
+## Morning report — 2026-09-09 20:17 UTC — family `iv_thresholds`
 
-- span: 2026-05-18..2026-09-08 (4 non-overlapping windows of 30d) · symbols: BTC, ETH, HYPE
-- verdicts: 0 KEEP · 0 INCONCLUSIVE · 2 DISCARD
-- artifact: `data\research\overnight_experiments\20260909_173039_vwap_thresholds.json`
+- span: 2026-06-14..2026-09-08 (3 non-overlapping windows of 30d) · symbols: BTC, ETH, SOL, HYPE
+- verdicts: 0 KEEP · 3 INCONCLUSIVE · 0 DISCARD
+- artifact: `data\research\overnight_experiments\20260909_201701_iv_thresholds.json`
+- INCONCLUSIVE: `high_iv>63.3` net=-42.64 n=28 — n<30 — park with evidence bar attached (IV-gate n=13 precedent)
+- INCONCLUSIVE: `high_iv>66.7` net=-32.7 n=24 — n<30 — park with evidence bar attached (IV-gate n=13 precedent)
+- INCONCLUSIVE: `high_iv>70.0` net=-25.64 n=17 — n<30 — park with evidence bar attached (IV-gate n=13 precedent)
 
 ---
+### 2026-09-09 20:17 UTC — iv_thresholds/high_iv>63.3 — INCONCLUSIVE
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-08 (3 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-162.75 n=174 PF=0.544
+- variant: net=-42.64 n=28 PF=0.239
+- per-window delta: 2026-06(+11.47), 2026-07(+95.33), 2026-08(+13.31)
+- reasons: windows improved 3/3 (majority=yes); aggregate n=28 (gate >=30); aggregate PF=0.239 (gate >1.0); n<30 — park with evidence bar attached (IV-gate n=13 precedent)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-09 20:17 UTC — iv_thresholds/high_iv>66.7 — INCONCLUSIVE
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-08 (3 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-162.75 n=174 PF=0.544
+- variant: net=-32.7 n=24 PF=0.29
+- per-window delta: 2026-06(+11.47), 2026-07(+102.21), 2026-08(+16.37)
+- reasons: windows improved 3/3 (majority=yes); aggregate n=24 (gate >=30); aggregate PF=0.29 (gate >1.0); n<30 — park with evidence bar attached (IV-gate n=13 precedent)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-09 20:17 UTC — iv_thresholds/high_iv>70.0 — INCONCLUSIVE
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-08 (3 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-162.75 n=174 PF=0.544
+- variant: net=-25.64 n=17 PF=0.325
+- per-window delta: 2026-06(+11.47), 2026-07(+102.21), 2026-08(+23.43)
+- reasons: windows improved 3/3 (majority=yes); aggregate n=17 (gate >=30); aggregate PF=0.325 (gate >1.0); n<30 — park with evidence bar attached (IV-gate n=13 precedent)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
 ### 2026-09-09 17:30 UTC — vwap_thresholds/z=2.5+HYPE:3.0 — DISCARD
 - hypothesis: per-symbol thresholds: HYPE trades later and thinner, so its fade plausibly needs a wider 3.0σ band; a single 2.5σ threshold treats all listings as the same animal
 - windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
