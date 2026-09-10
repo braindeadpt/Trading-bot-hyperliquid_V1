@@ -198,6 +198,19 @@ Per `AGENTS.md` §1 ("Current operational status") and
 - **Status: OOS validation and data-readiness are both still blocked**,
   independent of the Fase 10 paper-trading gate above.
 
+**Update 2026-09-10 — parity diagnostic executed, BLOCKED on billing:**
+`python scripts/research/goldrush_parity_diagnostic.py` was run for real
+(4 symbols × {1h,15m,5m,1m} × 300-bar overlap). All 16 cells failed with
+`GoldRush billing error 402: insufficient_credits` starting from the very
+first request — the account/API key has no remaining credits, so the
+parity comparison could not even fetch GoldRush data. Artifact:
+`data/research/goldrush_parity_diagnostic_20260910_235027.json`
+(`all_passed: false`, `oos_dataset_ready: false`). The secondary
+validation (`goldrush_secondary_validation.py`) uses the same provider and
+fails identically; it was not run. **New blocker, additive to the S3
+rebuild one:** restore GoldRush credits (or rotate to a funded API key),
+then re-run both validation scripts before any GoldRush-sourced OOS.
+
 ---
 
 ## 6. Security audit
@@ -275,7 +288,7 @@ the testnet_live suite; the rest are `network`-marked tests such as
 | Live-vs-replay drift | verdict = PASS | not meaningfully computable (0 live trades) | **NOT YET RUN** | `src/research/live_vs_replay.py`, `scripts/research/phase10_live_vs_replay.py` |
 | Testnet e2e scenarios (8) | all pass | 8/8 skipped, no credentials | **NOT YET RUN** | `python -m pytest tests/test_testnet_e2e.py -v -m testnet_live` output above; `docs/TESTNET_E2E_GUIDE.md` |
 | Native SL/TP + kill switch real-exchange proof | scenarios 5 & 8 pass | same 8-skipped set | **NOT YET RUN** | same as above |
-| GoldRush data readiness | rebuilt candles pass secondary validation | rebuild pipeline built, not executed (no AWS creds run) | **NOT YET RUN / BLOCKED** | `docs/NODE_TRADES_REBUILD.md` |
+| GoldRush data readiness | parity + secondary validation pass on a funded account, then rebuilt candles pass secondary validation | parity diagnostic run 2026-09-10: 16/16 cells failed `402 insufficient_credits` (billing block, not a data verdict); S3 rebuild pipeline built, not executed (no AWS creds run) | **BLOCKED (billing) + NOT YET RUN** | `data/research/goldrush_parity_diagnostic_20260910_235027.json`; `docs/NODE_TRADES_REBUILD.md` |
 | Security audit | 0 CRITICAL/MEDIUM/LOW | 0/0/0; 2 pre-existing HIGH (subprocess, non-execution-path) | **PASS (with known exceptions)** | audit output above |
 | Default CI test suite | all pass | 679 passed, 12 deselected | **PASS** | pytest output above |
 

@@ -723,6 +723,130 @@ def test_sweep_dispatches_nested_dict_params_to_family(monkeypatch):
     assert by_tag["HYPE z_threshold=4.0"]["verdict"] == "DISCARD"
 
 
+# --- vwap_exit_econ / vwap_exhaustion / vwap_deceleration (Q7/Q4/Q5) ----------
+
+class TestVwapExitEconFamily:
+    def test_family_registered(self):
+        for name in ("vwap_exit_econ", "vwap_exhaustion", "vwap_deceleration"):
+            assert name in mod.FAMILIES, f"family {name!r} missing from FAMILIES"
+
+    def test_grids_match_queue_preregistration(self):
+        # Q7: 5 cells (baseline + 4 exit variants) — fixed a priori in QUEUE.md
+        assert len(mod.VWAP_EXIT_ECON_GRID) == 5
+        assert mod.VWAP_EXIT_ECON_GRID[0] == {}
+        assert {"exit_z_threshold": 0.5} in mod.VWAP_EXIT_ECON_GRID
+        assert {"take_profit_r_multiple": 1.5} in mod.VWAP_EXIT_ECON_GRID
+        assert {"max_hold_hours": 2} in mod.VWAP_EXIT_ECON_GRID
+        # Q4/Q5: 4 cells each, cell 0 is always the untouched baseline
+        assert len(mod.VWAP_EXHAUSTION_GRID) == 4
+        assert len(mod.VWAP_DECELERATION_GRID) == 4
+        assert mod.VWAP_EXHAUSTION_GRID[0]["gate"] is None
+        assert mod.VWAP_DECELERATION_GRID[0]["gate"] is None
+        # gate kinds used by the grids must be wired in _vwap_fade_run_one
+        gates = ({c.get("gate") for c in mod.VWAP_EXHAUSTION_GRID} |
+                 {c.get("gate") for c in mod.VWAP_DECELERATION_GRID}) - {None}
+        for g in gates:
+            assert g in ("decay", "below_mean", "retrace_0.15",
+                         "retrace_0.30", "counter_close")
+
+    def test_sweep_dispatches_exit_econ_dicts_verbatim(self, monkeypatch):
+        """sweep() passes VWAP_EXIT_ECON_GRID dicts straight to run_one."""
+        seen: list = []
+
+        def fake_run_one(start, end, symbols, params):
+            seen.append(dict(params))
+            return cell(-20.0, 20, 10.0, 30.0)
+
+        tags = [f"cell{i}" for i in range(len(mod.VWAP_EXIT_ECON_GRID))]
+        monkeypatch.setitem(mod.FAMILIES, "vwap_exit_econ",
+                            lambda: (tags, fake_run_one, None))
+        session = mod.sweep("vwap_exit_econ", "2026-05-18", "2026-09-08",
+                            ["BTC"], split_days=30)
+        assert len(session["windows"]) == 4
+        assert len(seen) == 20  # 5 cells x 4 windows
+        assert seen[0] == {}
+        assert {"take_profit_r_multiple": 1.5} in seen
+
+    def test_sweep_dispatches_gate_cells_verbatim(self, monkeypatch):
+        """Q4/Q5 grids pass {overrides, gate} dicts through untouched."""
+        seen: list = []
+
+        def fake_run_one(start, end, symbols, params):
+            seen.append(dict(params))
+            return cell(-20.0, 20, 10.0, 30.0)
+
+        for fam, grid in (("vwap_exhaustion", mod.VWAP_EXHAUSTION_GRID),
+                          ("vwap_deceleration", mod.VWAP_DECELERATION_GRID)):
+            seen.clear()
+            tags = [f"c{i}" for i in range(len(grid))]
+            monkeypatch.setitem(mod.FAMILIES, fam,
+                                lambda t=tags, f=fake_run_one: (t, f, None))
+            session = mod.sweep(fam, "2026-05-18", "2026-09-08",
+                                ["BTC"], split_days=30)
+            assert len(seen) == len(grid) * 4
+            assert seen[0]["gate"] is None
+            assert any(s.get("gate") for s in seen)
+
+
+class TestEntryGates:
+    def _mk_event(self, sym, ts, close=100.0, open_=100.0,
+                  buy=None, sell=None, c1h=None):
+        from src.strategies.base import MarketEvent
+        from src.strategies.indicators import Candle
+        bar = Candle(open=open_, high=max(open_, close), low=min(open_, close),
+                     close=close, volume=1.0, timestamp_ms=ts,
+                     buy_volume=buy, sell_volume=sell)
+        return MarketEvent(symbol=sym, price=close, timestamp_ms=ts,
+                           candle_15m=bar, candle_1h=c1h)
+
+    def _mk_sig(self, sym, side, z=3.0):
+        from src.strategies.base import Signal
+        return Signal(strategy="VWAPDeviation", symbol=sym, side=side,
+                      confidence=0.7, size_pct=0.01, entry_price=100.0,
+                      metadata={"zscore": z})
+
+    def test_exhaustion_decay_vetoes_rising_aggressor(self):
+        g = mod._ExhaustionGate("decay")
+        sym = "BTC"
+        # sellers still accelerating on a fade-LONG -> veto; decaying -> allow
+        g.update(self._mk_event(sym, 1, buy=40.0, sell=60.0))
+        ev = self._mk_event(sym, 2, buy=40.0, sell=80.0)
+        g.update(ev)
+        assert g.allow(ev, self._mk_sig(sym, "long")) is False
+        ev2 = self._mk_event(sym, 3, buy=40.0, sell=50.0)
+        g.update(ev2)
+        assert g.allow(ev2, self._mk_sig(sym, "long")) is True
+
+    def test_exhaustion_missing_volume_is_veto_not_pass(self):
+        g = mod._ExhaustionGate("decay")
+        ev = self._mk_event("BTC", 1, buy=None, sell=None)
+        g.update(ev)
+        ev2 = self._mk_event("BTC", 2, buy=None, sell=None)
+        g.update(ev2)
+        assert g.allow(ev2, self._mk_sig("BTC", "long")) is False
+
+    def test_decel_retrace_blocks_fresh_extreme(self):
+        g = mod._DecelGate(retrace=0.15)
+        g.set_threshold(2.5)
+        g._extreme["BTC"] = 3.2   # excursion already extended to 3.2
+        ev = self._mk_event("BTC", 1)
+        # z=3.1 is a retrace of only 0.10 -> still vetoed
+        assert g.allow(ev, self._mk_sig("BTC", "long", z=-3.1)) is False
+        # z=3.0 retraced 0.20 -> allowed
+        assert g.allow(ev, self._mk_sig("BTC", "long", z=-3.0)) is True
+
+    def test_decel_counter_close(self):
+        g = mod._DecelGate(retrace=None)
+        g.set_threshold(2.5)
+        # fade-LONG needs a bar that closed UP (against the dump)
+        ev_up = self._mk_event("BTC", 1, open_=99.0, close=100.0)
+        ev_dn = self._mk_event("BTC", 2, open_=101.0, close=100.0)
+        assert g.allow(ev_up, self._mk_sig("BTC", "long")) is True
+        assert g.allow(ev_dn, self._mk_sig("BTC", "long")) is False
+        # and mirror for shorts
+        assert g.allow(ev_dn, self._mk_sig("BTC", "short")) is True
+
+
 # --- iv_thresholds family (Night 3) ------------------------------------------
 
 class TestIvThresholdsFamily:

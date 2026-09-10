@@ -189,6 +189,8 @@ def db_candle_to_ind(c: Any) -> Candle:
         volume=float(c.volume),
         timestamp_ms=int(c.timestamp_ms),
         open_interest=getattr(c, "open_interest", None),
+        buy_volume=getattr(c, "buy_volume", None),
+        sell_volume=getattr(c, "sell_volume", None),
     )
 
 

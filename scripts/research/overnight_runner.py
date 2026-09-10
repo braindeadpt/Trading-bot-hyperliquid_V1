@@ -968,6 +968,381 @@ def hype_vwap_refine_family() -> Tuple[List[str], Callable[..., Dict[str, Any]],
 
 
 # ---------------------------------------------------------------------------
+# Shared VWAP-fade harness for the Q4/Q5/Q7 families.
+#
+# All three families replay the production VWAPDeviation through the same
+# light_replay (15m confirm bars, 1h VWAP, tier-0 fees, per-symbol isolated
+# capital — identical conventions to vwap_thresholds/hype_vwap_refine so
+# cells stay comparable). The ONLY allowed surface is a config-dict override
+# on strategy.vwap_deviation plus an optional harness-local entry gate —
+# gate classes below are research code living in this file, never in src/.
+# ---------------------------------------------------------------------------
+
+import collections  # noqa: E402  (module-level: gates use deque)
+
+
+def _vwap_fade_run_one(fade_section: Dict[str, Any], db_path: str,
+                       symbols: List[str], s_ms: int, e_ms: int,
+                       initial_capital: float, commission_pct: float,
+                       slippage_bps: float, overrides: Dict[str, Any],
+                       gate_kind: Optional[str] = None) -> Dict[str, Any]:
+    """One VWAP-fade cell: production section + flat overrides + optional gate.
+
+    ``gate_kind`` is None or one of the _ExhaustionGate/_DecelGate kinds.
+    Errors return an ``{"error": ...}`` payload — a failed cell must not
+    kill the sweep (same convention as the other families).
+    """
+    from scripts.research.backtest_vwap_trend_vs_fade import light_replay  # noqa: E402
+    from src.data.database import Database  # noqa: E402
+    from src.strategies.vwap_deviation import VWAPDeviation  # noqa: E402
+
+    def make(sym: str) -> Any:
+        section = dict(fade_section)
+        section.update(overrides)
+        # harness-only override keys (prefixed _) never reach the strategy
+        decel_thr = float(section.pop("_decel_thr", section.get("z_threshold", 2.5)))
+        section["enabled"] = True
+        section["require_oir_confirm"] = False
+        strat = VWAPDeviation(section)
+        if gate_kind in ("decay", "below_mean"):
+            return _VWAPEntryVeto(strat, _ExhaustionGate(gate_kind))
+        if gate_kind and gate_kind.startswith("retrace_"):
+            gate = _DecelGate(retrace=float(gate_kind.split("_", 1)[1]))
+            gate.set_threshold(decel_thr)
+            return _VWAPEntryVeto(strat, gate)
+        if gate_kind == "counter_close":
+            gate = _DecelGate(retrace=None)
+            gate.set_threshold(decel_thr)
+            return _VWAPEntryVeto(strat, gate)
+        return strat
+
+    try:
+        db = Database(db_path, read_only=True)
+        trades_all: List[Dict[str, Any]] = []
+        per_symbol: Dict[str, Dict[str, Any]] = {}
+        for sym in symbols:
+            strategy = make(sym)
+            res = light_replay(
+                db, strategy, [sym], s_ms, e_ms,
+                bar_tf="15m",
+                initial_capital=initial_capital,
+                commission_pct=commission_pct,
+                slippage_bps=slippage_bps,
+            )
+            trs = list(res.get("trades", []) or [])
+            for t in trs:
+                t["trade_symbol"] = sym
+            trades_all.extend(trs)
+            per_symbol[sym] = {
+                "n_trades": len(trs),
+                "total_pnl_usd": round(sum(float(t.get("pnl_usd", 0.0)) for t in trs), 2),
+            }
+    except Exception as exc:  # noqa: BLE001 — a failed cell must not kill the sweep
+        return {"error": f"{type(exc).__name__}: {exc}", "overrides": dict(overrides)}
+
+    pnls = [float(t.get("pnl_usd", 0.0)) for t in trades_all]
+    exits: Dict[str, Dict[str, float]] = {}
+    for t in trades_all:
+        r = str(t.get("exit_reason") or "unknown")
+        exits.setdefault(r, {"n": 0, "pnl_usd": 0.0})
+        exits[r]["n"] += 1
+        exits[r]["pnl_usd"] += float(t.get("pnl_usd", 0.0))
+    return {
+        "overrides": dict(overrides),
+        "gate": gate_kind,
+        "n_trades": len(pnls),
+        "total_pnl_usd": round(sum(pnls), 2),
+        "gross_win_usd": round(sum(p for p in pnls if p > 0), 2),
+        "gross_loss_usd": round(abs(sum(p for p in pnls if p < 0)), 2),
+        "trade_pnls": [round(p, 2) for p in pnls],
+        "trade_symbols": [str(t.get("trade_symbol") or t.get("symbol") or "")
+                          for t in trades_all],
+        "trades_summary": {
+            k: {"n": int(v["n"]), "pnl_usd": round(v["pnl_usd"], 2)}
+            for k, v in sorted(exits.items())
+        },
+        "per_symbol": per_symbol,
+        "db_path": db_path,
+        "cost_model": {"commission_pct": commission_pct, "slippage_bps": slippage_bps},
+        "sizing_convention": "per-symbol isolated capital (same for baseline and variants)",
+    }
+
+
+class _VWAPEntryVeto:
+    """Harness-local entry gate (research only — never shipped to src/).
+
+    Delegates to a production VWAPDeviation. ``gate.update(event)`` runs on
+    EVERY bar so the gate's state sees the full tape; ``gate.allow(event,
+    sig)`` decides whether an inner Signal is allowed. Vetoed signals are
+    skipped — the inner strategy may re-fire on a later bar once its own
+    throttle clears, which is exactly the "wait for confirmation" semantic
+    the Q4/Q5 hypotheses describe.
+    """
+
+    def __init__(self, inner: Any, gate: Any) -> None:
+        self._inner = inner
+        self._gate = gate
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    def on_data(self, event: Any) -> Any:
+        self._gate.update(event)
+        sig = self._inner.on_data(event)
+        if sig is None:
+            return None
+        return sig if self._gate.allow(event, sig) else None
+
+    def on_position(self, position: Any, event: Any) -> Any:
+        return self._inner.on_position(position, event)
+
+
+class _ExhaustionGate:
+    """Q4 volume-exhaustion veto (§1.2): fade entries want the aggressor
+    side's volume DYING, not the production 1.5x surge confirmation.
+
+    Aggressor for a fade-LONG = sell_volume (sellers pushed price below
+    VWAP); for a fade-SHORT = buy_volume. Modes, both fixed a priori:
+      - "decay":       current-bar aggressor < previous bar's aggressor
+      - "below_mean":  current-bar aggressor < its own 24-bar rolling mean
+    Missing buy/sell volume vetoes the entry — silence is no-evidence, never
+    a silent pass.
+    """
+
+    def __init__(self, mode: str, lookback: int = 24) -> None:
+        self._mode = mode
+        self._lookback = lookback
+        self._bars: Dict[str, collections.deque] = {}
+
+    def update(self, event: Any) -> None:
+        bar = getattr(event, "candle_15m", None)
+        if bar is None:
+            return
+        dq = self._bars.setdefault(
+            event.symbol, collections.deque(maxlen=self._lookback + 1))
+        if not dq or dq[-1].timestamp_ms != bar.timestamp_ms:
+            dq.append(bar)
+
+    def _agg(self, bar: Any, side: str) -> Optional[float]:
+        if bar is None:
+            return None
+        v = bar.sell_volume if side == "long" else bar.buy_volume
+        return float(v) if v is not None else None
+
+    def allow(self, event: Any, sig: Any) -> bool:
+        dq = self._bars.get(event.symbol)
+        if not dq or len(dq) < 2:
+            return False
+        cur, prev = dq[-1], dq[-2]
+        agg = self._agg(cur, sig.side)
+        if agg is None:
+            return False
+        if self._mode == "decay":
+            prev_agg = self._agg(prev, sig.side)
+            return prev_agg is not None and agg < prev_agg
+        # below_mean: current aggressor below its own rolling mean over the
+        # previous `lookback` bars (current bar excluded — it IS the move).
+        hist = [self._agg(b, sig.side) for b in list(dq)[:-1][-self._lookback:]]
+        hist = [h for h in hist if h is not None]
+        return bool(hist) and agg < sum(hist) / len(hist)
+
+
+class _DecelGate:
+    """Q5 deceleration veto (§1.1): don't enter mid-impulse.
+
+    Tracks its own 1h candle deque and recomputes the same
+    calculate_vwap_zscore the strategy uses, maintaining the running |z|
+    extreme of the current excursion (|z| >= entry threshold; resets when
+    |z| falls back below it). Modes, fixed a priori:
+      - retrace:       allow only once |z| <= extreme - retrace_sigma
+      - counter_close: allow only when the signal bar closed AGAINST the
+                       move (long: close>open, short: close<open)
+    """
+
+    def __init__(self, retrace: Optional[float]) -> None:
+        self._retrace = retrace
+        self._c1h: Dict[str, collections.deque] = {}
+        self._extreme: Dict[str, float] = {}
+
+    def update(self, event: Any) -> None:
+        c = getattr(event, "candle_1h", None)
+        dq = self._c1h.setdefault(
+            event.symbol, collections.deque(maxlen=200))
+        if c is not None and (not dq or dq[-1].timestamp_ms != c.timestamp_ms):
+            dq.append(c)
+        if len(dq) < 24:
+            return
+        from src.strategies.indicators import calculate_vwap_zscore  # noqa: E402
+        _vwap, _sd, z = calculate_vwap_zscore(list(dq), event.price, lookback=24)
+        if z is None:
+            return
+        az = abs(z)
+        thr = float(getattr(self, "_thr", 2.5))
+        if az >= thr:
+            self._extreme[event.symbol] = max(self._extreme.get(event.symbol, 0.0), az)
+        else:
+            self._extreme[event.symbol] = 0.0
+
+    def set_threshold(self, thr: float) -> None:
+        self._thr = float(thr)
+
+    def allow(self, event: Any, sig: Any) -> bool:
+        if self._retrace is None:
+            bar = getattr(event, "candle_15m", None)
+            if bar is None:
+                return False
+            return (bar.close > bar.open) if sig.side == "long" else (bar.close < bar.open)
+        extreme = self._extreme.get(event.symbol, 0.0)
+        if extreme <= 0.0:
+            return False
+        # sig.metadata["zscore"] is the inner strategy's own reading — same
+        # series the gate tracks, so use it directly for the retrace test.
+        z_now = float((sig.metadata or {}).get("zscore", 0.0))
+        return abs(z_now) <= extreme - self._retrace
+
+
+def _vwap_cfg() -> Tuple[Dict[str, Any], Dict[str, Any], str, float, float, float]:
+    """Shared config plumbing for the VWAP families (live bot.db only —
+    the same source Night 2 used; no per-window seams)."""
+    from src.utils.config import load_config  # noqa: E402
+    cfg = load_config(str(ROOT / "config" / "settings.yaml"))
+    fade_section = dict(cfg.get("strategy.vwap_deviation", {}) or {})
+    live_path = str(cfg.get("database.path", "data/live/bot.db"))
+    initial_capital = float(
+        cfg.get("backtest.initial_capital", cfg.get("risk.initial_capital", 10_000.0)))
+    commission_pct = float(cfg.get("backtest.commission_pct", 0.04))
+    slippage_bps = float(cfg.get("backtest.slippage_bps", 2.0))
+    return cfg, fade_section, live_path, initial_capital, commission_pct, slippage_bps
+
+
+def _window_ms(start: str, end: str) -> Tuple[int, int]:
+    s_ms = int(datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+    e_ms = int(datetime.strptime(end, "%Y-%m-%d").replace(
+        hour=23, minute=59, second=59, microsecond=999000,
+        tzinfo=timezone.utc).timestamp() * 1000)
+    return s_ms, e_ms
+
+
+# ---------------------------------------------------------------------------
+# Family: vwap_exit_econ — Q7 exit-economics sweep (added 2026-09-10).
+#
+# QUEUE.md preregistration: the 4-window baseline bleeds net -151.09 / PF 0.9
+# / n=251 (Night 2 artifact). Entry-side sweeps already failed — the open
+# question is whether the loss is exit-side give-back. Fixed 5-cell grid:
+# exits only, entry params frozen at production values.
+# ---------------------------------------------------------------------------
+
+VWAP_EXIT_ECON_GRID: Tuple[Dict[str, Any], ...] = (
+    {},                                   # baseline: production exits
+    {"exit_z_threshold": 0.5},            # exit earlier on partial reversion
+    {"exit_z_threshold": 0.15},           # let winners run closer to VWAP
+    {"take_profit_r_multiple": 1.5},      # tighter TP (1.5R vs 2.0R)
+    {"max_hold_hours": 2},                # tighter time stop (2h vs 4h)
+)
+
+
+def vwap_exit_econ_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], Callable[..., Any]]:
+    """Wire the Q7 exit-economics family (config-dict overrides only)."""
+    cfg, fade_section, live_path, initial_capital, commission_pct, slippage_bps = _vwap_cfg()
+
+    def tag_for(ov: Dict[str, Any]) -> str:
+        if not ov:
+            return "baseline (prod exits)"
+        return ",".join(f"{k}={v}" for k, v in sorted(ov.items()))
+
+    def run_one(start: str, end: str, symbols: List[str],
+                overrides: Dict[str, Any]) -> Dict[str, Any]:
+        s_ms, e_ms = _window_ms(start, end)
+        return _vwap_fade_run_one(
+            fade_section, live_path, symbols, s_ms, e_ms,
+            initial_capital, commission_pct, slippage_bps, overrides)
+
+    return [tag_for(ov) for ov in VWAP_EXIT_ECON_GRID], run_one, cfg
+
+
+# ---------------------------------------------------------------------------
+# Family: vwap_exhaustion — Q4 volume-exhaustion inversion (§1.2).
+#
+# QUEUE.md preregistration: reversion wants seller/buyer volume DYING, not
+# the production 1.5x surge confirmation. buy_volume/sell_volume are
+# persisted on candle rows and now passed through db_candle_to_ind; the gate
+# vetoes entries where the aggressor side is still accelerating.
+# ---------------------------------------------------------------------------
+
+VWAP_EXHAUSTION_GRID: Tuple[Dict[str, Any], ...] = (
+    {"overrides": {}, "gate": None},                                  # baseline
+    {"overrides": {"volume_surge": 0.0}, "gate": None},               # ablation: no filter
+    {"overrides": {"volume_surge": 0.0}, "gate": "decay"},            # aggressor decaying
+    {"overrides": {"volume_surge": 0.0}, "gate": "below_mean"},       # aggressor below own mean
+)
+
+
+def vwap_exhaustion_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], Callable[..., Any]]:
+    """Wire the Q4 volume-exhaustion family (config-dict + harness gate)."""
+    cfg, fade_section, live_path, initial_capital, commission_pct, slippage_bps = _vwap_cfg()
+
+    def tag_for(cell: Dict[str, Any]) -> str:
+        ov, gate = cell.get("overrides") or {}, cell.get("gate")
+        if not ov and not gate:
+            return "baseline (prod surge=1.5)"
+        if not gate:
+            return "no_vol_filter"
+        return f"exhaust_{gate}"
+
+    def run_one(start: str, end: str, symbols: List[str],
+                cell: Dict[str, Any]) -> Dict[str, Any]:
+        s_ms, e_ms = _window_ms(start, end)
+        return _vwap_fade_run_one(
+            fade_section, live_path, symbols, s_ms, e_ms,
+            initial_capital, commission_pct, slippage_bps,
+            dict(cell.get("overrides") or {}), gate_kind=cell.get("gate"))
+
+    return [tag_for(c) for c in VWAP_EXHAUSTION_GRID], run_one, cfg
+
+
+# ---------------------------------------------------------------------------
+# Family: vwap_deceleration — Q5 deceleration confirmation (§1.1).
+#
+# QUEUE.md preregistration: don't enter on the threshold cross; wait for the
+# z-score to stop making new extremes. The gate recomputes the same z-score
+# series from the 1h deque and tracks the running excursion extreme.
+# ---------------------------------------------------------------------------
+
+VWAP_DECELERATION_GRID: Tuple[Dict[str, Any], ...] = (
+    {"overrides": {}, "gate": None},                        # baseline
+    {"overrides": {}, "gate": "retrace_0.15"},              # |z| <= extreme - 0.15
+    {"overrides": {}, "gate": "retrace_0.30"},              # |z| <= extreme - 0.30
+    {"overrides": {}, "gate": "counter_close"},             # bar closes against move
+)
+
+
+def vwap_deceleration_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], Callable[..., Any]]:
+    """Wire the Q5 deceleration family (config-dict + harness gate)."""
+    cfg, fade_section, live_path, initial_capital, commission_pct, slippage_bps = _vwap_cfg()
+    base_z = float(fade_section.get("z_threshold", 2.5))
+
+    def tag_for(cell: Dict[str, Any]) -> str:
+        gate = cell.get("gate")
+        return "baseline" if not gate else f"decel_{gate}"
+
+    def run_one(start: str, end: str, symbols: List[str],
+                cell: Dict[str, Any]) -> Dict[str, Any]:
+        s_ms, e_ms = _window_ms(start, end)
+        # _DecelGate needs the excursion threshold — thread it as a
+        # harness-only override key (popped inside make(), never reaches
+        # the strategy's params).
+        overrides = dict(cell.get("overrides") or {})
+        overrides["_decel_thr"] = base_z
+        return _vwap_fade_run_one(
+            fade_section, live_path, symbols, s_ms, e_ms,
+            initial_capital, commission_pct, slippage_bps,
+            overrides, gate_kind=cell.get("gate"))
+
+    return [tag_for(c) for c in VWAP_DECELERATION_GRID], run_one, cfg
+
+
+# ---------------------------------------------------------------------------
 # Family: iv_thresholds — high/low-IV cut sweep (Night 3).
 #
 # QUEUE.md preregistration: the IV gate variant "both strategies only in
@@ -1207,6 +1582,9 @@ FAMILIES = {
     "vwap_thresholds": vwap_thresholds_family,
     "iv_thresholds": iv_thresholds_family,
     "hype_vwap_refine": hype_vwap_refine_family,
+    "vwap_exit_econ": vwap_exit_econ_family,
+    "vwap_exhaustion": vwap_exhaustion_family,
+    "vwap_deceleration": vwap_deceleration_family,
 }
 
 
@@ -1257,6 +1635,12 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
         grid_params = [IV_THRESHOLDS_GRID[i] for i in sel]
     elif family == "hype_vwap_refine":
         grid_params = [HYPE_VWAP_REFINE_GRID[i] for i in sel]
+    elif family == "vwap_exit_econ":
+        grid_params = [VWAP_EXIT_ECON_GRID[i] for i in sel]
+    elif family == "vwap_exhaustion":
+        grid_params = [VWAP_EXHAUSTION_GRID[i] for i in sel]
+    elif family == "vwap_deceleration":
+        grid_params = [VWAP_DECELERATION_GRID[i] for i in sel]
     else:  # generic families: params parallel to tags via sel
         grid_params = list(sel)
     windows = split_windows(start, end, split_days)
