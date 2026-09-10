@@ -17,8 +17,8 @@ and a Flask + Socket.IO dashboard.
 - **GoldRush candle-data readiness is not yet validated.** Do not run OOS,
   parameter tuning, holdout, or performance backtests on GoldRush-sourced
   candles until parity is closed. Tooling:
-  `scripts/goldrush_parity_diagnostic.py`,
-  `scripts/goldrush_secondary_validation.py`.
+  `scripts/research/goldrush_parity_diagnostic.py`,
+  `scripts/research/goldrush_secondary_validation.py`.
 - **Mainnet execution is blocked** until OOS validation and data readiness
   above are closed.
 - **Baseline-signal gate** is required to promote any new name into
@@ -33,7 +33,7 @@ and a Flask + Socket.IO dashboard.
 pip install -r requirements.txt
 
 # 2. (Optional but recommended) Backfill historical candles
-python scripts/backfill_candles.py --days 7
+python scripts/ops/backfill_candles.py --days 7
 
 # 3. Run in Paper Trading mode
 python main.py --mode paper
@@ -135,7 +135,7 @@ verdict schema and a worked example are in its reference header).
 **Nightly schedule.** `overnight_nightly.bat` runs the session automatically
 via Windows Task Scheduler (task "Hyperliquid Overnight Research", daily at
 02:00 local — registered with `schtasks /Create ... /SC DAILY /ST 02:00`,
-runs while the user is logged in). The wrapper `scripts/overnight_nightly.py`
+runs while the user is logged in). The wrapper `scripts/research/overnight_nightly.py`
 reads the preregistered queue, runs the first READY family in compact
 `--summary` mode, and enforces the K=4 window floor at runtime: a selection
 that yields fewer than 4 non-overlapping windows is **refused** (the paired
@@ -211,31 +211,31 @@ python main.py --backtest --from-date 2024-01-01 --to-date 2024-03-01
 
 # Audits
 python main.py --audit               # security audit
-python scripts/lookahead_audit.py --ci   # future-data leakage scanner
+python scripts/ops/lookahead_audit.py --ci   # future-data leakage scanner
 python tests/test_cascade_simulation.py  # vol circuit stress test
 
 # Pre-commit / pre-push gate (CI + security audit + config_hash in one command)
-python scripts/run_pre_push_gate.py
-python scripts/run_pre_push_gate.py --fail-on-high   # audit fails on HIGH too
-python scripts/run_pre_push_gate.py --skip-audit     # CI battery only
-python scripts/run_pre_push_gate.py --skip-hash      # skip the config_hash check
-python scripts/run_pre_push_gate.py --preflight      # also validate deployment feeds (stage 0)
+python scripts/ops/run_pre_push_gate.py
+python scripts/ops/run_pre_push_gate.py --fail-on-high   # audit fails on HIGH too
+python scripts/ops/run_pre_push_gate.py --skip-audit     # CI battery only
+python scripts/ops/run_pre_push_gate.py --skip-hash      # skip the config_hash check
+python scripts/ops/run_pre_push_gate.py --preflight      # also validate deployment feeds (stage 0)
 
 # CI battery — also runs the same security audit + config_hash (the full trio)
-python scripts/run_ci_tests.py
+python scripts/ops/run_ci_tests.py
 
 # Git hooks: fast pre-commit (staged files only) + full pre-push gate
-python scripts/install_git_hooks.py
+python scripts/ops/install_git_hooks.py
 
 # Pre-start feed delivery check (fails early instead of waiting for silence)
-python scripts/preflight_feed_check.py
+python scripts/ops/preflight_feed_check.py
 
 # Runs automatically at boot (main.py step 4b) before the engine starts and
 # blocks if a contracted feed is not delivering. First deployment / fresh DB?
 python main.py --skip-preflight
 
 # Maintenance
-python scripts/backfill_candles.py --symbols BTC,ETH,SOL --days 7
+python scripts/ops/backfill_candles.py --symbols BTC,ETH,SOL --days 7
 python tests/test_basic.py
 python tests/test_critical_fixes.py
 python audit_all.py
@@ -317,8 +317,8 @@ restart) to confirm every contracted feed has recent delivery evidence —
 failing early instead of waiting for the silence threshold to trip:
 
 ```bash
-python scripts/preflight_feed_check.py            # exit 0 = all fresh
-python scripts/preflight_feed_check.py --json     # machine-readable report
+python scripts/ops/preflight_feed_check.py            # exit 0 = all fresh
+python scripts/ops/preflight_feed_check.py --json     # machine-readable report
 ```
 
 It reads the persisted artifacts (liquidation/funding/candles tables in
@@ -348,7 +348,7 @@ coverage check against the target DB before reading the data. Use
 (backtest-only) as needed.
 
 It is also available as an **optional stage of the pre-push gate**:
-`python scripts/run_pre_push_gate.py --preflight` validates the deployment
+`python scripts/ops/run_pre_push_gate.py --preflight` validates the deployment
 feeds before the CI battery — a stale contracted feed blocks the push, a
 feed past the warn fraction (exit 2) warns and continues.
 
@@ -413,7 +413,7 @@ FEED_SILENCE_IMMINENT_FRACTION=0.8
   Both fractions appear per-feed in the snapshot as `warn_fraction` /
   `imminent_fraction` and render in the panel's Alerted column
   (`early @ N%` / `imminent @ N%`). `FEED_SILENCE_WARN_FRACTION` also
-  sets the preflight warn level (`scripts/preflight_feed_check.py` —
+  sets the preflight warn level (`scripts/ops/preflight_feed_check.py` —
   `past N%` in its exit-2 report) unless `--warn-fraction` is passed.
 
 ### The cadence signal and the exp-gap indicator
@@ -438,7 +438,7 @@ feed's current gap exceeds its **own historical p99**:
   threshold (6h for liquidation feeds) is the real outage; the cadence
   fire preceded it by `max_silence − p99`. That lead time is measured
   against the real `liquidation_events` history by
-  `scripts/validate_feed_cadence_leadtime.py` (report:
+  `scripts/research/validate_feed_cadence_leadtime.py` (report:
   `docs/FEED_CADENCE_LEADTIME_VALIDATION.md`).
 
 The Feed Silence panel's **Age/exp gap** column renders the same signal:
@@ -518,7 +518,7 @@ An uncontracted feed must never appear in the snapshot, and
   eval/exec, hardcoded secrets, HTTP to unknown hosts, file writes outside
   project, os.system/subprocess, pickle.loads, dynamic __import__,
   suspicious comments, HTTP inventory).
-- `scripts/lookahead_audit.py --ci` runs the future-data leakage scanner
+- `scripts/ops/lookahead_audit.py --ci` runs the future-data leakage scanner
   (6 rules) and fails CI on any non-LOW finding.
 - See `docs/SECURITY.md` for the full threat model and deployment checklist.
 
@@ -526,18 +526,18 @@ An uncontracted feed must never appear in the snapshot, and
 
 ## Pre-commit / pre-push gate
 
-`scripts/run_pre_push_gate.py` is the **single command to run before
+`scripts/ops/run_pre_push_gate.py` is the **single command to run before
 commit/push** — it runs its validations in order, stopping early with a
 non-zero exit code if any fails:
 
-0. **Preflight (optional, `--preflight`)** — `scripts/preflight_feed_check.py`
+0. **Preflight (optional, `--preflight`)** — `scripts/ops/preflight_feed_check.py`
    against the **deployment state** (contracted feeds + per-symbol candle
    freshness). A deployment concern, not code: a stale contracted feed blocks
    the gate here, before the CI battery spends minutes. Exit 1 blocks; exit 2
    (past the warn fraction but still delivering) warns and continues — the
    same semantics as the boot-time wiring in `main.py` step 4b.
 1. **CI battery** — pytest `unit` + `integration_offline` (via
-   `scripts/run_ci_tests.py`). Since `run_ci_tests.py` itself runs the full
+   `scripts/ops/run_ci_tests.py`). Since `run_ci_tests.py` itself runs the full
    trio (CI + audit + hash), the gate passes `--skip-audit --skip-hash` so
    each check runs **exactly once** — the trio lives in `run_ci_tests.py`;
    the gate adds the opt-in suites and the `--fail-on-high` knob.
@@ -551,7 +551,7 @@ Wire it into your hook:
 
 ```bash
 # .git/hooks/pre-push
-python scripts/run_pre_push_gate.py || exit 1
+python scripts/ops/run_pre_push_gate.py || exit 1
 ```
 
 Flags:
@@ -592,20 +592,20 @@ hooks; pre-existing foreign hooks are left alone unless `--force`, which
 backs them up to `.bak`):
 
 ```bash
-python scripts/install_git_hooks.py              # install both hooks
-python scripts/install_git_hooks.py --force      # replace foreign hooks (backup .bak)
-python scripts/install_git_hooks.py --list       # show current state
-python scripts/install_git_hooks.py --uninstall  # remove managed hooks only
+python scripts/ops/install_git_hooks.py              # install both hooks
+python scripts/ops/install_git_hooks.py --force      # replace foreign hooks (backup .bak)
+python scripts/ops/install_git_hooks.py --list       # show current state
+python scripts/ops/install_git_hooks.py --uninstall  # remove managed hooks only
 ```
 
-- **pre-commit — fast path** (`scripts/run_git_hooks.py --hook pre-commit`):
+- **pre-commit — fast path** (`scripts/ops/run_git_hooks.py --hook pre-commit`):
   runs in seconds, only over the **staged** files — a syntax check of every
   staged `.py`, a **scoped security audit** of the staged files under `src/`
   (CRITICAL blocks; `--fail-on-high` also blocks HIGH), and the
   config_hash-vs-frozen check (always — catches drift even from a
   `DEFAULT_CONFIG` change). No full pytest, no full-tree audit: those stay
   in the pre-push hook.
-- **pre-push — full gate**: delegates to `scripts/run_pre_push_gate.py`
+- **pre-push — full gate**: delegates to `scripts/ops/run_pre_push_gate.py`
   (pytest battery + full security audit + config_hash); its exit code passes
   through.
 
@@ -673,13 +673,13 @@ machinery, production proves the calibration.**
 ```bash
 # Default CI battery (unit + integration_offline) — after the tests pass this
 # also runs the security audit and the config_hash-vs-frozen check, i.e. the
-# same three stages as scripts/run_pre_push_gate.py in a single command
-python scripts/run_ci_tests.py
+# same three stages as scripts/ops/run_pre_push_gate.py in a single command
+python scripts/ops/run_ci_tests.py
 
 # Everything including network-dependent tests
-python scripts/run_ci_tests.py --network --testnet-live
-python scripts/run_ci_tests.py --skip-audit     # CI battery only (audit + hash separately)
-python scripts/run_ci_tests.py --skip-hash      # skip the config_hash check
+python scripts/ops/run_ci_tests.py --network --testnet-live
+python scripts/ops/run_ci_tests.py --skip-audit     # CI battery only (audit + hash separately)
+python scripts/ops/run_ci_tests.py --skip-hash      # skip the config_hash check
 
 # Ad-hoc: run a single suite directly with pytest
 python -m pytest -m unit
@@ -700,7 +700,7 @@ server live in `scripts/manual/` — they are not part of any CI suite.
 ```bash
 python audit_all.py                               # Component health check
 python -m security.audit --src-dir src             # Static security audit
-python scripts/lookahead_audit.py --ci             # Future-data leakage scanner
+python scripts/ops/lookahead_audit.py --ci             # Future-data leakage scanner
 ```
 
 ---

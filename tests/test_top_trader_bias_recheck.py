@@ -1,4 +1,4 @@
-"""Unit tests for scripts/top_trader_bias_recheck.py.
+"""Unit tests for scripts/research/top_trader_bias_recheck.py.
 
 Pins the ≥20-date trigger contract so the auto re-run gate is exercised
 before the tracker actually accumulates 20 dates.
@@ -15,7 +15,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.top_trader_bias_recheck import (  # noqa: E402
+from scripts.research.top_trader_bias_recheck import (  # noqa: E402
     TARGET_DATES,
     best_candidate,
     bias_date_count,
@@ -111,8 +111,8 @@ class TestJsonContract:
     """The probe's machine output must feed the recheck verdict unchanged."""
 
     def test_probe_json_feeds_verdict(self, tmp_path):
-        from scripts.feature_screening_top_trader_bias import write_json
-        from scripts.top_trader_bias_recheck import load_result
+        from scripts.research.feature_screening_top_trader_bias import write_json
+        from scripts.research.top_trader_bias_recheck import load_result
 
         cells = [
             _cell(feature="tt_bias_delta_1h", ic=0.05, survives=True),
@@ -127,7 +127,7 @@ class TestJsonContract:
         assert verdict(data["cells"], data["meta"]["n_dates"]).startswith("GATE PASS")
 
     def test_nan_coerced_to_null(self, tmp_path):
-        from scripts.feature_screening_top_trader_bias import write_json
+        from scripts.research.feature_screening_top_trader_bias import write_json
 
         cells = [_cell(ic=float("nan"))]
         out = tmp_path / "nan.json"

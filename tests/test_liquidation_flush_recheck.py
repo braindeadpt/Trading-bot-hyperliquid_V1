@@ -1,4 +1,4 @@
-"""Unit tests for scripts/liquidation_flush_recheck.py.
+"""Unit tests for scripts/research/liquidation_flush_recheck.py.
 
 Covers the pure comparison logic (cell extraction, verdict rule) so the
 30-day auto re-run contract is pinned even before the feed reaches 30d.
@@ -15,7 +15,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.liquidation_flush_recheck import (  # noqa: E402
+from scripts.research.liquidation_flush_recheck import (  # noqa: E402
     BASELINE,
     TARGET_DAYS,
     extract_cell,

@@ -1,4 +1,4 @@
-"""Unit tests for scripts/backtest_liquidation_catcher_real.py — the variant
+"""Unit tests for scripts/research/backtest_liquidation_catcher_real.py — the variant
 knobs that break the flush→stop-out loop.
 
 The real-feed backtest (docs/LIQUIDATION_CATCHER_REAL_BACKTEST.md) showed the
@@ -24,9 +24,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "scripts" / "research"))
 
-from scripts import backtest_liquidation_catcher_real as blcr  # noqa: E402
+from scripts.research import backtest_liquidation_catcher_real as blcr  # noqa: E402
 from src.strategies.liquidation_catcher import LiquidationCatcher  # noqa: E402
 from src.strategies.base import MarketEvent  # noqa: E402
 

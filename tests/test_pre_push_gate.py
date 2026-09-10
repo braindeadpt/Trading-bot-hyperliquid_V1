@@ -1,4 +1,4 @@
-"""Tests for the pre-push gate script (scripts/run_pre_push_gate.py).
+"""Tests for the pre-push gate script (scripts/ops/run_pre_push_gate.py).
 
 Pins the gate contract documented in the script docstring:
 
@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "run_pre_push_gate.py"
+SCRIPT = ROOT / "scripts" / "ops" / "run_pre_push_gate.py"
 REAL_SETTINGS = ROOT / "config" / "settings.yaml"
 REAL_ENV = ROOT / ".env"
 REAL_MANIFEST = (
@@ -42,7 +42,7 @@ pytestmark = pytest.mark.unit
 
 
 def _load_gate():
-    """Import scripts/run_pre_push_gate.py by path (scripts/ is not a package)."""
+    """Import scripts/ops/run_pre_push_gate.py by path (scripts/ is not a package)."""
     spec = importlib.util.spec_from_file_location("run_pre_push_gate", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

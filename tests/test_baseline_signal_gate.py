@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.baseline_signal_gate import gate_verdict
+from scripts.research.baseline_signal_gate import gate_verdict
 from src.research.phase08_preregister import (
     LEGACY_EXECUTION_WITHOUT_BASELINE_GATE,
     PreregisterManifestError,

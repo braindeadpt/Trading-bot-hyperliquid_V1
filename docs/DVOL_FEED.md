@@ -68,7 +68,7 @@ records as `unknown` (never blocks).
 
 `fetch_dvol`, `build_iv_percentile`, `iv_pct_at` and `dvol_series_for` are the
 canonical copies here; the offline evidence scripts
-(`scripts/iv_percentile_regime_gate_test.py`, `iv_high_only_ab_split.py`,
+(`scripts/research/iv_percentile_regime_gate_test.py`, `iv_high_only_ab_split.py`,
 `iv_vs_adx_disagreement.py`) import them, so production and backtest can never
 drift on the percentile definition.
 

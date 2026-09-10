@@ -1,6 +1,6 @@
 # Research watchdogs — auto-rerun evidence gates (unified supervisor)
 
-One background process (**`scripts/research_watchdog_supervisor.py`**) re-runs
+One background process (**`scripts/research/research_watchdog_supervisor.py`**) re-runs
 research probes once enough out-of-sample data accumulates, so a gate decision
 is never blocked on a human remembering to relaunch a script. All gates are
 **read-only evidence gates** — they run probes and write decision reports;
@@ -8,9 +8,9 @@ nothing here trades or touches the OMS.
 
 | Gate | Trigger | Probe re-run | Report |
 |---|---|---|---|
-| Top-trader bias screening | `top_trader_bias_samples` ≥ **20 datas** | `scripts/feature_screening_top_trader_bias.py --json-out` | `docs/TOP_TRADER_BIAS_RECHECK_RESULT.md` |
-| Liquidation flush recheck | real feed (okx/bybit) ≥ **30 dias** | `scripts/liquidation_flush_shadow.py` | `docs/LIQUIDATION_FLUSH_RECHECK_RESULT.md` |
-| IV gate shadow recheck | **≥ 30 closed trades** com decisão IV | `scripts/iv_gate_shadow_recheck.py` (join + slices via `scripts/iv_gate_shadow_vs_pnl.py`) | `docs/IV_GATE_SHADOW_RECHECK_RESULT.md` |
+| Top-trader bias screening | `top_trader_bias_samples` ≥ **20 datas** | `scripts/research/feature_screening_top_trader_bias.py --json-out` | `docs/TOP_TRADER_BIAS_RECHECK_RESULT.md` |
+| Liquidation flush recheck | real feed (okx/bybit) ≥ **30 dias** | `scripts/research/liquidation_flush_shadow.py` | `docs/LIQUIDATION_FLUSH_RECHECK_RESULT.md` |
+| IV gate shadow recheck | **≥ 30 closed trades** com decisão IV | `scripts/research/iv_gate_shadow_recheck.py` (join + slices via `scripts/research/iv_gate_shadow_vs_pnl.py`) | `docs/IV_GATE_SHADOW_RECHECK_RESULT.md` |
 
 All gates share **one** gitignored state file
 (`data/research/research_watchdogs_state.json`) with a per-gate subtree
@@ -22,11 +22,11 @@ the legacy per-gate files (`top_trader_bias_recheck_state.json` /
 not re-fired after the upgrade.
 
 The probe/verdict/report helpers live in the per-gate scripts
-(`scripts/top_trader_bias_recheck.py`,
-`scripts/liquidation_flush_recheck.py`,
-`scripts/iv_gate_shadow_recheck.py`); the supervisor imports them — no
+(`scripts/research/top_trader_bias_recheck.py`,
+`scripts/research/liquidation_flush_recheck.py`,
+`scripts/research/iv_gate_shadow_recheck.py`); the supervisor imports them — no
 duplication, single source of truth. The IV gate trigger reuses the exact join
-from `scripts/iv_gate_shadow_vs_pnl.py`, so the watchdog and its report can
+from `scripts/research/iv_gate_shadow_vs_pnl.py`, so the watchdog and its report can
 never disagree about what counts as a matched IV decision.
 
 ## Why these triggers
@@ -48,13 +48,13 @@ never disagree about what counts as a matched IV decision.
 
 ```bash
 # One-shot check of ALL gates (exits after; no-op until a trigger is met)
-python scripts/research_watchdog_supervisor.py --once
+python scripts/research/research_watchdog_supervisor.py --once
 
 # Daemon mode (check all gates every 6h, re-run probes on triggers, then watch-only)
-nohup python -u scripts/research_watchdog_supervisor.py > logs/research_watchdogs.out 2>&1 &
+nohup python -u scripts/research/research_watchdog_supervisor.py > logs/research_watchdogs.out 2>&1 &
 
 # Smoke test / manual checkpoint (runs all probes now without consuming triggers)
-python scripts/research_watchdog_supervisor.py --force --once
+python scripts/research/research_watchdog_supervisor.py --force --once
 ```
 
 The supervisor is idempotent: each trigger is recorded in the shared state
@@ -103,7 +103,7 @@ payload, rendered under the Status column): the direction the current slices
 point to **before the n>=30 trigger fires** — `→ PROMOTE` or `→ REJECT` with
 the high/low net PnL, flagged `(proj)` while provisional (n<30). The
 projection reuses the exact same rule as the watchdog verdict
-(`project_decision` in `scripts/iv_gate_shadow_recheck.py`, minus the
+(`project_decision` in `scripts/research/iv_gate_shadow_recheck.py`, minus the
 n-gate), so the panel and the watchdog can never disagree about the
 direction — the operator watches the decision form instead of waiting for
 the run.

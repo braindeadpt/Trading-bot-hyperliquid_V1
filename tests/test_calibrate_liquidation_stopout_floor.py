@@ -1,4 +1,4 @@
-"""Unit tests for scripts/calibrate_liquidation_stopout_floor.py.
+"""Unit tests for scripts/research/calibrate_liquidation_stopout_floor.py.
 
 The script measures the real distribution of the dominant 5m liquidation
 notional (multi-venue okx+bybit) to calibrate the stop-out floor
@@ -22,9 +22,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts import calibrate_liquidation_stopout_floor as cal  # noqa: E402
+from scripts.research import calibrate_liquidation_stopout_floor as cal  # noqa: E402
 
-SCRIPT = ROOT / "scripts" / "calibrate_liquidation_stopout_floor.py"
+SCRIPT = ROOT / "scripts" / "research" / "calibrate_liquidation_stopout_floor.py"
 
 pytestmark = pytest.mark.unit
 

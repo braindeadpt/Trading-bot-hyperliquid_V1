@@ -27,7 +27,7 @@ Prior long-horizon cost test used the ~66d live sample → **INCONCLUSIVE** (pow
 
 **YES — extend to ≥6–12 months via Bybit 1h OI.**
 
-Executed: `scripts/backfill_oi_bybit_research.py --days 400` → `data/research/hyperliquid.db`
+Executed: `scripts/research/backfill_oi_bybit_research.py --days 400` → `data/research/hyperliquid.db`
 Stored **38,400** rows (BTC/ETH/SOL/HYPE), **2025-07-06 → 2026-08-10** (~400d / ~13 months).
 
 ### Declared limitations of the backfill

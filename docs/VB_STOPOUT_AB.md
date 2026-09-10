@@ -8,7 +8,7 @@ p90 real multi-venue (2.5M, 2026-08-14)**, corta o sangramento dos shorts do VB
 
 ## Método
 
-`scripts/vb_stopout_ab.py` corre o **mesmo** backtest VB (config de produção,
+`scripts/research/vb_stopout_ab.py` corre o **mesmo** backtest VB (config de produção,
 janela congelada 05-18→08-07, BTC/ETH/SOL/HYPE) duas vezes:
 
 | Run | Floor do stop-out | O que mede |
@@ -76,4 +76,4 @@ comer**. O resultado nulo é a verdade dos dados, não uma limitação do harnes
 * CSV baseline: `data/backtests/vb_stopout_off_20260814_121433.csv` (83 trades)
 * CSV calibrado: `data/backtests/vb_stopout_on_20260814_122124.csv` (83 trades)
 * JSON: `data/research/vb_stopout_ab.json` (gitignored)
-* Script: `scripts/vb_stopout_ab.py` · testes: `tests/test_vb_stopout_ab.py`
+* Script: `scripts/research/vb_stopout_ab.py` · testes: `tests/test_vb_stopout_ab.py`

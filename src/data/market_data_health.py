@@ -281,7 +281,7 @@ def cadence_percentile(
 
     The cadence the feed normally keeps. Single source of truth: the
     monitor's ``FeedSilenceState.cadence_percentile_sec`` and the cadence
-    lead-time validator (``scripts/validate_feed_cadence_leadtime.py``)
+    lead-time validator (``scripts/research/validate_feed_cadence_leadtime.py``)
     both call this, so the walk-forward simulation measures exactly the
     production rule and can never drift from it.
     """

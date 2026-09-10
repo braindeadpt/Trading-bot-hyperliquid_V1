@@ -332,7 +332,7 @@ import inspect; print(inspect.getsource(SignalPipeline.gate_manifest))"
 python -m pytest tests/test_backtest_live_parity.py tests/test_production_gate_parity.py -q
 
 # Full CI
-python scripts/run_ci_tests.py
+python scripts/ops/run_ci_tests.py
 ```
 
 Changing `GATE_ORDER`, `LIVE_ONLY_GATES`, `replay_substitutes`, or adding a

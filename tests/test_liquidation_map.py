@@ -396,7 +396,7 @@ def test_cli_dry_run_with_fixture(tmp_path: Path) -> None:
     fixture = tmp_path / "fills.ndjson"
     fixture.write_text(json.dumps(block) + "\n", encoding="utf-8")
 
-    script = ROOT / "scripts" / "build_liquidation_map.py"
+    script = ROOT / "scripts" / "research" / "build_liquidation_map.py"
     proc = subprocess.run(
         [
             sys.executable,

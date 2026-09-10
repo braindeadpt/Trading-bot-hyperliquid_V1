@@ -1,11 +1,11 @@
-"""Unit tests for scripts/iv_gate_shadow_recheck.py.
+"""Unit tests for scripts/research/iv_gate_shadow_recheck.py.
 
 Pins the shadow→enforcement decision contract: the recheck stays in shadow
 mode until >= TARGET_CLOSED closed trades carry an IV decision, then decides
 PROMOTE (high_iv profitable, low_iv not — enforce at threshold 66.7),
 REJECT (live sample contradicts the backtest direction — keep shadow) or
 INCONCLUSIVE (below the n gate). The trigger metric reuses the exact join
-from scripts/iv_gate_shadow_vs_pnl.py so the watchdog and the report can
+from scripts/research/iv_gate_shadow_vs_pnl.py so the watchdog and the report can
 never disagree about what counts as a matched IV decision.
 """
 
@@ -21,7 +21,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts import iv_gate_shadow_recheck as rc  # noqa: E402
+from scripts.research import iv_gate_shadow_recheck as rc  # noqa: E402
 
 
 def _slice(n_closed, net, *, wr=0.5):
@@ -75,7 +75,7 @@ def test_verdict_exactly_at_gate_promotes():
 
 
 def test_target_closed_matches_min_n_gate():
-    from scripts.iv_gate_shadow_vs_pnl import MIN_N_GATE
+    from scripts.research.iv_gate_shadow_vs_pnl import MIN_N_GATE
 
     assert rc.TARGET_CLOSED == MIN_N_GATE == 30
 

@@ -35,7 +35,7 @@ The bot is built around a **WebSocket-first event architecture**: real-time mark
   FundingArbitrage, FundingMomentum, SpotPerpCarry (plus others listed in YAML).
 - **Fees (2026-08-10):** paper/backtest aligned to HL perps **tier-0** —
   taker **0.045%**/side, maker **0.015%**/side. Phase10 window re-registered
-  via `scripts/reregister_phase10_tier0_fees.py`. Protocol:
+  via `scripts/ops/reregister_phase10_tier0_fees.py`. Protocol:
   `docs/PAPER_OOS_90D_PROTOCOL.md`.
 - **GoldRush candle-data readiness is not yet validated.** Do not run OOS,
   parameter tuning, holdout, or performance backtests against GoldRush-sourced
@@ -98,7 +98,10 @@ trading-bot-hyperliquid/
 ├── stop.bat                   # Kill running python.exe processes
 ├── service.bat                # Background service wrapper with recovery
 ├── scripts/
-│   └── backfill_candles.py    # Binance historical candle backfill (run before bot start)
+│   ├── ops/                   # run/maintain: CI gates, backfills, audits, hooks, re-registers
+│   │   └── backfill_candles.py    # Binance historical candle backfill (run before bot start)
+│   ├── research/              # experiments: backtests, sweeps, feature screens, overnight runner
+│   └── manual/                # manual Socket.IO checks (not part of CI)
 └── audit_all.py               # Component health-check script (imports every module)
 ```
 
@@ -134,9 +137,9 @@ python main.py --mode paper --no-dashboard
 
 ### Backfill historical candles (recommended before first run)
 ```bash
-python scripts/backfill_candles.py
+python scripts/ops/backfill_candles.py
 # or with custom parameters
-python scripts/backfill_candles.py --symbols BTC,ETH,SOL --days 7
+python scripts/ops/backfill_candles.py --symbols BTC,ETH,SOL --days 7
 ```
 
 ### Override config path
@@ -244,9 +247,9 @@ invocation, but the canonical entry point is pytest.
 
 ### Running the Full Test Battery
 ```bash
-python scripts/run_ci_tests.py                       # unit + integration_offline (default CI)
-python scripts/run_ci_tests.py --network              # + network suite
-python scripts/run_ci_tests.py --network --testnet-live
+python scripts/ops/run_ci_tests.py                       # unit + integration_offline (default CI)
+python scripts/ops/run_ci_tests.py --network              # + network suite
+python scripts/ops/run_ci_tests.py --network --testnet-live
 
 python -m pytest -m unit                              # ad-hoc: unit only
 python -m pytest tests/test_cvd_orderflow.py -v       # ad-hoc: single file
@@ -266,7 +269,7 @@ python -m pytest tests/test_cvd_orderflow.py -v       # ad-hoc: single file
 - **`tests/test_critical_fixes.py`** — drawdown circuit, portfolio restore, FundingArbitrage lifecycle, execution exit price fix. Always run after modifying core engine, portfolio, risk, or execution.
 - **`tests/test_cascade_simulation.py`** — VolatilityCircuitBreaker trip/extend/per-symbol isolation/snapshot, FundingBlackoutFilter boundary cases, DD CB regression, cold-start guard.
 - **`tests/test_engine_boot_integration.py`** — full boot/shutdown cycle against a fully-stubbed `TradingEngine`: feed subscription, OMS poller start, startup reconciliation, then graceful shutdown (background task cancellation, unsubscribe, OMS stop). Companion to `tests/test_mainnet_readiness_5_6.py`, which covers `start()`/`stop()` in isolation.
-- **`scripts/lookahead_audit.py --ci`** — static scan for future-data access (LOOKAHEAD-001..006). Fails CI on any non-LOW finding.
+- **`scripts/ops/lookahead_audit.py --ci`** — static scan for future-data access (LOOKAHEAD-001..006). Fails CI on any non-LOW finding.
 
 ### Component Health Check
 ```bash
@@ -404,8 +407,8 @@ Effective settings are logged once at engine start (`Effective risk: leverage=..
 | `src/exchanges/binance_price_bridge.py` | Spot `@aggTrade` → DataBus `binance_price:{symbol}`. |
 | `src/exchanges/binance_perp_price_bridge.py` | USD-M `@markPrice@1s` → DataBus `binance_perp_price:{symbol}` (LeadLag). |
 | `src/data/database.py` | SQLite schema and all persistence queries. |
-| `scripts/backfill_candles.py` | Binance historical candle backfill to populate candle tables before bot start. |
-| `scripts/lookahead_audit.py` | `LOOKAHEAD-001..006` static scanner (Phase B, v3.1.9). |
+| `scripts/ops/backfill_candles.py` | Binance historical candle backfill to populate candle tables before bot start. |
+| `scripts/ops/lookahead_audit.py` | `LOOKAHEAD-001..006` static scanner (Phase B, v3.1.9). |
 | `src/security/audit.py` | Static security scanner. If you add new file-I/O or HTTP patterns, update the auditor. |
 | `config/settings.yaml` | All tunable parameters. Add new strategy params here and in `DEFAULT_CONFIG`. |
 | `src/utils/config.py` | Configuration loader: defaults, deep-merge, env overrides, **`_apply_mode_overrides`**. |
@@ -435,7 +438,7 @@ Before submitting any code change:
    ```
 4. **Run the look-ahead audit** to catch future-data access regressions:
    ```bash
-   python scripts/lookahead_audit.py --ci
+   python scripts/ops/lookahead_audit.py --ci
    ```
 5. **Ensure type hints** are present on new public functions.
 6. **Use safe helpers** (`safe_float`, `safe_json_loads`, `validate_safe_path`) instead of raw conversions.
@@ -464,7 +467,7 @@ feature with predictive power
   → execution (PASS required)
 ```
 
-Never the inverse. Screening CLI: `python scripts/feature_screening.py`.
+Never the inverse. Screening CLI: `python scripts/research/feature_screening.py`.
 Report: `docs/FEATURE_SCREENING_REPORT.md`. Only TOP survivors (FDR +
 monotonicity + temporal stability + cross-symbol consistency) justify a
 strategy attempt. Pre-FDR hits alone do **not**.
@@ -514,7 +517,7 @@ That case is why profitability is a hard third condition: **FAIL
 (B1=48, n=146) and W3 (B1=43, n=215). Keeping it in `execution_strategies`
 would make the gate decorative. Precedent: **demote FAIL → shadow**; do not
 re-promote without a fresh PASS. Script:
-`scripts/demote_checklist_meta_for_baseline_fail.py`.
+`scripts/ops/demote_checklist_meta_for_baseline_fail.py`.
 
 **VWAPDeviation** stays in execution only because it is **INCONCLUSIVE**
 (n&lt;30) — grandfathered while sample accumulates — not because it passed.
@@ -530,10 +533,10 @@ powered run exists.
 ### CLI
 
 ```bash
-python scripts/baseline_signal_gate.py --strategy NAME --folds W2,W3 --seeds 200 --gate
+python scripts/research/baseline_signal_gate.py --strategy NAME --folds W2,W3 --seeds 200 --gate
 # exit 0=PASS, 1=FAIL, 2=INCONCLUSIVE
-python scripts/baseline_signal_gate.py --portfolio --seeds 200
-python scripts/baseline_signal_gate.py --validate-harness --seeds 40
+python scripts/research/baseline_signal_gate.py --portfolio --seeds 200
+python scripts/research/baseline_signal_gate.py --validate-harness --seeds 40
 ```
 
 Artifact board: `data/backtests/parity_diag/BASELINE_PORTFOLIO_GATE_REPORT.md`.

@@ -45,11 +45,11 @@ All paths below were generated **before** Phase 05 gate parity and lack `sizing_
 | Script | Status |
 |--------|--------|
 | `scripts/backtest_*_walkforward.py` | Outputs invalid until re-run with Phase 05 engine + manifest |
-| `scripts/backtest_ensemble_sweep.py` | Invalid (dual Kelly, no manifest) |
-| `scripts/backtest_cvd_sweep.py` | Invalid |
-| `scripts/compare_exit_economics_backtest.py` | Invalid |
+| `scripts/research/backtest_ensemble_sweep.py` | Invalid (dual Kelly, no manifest) |
+| `scripts/research/backtest_cvd_sweep.py` | Invalid |
+| `scripts/research/compare_exit_economics_backtest.py` | Invalid |
 | `scripts/_backtest_forensic_sol_eth.py` | Explicitly marked "understates live fidelity" |
-| `scripts/walk_forward.py` | Invalid until updated to `build_backtest_config_from_yaml` + manifest |
+| `scripts/research/walk_forward.py` | Invalid until updated to `build_backtest_config_from_yaml` + manifest |
 
 ---
 

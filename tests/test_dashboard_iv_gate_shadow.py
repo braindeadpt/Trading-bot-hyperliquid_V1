@@ -2,7 +2,7 @@
 
 Shows the growing shadow sample: n per class (high_iv / low_iv / unknown),
 closed vs open, and the average recorded IV percentile per class. The endpoint
-reuses the exact join/slices from ``scripts/iv_gate_shadow_vs_pnl.py`` (the
+reuses the exact join/slices from ``scripts/research/iv_gate_shadow_vs_pnl.py`` (the
 single source of truth) so the dashboard and the recheck watchdog can never
 disagree about what counts as a matched IV decision.
 """
@@ -89,7 +89,7 @@ class TestIvGateShadowEndpoint:
         self._tmp.cleanup()
 
     def _get(self):
-        from scripts import iv_gate_shadow_vs_pnl as pnl
+        from scripts.research import iv_gate_shadow_vs_pnl as pnl
 
         def _resolve(live_db=None, research_db=None):
             return Path(self._live), Path(self._research)
@@ -151,7 +151,7 @@ class TestIvGateShadowEndpoint:
     def test_empty_research_db(self) -> None:
         empty = os.path.join(self._tmp.name, "empty.db")
         sqlite3.connect(empty).close()
-        from scripts import iv_gate_shadow_vs_pnl as pnl
+        from scripts.research import iv_gate_shadow_vs_pnl as pnl
 
         def _resolve(live_db=None, research_db=None):
             return Path(self._live), Path(empty)
@@ -171,7 +171,7 @@ class TestIvGateShadowEndpoint:
     def test_distribution_by_strategy_and_symbol(self, tmp_path) -> None:
         """The endpoint exposes where the sample lives: per strategy and per
         symbol, with the per-class mix and aggregate n/closed."""
-        from scripts import iv_gate_shadow_vs_pnl as pnl
+        from scripts.research import iv_gate_shadow_vs_pnl as pnl
 
         live = os.path.join(tmp_path, "live.db")
         research = os.path.join(tmp_path, "research.db")
@@ -503,7 +503,7 @@ class TestTradesEndpointIvEnrichment:
 
         self._db = Database(self._live)
         self._web._engine = type("E", (), {"_db": self._db})()
-        from scripts import iv_gate_shadow_vs_pnl as pnl
+        from scripts.research import iv_gate_shadow_vs_pnl as pnl
 
         def _resolve(live_db=None, research_db=None):
             return Path(self._live), Path(self._research)
@@ -536,7 +536,7 @@ class TestTradesEndpointIvEnrichment:
         self._web._engine = type("E", (), {"_db": self._db})()
         empty = os.path.join(self._tmp.name, "empty2.db")
         sqlite3.connect(empty).close()
-        from scripts import iv_gate_shadow_vs_pnl as pnl
+        from scripts.research import iv_gate_shadow_vs_pnl as pnl
 
         def _resolve(live_db=None, research_db=None):
             return Path(self._live), Path(empty)
@@ -602,7 +602,7 @@ class TestPositionsEndpointIvEnrichment:
         )()
         self._web._engine = type("E", (), {"_db": self._db, "portfolio": port,
                                           "get_mark_prices_sync": staticmethod(lambda: {"BTC": 81_000.0})})()
-        from scripts import iv_gate_shadow_vs_pnl as pnl
+        from scripts.research import iv_gate_shadow_vs_pnl as pnl
 
         def _resolve(live_db=None, research_db=None):
             return Path(self._live), Path(self._research)
@@ -649,7 +649,7 @@ class TestPositionsEndpointIvEnrichment:
                                           "get_mark_prices_sync": staticmethod(lambda: {"BTC": 81_000.0})})()
         empty = os.path.join(self._tmp.name, "empty3.db")
         sqlite3.connect(empty).close()
-        from scripts import iv_gate_shadow_vs_pnl as pnl
+        from scripts.research import iv_gate_shadow_vs_pnl as pnl
 
         def _resolve(live_db=None, research_db=None):
             return Path(self._live), Path(empty)

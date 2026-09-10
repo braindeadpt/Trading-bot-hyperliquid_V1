@@ -402,7 +402,7 @@ def assert_baseline_signal_gate(
                 continue
             raise PreregisterManifestError(
                 f"baseline_signal_gate missing PASS record for execution "
-                f"strategy {name} — run scripts/baseline_signal_gate.py "
+                f"strategy {name} — run scripts/research/baseline_signal_gate.py "
                 f"--strategy {name} --gate before promoting to execution "
                 f"(legacy soft-exempt: {sorted(gf)})"
             )
@@ -426,7 +426,7 @@ def assert_can_promote_to_execution(
     if gate_record is None:
         raise PreregisterManifestError(
             f"cannot promote {name} to execution_strategies without "
-            f"baseline_signal_gate PASS — run scripts/baseline_signal_gate.py "
+            f"baseline_signal_gate PASS — run scripts/research/baseline_signal_gate.py "
             f"--strategy {name} --folds W2,W3 --seeds 200 --gate"
         )
     verdict = str(gate_record.get("verdict") or "").upper()

@@ -3,7 +3,7 @@
 Single source of truth for historical candle backfill. Used by:
 
   * ``main.py`` at startup (``ensure_candle_history``) — fast warm-up
-  * ``scripts/seed_db.py`` — explicit date-range CLI
+  * ``scripts/ops/seed_db.py`` — explicit date-range CLI
 
 All public entry points are coroutines that respect a per-run deadline
 (``BOT_BACKFILL_TIMEOUT_SEC`` env var, default 15s) and a per-request
@@ -322,7 +322,7 @@ def ensure_candle_history(
 
 
 # ────────────────────────────────────────────────────────────────────
-# Public async API (used by scripts/seed_db.py)
+# Public async API (used by scripts/ops/seed_db.py)
 # ────────────────────────────────────────────────────────────────────
 
 async def run_range_backfill(

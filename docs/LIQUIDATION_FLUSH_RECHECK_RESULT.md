@@ -1,6 +1,6 @@
 # Liquidation Flush Recheck — 30-day real-feed comparison
 
-_Generated 2026-09-10T20:23:11+00:00 by `scripts/liquidation_flush_recheck.py`._
+_Generated 2026-09-10T20:23:11+00:00 by `scripts/research/liquidation_flush_recheck.py`._
 
 **Real feed span at trigger: 32.1 days (53270 okx/bybit events).**
 

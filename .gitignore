@@ -74,9 +74,10 @@ backtest_results.json
 # Backtest data
 tests/data/
 
-# Ad-hoc local debug scripts (keep scripts/backfill_candles.py etc. tracked)
+# Ad-hoc local debug scripts (keep scripts/ops/backfill_candles.py etc. tracked)
 scripts/_*
-scripts/check_candles.py
+scripts/*/_*
+scripts/**/check_candles.py
 scripts/audit_*.py
 scripts/diagnose_*.py
 scripts/market_vs_*.py

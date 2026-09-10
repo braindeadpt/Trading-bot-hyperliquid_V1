@@ -12,7 +12,7 @@ applies it automatically.*
 
 > **Nothing in this document is active.** The YAML snippet in §6 is a diff
 > to review, not a change that has been made. Activation requires **both**:
-> 1. The Fase 10 gate (`python scripts/phase10_check_gate.py`) showing a real
+> 1. The Fase 10 gate (`python scripts/ops/phase10_check_gate.py`) showing a real
 >    **PASS** on all four criteria — `min_trades ≥ 100`,
 >    `profit_factor ≥ 1.20`, `expectancy_r > 0.0`, `max_drawdown_pct ≤ 5.0` —
 >    not "insufficient data," an actual PASS. See `docs/MAINNET_READINESS.md`
@@ -96,7 +96,7 @@ negative) but the exact figures moved between the two snapshots — a
 reminder that this is a moving, small-sample number, not a fixed fact.
 Neither snapshot counts toward the Fase 10 gate: both predate the frozen
 window (`window_start_ms` = 2026-07-13, current window trade_count = 0
-per `scripts/phase10_check_gate.py`).
+per `scripts/ops/phase10_check_gate.py`).
 
 **Recommendation: VWAPDeviation**, based on this data — it is the only one
 of the two currently-live strategies with positive historical PnL in both

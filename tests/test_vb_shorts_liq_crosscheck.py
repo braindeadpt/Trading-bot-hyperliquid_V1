@@ -1,4 +1,4 @@
-"""Unit tests for scripts/vb_shorts_liq_crosscheck.py.
+"""Unit tests for scripts/research/vb_shorts_liq_crosscheck.py.
 
 Pins the flush-reversal measurement mechanics: minute bucketing, p90
 threshold, post-flush return direction by dominant side, and the VB
@@ -17,8 +17,8 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import scripts.vb_shorts_liq_crosscheck as cc  # noqa: E402
-from scripts.vb_shorts_liq_crosscheck import (  # noqa: E402
+import scripts.research.vb_shorts_liq_crosscheck as cc  # noqa: E402
+from scripts.research.vb_shorts_liq_crosscheck import (  # noqa: E402
     load_liq_events,
     percentile,
 )

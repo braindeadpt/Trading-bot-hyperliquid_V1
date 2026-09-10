@@ -190,9 +190,9 @@ def test_progress_clamped_at_100(_stub_metrics, monkeypatch):
 
 
 def test_thresholds_match_scripts():
-    from scripts.top_trader_bias_recheck import TARGET_DATES
-    from scripts.liquidation_flush_recheck import TARGET_DAYS
-    from scripts.iv_gate_shadow_recheck import TARGET_CLOSED
+    from scripts.research.top_trader_bias_recheck import TARGET_DATES
+    from scripts.research.liquidation_flush_recheck import TARGET_DAYS
+    from scripts.research.iv_gate_shadow_recheck import TARGET_CLOSED
 
     assert wd.BIAS_TARGET_DATES == TARGET_DATES == 20
     assert wd.FLUSH_TARGET_DAYS == TARGET_DAYS == 30

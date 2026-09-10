@@ -10,7 +10,7 @@ judge, the human enforces).
 This preamble is the reference for the loop's two contracts (queue format
 and verdict schema) plus one worked example from a real session. It is
 rewritten verbatim on every session by the runner — edit it in
-`scripts/overnight_runner.py` (LEDGER_HEADER), never here.
+`scripts/research/overnight_runner.py` (LEDGER_HEADER), never here.
 
 ## Queue format (`data/research/overnight_experiments/QUEUE.md`)
 
@@ -231,7 +231,7 @@ majority/PF/catastrophic checks, so a negative result with small n was
 parked as INCONCLUSIVE instead of DISCARDed. The three `iv_thresholds`
 verdicts above were all decided under that buggy ordering. The fix makes
 `n >= 30` a precondition for **KEEP only**, never a precondition for
-DISCARD (research_program.md, `scripts/overnight_runner.py::decide`).
+DISCARD (research_program.md, `scripts/research/overnight_runner.py::decide`).
 
 Re-applying the corrected rule to the numbers already on record above
 (unchanged — this is a re-read, not a re-run):

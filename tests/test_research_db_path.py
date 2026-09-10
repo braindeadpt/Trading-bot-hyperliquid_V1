@@ -91,7 +91,7 @@ def test_no_bare_research_database_constructor_in_src() -> None:
 
 
 def test_merge_script_dedupes_natural_keys(tmp_path: Path) -> None:
-    from scripts.merge_ghost_research_db import merge_databases
+    from scripts.research.merge_ghost_research_db import merge_databases
 
     source = tmp_path / "ghost.db"
     dest = tmp_path / "dest.db"

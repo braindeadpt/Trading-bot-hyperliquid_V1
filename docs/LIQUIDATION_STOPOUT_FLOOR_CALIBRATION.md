@@ -30,6 +30,6 @@ Events: 13271 · samples: 6666
 * O default de 5.0M estava **~2× acima** do p90 real (2.5M): o stop-out só dispararia em eventos de cauda extrema — na prática quase nunca (super-calibrado, o exit por liquidação era letra morta).
 * p90 (2.5M) = só ~10% das janelas amostradas excedem este valor — um flush acima do p90 é genuinamente raro para os venues contratados.
 * O floor é único e global; a sensibilidade **por símbolo** varia com a escala (ver tabela: BTC p90 15.3M vs SOL p90 0.1M) — um floor único sub-calibra BTC e sobre-calibra SOL; o p90 pooled é o ponto médio defensável.
-* Recalibrar é uma decisão revista (hash-neutral, no código) — repetível a qualquer momento com `python scripts/calibrate_liquidation_stopout_floor.py`.
+* Recalibrar é uma decisão revista (hash-neutral, no código) — repetível a qualquer momento com `python scripts/research/calibrate_liquidation_stopout_floor.py`.
 
-*Report regenerado por `python scripts/calibrate_liquidation_stopout_floor.py`*
+*Report regenerado por `python scripts/research/calibrate_liquidation_stopout_floor.py`*

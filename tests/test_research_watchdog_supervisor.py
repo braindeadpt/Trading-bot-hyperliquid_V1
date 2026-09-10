@@ -1,4 +1,4 @@
-"""Unit tests for scripts/research_watchdog_supervisor.py.
+"""Unit tests for scripts/research/research_watchdog_supervisor.py.
 
 Pins the unified supervisor contract: ONE shared state file (with migration
 from the legacy per-watchdog files) and both gate triggers (bias >= 20 dates,
@@ -19,7 +19,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts import research_watchdog_supervisor as sup  # noqa: E402
+from scripts.research import research_watchdog_supervisor as sup  # noqa: E402
 
 
 def _write_json(path: Path, data: Dict[str, Any]) -> None:

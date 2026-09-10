@@ -63,10 +63,10 @@ Paper remains default. Mainnet requires `HYPERLIQUID_MAINNET_ENABLED=1` **and** 
 | Phase 03 behavioural | `python tests/test_exchange_reconciliation.py` | **19/19 PASS** |
 | Phase 01 fail-closed | `python tests/test_execution_fail_closed.py` | **9/9 PASS** |
 | Phase 02 OMS | `python tests/test_execution_oms.py` | **12/12 PASS** |
-| CI battery | `python scripts/run_ci_tests.py` | **ALL PASS** |
+| CI battery | `python scripts/ops/run_ci_tests.py` | **ALL PASS** |
 | Component health | `python audit_all.py` | **OK** |
 | Security audit | `python main.py --audit` | **OK** (see log) |
-| Lookahead audit | `python scripts/lookahead_audit.py --ci` | **OK** after manual `bin_vol[hi+1]` classification |
+| Lookahead audit | `python scripts/ops/lookahead_audit.py --ci` | **OK** after manual `bin_vol[hi+1]` classification |
 
 ---
 

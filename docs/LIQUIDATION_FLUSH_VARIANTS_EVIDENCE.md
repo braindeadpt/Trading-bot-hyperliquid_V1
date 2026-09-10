@@ -3,7 +3,7 @@
 **Data:** 2026-08-13 · **Fonte:** real (okx+bybit, 3.5d, 08-09→08-13) · **Símbolo:** ETH
 **Mecânica:** idêntica ao v2 (flush 1m dominante ≥ threshold, entry no OPEN do
 1º candle pós-flush, fees 0.090% RT, candles carimbados ao fecho do minuto).
-**Script:** `scripts/liquidation_flush_variants.py` · **JSON:** `data/backtests/liquidation_flush_variants_20260813_064616.json`
+**Script:** `scripts/research/liquidation_flush_variants.py` · **JSON:** `data/backtests/liquidation_flush_variants_20260813_064616.json`
 
 ## Baseline (referência)
 

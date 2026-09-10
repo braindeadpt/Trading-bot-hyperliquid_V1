@@ -105,7 +105,7 @@ aggregator never reads). `coin` values include ordinary perps (`ETH`,
   pre-decompress before calling `parse_node_fills_by_block_ndjson`).
 
 Layout facts (confirmed via a real read-only `list_objects_v2` against
-`s3://hl-mainnet-node-data/`, using `scripts/check_hl_s3_access.py` — see
+`s3://hl-mainnet-node-data/`, using `scripts/ops/check_hl_s3_access.py` — see
 module docstrings for the raw sample):
 
 - `s3://hl-mainnet-node-data/node_fills_by_block/hourly/{YYYYMMDD}/{hour}.lz4`,
@@ -134,7 +134,7 @@ module docstrings for the raw sample):
 Dry run (default — no network access, ever):
 
 ```bash
-python scripts/hl_node_trades_rebuild.py \
+python scripts/research/hl_node_trades_rebuild.py \
   --package data/research/goldrush_support_package_latest.json \
   --symbols BTC,ETH
 ```
@@ -146,7 +146,7 @@ cost warning).
 Real download + rebuild (requires `boto3` + AWS credentials):
 
 ```bash
-python scripts/hl_node_trades_rebuild.py \
+python scripts/research/hl_node_trades_rebuild.py \
   --package data/research/goldrush_support_package_latest.json \
   --symbols BTC,ETH \
   --db data/research/hyperliquid.db \

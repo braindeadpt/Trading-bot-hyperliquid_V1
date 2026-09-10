@@ -3,7 +3,7 @@
 Pins the boot contract (``main._preflight_feed_check`` /
 ``main._run_preflight_at_boot``):
 
-  * the check runs ``scripts/preflight_feed_check.py`` against the live DB
+  * the check runs ``scripts/ops/preflight_feed_check.py`` against the live DB
     with the resolved config + L2 dir before the engine starts;
   * exit 1 (a contracted feed not delivering / no evidence) BLOCKS boot with
     a clear message and exit code 1;

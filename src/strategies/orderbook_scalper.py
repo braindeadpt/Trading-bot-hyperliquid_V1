@@ -58,7 +58,7 @@ class OrderBookScalper(Strategy):
         self.BID_ASK_LONG = cfg.get("bid_ask_ratio_long", 1.5)
         self.BID_ASK_SHORT = cfg.get("bid_ask_ratio_short", 0.67)
         self.SPOOF_WALL_PROXIMITY_PCT = float(cfg.get("spoof_wall_proximity_pct", 0.001))
-        # Calibrated 2026-08-09 from live HL L2 (scripts/calibrate_obs_spoof_filter.py):
+        # Calibrated 2026-08-09 from live HL L2 (scripts/research/calibrate_obs_spoof_filter.py):
         # wall_frac among entry candidates p50≈0.20 p85≈0.21 p90≈0.22 — use p85
         # so the filter blocks ~15% (minority), never the tautological 100%.
         self.SPOOF_WALL_FRACTION_MIN = float(cfg.get("spoof_wall_fraction_min", 0.21))

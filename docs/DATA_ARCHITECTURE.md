@@ -96,7 +96,7 @@ still active.
 
 ## Backup
 
-Script: `scripts/backup_research_data.py`
+Script: `scripts/ops/backup_research_data.py`
 
 ### What it does
 
@@ -146,9 +146,9 @@ Origins are **never** deleted by this script (copy, not migrate).
 ### Manual command
 
 ```bash
-python scripts/backup_research_data.py --tag monthly
-python scripts/backup_research_data.py --tag annual
-python scripts/backup_research_data.py --tag monthly --dry-run
+python scripts/ops/backup_research_data.py --tag monthly
+python scripts/ops/backup_research_data.py --tag annual
+python scripts/ops/backup_research_data.py --tag monthly --dry-run
 ```
 
 Verified runs record their outcome in
@@ -161,7 +161,7 @@ Confirm before creating. Example monthly task (1st of month 03:30 local):
 
 ```text
 Program:  py
-Arguments: scripts/backup_research_data.py --tag monthly
+Arguments: scripts/ops/backup_research_data.py --tag monthly
 Start in:  <repository>
 Trigger:   Monthly, day 1, 03:30
 ```
@@ -171,7 +171,7 @@ PowerShell register sketch (do **not** run until confirmed):
 ```powershell
 $action = New-ScheduledTaskAction `
   -Execute "py" `
-  -Argument "scripts/backup_research_data.py --tag monthly" `
+  -Argument "scripts/ops/backup_research_data.py --tag monthly" `
   -WorkingDirectory "<repository>"
 $trigger = New-ScheduledTaskTrigger -Monthly -DaysOfMonth 1 -At 3:30AM
 Register-ScheduledTask -TaskName "HL_ResearchBackup_Monthly" `

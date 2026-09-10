@@ -6,8 +6,8 @@ the IV-percentile regime gate can run in production from stored history instead
 of a manual script.
 
 The percentile math here is the **canonical** copy — the offline evidence
-scripts (`scripts/iv_percentile_regime_gate_test.py`,
-`scripts/iv_high_only_ab_split.py`, `scripts/iv_vs_adx_disagreement.py`) import
+scripts (`scripts/research/iv_percentile_regime_gate_test.py`,
+`scripts/research/iv_high_only_ab_split.py`, `scripts/research/iv_vs_adx_disagreement.py`) import
 these functions, so production and backtest never drift.
 
 Data: Deribit public ``get_volatility_index_data`` (daily resolution).

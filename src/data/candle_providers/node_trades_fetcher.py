@@ -1,7 +1,7 @@
 """Object-key layout and pluggable fetchers for HL node_trades archives.
 
 Layout facts confirmed from a real read-only ``list_objects_v2`` against
-``s3://hl-mainnet-node-data/`` (via ``scripts/check_hl_s3_access.py``, July
+``s3://hl-mainnet-node-data/`` (via ``scripts/ops/check_hl_s3_access.py``, July
 2026):
 
 * The bucket root actually has 6 top-level prefixes: ``explorer_blocks``,

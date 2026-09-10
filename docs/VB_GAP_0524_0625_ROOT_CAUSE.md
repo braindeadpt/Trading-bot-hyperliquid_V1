@@ -1,7 +1,7 @@
 # VB não tradeou entre 05-24 e 06-25 — causa raiz: gate de funding stale no replay
 
 **Data:** 2026-08-13 · **Investigação:** full-trace do backtest VB na janela do gap
-**Scripts usados:** `scripts/vb_regime_forensics.py` (dados) + trace instrumentado do
+**Scripts usados:** `scripts/research/vb_regime_forensics.py` (dados) + trace instrumentado do
 `BacktestEngine` (logs) · **Veredito:** NÃO é filtro de candles, NÃO é bug — é o
 gate `replay_data_quality` a rejeitar todos os sinais porque o **funding
 pré-06-26 era esparso** (2.9 rows/dia vs 2619/dia depois).

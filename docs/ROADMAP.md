@@ -42,7 +42,7 @@ Melhoram warm-up após restart, backtest e observabilidade. **Não bloqueiam** l
 **Proposta:**
 
 - Novo módulo `src/data/hl_candle_backfill.py` — REST HL `candleSnapshot` (ou equivalente) por símbolo/timeframe
-- Script `scripts/backfill_hl_candles.py`
+- Script `scripts/ops/backfill_hl_candles.py`
 - Preferência: usar velas HL na DB quando existirem; Binance como fallback
 - Benefícios: backtest alinhado ao venue de execução, warm-up com preços HL, chart com histórico HL
 

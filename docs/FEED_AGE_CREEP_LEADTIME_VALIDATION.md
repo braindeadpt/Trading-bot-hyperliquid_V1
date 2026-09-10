@@ -21,4 +21,4 @@ O detector antecipa os silêncios reais? Para cada feed contratado, o script cru
 | Feed | Início | Fim | Fire | Lead |
 |---|---|---|---|---|
 
-_Gerado por `scripts/validate_feed_age_creep_leadtime.py` — read-only, nunca trade._
+_Gerado por `scripts/research/validate_feed_age_creep_leadtime.py` — read-only, nunca trade._

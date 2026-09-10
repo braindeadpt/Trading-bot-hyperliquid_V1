@@ -1,4 +1,4 @@
-"""Tests for the pre-start feed-delivery check (scripts/preflight_feed_check.py).
+"""Tests for the pre-start feed-delivery check (scripts/ops/preflight_feed_check.py).
 
 Pins the exit-code contract: a contracted feed with stale-or-missing
 evidence fails before the bot starts (instead of waiting for the watchdog
@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "preflight_feed_check.py"
+SCRIPT = ROOT / "scripts" / "ops" / "preflight_feed_check.py"
 
 pytestmark = pytest.mark.unit
 

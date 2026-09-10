@@ -1,4 +1,4 @@
-"""Unit tests for scripts/validate_feed_age_creep_leadtime.py.
+"""Unit tests for scripts/research/validate_feed_age_creep_leadtime.py.
 
 Pins the lead-time semantics: an episode is anticipated when the production
 staircase rule fired (and stayed active) before the first degraded day;
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts import validate_feed_age_creep_leadtime as va  # noqa: E402
+from scripts.research import validate_feed_age_creep_leadtime as va  # noqa: E402
 
 DAY_MS = 86_400_000
 MAX_SIL = 3600.0  # 1h threshold

@@ -65,4 +65,4 @@ Gerado a 2026-08-14T05:33:00+00:00 (UTC) · janela recente 48h · apenas feeds c
 | 2026-08-14 05:32 | OK | 1.0m | 1.0m | +0.00 | aligned_ok |
 | 2026-08-14 05:33 | OK | 1.0m | 1.0m | +0.00 | aligned_ok |
 
-_Gerado por `scripts/feed_cadence_diagnostic.py` — read-only, nunca trade._
+_Gerado por `scripts/research/feed_cadence_diagnostic.py` — read-only, nunca trade._

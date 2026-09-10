@@ -1,6 +1,6 @@
 # LiquidationCatcher — real-feed backtest (08-09+)
 
-**Data:** 2026-08-14 · **Commit (script):** script `scripts/backtest_liquidation_catcher_real.py`
+**Data:** 2026-08-14 · **Commit (script):** script `scripts/research/backtest_liquidation_catcher_real.py`
 
 ## Porquê este backtest
 
@@ -93,7 +93,7 @@ O delay de confirmação não ajuda (dilui o ganho do bypass).**
 
 ## Artefactos
 
-- Script: `scripts/backtest_liquidation_catcher_real.py`
+- Script: `scripts/research/backtest_liquidation_catcher_real.py`
 - JSON completo: `data/backtests/liq_catcher_real_20260813.json` (metrics +
   manifest com `strategy_fidelity[LiquidationCatcher]` e `liq_provenance`)
 - Manifest: `data_source=sqlite_hl_research` · `fidelity_tier=tier_b_proxy_microstructure`

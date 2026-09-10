@@ -1,4 +1,4 @@
-"""Unit tests for scripts/vb_long_followthrough_variant.py.
+"""Unit tests for scripts/research/vb_long_followthrough_variant.py.
 
 Pins the follow-through mechanics on the forensic CSV: BB band parity with the
 strategy implementation, breakout-signal reproduction, confirmation-candle
@@ -15,7 +15,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import scripts.vb_long_followthrough_variant as v  # noqa: E402
+import scripts.research.vb_long_followthrough_variant as v  # noqa: E402
 from src.strategies.indicators import calculate_bollinger_bands  # noqa: E402
 
 

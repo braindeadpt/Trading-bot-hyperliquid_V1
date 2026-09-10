@@ -32,7 +32,7 @@ from typing import Optional
 # runtime knob.
 #
 # Calibrated 2026-08-14 against the real multi-venue 5m window (okx+bybit,
-# 13,268 events, 6,651 samples) by scripts/calibrate_liquidation_stopout_floor.py:
+# 13,268 events, 6,651 samples) by scripts/research/calibrate_liquidation_stopout_floor.py:
 # the p90 of the dominant window notional is 2.47M USD (p95 6.98M, p99 45.1M).
 # The previous 5.0M sat ~2x above that p90 — super-calibrated, it would almost
 # never fire. 2.5M keeps the p90 gate (only the top ~10% of windows exceed it)

@@ -1,4 +1,4 @@
-"""Unit tests for scripts/iv_high_only_ab_split.py.
+"""Unit tests for scripts/research/iv_high_only_ab_split.py.
 
 Pins the independent-window contract (non-overlapping 30d split + the
 >p66 high-IV threshold that produced +42.99) and the verdict rules.
@@ -14,11 +14,11 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.iv_high_only_ab_split import (  # noqa: E402
+from scripts.research.iv_high_only_ab_split import (  # noqa: E402
     IV_ONLY_PCT,
     _verdict_text,
 )
-from scripts.regime_router_a_b_test import split_windows  # noqa: E402
+from scripts.research.regime_router_a_b_test import split_windows  # noqa: E402
 
 
 def _win(n_hi: int, hi_pnl: float) -> dict:

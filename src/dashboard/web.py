@@ -23,7 +23,7 @@ from src.dashboard.auth import (
     validate_dashboard_token,
 )
 from src.utils.helpers import safe_float
-from scripts.preflight_feed_check import PREFLIGHT_REPORT_PATH  # noqa: E402
+from scripts.ops.preflight_feed_check import PREFLIGHT_REPORT_PATH  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +138,7 @@ def _enrich_iv(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     column.
     """
     try:
-        from scripts.iv_gate_shadow_vs_pnl import (
+        from scripts.research.iv_gate_shadow_vs_pnl import (
             join_decisions_to_trades,
             load_shadow_decisions,
             resolve_db_paths,
@@ -216,7 +216,7 @@ def _feed_silence_creep(feed_silence: Dict[str, Any]) -> Dict[str, Dict[str, Any
     """Per-feed creep verdict for the panel badge.
 
     Runs the SAME production rule the research supervisor watchdog uses
-    (``staircase_verdict`` in ``scripts/feed_age_creep_recheck.py`` — daily
+    (``staircase_verdict`` in ``scripts/research/feed_age_creep_recheck.py`` — daily
     max age non-decreasing over >=5 days with meaningful growth on the
     feed's own threshold), so the Feed Silence badge always agrees with the
     ``feed_age_creep`` watchdog panel. Best-effort: broken DB / missing
@@ -229,7 +229,7 @@ def _feed_silence_creep(feed_silence: Dict[str, Any]) -> Dict[str, Dict[str, Any
     if not feed_silence:
         return out
     try:
-        from scripts.feed_age_creep_recheck import (  # lazy, like other scripts
+        from scripts.research.feed_age_creep_recheck import (  # lazy, like other scripts
             load_daily_history,
             staircase_verdict,
         )
@@ -1615,7 +1615,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
     def api_iv_gate_shadow():
         """Shadow IV sample distribution — n per class + avg percentile.
 
-        Uses the exact same join/slices as ``scripts/iv_gate_shadow_vs_pnl.py``
+        Uses the exact same join/slices as ``scripts/research/iv_gate_shadow_vs_pnl.py``
         (the single source of truth), so the dashboard and the recheck watchdog
         can never disagree about what counts as a matched IV decision. Read-only
         research data — the gate stays shadow, never touches execution.
@@ -1624,11 +1624,11 @@ def create_app(config: Dict[str, Any]) -> tuple:
         if cached is not None:
             return jsonify(cached)
         try:
-            from scripts.iv_gate_shadow_vs_pnl import (
+            from scripts.research.iv_gate_shadow_vs_pnl import (
                 BACKTEST_EVIDENCE,
                 build_report,
             )
-            from scripts.iv_gate_shadow_recheck import (
+            from scripts.research.iv_gate_shadow_recheck import (
                 TARGET_CLOSED,
                 concentration_caveat,
             )

@@ -1,4 +1,4 @@
-"""Tests for scripts/iv_gate_shadow_vs_pnl.py — live high_iv vs low_iv comparison.
+"""Tests for scripts/research/iv_gate_shadow_vs_pnl.py — live high_iv vs low_iv comparison.
 
 The IV gate is shadow-only (docs/IV_HIGH_ONLY_AB_SPLIT.md, n=13 INCONCLUSIVE):
 the router records an ``iv_gate_shadow`` decision per routed trade (research
@@ -27,9 +27,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts import iv_gate_shadow_vs_pnl as pnl  # noqa: E402
+from scripts.research import iv_gate_shadow_vs_pnl as pnl  # noqa: E402
 
-SCRIPT = ROOT / "scripts" / "iv_gate_shadow_vs_pnl.py"
+SCRIPT = ROOT / "scripts" / "research" / "iv_gate_shadow_vs_pnl.py"
 
 pytestmark = pytest.mark.unit
 

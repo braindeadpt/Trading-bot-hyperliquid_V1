@@ -144,7 +144,7 @@ goto end
 echo.
 echo [MODE] Look-ahead Audit (static scan for future-data leakage)
 echo.
-python scripts/lookahead_audit.py --ci
+python scripts/ops/lookahead_audit.py --ci
 echo.
 pause
 goto end

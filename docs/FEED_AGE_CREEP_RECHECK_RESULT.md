@@ -10,4 +10,4 @@ Detector do **max age diário por feed contratado** (escada não-decrescente sob
 
 _Sem feeds com creep — todos os maxes diários estáveis._
 
-_Gerado por `scripts/feed_age_creep_recheck.py` — read-only, nunca trade._
+_Gerado por `scripts/research/feed_age_creep_recheck.py` — read-only, nunca trade._

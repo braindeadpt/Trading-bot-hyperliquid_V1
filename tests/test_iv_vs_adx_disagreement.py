@@ -1,4 +1,4 @@
-"""Unit tests for scripts/iv_vs_adx_disagreement.py.
+"""Unit tests for scripts/research/iv_vs_adx_disagreement.py.
 
 Pins the keep/block decision rules of both gates and the disagreement
 verdict logic (which gate wins where the two signals disagree).
@@ -14,7 +14,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.iv_vs_adx_disagreement import (  # noqa: E402
+from scripts.research.iv_vs_adx_disagreement import (  # noqa: E402
     adx_keep,
     disagreement_verdict,
     iv_keep,

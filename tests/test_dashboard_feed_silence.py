@@ -676,7 +676,7 @@ class TestWarnLevelDerivation:
         precedence can never diverge between the live monitor and the script."""
         import inspect
 
-        import scripts.feed_cadence_diagnostic as diag
+        import scripts.research.feed_cadence_diagnostic as diag
 
         src = inspect.getsource(diag.live_snapshot_equivalent)
         assert "warn_level_from_flags" in src

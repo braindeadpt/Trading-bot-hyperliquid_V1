@@ -1,6 +1,6 @@
 """Tests for SecurityAuditor.run(targets=...) — the scoped scan.
 
-The pre-commit fast path (scripts/run_git_hooks.py) audits ONLY the staged
+The pre-commit fast path (scripts/ops/run_git_hooks.py) audits ONLY the staged
 ``.py`` files under ``src/`` instead of the whole tree. These tests pin that
 scoped behaviour and prove the default (``run()`` with no targets) still
 scans the whole tree exactly as before.

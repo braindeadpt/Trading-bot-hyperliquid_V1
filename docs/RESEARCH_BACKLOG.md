@@ -9,7 +9,7 @@ ideas are not lost *and* not acted on prematurely.
 execution; sizing 2.0%; governor last-exec protection). Prior window archived
 beside `data/research/phase10/phase10_preregister.json`. Any *further* change
 to `config/settings.yaml` invalidates the new window — re-register via
-`scripts/reregister_phase10_deadlock_fix.py` (or equivalent) with justification;
+`scripts/ops/reregister_phase10_deadlock_fix.py` (or equivalent) with justification;
 never disable `assert_config_matches_preregister`. ChecklistMeta promotion is
 partly in-sample — OOS walk-forward is mandatory before treating the ruleset
 as validated.
@@ -37,11 +37,11 @@ Last updated: 2026-08-10 (paper OOS 90d protocol + tier-0 fees; XS momentum C)
 `execution.maker_orders.maker_fee_pct` is **0.015** (official Hyperliquid
 perps tier-0). `backtest.commission_pct` matches taker. Prior maker tests
 that used 0.01 remain valid as optimistic lower bounds. Re-register via
-`scripts/reregister_phase10_tier0_fees.py` before counting a new OOS window.
+`scripts/ops/reregister_phase10_tier0_fees.py` before counting a new OOS window.
 
 ### Archived — cross-sectional slow momentum (verdict C)
 
-`scripts/xs_momentum_feasibility.py` /
+`scripts/research/xs_momentum_feasibility.py` /
 `docs/XS_MOMENTUM_FEASIBILITY.md` (2026-08-10):
 
 - **Data viability GO:** HL 1d panel 232 names (55 delisted with history),
@@ -56,8 +56,8 @@ that used 0.01 remain valid as optimistic lower bounds. Re-register via
 
 ### Archived — OI backfill viability + positioning screen (verdict C)
 
-`docs/OI_BACKFILL_VIABILITY.md`, `scripts/backfill_oi_bybit_research.py`,
-`scripts/feature_screening_oi_positioning.py`,
+`docs/OI_BACKFILL_VIABILITY.md`, `scripts/research/backfill_oi_bybit_research.py`,
+`scripts/research/feature_screening_oi_positioning.py`,
 `docs/FEATURE_SCREENING_OI_POSITIONING.md` (2026-08-10):
 
 - HL-native OI only ~66d → prior `oi_delta_24h` BE 19.6 / CI [−39,+39] was
@@ -70,7 +70,7 @@ that used 0.01 remain valid as optimistic lower bounds. Re-register via
 
 ### Archived — tape-native CVD/OIR screen (verdict C)
 
-`scripts/feature_screening_tape_native.py` /
+`scripts/research/feature_screening_tape_native.py` /
 `docs/FEATURE_SCREENING_TAPE_NATIVE.md` (2026-08-10):
 
 - Real `trade_tape` + real OIR (~29 dates). Expectation: stats maybe, tradable no.
@@ -79,7 +79,7 @@ that used 0.01 remain valid as optimistic lower bounds. Re-register via
 
 ### Archived — 24m candle-only feature re-screen (verdict C)
 
-`scripts/feature_screening_24m_candles.py` /
+`scripts/research/feature_screening_24m_candles.py` /
 `docs/FEATURE_SCREENING_24M_CANDLES.md` (2026-08-09):
 
 - Proxy DB 24m, **731** UTC dates, bar-level IC + **date-cluster** bootstrap.
@@ -94,7 +94,7 @@ that used 0.01 remain valid as optimistic lower bounds. Re-register via
 
 ### Archived — 24m price STRUCTURE features (verdict C) — candle space CLOSED
 
-`scripts/feature_screening_24m_structure.py` /
+`scripts/research/feature_screening_24m_structure.py` /
 `docs/FEATURE_SCREENING_24M_STRUCTURE.md` (2026-08-10):
 
 - Gap closed: continuous S/R, Donchian position, %B, breakout age/magnitude,
@@ -112,7 +112,7 @@ without a new non-candle information source (L2 depth / queue / maker AS).
 
 ### Archived — maker fill + adverse selection on 24m survivors (verdict C)
 
-`scripts/maker_fill_adverse_selection_24m.py` /
+`scripts/research/maker_fill_adverse_selection_24m.py` /
 `docs/MAKER_FILL_ADVERSE_SELECTION_24M.md` (2026-08-10):
 
 - Same proxy DB (731 dates). OHLC penetration fills only (no L2/queue).
@@ -127,7 +127,7 @@ without a new non-candle information source (L2 depth / queue / maker AS).
 
 ### Archived — Hyperliquid MM feasibility (verdict C)
 
-`scripts/mm_feasibility_study.py` /
+`scripts/research/mm_feasibility_study.py` /
 `docs/MARKET_MAKING_FEASIBILITY.md` (2026-08-10):
 
 - 31d HL `l2_snapshots` + sampled `trade_tape` (read-only); ~1–2d depth books on E:.
@@ -139,7 +139,7 @@ without a new non-candle information source (L2 depth / queue / maker AS).
 
 ### Archived — MM liquidity-spectrum addendum (verdict C, definitive)
 
-`scripts/mm_feasibility_liquidity_spectrum.py` /
+`scripts/research/mm_feasibility_liquidity_spectrum.py` /
 `docs/MARKET_MAKING_FEASIBILITY_LIQUIDITY_SPECTRUM.md` (2026-08-10):
 
 - 177 HL perps ranked by `dayNtlVlm`; 12 symbols REST-polled 12 min (bot untouched).
@@ -215,7 +215,7 @@ Enquadramento (keep this exact framing):
 - Revisit only inside a future **feature-screening pipeline** (raw predictive
   power vs forward returns), not as another strategy parameter loop.
 
-**Screening update (2026-08-09):** `scripts/feature_screening.py` included
+**Screening update (2026-08-09):** `scripts/research/feature_screening.py` included
 `cvd_price_div_signed` / `cvd_div_strength`. Some cells clear FDR but fail
 monotonicity (degenerate quintiles) and are **not** TOP survivors — same
 enquadramento: weak/inconsistent as a *feature block*, not a strategy reopen.
@@ -227,7 +227,7 @@ Artifacts: `CVD_P90_CALIBRATION.md`, `baseline_gate_CVDOrderFlow_p90.json`.
 ### Archived — short-horizon mean reversion (cost test)
 
 Screening found genuine short-horizon fade structure (`ret_lag_*`, IC≈−0.06,
-monotone, stable). Cost test (`scripts/reversion_cost_test.py`,
+monotone, stable). Cost test (`scripts/research/reversion_cost_test.py`,
 `docs/REVERSION_COST_TEST.md`) verdict **(C)**:
 
 - Best gross breakeven RT ≈ **4.21 bps**
@@ -244,7 +244,7 @@ drops enough that taker RT < breakeven.
 
 ### Archived — ret_lag fade through 24h + long-horizon cost scan
 
-`scripts/long_horizon_cost_test.py` / `docs/LONG_HORIZON_COST_TEST.md` (2026-08-09):
+`scripts/research/long_horizon_cost_test.py` / `docs/LONG_HORIZON_COST_TEST.md` (2026-08-09):
 
 - **`ret_lag` fade 15m→24h: CLOSED (not exploitable).** Short-horizon best BE was
   4.21 bps; at 12h/24h gross BE turns ≤0 / more negative. Do not build a fade
@@ -260,7 +260,7 @@ above — not on reversion.
 
 ### Archived — atr_percentile_7d@24h long revalidation
 
-Long revalidation (`scripts/validate_atr_percentile_long.py`,
+Long revalidation (`scripts/research/validate_atr_percentile_long.py`,
 `docs/ATR_PERCENTILE_LONG_REVALIDATION.md`) verdict **(C)**:
 
 - Short-sample BE ≈ 34.5 bps looked like (A); long sample /

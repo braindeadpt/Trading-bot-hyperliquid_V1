@@ -8,7 +8,7 @@ is the source of truth for the ledger.
 
 ## What this is
 
-The v2 simulation (scripts/liquidation_flush_shadow.py) found one cell that
+The v2 simulation (scripts/research/liquidation_flush_shadow.py) found one cell that
 approached the baseline gate on the REAL liquidation source (okx+bybit):
 **ETH, p90 of dominant-minute notional, hold 30m, fade, no SL** — n=46,
 WR 50.0%, PF 2.35, avg +7.0 bps (evidence: `data/backtests/liquidation_flush_shadow_v2_evidence.md`).
@@ -72,7 +72,7 @@ parity check — entry timestamps matched, side did not.
 
 ```bash
 tail -f logs/liquidation_flush_shadow_live.out            # live events + reports
-python scripts/liquidation_flush_shadow_live.py --once    # single backfill pass + report (safe to run while monitor runs)
+python scripts/research/liquidation_flush_shadow_live.py --once    # single backfill pass + report (safe to run while monitor runs)
 python -c "import json; s=json.load(open('data/research/liquidation_flush_shadow_live_state.json')); print(len(s['trades']), 'trades,', len(s['open_positions']), 'open')"
 ```
 

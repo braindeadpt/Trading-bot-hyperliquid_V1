@@ -1,6 +1,6 @@
 # Failed_breakout do VB × liquidações — o cruzamento literal é impossível, o proxy mostra reversão fraca mas o rework já resolve
 
-**Data:** 2026-08-13 · **Script:** `scripts/vb_shorts_liq_crosscheck.py` (PART C)
+**Data:** 2026-08-13 · **Script:** `scripts/research/vb_shorts_liq_crosscheck.py` (PART C)
 **Fonte:** forensics VB `data/backtests/vb_forensics_20260813_040003.csv` + candles_1m
 
 ## A pergunta

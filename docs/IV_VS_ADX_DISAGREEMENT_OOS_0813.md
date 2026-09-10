@@ -3,7 +3,7 @@
 Gerado: 2026-08-13 13:06 UTC · janela **2026-08-07 -> 2026-08-13** (fora da
 amostra 05-18→08-07 que gerou ambos os gates) · IV keep = DVOL pct(30d) > 66.7 ·
 ADX keep = VB {expansion} / VWAP {low_vol, unknown} · ADX(14) 15m fechado
-(range 20 / trend 25). Mesma maquinaria de `scripts/iv_vs_adx_disagreement.py`.
+(range 20 / trend 25). Mesma maquinaria de `scripts/research/iv_vs_adx_disagreement.py`.
 
 ## Concordância / discordância (janela fresca, 15 trades)
 

@@ -84,6 +84,6 @@ pytest-asyncio==1.4.0    # Async test support (pytest<10,>=8.4)
 # Optional: node_trades S3 rebuild (GoldRush parity fallback)
 # ═════════════════════════════════════════════════════════════════════════════
 # boto3==1.35.0           # Required only for real S3 downloads via
-#                         # scripts/hl_node_trades_rebuild.py --execute
+#                         # scripts/research/hl_node_trades_rebuild.py --execute
 #                         # (requester-pays; AWS credentials required)
 # lz4==4.3.3              # Optional: decompress LZ4-framed node_trades archives

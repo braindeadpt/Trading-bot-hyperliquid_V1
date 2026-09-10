@@ -482,7 +482,7 @@ class SecurityAuditor:
 
         With *targets* (a list of ``.py`` paths, resolved relative to
         ``src_dir``), only those files are scanned — the fast path used by the
-        pre-commit hook (scripts/run_git_hooks.py). The default (``None``)
+        pre-commit hook (scripts/ops/run_git_hooks.py). The default (``None``)
         scans the whole tree, exactly as before.
         """
         self.findings.clear()

@@ -1,4 +1,4 @@
-"""Tests for scripts/feed_cadence_diagnostic.py.
+"""Tests for scripts/research/feed_cadence_diagnostic.py.
 
 Pins the cadence math (inter-event gaps, historical p95/p99, recent stats,
 least-squares trend) and the verdict contract: a feed whose recent median
@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "feed_cadence_diagnostic.py"
+SCRIPT = ROOT / "scripts" / "research" / "feed_cadence_diagnostic.py"
 
 pytestmark = pytest.mark.unit
 
@@ -64,7 +64,7 @@ def _run(args):
 # ── pure helpers ─────────────────────────────────────────────────────────
 
 def test_inter_event_gaps_and_percentile() -> None:
-    from scripts.feed_cadence_diagnostic import (
+    from scripts.research.feed_cadence_diagnostic import (
         inter_event_gaps,
         percentile,
     )
@@ -78,7 +78,7 @@ def test_inter_event_gaps_and_percentile() -> None:
 
 
 def test_inter_event_gaps_caps_absurd_gaps() -> None:
-    from scripts.feed_cadence_diagnostic import inter_event_gaps
+    from scripts.research.feed_cadence_diagnostic import inter_event_gaps
 
     # A 30h gap is an outage, not cadence — capped out of the baseline.
     ts = [1000, 1000 + 60_000, 1000 + 30 * 3600_000]
@@ -87,7 +87,7 @@ def test_inter_event_gaps_caps_absurd_gaps() -> None:
 
 
 def test_least_squares_slope_positive_and_flat() -> None:
-    from scripts.feed_cadence_diagnostic import least_squares_slope
+    from scripts.research.feed_cadence_diagnostic import least_squares_slope
 
     rising = least_squares_slope([0.0, 1.0, 2.0, 3.0], [1.0, 2.0, 3.0, 4.0])
     assert rising > 0
@@ -96,7 +96,7 @@ def test_least_squares_slope_positive_and_flat() -> None:
 
 
 def test_analyze_feed_degrading_when_recent_median_above_hist_p99() -> None:
-    from scripts.feed_cadence_diagnostic import analyze_feed
+    from scripts.research.feed_cadence_diagnostic import analyze_feed
 
     # History: 200 gaps of 1 min. Recent (last 1h): 5 gaps of 30 min.
     ts = []
@@ -116,7 +116,7 @@ def test_analyze_feed_degrading_when_recent_median_above_hist_p99() -> None:
 
 
 def test_analyze_feed_ok_when_cadence_unchanged() -> None:
-    from scripts.feed_cadence_diagnostic import analyze_feed
+    from scripts.research.feed_cadence_diagnostic import analyze_feed
 
     ts = []
     t = NOW - 300 * MIN
@@ -130,7 +130,7 @@ def test_analyze_feed_ok_when_cadence_unchanged() -> None:
 
 
 def test_analyze_feed_insufficient_history() -> None:
-    from scripts.feed_cadence_diagnostic import analyze_feed
+    from scripts.research.feed_cadence_diagnostic import analyze_feed
 
     ts = [1000, 1000 + 60_000, 1000 + 120_000]  # only 2 gaps
     st = analyze_feed("liquidation_okx", ts, now_ms=1000 + 5 * MIN, recent_ms=3600_000,
@@ -202,7 +202,7 @@ def _okx_ts(gap_secs, start=1_000_000):
 
 
 def test_live_snapshot_equivalent_healthy() -> None:
-    from scripts.feed_cadence_diagnostic import live_snapshot_equivalent
+    from scripts.research.feed_cadence_diagnostic import live_snapshot_equivalent
 
     ts = _okx_ts([60.0] * 120)
     now = ts[-1] + 30_000  # age 30s
@@ -220,7 +220,7 @@ def test_live_snapshot_equivalent_healthy() -> None:
 
 
 def test_live_snapshot_warn_levels_by_age() -> None:
-    from scripts.feed_cadence_diagnostic import live_snapshot_equivalent
+    from scripts.research.feed_cadence_diagnostic import live_snapshot_equivalent
 
     ts = _okx_ts([60.0] * 120)
     max_sil = 21600.0
@@ -238,7 +238,7 @@ def test_live_snapshot_warn_levels_by_age() -> None:
 
 
 def test_live_snapshot_none_without_events() -> None:
-    from scripts.feed_cadence_diagnostic import live_snapshot_equivalent
+    from scripts.research.feed_cadence_diagnostic import live_snapshot_equivalent
 
     assert live_snapshot_equivalent(
         [], now_ms=1, max_silence_sec=21600.0, warn_fraction=0.5,
@@ -252,7 +252,7 @@ def test_live_snapshot_none_without_events() -> None:
 
 
 def test_cross_verdict_buckets() -> None:
-    from scripts.feed_cadence_diagnostic import cross_verdict
+    from scripts.research.feed_cadence_diagnostic import cross_verdict
 
     none = {"warn_level": "none"}
     early = {"warn_level": "early"}
@@ -295,7 +295,7 @@ def test_json_report_crosses_with_live_snapshot() -> None:
 def test_report_accumulates_history_per_feed() -> None:
     """Two runs accumulate two history rows per feed in the JSON, and the
     markdown report shows the current state + the per-feed trend table."""
-    from scripts.feed_cadence_diagnostic import (
+    from scripts.research.feed_cadence_diagnostic import (
         load_cadence_history,
         render_markdown_report,
         write_cadence_report,
@@ -329,7 +329,7 @@ def test_report_accumulates_history_per_feed() -> None:
 
 
 def test_history_cap_per_feed() -> None:
-    from scripts.feed_cadence_diagnostic import (
+    from scripts.research.feed_cadence_diagnostic import (
         HISTORY_CAP_PER_FEED,
         record_and_save_history,
     )
@@ -342,13 +342,13 @@ def test_history_cap_per_feed() -> None:
         }
         # 3 runs would exceed the tiny cap -> only the cap survives
         old = HISTORY_CAP_PER_FEED
-        from scripts import feed_cadence_diagnostic as dg
+        from scripts.research import feed_cadence_diagnostic as dg
         dg.HISTORY_CAP_PER_FEED = 3
         try:
             for _ in range(5):
                 record_and_save_history(report, path=hp)
         finally:
             dg.HISTORY_CAP_PER_FEED = old
-        from scripts.feed_cadence_diagnostic import load_cadence_history
+        from scripts.research.feed_cadence_diagnostic import load_cadence_history
         history = load_cadence_history(path=hp)
         assert len([h for h in history if h["feed"] == "liquidation_okx"]) == 3

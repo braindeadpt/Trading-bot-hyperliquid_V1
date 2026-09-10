@@ -47,7 +47,7 @@ Applied in `config/settings.yaml` (2026-08-09, operator-confirmed): `liquidation
 Why p90 not p95: in shadow, extra signals cost nothing and speed n≥30 accumulation.
 
 **Do not read “p90” as multi-venue truth.** Calibration used OKX alone
-(`scripts/calibrate_liquidation_thresholds.py` →
+(`scripts/research/calibrate_liquidation_thresholds.py` →
 `data/backtests/parity_diag/liq_threshold_calibration_okx.json`). The live
 window **sums OKX+Bybit**, so the same dollar cut will sit closer to
 **~p75–p80 of the aggregated distribution**. Recalibrate from DB rows with
@@ -117,12 +117,12 @@ Missing instruments are logged once and skipped — never silently ignored mid-s
 - `src/exchanges/liquidation_event.py` — shared model + provenance helpers
 - `src/exchanges/liquidation_aggregator.py` — WS aggregator
 - `main.py` — starts aggregator when mode ∈ {real, auto, binance}
-- Threshold calibration: `scripts/calibrate_liquidation_thresholds.py` (OKX REST distribution → proposed p90/p95; **does not write YAML**)
+- Threshold calibration: `scripts/research/calibrate_liquidation_thresholds.py` (OKX REST distribution → proposed p90/p95; **does not write YAML**)
 
 ## Threshold recalibration
 
 1. Wait until DB has enough **real** rows (`source != proxy`) across venues.
-2. Re-run `scripts/calibrate_liquidation_thresholds.py` **and/or** compute
+2. Re-run `scripts/research/calibrate_liquidation_thresholds.py` **and/or** compute
    percentiles on the engine’s summed 5m windows (preferred — matches live
    aggregation semantics).
 3. Ask before rewriting YAML; replace the PROVISIONAL comments with the new

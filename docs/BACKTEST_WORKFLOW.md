@@ -16,16 +16,16 @@
 
 ```bash
 # Auditoria completa (usa bot.db) — ~2h com --quick
-python scripts/backtest_strategy_audit.py --quick
+python scripts/research/backtest_strategy_audit.py --quick
 
 # Auditoria com todas as janelas (incl. E_feeds para LeadLag/LiqCatcher)
-python scripts/backtest_strategy_audit.py
+python scripts/research/backtest_strategy_audit.py
 
 # Relatório a partir de CSV existente
-python scripts/generate_strategy_audit_report.py
+python scripts/research/generate_strategy_audit_report.py
 
 # Backtest legado (3 janelas fixas)
-python scripts/backtest_per_strategy.py
+python scripts/research/backtest_per_strategy.py
 ```
 
 ## Outputs
@@ -49,15 +49,15 @@ python scripts/backtest_per_strategy.py
 Backfill antes de re-testar estratégias NO_DATA:
 
 ```bash
-python scripts/backfill_funding.py
-python scripts/backfill_external_feeds.py
-python scripts/backfill_candles.py --days 30
+python scripts/ops/backfill_funding.py
+python scripts/ops/backfill_external_feeds.py
+python scripts/ops/backfill_candles.py --days 30
 ```
 
 ## Ciclo recomendado (mensal)
 
 1. Backfill dados em falta
-2. `python scripts/backtest_strategy_audit.py --quick`
+2. `python scripts/research/backtest_strategy_audit.py --quick`
 3. Rever `docs/STRATEGY_AUDIT.md`
 4. Atualizar `settings.yaml` (só KEEP + WATCH promovidos)
 5. Paper 2 semanas → comparar live vs backtest

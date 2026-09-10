@@ -35,7 +35,7 @@ adoption, kill switch). Account left flat, 0 open orders.
 **Testnet gate row now PASS.** Mainnet remains NOT READY — the frozen paper
 window, live-vs-replay parity, and GoldRush readiness are still open. The
 paper bot had also deadlocked on the 10% drawdown CB (frozen equity re-trip
-each UTC day); `scripts/reset_paper_session.py --apply` now performs a real
+each UTC day); `scripts/ops/reset_paper_session.py --apply` now performs a real
 persistent reset and evidence collection resumed 2026-09-10.
 
 ---
@@ -60,7 +60,7 @@ persistent reset and evidence collection resumed 2026-09-10.
 
 The gate protocol is implemented in `src/research/phase10_preregister.py`
 (manifest freeze) and `src/research/phase10_gate_metrics.py` /
-`scripts/phase10_check_gate.py` (metrics + pass/fail evaluation).
+`scripts/ops/phase10_check_gate.py` (metrics + pass/fail evaluation).
 
 **Frozen manifest** (`data/research/phase10/phase10_preregister.json`, read
 directly this session):
@@ -73,7 +73,7 @@ directly this session):
 | `window.min_weeks` / `max_weeks` | 8 / 12 |
 | Gate thresholds | `min_trades=100`, `min_profit_factor=1.20`, `expectancy_r_gt=0.0`, `max_drawdown_pct=5.0` |
 
-**Real gate-check output**, from `python scripts/phase10_check_gate.py` run
+**Real gate-check output**, from `python scripts/ops/phase10_check_gate.py` run
 in this session:
 
 ```
@@ -106,7 +106,7 @@ opened; 0 of the required ≥100 trades exist yet.**
 ## 2. Live-vs-replay drift check
 
 Implemented in `src/research/live_vs_replay.py` +
-`scripts/phase10_live_vs_replay.py`. It compares closed `trades` rows in
+`scripts/research/phase10_live_vs_replay.py`. It compares closed `trades` rows in
 `data/live/bot.db` for the frozen window against a fresh `BacktestEngine`
 replay of a read-only snapshot of the exact same candles, under the exact
 same effective config, across 8 dimensions (signal count, gate rejections,
@@ -186,12 +186,12 @@ Per `AGENTS.md` §1 ("Current operational status") and
 - A parity divergence was found between GoldRush HyperCore candles and the
   official `hl_candleSnapshot` feed for specific symbol/time windows.
 - A fallback pipeline (`src/data/candle_providers/node_trades_rebuild.py`,
-  `scripts/hl_node_trades_rebuild.py`) was built to rebuild 1m OHLCV directly
+  `scripts/research/hl_node_trades_rebuild.py`) was built to rebuild 1m OHLCV directly
   from official Hyperliquid node-data S3 archives
   (`node_fills_by_block/hourly/{date}/{hour}.lz4`) for the disputed windows.
 - **This pipeline has not yet been executed for real.** It requires AWS
   credentials + `boto3` (requester-pays S3) and is currently dry-run only
-  (`scripts/hl_node_trades_rebuild.py` without `--execute`). Rebuilt data is
+  (`scripts/research/hl_node_trades_rebuild.py` without `--execute`). Rebuilt data is
   explicitly documented as "not automatically treated as validated" —
   OOS/tuning stays blocked until the rebuilt candles pass their own
   secondary validation.
@@ -268,11 +268,11 @@ the testnet_live suite; the rest are `network`-marked tests such as
 
 | Gate criterion | Threshold | Current value | Status | Evidence location |
 |---|---|---|---|---|
-| Frozen window — min trades | ≥ 100 | 0 | **FAIL** | `python scripts/phase10_check_gate.py` output above; `data/live/bot.db` |
+| Frozen window — min trades | ≥ 100 | 0 | **FAIL** | `python scripts/ops/phase10_check_gate.py` output above; `data/live/bot.db` |
 | Frozen window — profit factor | ≥ 1.20 | 0.0 (no basis) | **INSUFFICIENT_DATA** | same |
 | Frozen window — expectancy_r | > 0.0 | 0.0 (no basis) | **INSUFFICIENT_DATA** | same |
 | Frozen window — max drawdown | ≤ 5.0% | 0.0 (no basis) | **INSUFFICIENT_DATA** | same |
-| Live-vs-replay drift | verdict = PASS | not meaningfully computable (0 live trades) | **NOT YET RUN** | `src/research/live_vs_replay.py`, `scripts/phase10_live_vs_replay.py` |
+| Live-vs-replay drift | verdict = PASS | not meaningfully computable (0 live trades) | **NOT YET RUN** | `src/research/live_vs_replay.py`, `scripts/research/phase10_live_vs_replay.py` |
 | Testnet e2e scenarios (8) | all pass | 8/8 skipped, no credentials | **NOT YET RUN** | `python -m pytest tests/test_testnet_e2e.py -v -m testnet_live` output above; `docs/TESTNET_E2E_GUIDE.md` |
 | Native SL/TP + kill switch real-exchange proof | scenarios 5 & 8 pass | same 8-skipped set | **NOT YET RUN** | same as above |
 | GoldRush data readiness | rebuilt candles pass secondary validation | rebuild pipeline built, not executed (no AWS creds run) | **NOT YET RUN / BLOCKED** | `docs/NODE_TRADES_REBUILD.md` |
@@ -288,7 +288,7 @@ Fase 10 go/no-go gate itself.**
 
 ## Verification log (commands actually run this session)
 
-1. `python scripts/phase10_check_gate.py` — gate report above.
+1. `python scripts/ops/phase10_check_gate.py` — gate report above.
 2. `python -X utf8 -m src.security.audit --verbose --src-dir src` — audit
    report above (equivalent to `python main.py --audit`, which was also run
    and confirmed to write the identical findings to

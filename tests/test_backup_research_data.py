@@ -1,4 +1,4 @@
-"""Unit tests for scripts/backup_research_data.py (offline)."""
+"""Unit tests for scripts/ops/backup_research_data.py (offline)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import backup_research_data as br
+from scripts.ops import backup_research_data as br
 
 
 def _make_db(path: Path, *, table: str, rows: int) -> None:

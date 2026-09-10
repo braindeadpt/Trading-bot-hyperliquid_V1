@@ -29,4 +29,4 @@ O detector `FEED CADENCE` avisa quando o gap actual ultrapassa o **p99 históric
 | Casados com fires simulados (±900s) | 0 |
 | Janela dos alertas reais | — → — |
 
-_Gerado por `scripts/validate_feed_cadence_leadtime.py` — read-only, nunca trade._
+_Gerado por `scripts/research/validate_feed_cadence_leadtime.py` — read-only, nunca trade._

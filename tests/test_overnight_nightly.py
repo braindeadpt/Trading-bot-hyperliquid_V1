@@ -1,4 +1,4 @@
-"""Tests for scripts/overnight_nightly.py — the queue-driven cron wrapper.
+"""Tests for scripts/research/overnight_nightly.py — the queue-driven cron wrapper.
 
 Pins the wrapper's contract without running backtests:
 - pick_ready(): first READY section, parseable family + window set + cells,
@@ -22,38 +22,38 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts import overnight_nightly as nw  # noqa: E402
+from scripts.research import overnight_nightly as nw  # noqa: E402
 
 READY_QUEUE = """# queue
 
 ## Test family (READY — wired)
-- **Harness:** `python scripts/overnight_runner.py --family vwap_thresholds --cells 0,1 --symbols BTC,ETH`
+- **Harness:** `python scripts/research/overnight_runner.py --family vwap_thresholds --cells 0,1 --symbols BTC,ETH`
 - **Window set:** 2026-05-18..2026-09-08, split 30d -> 4 non-overlapping windows.
 - **Grid:** 2 cells x 4 = 8 runs.
 
 ## Blocked family (BLOCKED — K=4 floor)
-- **Harness:** `python scripts/overnight_runner.py --family flush_fade`
+- **Harness:** `python scripts/research/overnight_runner.py --family flush_fade`
 - **Window set:** 2026-08-07..2026-09-09, split 30d -> 2 windows.
 """
 
 K3_QUEUE = """# queue
 
 ## Short family (READY — wired)
-- **Harness:** `python scripts/overnight_runner.py --family vwap_thresholds`
+- **Harness:** `python scripts/research/overnight_runner.py --family vwap_thresholds`
 - **Window set:** 2026-08-07..2026-09-09, split 30d -> windows.
 """
 
 DVOL_QUEUE = """# queue
 
 ## Night 3 (READY — coverage-gated)
-- **Harness:** `python scripts/overnight_runner.py --family iv_thresholds --start dvol --end dvol --symbols BTC,ETH,SOL,HYPE --cells 0,1,2`
+- **Harness:** `python scripts/research/overnight_runner.py --family iv_thresholds --start dvol --end dvol --symbols BTC,ETH,SOL,HYPE --cells 0,1,2`
 - **Window set:** DVOL coverage (starts 2026-06-14), 30d split — K=4 needs ~115d.
 """
 
 NO_READY_QUEUE = """# queue
 
 ## Night 1 — done (CLOSED)
-- **Harness:** `python scripts/overnight_runner.py --family flush_fade`
+- **Harness:** `python scripts/research/overnight_runner.py --family flush_fade`
 
 ## Night 3 — blocked (BLOCKED — reopen ~ 2026-10-08)
 - **Harness:** wrap iv script as family `iv_thresholds`.
@@ -96,7 +96,7 @@ class TestPickReady:
         q = tmp_path / "Q.md"
         q.write_text("""# q
 ## F (READY — wired)
-- **Harness**: `python scripts/overnight_runner.py --family flush_fade`
+- **Harness**: `python scripts/research/overnight_runner.py --family flush_fade`
 - **Window set**: 2026-05-18..2026-09-08, split 30d -> 4 windows.
 """, encoding="utf-8")
         sel = nw.pick_ready(q)
@@ -111,7 +111,7 @@ class TestPickReady:
         q = tmp_path / "Q.md"
         q.write_text("""# q
 ## F (READY — wired)
-- **Harness:** `python scripts/overnight_runner.py --family vwap_thresholds`
+- **Harness:** `python scripts/research/overnight_runner.py --family vwap_thresholds`
 """, encoding="utf-8")
         assert nw.pick_ready(q) is None
 

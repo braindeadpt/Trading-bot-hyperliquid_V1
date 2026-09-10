@@ -1,4 +1,4 @@
-"""Tests for scripts/overnight_runner.py — the gated overnight sweep.
+"""Tests for scripts/research/overnight_runner.py — the gated overnight sweep.
 
 Pins the research_program.md verdict rules: KEEP requires multi-window
 majority + aggregate n>=30 + PF>1 + no catastrophic window (+ the exact
@@ -18,7 +18,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-from scripts import overnight_runner as mod  # noqa: E402
+from scripts.research import overnight_runner as mod  # noqa: E402
 
 
 def cell(pnl: float, n: int, gw: float, gl: float) -> dict:
@@ -847,7 +847,7 @@ def test_iv_run_one_caches_engine_pass(monkeypatch):
         def close(self):
             pass
 
-    import scripts.iv_high_only_ab_split as ivmod
+    import scripts.research.iv_high_only_ab_split as ivmod
     from src.data.dvol_feed import DVOL_WINDOW_DAYS, build_iv_percentile
 
     # Deterministic DVOL: 60 flat days then 3 extreme-high closes. A trade
@@ -872,7 +872,7 @@ def test_iv_run_one_caches_engine_pass(monkeypatch):
     monkeypatch.setattr(ivmod, "SPECS",
                         [("VWAPDeviation", object, "strategy.vwap_deviation")])
 
-    import scripts.regime_router_a_b_test as rr
+    import scripts.research.regime_router_a_b_test as rr
 
     def fake_run_strategy(cfg, db, cls, path, s_ms, e_ms, symbols):
         calls["n"] += 1

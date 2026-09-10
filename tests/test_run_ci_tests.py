@@ -1,4 +1,4 @@
-"""Tests for the trio CI runner (scripts/run_ci_tests.py).
+"""Tests for the trio CI runner (scripts/ops/run_ci_tests.py).
 
 Pins the contract that one command now runs the full pre-push trio — pytest
 battery, security audit, config_hash vs the Fase 10 frozen manifest — in
@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "run_ci_tests.py"
+SCRIPT = ROOT / "scripts" / "ops" / "run_ci_tests.py"
 REAL_SETTINGS = ROOT / "config" / "settings.yaml"
 REAL_ENV = ROOT / ".env"
 REAL_MANIFEST = (
@@ -36,7 +36,7 @@ pytestmark = pytest.mark.unit
 
 
 def _load_runner():
-    """Import scripts/run_ci_tests.py by path (scripts/ is not a package)."""
+    """Import scripts/ops/run_ci_tests.py by path (scripts/ is not a package)."""
     spec = importlib.util.spec_from_file_location("run_ci_tests", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

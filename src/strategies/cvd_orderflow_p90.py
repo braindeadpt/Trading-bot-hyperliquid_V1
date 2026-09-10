@@ -1,7 +1,7 @@
 """CVDOrderFlow_p90 — distribution-calibrated variant (not a silent retune).
 
 Threshold = aggregate p90 of non-zero medium-window |divergence| from
-``scripts/calibrate_cvd_divergence.py``. Default falls back to last known
+``scripts/research/calibrate_cvd_divergence.py``. Default falls back to last known
 calibration (0.12) if the JSON artifact is missing.
 """
 

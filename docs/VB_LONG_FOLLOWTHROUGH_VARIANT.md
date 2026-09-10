@@ -1,6 +1,6 @@
 # VB long-only + follow-through — mesma amostra forense, nova simulação
 
-**Data:** 2026-08-13 · **Script:** `scripts/vb_long_followthrough_variant.py`
+**Data:** 2026-08-13 · **Script:** `scripts/research/vb_long_followthrough_variant.py`
 **Fonte:** `data/backtests/vb_forensics_20260813_040003.csv` (83 trades) + `candles_15m`
 
 ## A variante (backlog #1.5)
@@ -73,7 +73,7 @@ estudo.
 
 ## Implementação
 
-* `scripts/vb_long_followthrough_variant.py` — reconstrução BB(20,2) idêntica à
+* `scripts/research/vb_long_followthrough_variant.py` — reconstrução BB(20,2) idêntica à
   estratégia, validação 83/83 do sinal, fatias comparativas, JSON persistido
   (`data/backtests/vb_long_ft_variant_*.json`).
 * 8 testes unitários (paridade BB, confirmação long/short, rejeição de

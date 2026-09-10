@@ -105,7 +105,7 @@ def _write_package(tmp_path: Path, entries) -> Path:
 # ---------------------------------------------------------------------------
 # S3 key layout — matches the real hl-mainnet-node-data/node_fills_by_block/
 # shape confirmed via a real read-only list_objects_v2
-# (scripts/check_hl_s3_access.py): node_fills_by_block/hourly/{YYYYMMDD}/{hour}.lz4,
+# (scripts/ops/check_hl_s3_access.py): node_fills_by_block/hourly/{YYYYMMDD}/{hour}.lz4,
 # hour unpadded, no {coin} segment. node_fills_by_block replaced node_trades
 # as the default prefix because node_trades is stale (2025-03-22..2025-06-21
 # only) while node_fills_by_block reaches all the way to today.

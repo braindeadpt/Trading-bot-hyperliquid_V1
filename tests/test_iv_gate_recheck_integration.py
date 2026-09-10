@@ -35,9 +35,9 @@ pytestmark = pytest.mark.integration_offline
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts import iv_gate_shadow_recheck as rc  # noqa: E402
-from scripts import iv_gate_shadow_vs_pnl as pnl  # noqa: E402
-from scripts import research_watchdog_supervisor as sup  # noqa: E402
+from scripts.research import iv_gate_shadow_recheck as rc  # noqa: E402
+from scripts.research import iv_gate_shadow_vs_pnl as pnl  # noqa: E402
+from scripts.research import research_watchdog_supervisor as sup  # noqa: E402
 
 
 def _make_dbs(tmp: Path, *, n_high: int, n_low: int, pnl_high: float,

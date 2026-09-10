@@ -174,7 +174,7 @@ Depois de 50 trades com a Fase 1, avaliar e ajustar:
 Para cada estratégia desligada, **backtest primeiro**:
 
 ```bash
-python scripts/backtest_per_strategy.py --strategy lead_lag --from 2025-01-01 --to 2026-06-01
+python scripts/research/backtest_per_strategy.py --strategy lead_lag --from 2025-01-01 --to 2026-06-01
 ```
 
 Só reativar se:

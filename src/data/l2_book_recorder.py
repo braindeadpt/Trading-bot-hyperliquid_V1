@@ -11,7 +11,7 @@ recorder never silently redirects to another path (2026-08-14 audit: the
 E: → C: silent regression).
 
 Architecture map: ``docs/DATA_ARCHITECTURE.md``.
-Backup: ``scripts/backup_research_data.py``.
+Backup: ``scripts/ops/backup_research_data.py``.
 """
 
 from __future__ import annotations

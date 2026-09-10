@@ -104,7 +104,7 @@ even before 29/06.
 
 ## 2. How missing data was treated (this is what invalidated TOPs)
 
-### Feature screening (`scripts/feature_screening.py`)
+### Feature screening (`scripts/research/feature_screening.py`)
 
 | family | columns | treatment after 29/06 | severity |
 |--------|---------|----------------------|----------|
@@ -166,9 +166,9 @@ because `_accumulate_liquidation_proxy` appended events **without** setting
 2. **ChecklistMeta:** scores `w_liquidation` **only if**
    `liquidation_data_source == "binance"` (proxy ≡ absent).
 3. **FeedSilenceMonitor** + ERROR/notifier + dashboard field.
-4. **Backfill CLI:** `scripts/backfill_binance_perp_prices.py --from-gap`.
-5. **Valid-window re-screen:** `scripts/feature_screening_basis_liq_valid.py`.
-6. **CM control gate:** `scripts/baseline_gate_cm_no_liq.py` (in-memory
+4. **Backfill CLI:** `scripts/ops/backfill_binance_perp_prices.py --from-gap`.
+5. **Valid-window re-screen:** `scripts/research/feature_screening_basis_liq_valid.py`.
+6. **CM control gate:** `scripts/research/baseline_gate_cm_no_liq.py` (in-memory
    `w_liquidation=0`).
 
 ### Config change (confirmed 2026-08-09)
@@ -184,7 +184,7 @@ Applied in `config/settings.yaml`. Restart paper bot to load.
 
 ## 5. ChecklistMeta gate re-check
 
-Script: `python scripts/baseline_gate_cm_no_liq.py --seeds 100 --folds W2,W3`
+Script: `python scripts/research/baseline_gate_cm_no_liq.py --seeds 100 --folds W2,W3`
 
 | fold | prior (w_liq=0.5) | control (w_liq=0) |
 |------|-------------------|-------------------|

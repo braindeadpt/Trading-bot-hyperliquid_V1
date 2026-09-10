@@ -70,7 +70,7 @@ Secrets: `COINALYZE_API_KEY` in env or vault (optional).
 ## Operational checks
 
 ```bash
-python scripts/audit_market_data.py   # exit 1 if any symbol red/missing
+python scripts/ops/audit_market_data.py   # exit 1 if any symbol red/missing
 python tests/test_market_data_funding.py
 python tests/test_market_data_phase4.py
 ```

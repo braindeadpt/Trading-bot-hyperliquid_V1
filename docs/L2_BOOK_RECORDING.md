@@ -205,5 +205,5 @@ assert abs(m.spread_pct - row["spread_pct"]) < 1e-12
 Validation CLI:
 
 ```bash
-python scripts/validate_l2_book_recording.py --path data/research/l2_books
+python scripts/research/validate_l2_book_recording.py --path data/research/l2_books
 ```

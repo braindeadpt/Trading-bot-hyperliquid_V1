@@ -1,4 +1,4 @@
-"""Tests for the git hooks: scripts/run_git_hooks.py + scripts/install_git_hooks.py.
+"""Tests for the git hooks: scripts/ops/run_git_hooks.py + scripts/ops/install_git_hooks.py.
 
 Pins the contract:
 
@@ -29,8 +29,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNNER = ROOT / "scripts" / "run_git_hooks.py"
-INSTALLER = ROOT / "scripts" / "install_git_hooks.py"
+RUNNER = ROOT / "scripts" / "ops" / "run_git_hooks.py"
+INSTALLER = ROOT / "scripts" / "ops" / "install_git_hooks.py"
 REAL_SETTINGS = ROOT / "config" / "settings.yaml"
 REAL_ENV = ROOT / ".env"
 REAL_MANIFEST = (
@@ -221,7 +221,7 @@ def test_install_creates_both_hooks(tmp_path) -> None:
         hook = repo / ".git" / "hooks" / name
         assert hook.exists()
         body = hook.read_text(encoding="utf-8")
-        assert "Managed by scripts/install_git_hooks.py" in body
+        assert "Managed by scripts/ops/install_git_hooks.py" in body
         assert "run_git_hooks.py" in body
         assert name in body  # the --hook argument matches the file name
 
@@ -258,7 +258,7 @@ def test_install_force_backs_up_foreign_hook(tmp_path) -> None:
     assert r.returncode == 0, r.stdout + r.stderr
     assert (repo / ".git" / "hooks" / "pre-commit.bak").exists()
     body = foreign.read_text(encoding="utf-8")
-    assert "Managed by scripts/install_git_hooks.py" in body
+    assert "Managed by scripts/ops/install_git_hooks.py" in body
 
 
 def test_uninstall_removes_managed_only(tmp_path) -> None:

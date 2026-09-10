@@ -206,8 +206,8 @@ Um artefacto é **não comparável** com o motor actual se foi gerado antes de:
 |---------|-----------|------|
 | `python main.py --audit` | 0 CRITICAL, 1 HIGH (`AUDIT-005` pré-existente em `crash_recovery.py`), 1 LOW | **0** |
 | `python audit_all.py` | Todos os componentes OK | **0** |
-| `python scripts/lookahead_audit.py --ci` | **FAIL** — 10 findings (2× HIGH `LOOKAHEAD-002` em `indicators.py:767`, 7× HIGH `LOOKAHEAD-003` em `portfolio.py` funding settle) | **1** |
-| `python scripts/run_ci_tests.py` | 13 suites + `test_basic` — **todos passaram** | **0** |
+| `python scripts/ops/lookahead_audit.py --ci` | **FAIL** — 10 findings (2× HIGH `LOOKAHEAD-002` em `indicators.py:767`, 7× HIGH `LOOKAHEAD-003` em `portfolio.py` funding settle) | **1** |
+| `python scripts/ops/run_ci_tests.py` | 13 suites + `test_basic` — **todos passaram** | **0** |
 
 ---
 
@@ -219,7 +219,7 @@ Um artefacto é **não comparável** com o motor actual se foi gerado antes de:
 | M2 | SL/TP software-managed (sem trigger orders SDK) | **Confirmado** | `mode_overrides.mainnet.close_positions_on_shutdown: true`, `flatten_on_stop: true`; comentários em `settings.yaml` |
 | M3 | Performance paper negativa | **Confirmado** | PF 0.44, expectancy −$4.56, −$1,222 PnL em 268 trades |
 | M4 | Paridade execução sizing | **Confirmado** | CRIT-003 hardcoded 20% vs config 5% |
-| M5 | Lookahead audit CI falha | **Confirmado** | `scripts/lookahead_audit.py --ci` exit 1 |
+| M5 | Lookahead audit CI falha | **Confirmado** | `scripts/ops/lookahead_audit.py --ci` exit 1 |
 | M6 | Contabilidade snapshot vs trades | **Confirmado** | +$10.6k snapshot delta vs −$1.2k trade PnL |
 | M7 | Amostra pós-v3.1.47 insuficiente | **Confirmado** | 11 trades / 1 dia |
 
@@ -262,8 +262,8 @@ for mode in ('paper','testnet','mainnet'):
 # Auditorias
 python main.py --audit
 python audit_all.py
-python scripts/lookahead_audit.py --ci
-python scripts/run_ci_tests.py
+python scripts/ops/lookahead_audit.py --ci
+python scripts/ops/run_ci_tests.py
 ```
 
 ---
@@ -276,8 +276,8 @@ Cada fase só é considerada **aceite** quando **todos** os itens aplicáveis pa
 
 - [ ] **A1** — `python main.py --audit` → 0 CRITICAL (HIGH pré-existente `AUDIT-005` documentado se mantido)
 - [ ] **A2** — `python audit_all.py` → exit 0
-- [ ] **A3** — `python scripts/lookahead_audit.py --ci` → exit 0 (actualmente **falha**)
-- [ ] **A4** — `python scripts/run_ci_tests.py` → exit 0
+- [ ] **A3** — `python scripts/ops/lookahead_audit.py --ci` → exit 0 (actualmente **falha**)
+- [ ] **A4** — `python scripts/ops/run_ci_tests.py` → exit 0
 - [ ] **A5** — Nenhum segredo em diff/commits
 
 ### B. Paridade paper / backtest / risco

@@ -19,7 +19,7 @@ PASS  ⇔  B1 ≥ p95   AND   n_trades ≥ 30   AND   expectancy > 0 (PF > 1)
 
 ChecklistMeta powered FAIL on W2+W3 → demoted from `execution_strategies` to
 shadow. VWAPDeviation retained (underpowered INCONCLUSIVE grandfather only).
-See `scripts/demote_checklist_meta_for_baseline_fail.py`.
+See `scripts/ops/demote_checklist_meta_for_baseline_fail.py`.
 
 ### Cautionary example
 
@@ -30,7 +30,7 @@ percentile-only gate while losing money. Three-condition gate → **FAIL
 ## How to run
 
 ```bash
-python scripts/baseline_signal_gate.py --strategy NAME --folds W2,W3 --seeds 200 --gate
+python scripts/research/baseline_signal_gate.py --strategy NAME --folds W2,W3 --seeds 200 --gate
 ```
 
 Exit codes: `0=PASS`, `1=FAIL`, `2=INCONCLUSIVE`.

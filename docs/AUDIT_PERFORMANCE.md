@@ -112,7 +112,7 @@ Round-trip típico: **~0.11–0.17%** (taker 0.035%×2 + slippage). Qualquer est
 ## 7. Monitorização
 
 - `_periodic_summary_loop`: corrigido (`portfolio.current_capital` em vez de `.capital`)
-- Script: `python scripts/audit_performance.py`
+- Script: `python scripts/ops/audit_performance.py`
 
 ---
 
@@ -122,7 +122,7 @@ Round-trip típico: **~0.11–0.17%** (taker 0.035%×2 + slippage). Qualquer est
 2. Confirmar em log: **sem** `Ensemble HIGH-CONVICTION` para VolatilityBreakout/VWAP
 3. Confirmar: **sem** entradas FundingExtreme (`mean_reversion.enabled: false`)
 4. Opcional: DB novo (`data/live/bot.db` backup) para métricas limpas
-5. Correr semanalmente: `python scripts/audit_performance.py`
+5. Correr semanalmente: `python scripts/ops/audit_performance.py`
 
 ---
 

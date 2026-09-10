@@ -1,6 +1,6 @@
 # VB shorts × liquidações — a hipótese "o flush reverte" refina-se
 
-**Data:** 2026-08-13 · **Script:** `scripts/vb_shorts_liq_crosscheck.py` (read-only)
+**Data:** 2026-08-13 · **Script:** `scripts/research/vb_shorts_liq_crosscheck.py` (read-only)
 **Fonte:** forensics VB `data/backtests/vb_forensics_20260813_040003.csv` + `data/live/bot.db`
 (liq okx/bybit real 08-09+, proxy 06-08..06-29, candles_1m).
 

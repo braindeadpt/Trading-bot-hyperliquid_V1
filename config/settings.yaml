@@ -357,7 +357,7 @@ strategy:
   # Strategy: VWAPTrend (research-only) — Zarattini & Aziz 2023 adapted to crypto
   # Anchored UTC-day VWAP trend-follow (long above / short below), opposite of
   # VWAPDeviation fade. NOT in ensemble / factory registry — instantiate only
-  # from scripts/backtest_vwap_trend_vs_fade.py.
+  # from scripts/research/backtest_vwap_trend_vs_fade.py.
   #
   # VERDICT 2026-08-08 (light 15m/5m replay, 2026-05-18→2026-08-07,
   # BTC/ETH/SOL/HYPE, commission 0.04%/side ≈ 8 bps RT):
@@ -540,7 +540,7 @@ strategy:
     mode: momentum                  # momentum = follow heavy book side; fade = mean-revert imbalance
     spoof_wall_proximity_pct: 0.001 # reject if supporting wall within 0.1% of mid
     # Anti-spoof (2026-08-09): wall_frac = largest_wall_size / same_side_depth_1pct.
-    # Calibrated from live HL L2 (scripts/calibrate_obs_spoof_filter.py): 104 entry
+    # Calibrated from live HL L2 (scripts/research/calibrate_obs_spoof_filter.py): 104 entry
     # candidates, p85 → spoof_wall_fraction_min=0.21 ≈ ~15% block rate.
     # DO NOT reintroduce depth_quality / spoof_depth_skew_min — that filter was
     # tautological with bid_ask_ratio (ask-heavy entry ⇒ depth_q≤0.35) and blocked
@@ -970,7 +970,7 @@ database:
   prune_days: 30                  # keep last 30 days of tick data
   auto_backfill_on_start: true    # fetch Binance candles if DB is empty/stale
   backfill_days: 7                # days of history per timeframe (Binance max 1000 bars)
-  backfill_funding_days: 30       # funding + OI history for backtest (scripts/backfill_funding.py)
+  backfill_funding_days: 30       # funding + OI history for backtest (scripts/ops/backfill_funding.py)
   backfill_perp_days: 30           # Binance USD-M perp mids for LeadLag backtest
   backfill_min_candles_15m: 80    # trigger backfill when 15m count below this
   backfill_timeframes: ["1m", "5m", "15m", "1h"]

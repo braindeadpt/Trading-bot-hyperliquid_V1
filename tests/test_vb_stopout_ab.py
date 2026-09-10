@@ -1,4 +1,4 @@
-"""Unit tests for scripts/vb_stopout_ab.py — the VB liquidation stop-out A/B.
+"""Unit tests for scripts/research/vb_stopout_ab.py — the VB liquidation stop-out A/B.
 
 The heavy part (two ~15 min backtests) is not exercised here; these tests pin
 the pure pieces: the floor override reaches the BacktestConfig (None → the
@@ -15,10 +15,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "scripts" / "research"))
 
-from scripts import vb_stopout_ab as ab  # noqa: E402
-from scripts.vb_regime_forensics import stats  # noqa: E402
+from scripts.research import vb_stopout_ab as ab  # noqa: E402
+from scripts.research.vb_regime_forensics import stats  # noqa: E402
 
 pytestmark = pytest.mark.unit
 

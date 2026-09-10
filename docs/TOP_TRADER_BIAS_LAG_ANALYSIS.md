@@ -92,6 +92,6 @@ O lag de publicação **não é o problema** — a persistência é. Net bias po
 ## Como re-medir quando a amostra crescer
 
 O script do probe é idempotente e regenera o relatório sozinho; o re-run é
-**automático** — o watchdog `scripts/top_trader_bias_recheck.py` relança o
+**automático** — o watchdog `scripts/research/top_trader_bias_recheck.py` relança o
 probe quando `top_trader_bias_samples` cobrir ≥20 datas (~3 semanas de
 polling), mantendo o gate n>=20 do bootstrap intacto.

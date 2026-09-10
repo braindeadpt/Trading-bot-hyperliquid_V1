@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT))
 
 _SPEC = importlib.util.spec_from_file_location(
     "validate_phase08_ruleset_12w",
-    ROOT / "scripts" / "validate_phase08_ruleset_12w.py",
+    ROOT / "scripts" / "research" / "validate_phase08_ruleset_12w.py",
 )
 assert _SPEC and _SPEC.loader
 _mod = importlib.util.module_from_spec(_SPEC)

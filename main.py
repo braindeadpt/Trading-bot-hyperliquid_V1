@@ -57,7 +57,7 @@ from utils.helpers import safe_ensure_dir
 from utils.instance_lock import acquire_instance_lock, release_instance_lock
 
 from data.database import Database
-from scripts.preflight_feed_check import EXIT_INTERNAL_ERROR, PREFLIGHT_REPORT_PATH  # noqa: E402
+from scripts.ops.preflight_feed_check import EXIT_INTERNAL_ERROR, PREFLIGHT_REPORT_PATH  # noqa: E402
 from exchanges.hyperliquid_ws import HyperliquidWSClient, DataBus
 from exchanges.hyperliquid_rest import HyperliquidRESTClient
 from exchanges.binance_api import BinanceRESTClient, BinanceWSClient
@@ -138,7 +138,7 @@ def _preflight_feed_check(
     min_latest_ms: Optional[int] = None,
     json_report_out: Optional[Path] = None,
 ) -> int:
-    """Run scripts/preflight_feed_check.py at boot / before backtest; return
+    """Run scripts/ops/preflight_feed_check.py at boot / before backtest; return
     its exit code.
 
     0 = all contracted feeds have fresh evidence AND candles are
@@ -150,7 +150,7 @@ def _preflight_feed_check(
     """
     cmd = [
         sys.executable,
-        str(PROJECT_ROOT / "scripts" / "preflight_feed_check.py"),
+        str(PROJECT_ROOT / "scripts" / "ops" / "preflight_feed_check.py"),
         "--db", str(db_path),
         "--config", str(config_path),
     ]

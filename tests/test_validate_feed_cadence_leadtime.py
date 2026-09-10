@@ -1,4 +1,4 @@
-"""Tests for the cadence lead-time validator (scripts/validate_feed_cadence_leadtime.py).
+"""Tests for the cadence lead-time validator (scripts/research/validate_feed_cadence_leadtime.py).
 
 The walk-forward simulation must reproduce the production rule exactly
 (shared ``cadence_percentile``) and answer the operational question:
@@ -16,7 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.validate_feed_cadence_leadtime import (  # noqa: E402
+from scripts.research.validate_feed_cadence_leadtime import (  # noqa: E402
     cross_check_with_real,
     simulate_cadence_fires,
 )

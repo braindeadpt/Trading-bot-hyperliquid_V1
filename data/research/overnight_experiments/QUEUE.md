@@ -4,7 +4,7 @@ Curated from `docs/RESEARCH_BACKLOG.md` against the data actually on disk as
 of **2026-09-09**. One entry per experiment family: hypothesis, harness
 (CLI/config-dict surface only — no strategy-code edits), fixed window set,
 and the evidence bar the verdict must clear. The runner
-(`scripts/overnight_runner.py`) executes families in queue order.
+(`scripts/research/overnight_runner.py`) executes families in queue order.
 
 **Registry cleanup 2026-09-10:** TrendFollow, MeanReversion, DonchianBreakout,
 FundingArbitrage, CVDOrderFlow(+P90), RangeGrid, TrendPyramid, SFPReversion and
@@ -56,7 +56,7 @@ feed collection, tracked by the watchdog supervisor, not this queue).
 
 - **Hypothesis (fixed):** the stop-out bypass alone (`delay=0 · OFF`) removes
   the exit loop; every confirmation delay dilutes that edge.
-- **Harness:** `python scripts/overnight_runner.py --family flush_fade`
+- **Harness:** `python scripts/research/overnight_runner.py --family flush_fade`
 - **Window set:** 2026-08-09..2026-09-09, split 10d → 4 non-overlapping
   windows (3 valid after the feed gap).
 - **Budget actual:** 4 cells × 4 windows = **16 runs OK** (the original
@@ -87,7 +87,7 @@ Grid 4 cells preregistered — baseline 2.5σ / `z_threshold: 3.5` /
 `z_threshold: 4.0` / `volume_surge: 2.0` (z stays 2.5) — HYPE-only
 overrides, BTC/ETH untouched (control in every cell).
 
-- **Harness:** `python scripts/overnight_runner.py --family hype_vwap_refine --start 2026-03-13 --end 2026-09-08 --symbols HYPE,BTC,ETH --cells 0,1,2`
+- **Harness:** `python scripts/research/overnight_runner.py --family hype_vwap_refine --start 2026-03-13 --end 2026-09-08 --symbols HYPE,BTC,ETH --cells 0,1,2`
 - **Window set: 2026-03-13..2026-09-08 split 30d → 6 non-overlapping windows.** W1–W4 read the E: research DB (HYPE 15m+1h from 2026-01-11, ~100% coverage in every planned window; that DB ends exactly 2026-07-10, so W4 seals the seam); W5–W6 read the live `bot.db` — one source per window, preregistered, never mixed mid-window. K=6 makes the sign-flip gate passable (floor p=1/64=0.0156) and aggregate n≥30 clears at every tested parameter (projected n≈45–100).
 - **Budget: two preregistered sessions** — A `--cells 0,1,2` (18 runs) = the harness line above; after A lands, repoint the line to B `--cells 0,3` (12 runs); both ≤20, no third session.
 - **Kill rule:** no variant improves ≥4/6 windows → §1.3 thin-book hypothesis is dead for this regime, HYPE moves to exclude-candidates, no further threshold iteration (fixed +1σ/+2σ steps and single vs2.0 value prevent grid-shopping).
@@ -104,7 +104,7 @@ overrides, BTC/ETH untouched (control in every cell).
 - **Optional accumulator run before then:** permitted only on an
   otherwise-empty night, pre-declared expectation INCONCLUSIVE (n was 13
   over 80d); the verdict is K-capped at INCONCLUSIVE. The default is to wait.
-- **Harness:** `python scripts/overnight_runner.py --family iv_thresholds --start dvol --end dvol --symbols BTC,ETH,SOL,HYPE --cells 0,1,2` (machine-runnable, wired 2026-09-09 — the span is resolved at run time from the persisted `dvol_daily` coverage, no manual date arithmetic at reopen; the runner enforces the K=4 floor itself and prints `-> BLOCKED (coverage …)` while the feed is still short. Grid {63.3, 66.7, 70}: cells 1..3 vs baseline 0.)
+- **Harness:** `python scripts/research/overnight_runner.py --family iv_thresholds --start dvol --end dvol --symbols BTC,ETH,SOL,HYPE --cells 0,1,2` (machine-runnable, wired 2026-09-09 — the span is resolved at run time from the persisted `dvol_daily` coverage, no manual date arithmetic at reopen; the runner enforces the K=4 floor itself and prints `-> BLOCKED (coverage …)` while the feed is still short. Grid {63.3, 66.7, 70}: cells 1..3 vs baseline 0.)
 - **Window set:** DVOL coverage (starts 2026-06-14), 30d split — K=4 needs
   coverage >= ~115d.
 - **Budget when reopened:** 3 × 4 = **12 runs OK** (3×5=15 still within

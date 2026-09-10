@@ -2,7 +2,7 @@
 
 One supervisor process runs both evidence gates (bias screening + liquidation
 flush) and writes a SINGLE shared state file
-(``scripts/research_watchdog_supervisor.py`` ->
+(``scripts/research/research_watchdog_supervisor.py`` ->
 ``data/research/research_watchdogs_state.json``). This module reads the live
 DBs + that shared state and shapes them into a small read-only payload for
 the dashboard. It imports the supervisors'/scripts' pure metric helpers so
@@ -14,33 +14,33 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List
 
-from scripts.iv_gate_shadow_recheck import (
+from scripts.research.iv_gate_shadow_recheck import (
     TARGET_CLOSED as IV_TARGET_CLOSED,
     concentration_caveat as iv_concentration_caveat,
     project_decision,
     run_comparison as run_iv_comparison,
 )
-from scripts.feed_age_creep_recheck import (  # noqa: E402
+from scripts.research.feed_age_creep_recheck import (  # noqa: E402
     CREEP_MIN_DAYS,
     detect_creeping_age,
     resolve_contracts as resolve_creep_contracts,
 )
-from scripts.feed_cadence_diagnostic import (  # noqa: E402
+from scripts.research.feed_cadence_diagnostic import (  # noqa: E402
     DEFAULT_DB as CADENCE_DEFAULT_DB,
     run_cadence_diagnostic,
 )
 from src.core.engine import feed_silence_contracts  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
-from scripts.liquidation_flush_recheck import (
+from scripts.research.liquidation_flush_recheck import (
     TARGET_DAYS as FLUSH_TARGET_DAYS,
 )
-from scripts.overnight_nightly import build_nightly_status  # noqa: E402
-from scripts.liquidation_flush_recheck import real_span_days
-from scripts.research_watchdog_supervisor import load_shared_state
-from scripts.top_trader_bias_recheck import (
+from scripts.research.overnight_nightly import build_nightly_status  # noqa: E402
+from scripts.research.liquidation_flush_recheck import real_span_days
+from scripts.research.research_watchdog_supervisor import load_shared_state
+from scripts.research.top_trader_bias_recheck import (
     TARGET_DATES as BIAS_TARGET_DATES,
 )
-from scripts.top_trader_bias_recheck import bias_date_count
+from scripts.research.top_trader_bias_recheck import bias_date_count
 
 
 def _progress_pct(current: float, target: int) -> float:
@@ -56,7 +56,7 @@ def _bias_watchdog() -> Dict[str, Any]:
     return {
         "id": "top_trader_bias",
         "label": "Top-trader bias screening",
-        "script": "scripts/research_watchdog_supervisor.py",
+        "script": "scripts/research/research_watchdog_supervisor.py",
         "metric_label": "datas de bias cobertas",
         "unit": "datas",
         "current": n_dates,
@@ -77,7 +77,7 @@ def _flush_watchdog() -> Dict[str, Any]:
     return {
         "id": "liquidation_flush",
         "label": "Liquidation flush recheck",
-        "script": "scripts/research_watchdog_supervisor.py",
+        "script": "scripts/research/research_watchdog_supervisor.py",
         "metric_label": "dias do feed real (okx/bybit)",
         "unit": "dias",
         "current": round(span_days, 2),
@@ -127,7 +127,7 @@ def _iv_gate_watchdog() -> Dict[str, Any]:
     return {
         "id": "iv_gate_shadow",
         "label": "IV gate shadow recheck",
-        "script": "scripts/research_watchdog_supervisor.py",
+        "script": "scripts/research/research_watchdog_supervisor.py",
         "metric_label": "closed trades com decisão IV",
         "unit": "trades",
         "current": n_closed,
@@ -169,7 +169,7 @@ def _creeping_age_watchdog() -> Dict[str, Any]:
     return {
         "id": "feed_age_creep",
         "label": "Feed age creep (max diário a subir)",
-        "script": "scripts/research_watchdog_supervisor.py",
+        "script": "scripts/research/research_watchdog_supervisor.py",
         "metric_label": "feeds com max age diário em crescimento",
         "unit": "feeds",
         "current": len(feeds),
@@ -214,7 +214,7 @@ def _cadence_watchdog() -> Dict[str, Any]:
     return {
         "id": "feed_cadence",
         "label": "Feed cadence (gaps vs p95/p99)",
-        "script": "scripts/research_watchdog_supervisor.py",
+        "script": "scripts/research/research_watchdog_supervisor.py",
         "metric_label": "feeds DEGRADING (mediana recente > p99 histórico)",
         "unit": "feeds",
         "current": len(feeds),
@@ -242,7 +242,7 @@ def _overnight_watchdog() -> Dict[str, Any]:
     return {
         "id": "overnight_session",
         "label": "Overnight research (nightly runner)",
-        "script": "scripts/overnight_nightly.py",
+        "script": "scripts/research/overnight_nightly.py",
         "metric_label": "sessões recentes com veredicto",
         "unit": "sessions",
         "current": len(recent),

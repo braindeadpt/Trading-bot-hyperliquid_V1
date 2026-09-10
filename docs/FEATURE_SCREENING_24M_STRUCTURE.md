@@ -221,4 +221,4 @@ Negatives ≈0 (**PASS**). Side rules are balanced under median-split (no uni-di
 
 ## Look-ahead audit note
 
-`CONTROL_LOOKAHEAD_fwd_ret_24h` is the exact 24h forward return (`close[t+96]/close[t]−1`) — intentional HIGH look-ahead. A distance-to-future-high probe was insufficiently correlated with endpoint returns to validate ranking. Causal structure features use only lag≥0 windows; pivots wait `k=3`. Run: `python scripts/lookahead_audit.py --paths scripts/feature_screening_24m_structure.py`.
+`CONTROL_LOOKAHEAD_fwd_ret_24h` is the exact 24h forward return (`close[t+96]/close[t]−1`) — intentional HIGH look-ahead. A distance-to-future-high probe was insufficiently correlated with endpoint returns to validate ranking. Causal structure features use only lag≥0 windows; pivots wait `k=3`. Run: `python scripts/ops/lookahead_audit.py --paths scripts/research/feature_screening_24m_structure.py`.

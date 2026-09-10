@@ -161,13 +161,13 @@ strategy:
 
 ```bash
 # Walk-forward optimisation sweep (45 runs, ~2h)
-python scripts/backtest_vb_vwap_walkforward.py
+python scripts/research/backtest_vb_vwap_walkforward.py
 
 # Auditoria completa (todas as estratégias, ~3h)
-python scripts/backtest_strategy_audit.py --quick
+python scripts/research/backtest_strategy_audit.py --quick
 
 # CVD sweep isolado
-python scripts/backtest_cvd_sweep.py
+python scripts/research/backtest_cvd_sweep.py
 
 # Backfill buy/sell volume (manter actualizado)
 python scripts/_backfill_cvd_volume.py --days 36

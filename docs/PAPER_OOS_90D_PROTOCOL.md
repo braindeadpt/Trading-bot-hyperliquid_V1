@@ -25,7 +25,7 @@ Prior config understated maker (0.01) and used taker 0.035 (Tier-2+). Aligning
 fees **invalidates** the prior Phase10 window counter. Re-register with:
 
 ```bash
-python scripts/reregister_phase10_tier0_fees.py
+python scripts/ops/reregister_phase10_tier0_fees.py
 ```
 
 Then **coordinated restart** of the paper bot (`stop.bat` / `start.bat` or
@@ -48,7 +48,7 @@ Even on PASS: **remain paper** — mainnet promotion is out of scope.
 
 ### B. Shadow strategies
 
-Via `scripts/evaluate_shadow_outcomes.py` / shadow panel (gross + **net**):
+Via `scripts/research/evaluate_shadow_outcomes.py` / shadow panel (gross + **net**):
 
 - `n_evaluated` ≥ 30 in 90d, else `INCONCLUSIVE (frequency insufficient)`
 - net PF > 1 and net expectancy_R > 0
@@ -60,8 +60,8 @@ Via `scripts/evaluate_shadow_outcomes.py` / shadow panel (gross + **net**):
 
 Recorder: `market_data.l2_recording` at **1s × 25 levels**.
 
-1. Daily audit: `python scripts/l2_recording_audit.py`
-2. After **≥30 valid days**: `python scripts/feature_screening_l2_depth.py`
+1. Daily audit: `python scripts/research/l2_recording_audit.py`
+2. After **≥30 valid days**: `python scripts/research/feature_screening_l2_depth.py`
 3. FDR + date-cluster bootstrap + tier-0 cost / AS. Objective: execution /
    fill-AS information — **not** build MM or directional strategy without
    economic survivor.
@@ -69,10 +69,10 @@ Recorder: `market_data.l2_recording` at **1s × 25 levels**.
 ## Weekly ops
 
 ```bash
-python scripts/paper_oos_weekly_report.py
-python scripts/evaluate_shadow_outcomes.py --since-days 14 --persist
-python scripts/phase10_check_gate.py --no-register
-python scripts/l2_recording_audit.py
+python scripts/research/paper_oos_weekly_report.py
+python scripts/research/evaluate_shadow_outcomes.py --since-days 14 --persist
+python scripts/ops/phase10_check_gate.py --no-register
+python scripts/research/l2_recording_audit.py
 ```
 
 Do **not** decide on mid-window snapshots. Formal verdict only at day 90

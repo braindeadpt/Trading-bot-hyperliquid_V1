@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("scipy")
 
-from scripts.feature_screening_24m_structure import (
+from scripts.research.feature_screening_24m_structure import (
     CONTROL_LOOKAHEAD,
     PIVOT_CONFIRM_K,
     _confirmed_pivots,

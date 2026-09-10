@@ -63,10 +63,10 @@ throughput is a handful of experiments per night, and that is fine.
 
 | Family | Harness | Override surface |
 |---|---|---|
-| LiquidationCatcher variants (delay, stopout, hold) | `scripts/backtest_liquidation_catcher_real.py` | `--delay-min`, `--stopout-off`, `--variants` |
-| IV gate (DVOL percentile threshold, high/low-only) | `scripts/iv_high_only_ab_split.py` | threshold, target strategy, windows |
+| LiquidationCatcher variants (delay, stopout, hold) | `scripts/research/backtest_liquidation_catcher_real.py` | `--delay-min`, `--stopout-off`, `--variants` |
+| IV gate (DVOL percentile threshold, high/low-only) | `scripts/research/iv_high_only_ab_split.py` | threshold, target strategy, windows |
 | Regime router / VB regime rework | the router A/B split script (`--split-days` pattern) | regime definitions passed as flags |
-| Gate rechecks (bias / flush / IV shadow) | `scripts/research_watchdog_supervisor.py` | read-only; never triggered manually except for testing |
+| Gate rechecks (bias / flush / IV shadow) | `scripts/research/research_watchdog_supervisor.py` | read-only; never triggered manually except for testing |
 | New families | **write a script** following the existing pattern: CLI flags, non-overlapping windows, JSON dump, docs report — never edit strategy code | — |
 
 If a proposed variant does not map onto an existing harness's override

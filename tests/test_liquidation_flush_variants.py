@@ -1,4 +1,4 @@
-"""Unit tests for scripts/liquidation_flush_variants.py.
+"""Unit tests for scripts/research/liquidation_flush_variants.py.
 
 Pins the variant mechanics to the v2 simulation: the baseline (p90 filter,
 1st-bar entry, hold 30m, fade) must reproduce the simulation's cell
@@ -15,7 +15,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.liquidation_flush_variants import (  # noqa: E402
+from scripts.research.liquidation_flush_variants import (  # noqa: E402
     entry_index,
     flush_events,
     percentile,

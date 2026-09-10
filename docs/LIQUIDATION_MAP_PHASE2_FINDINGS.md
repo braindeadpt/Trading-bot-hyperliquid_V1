@@ -43,7 +43,7 @@ therefore used:
   **no** `liquidation` field (by design; Phase-1 address harvest only).
 - Real archive: `data/research/fills/20260715_14.lz4`
   (`node_fills_by_block/hourly/20260715/14.lz4`, ~62 MB, downloaded this
-  session via `scripts/download_recent_fills.py`).
+  session via `scripts/ops/download_recent_fills.py`).
 
 ### Fields found (real hour)
 
@@ -147,11 +147,11 @@ the OS task):
 
 ```text
 # Hourly — reuse Phase 1 CLI (requires local fills for that hour)
-python scripts/download_recent_fills.py --hours 1
-python scripts/build_liquidation_map.py --from-fills <downloaded.lz4> --execute --max-distance-pct 50
+python scripts/ops/download_recent_fills.py --hours 1
+python scripts/research/build_liquidation_map.py --from-fills <downloaded.lz4> --execute --max-distance-pct 50
 
 # After accumulation, score:
-python scripts/analyze_liquidation_reactions.py --execute --forward-only
+python scripts/research/analyze_liquidation_reactions.py --execute --forward-only
 ```
 
 ### Minimally meaningful sample (order-of-magnitude)
@@ -168,7 +168,7 @@ Prefer also expanding Approach A across many archived hours in parallel.
 | Path | Role |
 |------|------|
 | `src/research/liquidation_reaction_analysis.py` | Extract liq events, cluster, measure flush/reverse, forward track |
-| `scripts/analyze_liquidation_reactions.py` | CLI (`--dry-run` default; `--execute` for real scan) |
+| `scripts/research/analyze_liquidation_reactions.py` | CLI (`--dry-run` default; `--execute` for real scan) |
 | `tests/test_liquidation_reaction_analysis.py` | Offline unit tests (synthetic math) |
 | `docs/LIQUIDATION_MAP_PHASE2_FINDINGS.md` | This report |
 

@@ -1,7 +1,7 @@
 # LiquidationCatcher — variantes que quebram o loop entrada→stop-out
 
 **Data:** 2026-08-14 · **Feed:** real okx+bybit, 08-09 → 08-14 (10.589 eventos)
-· **Script:** `scripts/backtest_liquidation_catcher_real.py --variants`
+· **Script:** `scripts/research/backtest_liquidation_catcher_real.py --variants`
 
 ## O loop (baseline)
 
@@ -76,4 +76,4 @@ reverter), não o delay em si.
 
 * Grid completo: `data/research/liq_catcher_variants.json` (gitignored)
 * Família curta: `data/research/liq_catcher_short_delay.json` (gitignored)
-* Script: `scripts/backtest_liquidation_catcher_real.py --variants`
+* Script: `scripts/research/backtest_liquidation_catcher_real.py --variants`

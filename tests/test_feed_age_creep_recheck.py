@@ -1,4 +1,4 @@
-"""Unit tests for scripts/feed_age_creep_recheck.py.
+"""Unit tests for scripts/research/feed_age_creep_recheck.py.
 
 Pins the staircase rule: a contracted feed is "creeping" when the last N
 recorded daily max-ages are non-decreasing, grew a meaningful fraction of
@@ -19,7 +19,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts import feed_age_creep_recheck as creep  # noqa: E402
+from scripts.research import feed_age_creep_recheck as creep  # noqa: E402
 
 DAY_MS = 86_400_000
 MAX_SIL = 3600.0  # 1h threshold

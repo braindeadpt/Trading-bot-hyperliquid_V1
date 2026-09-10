@@ -68,6 +68,6 @@ class ResearchParityLedger:
     def assert_oos_ready(self) -> None:
         if not self.oos_dataset_ready:
             raise ParityGateError(
-                "GoldRush parity not validated — run scripts/goldrush_parity_diagnostic.py "
+                "GoldRush parity not validated — run scripts/research/goldrush_parity_diagnostic.py "
                 "and resolve mismatches before OOS.",
             )

@@ -73,7 +73,7 @@ In order:
 2. **`logs/` directory** — the most recent rotating log file. Look for
    `ERROR`, `CRITICAL`, `KILL SWITCH`, `RECONCILE`, or repeated stack traces.
    Do not delete or move anything in `logs/` while investigating.
-3. **Gate/health check**: `python scripts/phase10_check_gate.py` — read-only,
+3. **Gate/health check**: `python scripts/ops/phase10_check_gate.py` — read-only,
    safe to run at any time, shows current trade count and gate criteria
    against the live DB.
 4. **Reconciliation-related tests**, if you suspect a position-tracking bug
