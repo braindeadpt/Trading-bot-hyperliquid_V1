@@ -7,6 +7,39 @@ re-checking.*
 
 ---
 
+## Update 2026-09-10 — testnet e2e PASSED (8/8)
+
+The testnet suite ran for real against `api.hyperliquid-testnet.xyz` using a
+testnet **API/agent wallet** (`HYPERLIQUID_PRIVATE_KEY` = agent key,
+`HYPERLIQUID_ACCOUNT_ADDRESS` = master account — new env var, support added
+in `HyperliquidLiveClient`):
+
+```
+8 passed, 3 warnings in 86.10s   (all 8 scenarios: maker, market, partial
+fill, cancel, native SL/TP triggers, crash/restart recovery, orphan
+adoption, kill switch). Account left flat, 0 open orders.
+```
+
+**Two production bugs found and fixed by this run:**
+
+1. `build_meta_cache()` never populated — `Info.meta()` returns
+   `{"universe": [...]}` (dict), the code expected a list, so
+   `normalize_price`/`normalize_size` were silent no-ops and trigger orders
+   died in `float_to_wire` on unrounded prices.
+2. `get_open_orders()` used the basic endpoint, which returns trigger
+   orders **without** `isTrigger`/`tpsl`/`triggerPx` — protection sync,
+   reconciliation, and orphan-trigger purge were all blind to native SL/TP.
+   Switched to `frontend_open_orders` (superset) + parser handles the flat
+   trigger shape.
+
+**Testnet gate row now PASS.** Mainnet remains NOT READY — the frozen paper
+window, live-vs-replay parity, and GoldRush readiness are still open. The
+paper bot had also deadlocked on the 10% drawdown CB (frozen equity re-trip
+each UTC day); `scripts/reset_paper_session.py --apply` now performs a real
+persistent reset and evidence collection resumed 2026-09-10.
+
+---
+
 ## MAINNET EXECUTION IS NOT READY
 
 > **No gate criterion below currently shows a real PASS.** The frozen

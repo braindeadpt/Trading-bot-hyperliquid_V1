@@ -83,6 +83,22 @@ def _extract_trigger_from_order(order: Dict[str, Any]) -> Optional[Tuple[str, fl
             safe_float(order.get("triggerPx", order.get("trigger_px"))),
             safe_float(order.get("limitPx", order.get("px"))),
         )
+    # frontend_open_orders shape: isTrigger + orderType string
+    # ("Stop Market"/"Take Profit Market"/"Stop Limit"/"Take Profit Limit")
+    # + triggerPx — no tpsl field.
+    if order.get("isTrigger"):
+        ot = str(order.get("orderType", "")).lower()
+        if "stop" in ot:
+            tpsl = "sl"
+        elif "take profit" in ot:
+            tpsl = "tp"
+        else:
+            return None
+        return (
+            tpsl,
+            safe_float(order.get("triggerPx", order.get("trigger_px"))),
+            safe_float(order.get("limitPx", order.get("px"))),
+        )
     return None
 
 

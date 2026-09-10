@@ -95,6 +95,10 @@ def build_meta_cache(info: Any) -> Dict[str, Dict[str, int]]:
     module-level ``_meta_cache`` dict.
     """
     raw = info.meta()
+    # SDK 0.23 returns {"universe": [...], "marginTables": [...]}; older
+    # versions returned the universe list directly.
+    if isinstance(raw, dict):
+        raw = raw.get("universe", [])
     if not isinstance(raw, (list, tuple)):
         return {}
     cache: Dict[str, Dict[str, int]] = {}
@@ -517,17 +521,21 @@ class HyperliquidLiveClient:
     # ── Read-only queries ───────────────────────────────────────
 
     async def get_open_orders(self) -> List[Dict[str, Any]]:
-        """Return the list of open orders for the connected wallet.
+        """Return open orders for the traded account, trigger metadata included.
+
+        Uses ``frontend_open_orders`` — the plain ``open_orders`` endpoint
+        returns trigger orders WITHOUT ``isTrigger``/``tpsl``/``triggerPx``,
+        which would make them indistinguishable from resting limits (breaks
+        protection sync, reconciliation and orphan-trigger purge). Falls back
+        to the basic endpoint when the frontend variant is unavailable.
 
         Requires the client to be initialised.
         """
         if self._info is None or self._wallet_address is None:
             raise RuntimeError("HyperliquidLiveClient not initialized")
 
-        result = await asyncio.to_thread(
-            self._info.open_orders,
-            self._wallet_address,
-        )
+        fn = getattr(self._info, "frontend_open_orders", None) or self._info.open_orders
+        result = await asyncio.to_thread(fn, self._wallet_address)
         return result if isinstance(result, list) else []
 
     async def get_user_state(self) -> Dict[str, Any]:
