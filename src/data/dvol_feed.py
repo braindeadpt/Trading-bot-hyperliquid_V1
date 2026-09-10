@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import datetime as _dt
 import logging
+import math
 import time
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import aiohttp
 
@@ -29,8 +31,11 @@ from src.utils.http import make_client_session
 logger = logging.getLogger(__name__)
 
 DERIBIT_URL = "https://www.deribit.com/api/v2/public/get_volatility_index_data"
+DERIBIT_TICKER_URL = "https://www.deribit.com/api/v2/public/ticker"
+DERIBIT_BOOK_URL = "https://www.deribit.com/api/v2/public/get_book_summary_by_currency"
 DVOL_WINDOW_DAYS = 30
 DVOL_CURRENCIES = ("BTC", "ETH")
+ATM_MIN_EXPIRY_DAYS = 7  # skip near-expiry options (pin risk distorts IV)
 
 # Canonical high_iv cut for the IV regime gate. Matches the backtest evidence
 # exactly (docs/IV_HIGH_ONLY_AB_SPLIT.md: high_iv = DVOL percentile(30d) > 66.7).
@@ -57,6 +62,79 @@ async def fetch_dvol(
             payload = await resp.json()
     data = payload.get("result", {}).get("data", [])
     return [(int(row[0]), float(row[4])) for row in data]
+
+
+async def _deribit_get(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    timeout = aiohttp.ClientTimeout(total=25)
+    async with make_client_session(timeout=timeout) as session:
+        async with session.get(
+            url, params=params, headers={"User-Agent": "research/1.0"}
+        ) as resp:
+            resp.raise_for_status()
+            return await resp.json()
+
+
+def _parse_deribit_option_name(name: str) -> Tuple[Optional[int], Optional[float]]:
+    """``BTC-26SEP25-100000-C`` -> (expiry_ms, strike). None on parse fail."""
+    try:
+        _cur, dstr, strike, _cp = name.split("-")
+        exp = _dt.datetime.strptime(dstr, "%d%b%y").replace(
+            hour=8, tzinfo=_dt.timezone.utc)  # Deribit expiry = 08:00 UTC
+        return int(exp.timestamp() * 1000), float(strike)
+    except (ValueError, AttributeError):
+        return None, None
+
+
+async def fetch_deribit_market_snapshot(currency: str) -> Dict[str, Any]:
+    """Perp basis + ATM IV snapshot for ``currency`` (free public endpoints).
+
+    - ``index_price`` / ``perp_price`` / ``basis_bps`` (simple perp-index
+      spread in bps — not annualized; it is a level, not a carry estimate)
+    - ``atm_iv``: mark_iv of the option closest to the money with expiry
+      >= ``ATM_MIN_EXPIRY_DAYS`` out.
+    """
+    cur = currency.upper()
+    now_ms = int(time.time() * 1000)
+    out: Dict[str, Any] = {
+        "currency": cur, "timestamp_ms": now_ms,
+        "index_price": None, "perp_price": None, "basis_bps": None,
+        "atm_iv": None, "atm_expiry_ms": None, "atm_strike": None,
+        "n_options": 0,
+    }
+    tick = await _deribit_get(DERIBIT_TICKER_URL, {
+        "instrument_name": f"{cur}-PERPETUAL",
+    })
+    res = tick.get("result") or {}
+    idx, perp = res.get("index_price"), res.get("mark_price")
+    if idx and perp:
+        out["index_price"] = float(idx)
+        out["perp_price"] = float(perp)
+        out["basis_bps"] = (float(perp) - float(idx)) / float(idx) * 10_000.0
+
+    book = await _deribit_get(DERIBIT_BOOK_URL, {
+        "currency": cur, "kind": "option",
+    })
+    instruments = book.get("result") or []
+    out["n_options"] = len(instruments)
+    min_exp_ms = now_ms + ATM_MIN_EXPIRY_DAYS * 86_400_000
+    best: Optional[Tuple[float, Dict[str, Any], int, float]] = None
+    for inst in instruments:
+        name = str(inst.get("instrument_name", ""))
+        exp_ms, strike = _parse_deribit_option_name(name)
+        und = inst.get("underlying_price") or res.get("index_price")
+        iv = inst.get("mark_iv")
+        if exp_ms is None or strike is None or not und or iv is None:
+            continue
+        if exp_ms < min_exp_ms:
+            continue
+        moneyness = abs(math.log(float(strike) / float(und)))
+        if best is None or moneyness < best[0]:
+            best = (moneyness, inst, exp_ms, float(strike))
+    if best is not None:
+        out["atm_iv"] = float(best[1]["mark_iv"])
+        out["atm_expiry_ms"] = best[2]
+        out["atm_strike"] = best[3]
+    return out
 
 
 def build_iv_percentile(
@@ -190,18 +268,24 @@ class DvolFeed:
         total = 0
         for currency in self._currencies:
             rows = await fetch_dvol(currency, start_ms, end_ms)
-            if not rows:
-                continue
-            n = self._db.save_dvol_daily(
-                [(currency, ts, close) for ts, close in rows]
-            )
-            total += n
-            logger.info(
-                "DvolFeed %s: %d closes persisted (%.0fd lookback)",
-                currency,
-                n,
-                self._lookback_ms / 86_400_000,
-            )
+            if rows:
+                n = self._db.save_dvol_daily(
+                    [(currency, ts, close) for ts, close in rows]
+                )
+                total += n
+                logger.info(
+                    "DvolFeed %s: %d closes persisted (%.0fd lookback)",
+                    currency,
+                    n,
+                    self._lookback_ms / 86_400_000,
+                )
+            # Perp basis + ATM IV snapshot — same cadence, same table set.
+            try:
+                snap = await fetch_deribit_market_snapshot(currency)
+                self._db.save_deribit_snapshot(snap)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("DvolFeed %s market snapshot failed: %s",
+                               currency, exc)
         self._last_error = None if total else "no_data"
         return total
 

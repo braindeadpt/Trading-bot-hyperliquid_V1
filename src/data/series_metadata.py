@@ -24,6 +24,9 @@ SOURCE_GOLDRUSH = "goldrush"
 GOLDRUSH_API_VERSION = "hypercore-info-v1"
 SOURCE_COINALYZE_HL = "coinalyze_hl"
 COINALYZE_API_VERSION = "coinalyze-v1"
+SOURCE_BYBIT_PERP = "bybit_klines"
+BYBIT_API_VERSION = "bybit-v5"
+VENUE_BYBIT = "bybit"
 
 PROTECTED_OFFICIAL_SOURCES = frozenset({
     SOURCE_HL_CANDLE_SNAPSHOT,
@@ -76,6 +79,24 @@ class SeriesMetadata:
                 "volume_unit": "base",
                 "close_time_key": "T",
                 "provider": "coinalyze_hl",
+            },
+            volume_unit="base",
+        )
+
+    @classmethod
+    def bybit_perp_candles(cls) -> "SeriesMetadata":
+        """Cross-venue PROXY — never HL venue-of-record."""
+        return cls(
+            source=SOURCE_BYBIT_PERP,
+            venue=VENUE_BYBIT,
+            api_version=BYBIT_API_VERSION,
+            ingested_at_ms=int(time.time() * 1000),
+            quality_flags={
+                "taker_split": False,
+                "volume_unit": "base",
+                "close_time_key": "T",
+                "provider": "bybit_perp",
+                "proxy": True,
             },
             volume_unit="base",
         )

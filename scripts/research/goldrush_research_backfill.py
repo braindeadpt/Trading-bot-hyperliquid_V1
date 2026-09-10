@@ -184,9 +184,11 @@ def main() -> int:
 
         default="auto",
 
-        choices=["auto", "goldrush", "coinalyze"],
+        choices=["auto", "goldrush", "coinalyze", "bybit"],
 
-        help="auto tries goldrush then coinalyze (coinalyze = HL-native *_PERP.A)",
+        help="auto tries goldrush then coinalyze (HL-native). bybit is a "
+             "cross-venue PROXY (venue=bybit) — explicit opt-in only, "
+             "never in the auto chain",
 
     )
 

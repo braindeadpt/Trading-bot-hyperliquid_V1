@@ -267,6 +267,21 @@ class ResearchDatabase(Database):
             ) WITHOUT ROWID;
         """)
         self._conn().execute("""
+            CREATE TABLE IF NOT EXISTS deribit_snapshot (
+                currency        TEXT    NOT NULL,
+                timestamp_ms    INTEGER NOT NULL,
+                index_price     REAL,
+                perp_price      REAL,
+                basis_bps       REAL,
+                atm_iv          REAL,
+                atm_expiry_ms   INTEGER,
+                atm_strike      REAL,
+                n_options       INTEGER,
+                ingested_at_ms  INTEGER NOT NULL,
+                PRIMARY KEY (currency, timestamp_ms)
+            ) WITHOUT ROWID;
+        """)
+        self._conn().execute("""
             CREATE TABLE IF NOT EXISTS feed_age_history (
                 feed            TEXT    NOT NULL,
                 day_start_ms    INTEGER NOT NULL,
@@ -641,6 +656,51 @@ class ResearchDatabase(Database):
             sql, (str(currency).upper(), int(start_ms), int(end_ms))
         ).fetchall()
         return [(int(ts), float(close)) for ts, close in rows]
+
+    def save_deribit_snapshot(self, row: Dict[str, Any]) -> None:
+        """Upsert one Deribit market snapshot (perp basis + ATM IV)."""
+        sql = """
+            INSERT OR REPLACE INTO deribit_snapshot (
+                currency, timestamp_ms, index_price, perp_price, basis_bps,
+                atm_iv, atm_expiry_ms, atm_strike, n_options, ingested_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute(sql, (
+                str(row["currency"]).upper(),
+                int(row["timestamp_ms"]),
+                row.get("index_price"),
+                row.get("perp_price"),
+                row.get("basis_bps"),
+                row.get("atm_iv"),
+                row.get("atm_expiry_ms"),
+                row.get("atm_strike"),
+                row.get("n_options"),
+                int(time.time() * 1000),
+            ))
+            conn.commit()
+
+    def load_deribit_snapshots(
+        self,
+        currency: str,
+        start_ms: int,
+        end_ms: int,
+    ) -> List[Dict[str, Any]]:
+        """Deribit snapshots for ``currency`` in ``[start_ms, end_ms]`` ascending."""
+        sql = """
+            SELECT currency, timestamp_ms, index_price, perp_price, basis_bps,
+                   atm_iv, atm_expiry_ms, atm_strike, n_options
+            FROM deribit_snapshot
+            WHERE currency = ? AND timestamp_ms >= ? AND timestamp_ms <= ?
+            ORDER BY timestamp_ms ASC
+        """
+        cols = ["currency", "timestamp_ms", "index_price", "perp_price",
+                "basis_bps", "atm_iv", "atm_expiry_ms", "atm_strike", "n_options"]
+        rows = self._conn().execute(
+            sql, (str(currency).upper(), int(start_ms), int(end_ms))
+        ).fetchall()
+        return [dict(zip(cols, r)) for r in rows]
 
     def save_feed_age_history(
         self,

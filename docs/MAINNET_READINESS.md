@@ -198,6 +198,17 @@ Per `AGENTS.md` §1 ("Current operational status") and
 - **Status: OOS validation and data-readiness are both still blocked**,
   independent of the Fase 10 paper-trading gate above.
 
+**Update 2026-09-11 — S3 node-fills rebuild EXECUTED for real:** AWS creds
+(`~/.aws/credentials` default profile) verified via
+`scripts/ops/check_hl_s3_access.py`; `hl_node_trades_rebuild.py --execute`
+downloaded the 4 required `node_fills_by_block/hourly` objects for the
+support-package priority windows and rebuilt **226 official 1m candles**
+(74 BTC + 152 ETH, 2026-07-10 window) into the research DB with
+`source=hl_node_trades_rebuild` — zero fetch failures, cost ~$0.002
+requester-pays. Rebuilt rows still await their own secondary-validation
+pass before being treated as OOS-grade (the `revalidate_fn` hook exists
+but is not yet wired into the CLI).
+
 **Update 2026-09-11 — Coinalyze wired as GoldRush replacement, parity FAILS:**
 `CoinalyzeCandleProvider` (HL-native `*_PERP.A` markets, free with the
 existing `COINALYZE_API_KEY`) was added and run via

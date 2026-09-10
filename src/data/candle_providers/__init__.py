@@ -6,6 +6,7 @@ from src.data.candle_providers.base import (
     CandleProviderError,
     ProviderName,
 )
+from src.data.candle_providers.bybit_perp import BybitPerpCandleProvider
 from src.data.candle_providers.coinalyze_hl import CoinalyzeCandleProvider
 from src.data.candle_providers.goldrush_hypercore import GoldrushHypercoreCandleProvider
 from src.data.candle_providers.hyperliquid_public import HyperliquidPublicCandleProvider
@@ -29,6 +30,7 @@ __all__ = [
     "CandleProvider",
     "CandleProviderError",
     "ProviderName",
+    "BybitPerpCandleProvider",
     "CoinalyzeCandleProvider",
     "GoldrushHypercoreCandleProvider",
     "HyperliquidPublicCandleProvider",

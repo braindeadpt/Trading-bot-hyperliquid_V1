@@ -50,6 +50,7 @@ import argparse
 import asyncio
 import json
 import os
+import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
@@ -70,6 +71,7 @@ WATCHDOG_IDS = (
     "iv_gate_shadow",
     "feed_age_creep",
     "feed_cadence",
+    "liq_feed_gap",
 )
 
 # ── helpers reused from the per-gate scripts (single source of truth) ──
@@ -83,6 +85,8 @@ from scripts.research.top_trader_bias_recheck import (  # noqa: E402
     write_report as write_bias_report,
 )
 from scripts.research.liquidation_flush_recheck import (  # noqa: E402
+    DB_PATH as LIQ_DB_PATH,
+    REAL_SOURCES as LIQ_REAL_SOURCES,
     TARGET_DAYS as FLUSH_TARGET_DAYS,
     extract_cell,
     real_span_days,
@@ -212,6 +216,11 @@ def fresh_state() -> Dict[str, Dict[str, Any]]:
             "runs": [],
             "feeds_alerted": {},
         },
+        "liq_feed_gap": {
+            "triggered": False,
+            "runs": [],
+            "open_gap_start_ms": None,
+        },
     }
 
 
@@ -223,6 +232,8 @@ def _normalize_sub(raw: Any) -> Dict[str, Any]:
     }
     if sub.get("feeds_alerted") is not None:
         out["feeds_alerted"] = dict(sub.get("feeds_alerted") or {})
+    if "open_gap_start_ms" in sub:
+        out["open_gap_start_ms"] = sub.get("open_gap_start_ms")
     return out
 
 
@@ -246,7 +257,13 @@ def load_shared_state(path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
 
     state = fresh_state()
     migrated = False
-    for key, legacy in LEGACY_STATE_PATHS.items():
+    # An explicit state path scopes legacy lookup to the same directory —
+    # without this, tests/temp runs silently adopt the real production
+    # legacy files and can never observe a fresh state.
+    legacy_map = LEGACY_STATE_PATHS if path is None else {
+        k: state_path.parent / p.name for k, p in LEGACY_STATE_PATHS.items()
+    }
+    for key, legacy in legacy_map.items():
         if legacy.exists():
             try:
                 old = json.loads(legacy.read_text(encoding="utf-8"))
@@ -617,17 +634,130 @@ def check_cadence_degrading(
     return fired
 
 
+# ── liquidation feed gap watchdog ─────────────────────────────────────
+#
+# The persisted `liquidation_events` series (okx+bybit) feeds the flush
+# recheck. A silent gap once killed nine days of coverage (08-19..08-28)
+# unnoticed. This watch fires once per gap *episode*: alert when the
+# trailing silence exceeds the threshold, stay quiet while the gap stays
+# open, re-arm when the feed resumes.
+
+LIQ_GAP_ALERT_MS = 48 * 3_600_000      # 48h silence = gap (liq events are bursty)
+LIQ_GAP_LOOKBACK_MS = 30 * 86_400_000  # worst inter-event gap over last 30d
+
+
+def liq_gap_status() -> Dict[str, Any]:
+    """Trailing silence + worst inter-event gap in the lookback window."""
+    now_ms = int(time.time() * 1000)
+    out: Dict[str, Any] = {
+        "n_events": 0, "last_event_ms": None,
+        "trailing_silence_ms": None, "worst_gap_ms": None,
+        "worst_gap_start_ms": None,
+    }
+    if not LIQ_DB_PATH.exists():
+        return out
+    try:
+        conn = sqlite3.connect(f"file:{LIQ_DB_PATH}?mode=ro", uri=True)
+        cur = conn.cursor()
+        ph = ",".join("?" * len(LIQ_REAL_SOURCES))
+        cur.execute(
+            f"SELECT timestamp_ms FROM liquidation_events "
+            f"WHERE source IN ({ph}) AND timestamp_ms >= ? "
+            f"ORDER BY timestamp_ms",
+            (*LIQ_REAL_SOURCES, now_ms - LIQ_GAP_LOOKBACK_MS),
+        )
+        ts = [r[0] for r in cur.fetchall()]
+        conn.close()
+    except Exception as exc:
+        log(f"liq_gap: DB read failed: {exc}")
+        return out
+    if not ts:
+        return out
+    out["n_events"] = len(ts)
+    out["last_event_ms"] = ts[-1]
+    out["trailing_silence_ms"] = now_ms - ts[-1]
+    prev, worst, wstart = ts[0], 0, None
+    for t in ts[1:]:
+        if t - prev > worst:
+            worst, wstart = t - prev, prev
+        prev = t
+    out["worst_gap_ms"] = worst
+    out["worst_gap_start_ms"] = wstart
+    return out
+
+
+def notify_liq_gap(status: Dict[str, Any]) -> None:
+    notifier = build_alert_notifier()
+    if notifier is None:
+        log("liq_gap: alert skipped — no notifier")
+        return
+    sil_h = (status.get("trailing_silence_ms") or 0) / 3_600_000
+    worst_h = (status.get("worst_gap_ms") or 0) / 3_600_000
+    msg = (
+        f"⚠️ <b>LIQ FEED GAP</b>\n"
+        f"`liquidation_events` (okx+bybit) silencioso há <b>{sil_h:.1f}h</b> "
+        f"(limiar {LIQ_GAP_ALERT_MS // 3_600_000}h).\n"
+        f"Pior gap nos últimos 30d: {worst_h:.1f}h.\n"
+        f"Isto mata o flush recheck — verificar liquidation aggregator / bot up."
+    )
+    try:
+        notifier.send(msg)
+    except Exception as exc:
+        log(f"liq_gap: notify failed: {exc}")
+
+
+def check_liq_gap(
+    shared: Dict[str, Dict[str, Any]],
+    *,
+    force: bool = False,
+) -> bool:
+    """Alert once per liquidation-feed silence episode."""
+    sub = shared["liq_feed_gap"]
+    status = liq_gap_status()
+    sil = status.get("trailing_silence_ms")
+    open_start = sub.get("open_gap_start_ms")
+
+    if sil is not None and sil > LIQ_GAP_ALERT_MS:
+        if open_start is None or force:
+            sub["open_gap_start_ms"] = status["last_event_ms"]
+            run = {
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "trailing_silence_h": round(sil / 3_600_000, 1),
+                "worst_gap_30d_h": round((status.get("worst_gap_ms") or 0) / 3_600_000, 1),
+                "n_events_30d": status["n_events"],
+            }
+            sub["runs"].append(run)
+            save_shared_state(shared)
+            notify_liq_gap(status)
+            log(f"liq_gap: ALERT — feed silencioso há {sil / 3_600_000:.1f}h")
+            return True
+        log(f"liq_gap: episódio em curso ({sil / 3_600_000:.1f}h) — já alertado")
+        return False
+    if open_start is not None:
+        sub["open_gap_start_ms"] = None
+        save_shared_state(shared)
+        log("liq_gap: feed retomou — episódio fechado, re-armado")
+        return False
+    if sil is not None:
+        log(f"liq_gap: ok (último evento há {sil / 3_600_000:.1f}h, "
+            f"worst30d={(status.get('worst_gap_ms') or 0) / 3_600_000:.1f}h)")
+    else:
+        log("liq_gap: sem eventos na janela — nada a medir")
+    return False
+
+
 def check_all(
     shared: Dict[str, Dict[str, Any]], *, force: bool = False
-) -> Tuple[bool, bool, bool, bool, bool]:
-    """Run all five gates once. Returns (bias_ran, flush_ran, iv_ran,
-    creep_ran, cadence_ran)."""
+) -> Tuple[bool, bool, bool, bool, bool, bool]:
+    """Run all six gates once. Returns (bias_ran, flush_ran, iv_ran,
+    creep_ran, cadence_ran, liq_gap_ran)."""
     bias_ran = check_bias(shared, force=force)
     flush_ran = check_flush(shared, force=force)
     iv_ran = check_iv_gate(shared, force=force)
     creep_ran = check_creeping_age(shared, force=force)
     cadence_ran = check_cadence_degrading(shared, force=force)
-    return bias_ran, flush_ran, iv_ran, creep_ran, cadence_ran
+    liq_gap_ran = check_liq_gap(shared, force=force)
+    return bias_ran, flush_ran, iv_ran, creep_ran, cadence_ran, liq_gap_ran
 
 
 def main() -> int:
@@ -645,6 +775,7 @@ def main() -> int:
         f"iv >= {IV_TARGET_CLOSED} closed com decisão, "
         f"creep >= {CREEP_MIN_DAYS}d de escada no max diário, "
         f"cadence DEGRADING (rec mediana > p99 histórico), "
+        f"liq_gap > {LIQ_GAP_ALERT_MS // 3_600_000}h silêncio, "
         f"check a cada {args.hours:.0f}h) ===")
     shared = load_shared_state()
     # Always persist the canonical shared file (fresh or migrated) so the

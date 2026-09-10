@@ -7,6 +7,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
+from src.data.candle_providers.bybit_perp import BybitPerpCandleProvider
 from src.data.candle_providers.coinalyze_hl import (
     CoinalyzeCandleProvider,
     CoinalyzeConfigError,
@@ -44,12 +45,16 @@ def _make_provider(name: str) -> Any:
         return GoldrushHypercoreCandleProvider(max_requests_per_second=4.0)
     if name == "coinalyze":
         return CoinalyzeCandleProvider(max_requests_per_second=4.0)
+    if name == "bybit":
+        return BybitPerpCandleProvider(max_requests_per_second=4.0)
     raise ValueError(f"unknown research candle provider {name!r}")
 
 
 def _meta_for(provider_name: str) -> SeriesMetadata:
     if provider_name == "coinalyze_hl":
         return SeriesMetadata.coinalyze_hl_candles()
+    if provider_name == "bybit_perp":
+        return SeriesMetadata.bybit_perp_candles()
     return SeriesMetadata.goldrush_candles()
 
 

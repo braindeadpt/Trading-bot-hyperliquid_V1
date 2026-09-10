@@ -6,7 +6,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
-ProviderName = Literal["hyperliquid_public", "goldrush_hypercore", "coinalyze_hl"]
+ProviderName = Literal[
+    "hyperliquid_public", "goldrush_hypercore", "coinalyze_hl", "bybit_perp"
+]
 
 INTERVAL_MS: Dict[str, int] = {
     "1m": 60_000,
