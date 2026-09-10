@@ -6,7 +6,7 @@
 <title>Hyperliquid Trading Bot Dashboard</title>
 <script src="/socket.io.min.js"></script>
 <script src="/static/lightweight-charts.standalone.production.js"></script>
-<link rel="stylesheet" href="/static/dashboard.css?v=9">
+<link rel="stylesheet" href="/static/dashboard.css?v=10">
 <style>
 /* Inline fallback — guaranteed to apply */
 :root {
@@ -176,7 +176,7 @@ th { font-size: 10px; }
     <div class="badges">
         <span class="badge badge-blue" id="mode-badge">PAPER</span>
         <span class="badge badge-green" id="status-badge">RUNNING</span>
-        <span class="badge badge-yellow" id="circuit-badge">CB: OFF</span>
+        <span class="badge badge-dim" id="circuit-badge">CB: OFF</span>
         <span class="badge badge-purple" id="uptime-badge">00:00:00</span>
         <span class="badge badge-blue" id="latency-badge">--ms</span>
     </div>
@@ -213,6 +213,44 @@ th { font-size: 10px; }
         <span class="label">Engine</span>
         <span class="value" id="kpi-engine">--</span>
         <span class="sub" id="kpi-latency">Socket: --</span>
+    </div>
+</div>
+
+<!-- ALERT BANNER — critical states, never miss them -->
+<div id="alert-banner" class="alert-banner" style="display:none;">
+    <div class="alert-items" id="alert-items"></div>
+</div>
+
+<!-- FASE 10 / MAINNET GATE — mission panel -->
+<div class="panel gate-panel" id="gate-panel">
+    <div class="panel-header">
+        <span>OOS GATE · PATH TO MAINNET <span class="dim" id="gate-exp">fase 10</span></span>
+        <span class="badge" id="gate-verdict">—</span>
+    </div>
+    <div class="panel-body gate-body">
+        <div class="gate-left">
+            <div class="gate-count"><span id="gate-trades-n">--</span><span class="dim gate-of" id="gate-trades-of">/100 trades</span></div>
+            <div class="gate-bar"><div class="gate-bar-fill" id="gate-trades-bar"></div></div>
+            <div class="gate-sub dim" id="gate-strats">—</div>
+        </div>
+        <div class="gate-criteria" id="gate-criteria">
+            <div class="gate-crit muted" style="grid-column:1/-1;">Loading gate…</div>
+        </div>
+        <div class="gate-right">
+            <div class="gate-right-label dim">Window</div>
+            <div class="gate-window-text" id="gate-window-text">--</div>
+            <div class="gate-window-bar"><div class="gate-window-elapsed" id="gate-win-elapsed"></div><div class="gate-window-target" id="gate-win-target"></div></div>
+            <div class="gate-sub dim" id="gate-window-dates">--</div>
+        </div>
+        <div class="gate-side">
+            <div class="gate-side-label dim">Other gates</div>
+            <div class="gate-chip-row" id="gate-other">
+                <span class="gchip gchip-pass" title="8/8 scenarios on real testnet — 2026-09-10">Testnet e2e ✓</span>
+                <span class="gchip gchip-pass" title="0 critical/medium/low findings">Security ✓</span>
+                <span class="gchip gchip-wait" title="Needs window trades to diff">Live↔replay · wait</span>
+                <span class="gchip gchip-block" title="GoldRush candles not validated — needs node rebuild">GoldRush data ✗</span>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -2220,14 +2258,126 @@ function renderLogs(data) {
     div.scrollTop = div.scrollHeight;
 }
 
+// ── Alert banner — critical states surfaced above the fold ──
+function updateAlertBanner() {
+    const items = [];
+    const connected = socket && socket.connected;
+    if (!connected) {
+        items.push({ txt: "Dashboard OFFLINE — socket desligado, dados congelados", warn: false });
+    }
+    if (statusUpdate && Object.keys(statusUpdate).length) {
+        if (statusUpdate.circuit_breaker === "ON") {
+            items.push({ txt: "CIRCUIT BREAKER ATIVO — novas entradas bloqueadas (drawdown diário)", warn: false });
+        }
+        if (statusUpdate.running === false) {
+            items.push({ txt: "Engine STOPPED", warn: false });
+        }
+        if (statusUpdate.ws_healthy === false) {
+            items.push({ txt: "WebSocket Hyperliquid degraded", warn: true });
+        }
+        const staleSec = Date.now() - (statusReceivedAt || 0);
+        if (connected && staleSec > 15000) {
+            items.push({ txt: "Status feed stale (" + Math.round(staleSec / 1000) + "s)", warn: true });
+        }
+    }
+    const banner = document.getElementById("alert-banner");
+    const box = document.getElementById("alert-items");
+    if (!banner || !box) return;
+    if (!items.length) { banner.style.display = "none"; return; }
+    banner.style.display = "block";
+    box.innerHTML = items.map(i =>
+        `<div class="alert-item ${i.warn ? "warn" : ""}"><span class="adot"></span>${i.txt}</div>`
+    ).join("");
+}
+
+// ── Fase-10 gate panel ──
+const GATE_CRITERIA_META = {
+    min_trades:       { label: "Trades",       fmt: v => Math.round(v) },
+    profit_factor:    { label: "Profit factor",fmt: v => Number(v).toFixed(2) },
+    expectancy_r:     { label: "Expectancy R", fmt: v => (v >= 0 ? "+" : "") + Number(v).toFixed(3) },
+    max_drawdown_pct: { label: "Max DD %",     fmt: v => Number(v).toFixed(2) + "%" },
+};
+const GATE_CRITERIA_ORDER = ["min_trades", "profit_factor", "expectancy_r", "max_drawdown_pct"];
+
+function renderGate(g) {
+    const verdict = document.getElementById("gate-verdict");
+    if (!verdict) return;
+    if (!g || g.available !== true) {
+        verdict.textContent = "NO MANIFEST";
+        verdict.className = "badge badge-yellow";
+        document.getElementById("gate-criteria").innerHTML =
+            `<div class="gate-crit st-insufficient" style="grid-column:1/-1;">${g && g.error ? g.error : "gate unavailable"}</div>`;
+        return;
+    }
+    document.getElementById("gate-exp").textContent =
+        "exp " + String(g.experiment_id || "").slice(0, 8);
+
+    const n = g.trade_count || 0;
+    const minT = (g.criteria.min_trades && g.criteria.min_trades.threshold) || 100;
+    document.getElementById("gate-trades-n").textContent = n;
+    document.getElementById("gate-trades-of").textContent = "/" + minT + " trades";
+    const bar = document.getElementById("gate-trades-bar");
+    bar.style.width = Math.min(100, (n / minT) * 100) + "%";
+    bar.classList.toggle("done", n >= minT);
+    document.getElementById("gate-strats").textContent =
+        "exec: " + (g.execution_strategies || []).join(", ");
+
+    document.getElementById("gate-criteria").innerHTML = GATE_CRITERIA_ORDER.map(name => {
+        const c = g.criteria[name];
+        if (!c) return "";
+        const meta = GATE_CRITERIA_META[name];
+        const st = c.status === "PASS" ? "st-pass" : c.status === "FAIL" ? "st-fail" : "st-insufficient";
+        return `<div class="gate-crit ${st}">
+            <div class="gc-name">${meta.label}</div>
+            <div class="gc-val">${meta.fmt(c.value)}</div>
+            <div class="gc-thr">${c.status} · alvo ${name === "min_trades" ? "≥" : name === "max_drawdown_pct" ? "≤" : name === "expectancy_r" ? ">" : "≥"} ${meta.fmt(c.threshold)}</div>
+        </div>`;
+    }).join("");
+
+    // Window timeline
+    const now = g.now_ms || Date.now();
+    const start = g.window_start_ms, minE = g.min_end_ms, maxE = g.max_end_ms;
+    if (start && maxE) {
+        const total = maxE - start;
+        const elPct = Math.min(100, Math.max(0, (now - start) / total * 100));
+        const minPct = minE ? Math.max(0, Math.min(100, (minE - start) / total * 100)) : 0;
+        document.getElementById("gate-win-elapsed").style.width = elPct + "%";
+        const tgt = document.getElementById("gate-win-target");
+        tgt.style.left = minPct + "%";
+        tgt.style.width = (100 - minPct) + "%";
+        const dayN = Math.max(0, Math.floor((now - start) / 86400000));
+        const minD = minE ? Math.max(0, Math.ceil((minE - now) / 86400000)) : null;
+        const maxD = Math.max(0, Math.ceil((maxE - now) / 86400000));
+        document.getElementById("gate-window-text").textContent =
+            "Dia " + dayN + (minD !== null ? " · earliest " + minD + "d" : "") + " · hard " + maxD + "d";
+        const fd = t => t ? new Date(t).toLocaleDateString("pt-PT", {month:"short", day:"numeric"}) : "--";
+        document.getElementById("gate-window-dates").textContent =
+            fd(start) + " → min " + fd(minE) + " · max " + fd(maxE);
+    }
+
+    const nPass = GATE_CRITERIA_ORDER.filter(k => g.criteria[k] && g.criteria[k].status === "PASS").length;
+    const nFail = GATE_CRITERIA_ORDER.filter(k => g.criteria[k] && g.criteria[k].status === "FAIL").length;
+    if (g.gate_met) {
+        verdict.textContent = "GATE MET"; verdict.className = "badge badge-green";
+    } else if (nFail > 0) {
+        verdict.textContent = nPass + "/4 PASS · " + nFail + " FAIL"; verdict.className = "badge badge-red";
+    } else {
+        verdict.textContent = nPass + "/4 PASS · IN PROGRESS"; verdict.className = "badge badge-blue";
+    }
+}
+
+setInterval(updateAlertBanner, 5000);
+
 // ── Socket.IO ──
 socket.on("connect", () => {
     document.getElementById("conn-badge").textContent = "LIVE";
     document.getElementById("conn-badge").className = "badge badge-green";
+    updateAlertBanner();
 });
 socket.on("disconnect", () => {
     document.getElementById("conn-badge").textContent = "OFFLINE";
     document.getElementById("conn-badge").className = "badge badge-red";
+    updateAlertBanner();
 });
 
 socket.on("status", (data) => {
@@ -2239,7 +2389,8 @@ socket.on("status", (data) => {
     statusEl.className = "badge " + (data.running ? "badge-green" : "badge-red");
     const cbEl = document.getElementById("circuit-badge");
     cbEl.textContent = "CB: " + (data.circuit_breaker || "OFF");
-    cbEl.className = "badge " + (data.circuit_breaker === "ON" ? "badge-red" : "badge-yellow");
+    cbEl.className = "badge " + (data.circuit_breaker === "ON" ? "badge-red badge-pulse" : "badge-dim");
+    updateAlertBanner();
     const uptime = data.uptime_sec || 0;
     const h = Math.floor(uptime / 3600).toString().padStart(2, "0");
     const m = Math.floor((uptime % 3600) / 60).toString().padStart(2, "0");
@@ -2295,6 +2446,7 @@ pollResearch = function pollResearch() {
     authFetch("/api/research_watchdogs").then(r => r.json()).then(d => renderResearchWatchdogs(d)).catch(() => {});
     authFetch("/api/dvol").then(r => r.json()).then(d => renderDvolPanel(d)).catch(() => {});
     authFetch("/api/iv_gate_shadow").then(r => r.json()).then(d => renderIvGateShadow(d)).catch(() => {});
+    authFetch("/api/gate").then(r => r.json()).then(d => renderGate(d)).catch(() => {});
 };
 
 if (!window.__hlDashTimers) {

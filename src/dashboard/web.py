@@ -1494,6 +1494,53 @@ def create_app(config: Dict[str, Any]) -> tuple:
             logger.warning("research_watchdogs failed: %s", exc)
             return jsonify({"error": str(exc), "watchdogs": []}), 500
 
+    @app.route("/api/gate")
+    def api_gate():
+        """Fase-10 frozen-window gate progress for the dashboard mission panel.
+
+        Read-only: wraps ``build_gate_report`` (manifest integrity-verified,
+        trades DB opened mode=ro) and adds the window timing bounds from the
+        manifest so the UI can show elapsed/remaining. Cached 60s.
+        """
+        cached = _ttl_get("gate")
+        if cached is not None:
+            return jsonify(cached)
+        try:
+            from src.research.phase10_gate_metrics import build_gate_report
+            from src.research.phase10_preregister import load_preregister_manifest
+
+            manifest = load_preregister_manifest() or {}
+            window = manifest.get("window") or {}
+            report = build_gate_report()
+            data = {
+                "available": True,
+                "experiment_id": report.get("experiment_id"),
+                "window_start_ms": report.get("window_start_ms"),
+                "min_end_ms": window.get("min_end_ms"),
+                "max_end_ms": window.get("max_end_ms"),
+                "min_weeks": window.get("min_weeks"),
+                "max_weeks": window.get("max_weeks"),
+                "trade_count": report.get("trade_count"),
+                "criteria": report.get("criteria") or {},
+                "cost_summary": report.get("cost_summary") or {},
+                "gate_met": bool(report.get("gate_met")),
+                "execution_strategies": report.get("execution_strategies") or [],
+                "expectancy_basis": [
+                    report.get("expectancy_r_trades_used"),
+                    report.get("expectancy_r_trades_total"),
+                ],
+                "generated_at_ms": report.get("generated_at_ms"),
+                "now_ms": int(time.time() * 1000),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("api_gate failed: %s", exc)
+            data = {
+                "available": False,
+                "error": str(exc)[:200],
+                "now_ms": int(time.time() * 1000),
+            }
+        return jsonify(_ttl_put("gate", data, _RESEARCH_CACHE_TTL_S))
+
     @app.route("/api/dvol")
     def api_dvol():
         """DVOL daily series + trailing-30d percentile per symbol (IV gate).

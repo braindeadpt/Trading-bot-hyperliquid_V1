@@ -59,6 +59,7 @@ h1 { font-size: 14px; margin: 0; color: var(--accent); font-weight: 600; }
 .badge-red { background: #450a0a; color: var(--down); }
 .badge-blue { background: #1e3a5f; color: var(--accent); }
 .badge-purple { background: #2e1065; color: var(--accent2); }
+.badge-dim { background: #21262d; color: var(--muted); }
 
 /* ── KPI Bar — single row, compact ── */
 .kpi-bar {
@@ -195,6 +196,57 @@ tr:hover td { background: var(--panel-hover); }
 .log-entry { padding: 0; }
 .log-warn { color: var(--warn); }
 .log-error { color: var(--down); }
+
+/* ── Alert banner — critical operational states ── */
+.alert-banner {
+    margin-bottom: var(--gap);
+    background: linear-gradient(90deg, rgba(248,81,73,0.14), rgba(248,81,73,0.05));
+    border: 1px solid rgba(248,81,73,0.55);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    animation: alertpulse 2.4s ease-in-out infinite;
+}
+@keyframes alertpulse { 0%,100% { border-color: rgba(248,81,73,0.55); } 50% { border-color: rgba(248,81,73,0.95); } }
+.alert-items { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.alert-item { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: var(--down); }
+.alert-item.warn { color: var(--warn); }
+.alert-item .adot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; }
+
+/* ── Fase-10 gate panel ── */
+.gate-panel { margin-bottom: var(--gap); }
+.gate-body { display: flex; gap: 18px; align-items: stretch; padding: 10px 12px; flex-wrap: wrap; }
+.gate-left { min-width: 150px; display: flex; flex-direction: column; justify-content: center; gap: 4px; }
+.gate-count { font-family: 'SF Mono','Consolas',monospace; font-size: 26px; font-weight: 700; letter-spacing: -0.5px; line-height: 1; }
+.gate-of { font-size: 11px; font-weight: 400; margin-left: 3px; }
+.gate-bar { height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; }
+.gate-bar-fill { height: 100%; width: 0%; background: var(--accent); border-radius: 3px; transition: width 0.6s ease; }
+.gate-bar-fill.done { background: var(--up); }
+.gate-sub { font-size: 9px; }
+.gate-criteria { flex: 1; min-width: 300px; display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 6px; }
+.gate-crit { background: var(--panel-hover); border: 1px solid var(--border); border-left-width: 3px; border-radius: 4px; padding: 5px 8px; display: flex; flex-direction: column; gap: 2px; }
+.gate-crit .gc-name { font-size: 8.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+.gate-crit .gc-val { font-family: 'SF Mono','Consolas',monospace; font-size: 14px; font-weight: 700; }
+.gate-crit .gc-thr { font-size: 8.5px; color: var(--dim); }
+.gate-crit.st-pass { border-left-color: var(--up); }
+.gate-crit.st-fail { border-left-color: var(--down); }
+.gate-crit.st-insufficient { border-left-color: var(--warn); }
+.gate-crit.st-pass .gc-val { color: var(--up); }
+.gate-crit.st-fail .gc-val { color: var(--down); }
+.gate-crit.st-insufficient .gc-val { color: var(--warn); }
+.gate-right { min-width: 210px; display: flex; flex-direction: column; justify-content: center; gap: 4px; }
+.gate-right-label, .gate-side-label { font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.4px; }
+.gate-window-text { font-family: 'SF Mono','Consolas',monospace; font-size: 13px; font-weight: 600; }
+.gate-window-bar { position: relative; height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; }
+.gate-window-elapsed { position: absolute; left: 0; top: 0; height: 100%; background: var(--accent2); width: 0%; }
+.gate-window-target { position: absolute; top: 0; height: 100%; background: rgba(63,185,80,0.35); border-left: 1px solid var(--up); }
+.gate-side { min-width: 190px; display: flex; flex-direction: column; justify-content: center; gap: 4px; border-left: 1px solid var(--border); padding-left: 14px; }
+.gate-chip-row { display: flex; flex-wrap: wrap; gap: 4px; }
+.gchip { font-size: 9px; padding: 2px 7px; border-radius: 8px; border: 1px solid var(--border); font-weight: 600; white-space: nowrap; }
+.gchip-pass { color: var(--up); border-color: rgba(63,185,80,0.5); background: rgba(63,185,80,0.08); }
+.gchip-wait { color: var(--warn); border-color: rgba(210,153,34,0.5); background: rgba(210,153,34,0.08); }
+.gchip-block { color: var(--down); border-color: rgba(248,81,73,0.5); background: rgba(248,81,73,0.08); }
+.badge.badge-pulse { animation: alertpulse 1.6s ease-in-out infinite; }
+@media (max-width: 1100px) { .gate-side { border-left: none; padding-left: 0; } .gate-criteria { grid-template-columns: repeat(2, minmax(0,1fr)); } }
 
 /* ── Tick bar ── */
 .tick-bar { display: flex; gap: 2px; margin-top: 4px; }
