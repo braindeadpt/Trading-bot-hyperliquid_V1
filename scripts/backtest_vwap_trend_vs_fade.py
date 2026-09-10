@@ -689,7 +689,7 @@ def main() -> int:
     end_ms = ms_from_date(args.end, end=True)
 
     cfg = load_config()
-    db = Database(cfg.get("database.path", "data/live/bot.db"))
+    db = Database(cfg.get("database.path", "data/live/bot.db"), read_only=True)
     fade_section = dict(cfg.get("strategy.vwap_deviation", {}) or {})
     initial_capital = float(
         args.capital

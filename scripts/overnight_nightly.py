@@ -44,7 +44,12 @@ LOG_DIR = ROOT / "logs"
 
 RUNNER = ROOT / "scripts" / "overnight_runner.py"
 K_FLOOR = 4              # paired sign-flip noise gate cannot pass below this
-SUBPROCESS_TIMEOUT_S = 2 * 60 * 60   # a hung sweep must not hold the lock forever
+SUBPROCESS_TIMEOUT_S = 20 * 60       # a hung sweep must not hold the lock forever
+# 20 min, not 2h (2026-09-10): a full preregistered session (Q6 session A,
+# 6 windows x 3 cells = 18 runs) measures at ~18s. Two hours was not margin,
+# it was blindness -- every night the sweep blocked on the live DB's lock and
+# was only discovered dead the next morning. At 20 min a block is reported
+# while the window is still open, and a legitimate session never comes close.
 
 _DATE = r"\d{4}-\d{2}-\d{2}"
 
@@ -285,6 +290,14 @@ def run_session(sel: Dict[str, Any], symbols: str) -> Dict[str, Any]:
 
 
 def main() -> int:
+    # Cell tags carry sigma ("z=3.5σ"). With stdout redirected to a file
+    # Windows picks cp1252 and printing one raises UnicodeEncodeError, killing
+    # the session (2026-09-10). Force UTF-8 when the stream supports it;
+    # pytest's capture object does not, hence the guard.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--queue", default=str(QUEUE_PATH))
     ap.add_argument("--status", default=str(STATUS_PATH))

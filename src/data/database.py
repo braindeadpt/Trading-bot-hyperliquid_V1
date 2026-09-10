@@ -164,16 +164,27 @@ class Database:
         "1h": "candles_1h",
     }
 
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(self, db_path: Path | str, *, read_only: bool = False) -> None:
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # read_only: research/backtest consumers open the LIVE trading DB to
+        # read candles. A normal open is read-WRITE, runs _init_db()'s DDL and
+        # sets PRAGMA journal_mode=WAL against a database the bot is actively
+        # writing — which blocks on locks (the overnight sessions died on a
+        # 7200s timeout every night the bot was up) and lets a research process
+        # touch live trading data. In read_only mode nothing is created and the
+        # connection is opened with the SQLite `mode=ro` URI, so contention and
+        # accidental writes are both impossible.
+        self._read_only = bool(read_only)
+        if not self._read_only:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         # CRIT-005 FIX: Serialize all DB write operations to prevent
         # interleaved coroutine access from corrupting WAL transactions.
         # SQLite WAL allows one writer + many readers; the lock ensures
         # a single writer at a time from the async event loop.
         self._write_lock = threading.Lock()
-        self._init_db()
+        if not self._read_only:
+            self._init_db()
 
     # ------------------------------------------------------------------
     # Connection helpers
@@ -182,6 +193,18 @@ class Database:
     def _conn(self) -> sqlite3.Connection:
         """Return a thread-local connection (auto-creates on first use)."""
         if not hasattr(self._local, "connection"):
+            if self._read_only:
+                # mode=ro: never creates, never writes, never waits on a
+                # writer's lock. No PRAGMA journal_mode here — changing the
+                # journal mode is itself a write.
+                self._local.connection = sqlite3.connect(
+                    f"file:{self.db_path.as_posix()}?mode=ro",
+                    uri=True,
+                    detect_types=sqlite3.PARSE_DECLTYPES,
+                    check_same_thread=False,
+                )
+                self._local.connection.row_factory = sqlite3.Row
+                return self._local.connection
             self._local.connection = sqlite3.connect(
                 str(self.db_path),
                 detect_types=sqlite3.PARSE_DECLTYPES,

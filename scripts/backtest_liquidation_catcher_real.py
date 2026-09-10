@@ -106,7 +106,7 @@ def _copy_candles(
                 )
                 live_fallback_used = True
             from src.data.database import Database
-            live = Database(str(LIVE_DB))
+            live = Database(str(LIVE_DB), read_only=True)
             rows = live.get_candles(symbol, tf, limit=500_000, start_ms=start_ms, end_ms=end_ms)
             tf_source = "live_bot_db"
         if rows:

@@ -881,7 +881,9 @@ def test_iv_run_one_caches_engine_pass(monkeypatch):
     monkeypatch.setattr(rr, "run_strategy", fake_run_strategy)
 
     # DB constructor + DVOL loader stubbed; loader returns one shared series.
-    monkeypatch.setattr("src.data.database.Database", lambda _p: FakeDB())
+    # **_kw: the research call sites pass read_only=True (the live trading DB
+    # is opened mode=ro so a sweep can never block on the bot's writer lock).
+    monkeypatch.setattr("src.data.database.Database", lambda _p, **_kw: FakeDB())
     monkeypatch.setattr(
         mod, "_load_dvol_series",
         lambda symbols, s_ms, e_ms: ({s: iv_series for s in symbols}, iv_series))

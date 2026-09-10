@@ -8,6 +8,11 @@ title Overnight Research (nightly)
 
 cd /d "%~dp0"
 
+:: chcp only changes the CONSOLE code page. When stdout is redirected to a
+:: file (as below) Python still picks the locale encoding (cp1252) and dies
+:: on the first sigma in a cell tag -- this killed the 2026-09-10 02:00 run.
+set PYTHONIOENCODING=utf-8
+
 if not exist logs mkdir logs
 if not exist data\research\overnight_experiments mkdir data\research\overnight_experiments
 

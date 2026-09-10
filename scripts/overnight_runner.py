@@ -690,7 +690,7 @@ def vwap_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], 
     cfg = load_config(str(ROOT / "config" / "settings.yaml"))
     fade_section = dict(cfg.get("strategy.vwap_deviation", {}) or {})
     base_z = float(fade_section.get("z_threshold", 2.5))
-    db = Database(str(cfg.get("database.path", "data/live/bot.db")))
+    db = Database(str(cfg.get("database.path", "data/live/bot.db")), read_only=True)
     initial_capital = float(
         cfg.get("backtest.initial_capital", cfg.get("risk.initial_capital", 10_000.0))
     )
@@ -909,7 +909,7 @@ def hype_vwap_refine_family() -> Tuple[List[str], Callable[..., Dict[str, Any]],
             return {"error": f"no preregistered DB seam covers window ending {end}",
                     "overrides": dict(overrides)}
         try:
-            db = Database(db_path)
+            db = Database(db_path, read_only=True)
             trades_all: List[Dict[str, Any]] = []
             per_symbol: Dict[str, Dict[str, Any]] = {}
             for sym in symbols:
@@ -1169,7 +1169,7 @@ def iv_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], Ca
     from src.utils.config import load_config  # noqa: E402
 
     cfg = load_config(str(ROOT / "config" / "settings.yaml"))
-    db = Database(str(cfg.get("database.path", "data/live/bot.db")))
+    db = Database(str(cfg.get("database.path", "data/live/bot.db")), read_only=True)
     spec_names = [name for name, _cls, _path in SPECS]
 
     def tag_for(cut: Optional[float]) -> str:
@@ -1581,6 +1581,14 @@ def summarize(session: Dict[str, Any], artifact: Path, ledger: Path) -> str:
 
 
 def main() -> int:
+    # Cell tags carry sigma ("z=3.5σ"). With stdout redirected to a file
+    # Windows picks cp1252 and printing one raises UnicodeEncodeError, killing
+    # the session (2026-09-10). Force UTF-8 when the stream supports it;
+    # pytest's capture object does not, hence the guard.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--family", choices=sorted(FAMILIES), default=None)
     ap.add_argument("--start", default="2026-05-18")
