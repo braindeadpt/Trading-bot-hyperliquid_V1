@@ -37,8 +37,8 @@ Spare budget is never spent on unplanned windows.
 | Verdict | Condition (all must hold for KEEP) |
 |---|---|
 | **KEEP** | ≥2 valid windows ∧ strict majority improved ∧ aggregate n≥30 ∧ PF>1 ∧ no window worse than 2× the baseline's worst ∧ noise gate passed (exact paired per-window sign-flip test, one-sided alpha=0.10 — the unit is the window PAIR so regime correlation is preserved; p = fraction of sign patterns with sum ≥ observed; with all K windows favoring the variant p = 2^−K, so K=3 cannot clear alpha and K=4 is the practical floor; skipped with an explicit reason when per-trade PnL is unavailable) → **shadow candidate** with a named shadow path |
-| **INCONCLUSIVE** | fewer than 2 valid windows (a majority of one is not multi-window evidence) ∨ n<30 ∨ noise gate failed (paired delta not beyond the window sign-flip null) — parked with the evidence bar attached |
-| **DISCARD** | no majority ∨ PF≤1 ∨ catastrophic window — including the case "improved everywhere but still loses money": less bad than the baseline is not an edge |
+| **DISCARD** | catastrophic window ∨ no majority ∨ PF≤1 — including the case "improved everywhere but still loses money": less bad than the baseline is not an edge. Checked **before** the n gate: a negative result does not need n≥30 to be negative, so a small-n DISCARD is still DISCARD, never parked as INCONCLUSIVE |
+| **INCONCLUSIVE** | only reached once the result is otherwise positive (majority improved ∧ PF>1 ∧ no catastrophic window): fewer than 2 valid windows (a majority of one is not multi-window evidence) ∨ n<30 ∨ noise gate failed (paired delta not beyond the window sign-flip null) — parked with the evidence bar attached. n≥30 is a **KEEP** precondition, never a DISCARD precondition |
 | **BLOCKED** | no window cells survived to compare (or the experiment needs forbidden changes — program-level BLOCKED, logged, never run) |
 
 Reasons vocabulary the runner emits: `windows improved X/Y`,
@@ -53,9 +53,14 @@ baseline tag and aggregate (net, n, PF) · variant aggregate · per-window
 delta (`n/e` marks a no-evidence window) · reasons · audit line. The JSON
 artifact (same data, machine-readable, gitignored) carries per-cell
 details: `total_pnl_usd`, `n_trades`, `gross_win/loss_usd`,
-`trades_summary`, `trade_pnls` (per-window paired noise gate needs these),
-`manifest`, and the `noise_gate` dict per variant (p_value, alpha, method,
-per-window deltas).
+`trades_summary`, `trade_pnls` + `trade_symbols` (the per-window paired
+noise gate and its per-symbol slices need these), `manifest`, the
+`noise_gate` dict per variant (p_value, alpha, method, per-window deltas),
+and `symbol_gates` per variant (the SAME paired sign-flip test restricted
+to each symbol — **advisory only**: it answers "does the variant fix symbol
+X specifically?" but never feeds the verdict; the cell-level gate is the
+only promotion gate, and a great slice on a losing cell is a forensics
+lead, not an edge).
 
 ## Worked example — Night 1, flush_fade `delay=0 stopout=OFF` (real run)
 
@@ -87,16 +92,113 @@ noise-model commit would add a `noise gate:` line here; this run predates
 it, and its per-trade PnL is not stored in the artifact, so none is shown.)
 
 ---
-## Morning report — 2026-09-09 20:17 UTC — family `iv_thresholds`
+## Morning report — 2026-09-10 23:13 UTC — family `vwap_deceleration`
 
-- span: 2026-06-14..2026-09-08 (3 non-overlapping windows of 30d) · symbols: BTC, ETH, SOL, HYPE
-- verdicts: 0 KEEP · 3 INCONCLUSIVE · 0 DISCARD
-- artifact: `data\research\overnight_experiments\20260909_201701_iv_thresholds.json`
-- INCONCLUSIVE: `high_iv>63.3` net=-42.64 n=28 — n<30 — park with evidence bar attached (IV-gate n=13 precedent)
-- INCONCLUSIVE: `high_iv>66.7` net=-32.7 n=24 — n<30 — park with evidence bar attached (IV-gate n=13 precedent)
-- INCONCLUSIVE: `high_iv>70.0` net=-25.64 n=17 — n<30 — park with evidence bar attached (IV-gate n=13 precedent)
+- span: 2026-05-18..2026-09-08 (4 non-overlapping windows of 30d) · symbols: BTC, ETH, HYPE
+- verdicts: 0 KEEP · 0 INCONCLUSIVE · 3 DISCARD
+- artifact: `data\research\overnight_experiments\20260910_231319_vwap_deceleration.json`
 
 ---
+### 2026-09-10 23:13 UTC — vwap_deceleration/decel_retrace_0.15 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (baseline): net=-151.09 n=251 PF=0.9
+- variant: net=-181.86 n=166 PF=0.83
+- per-window delta: 2026-05(-3.13), 2026-06(-141.31), 2026-07(+18.79), 2026-08(+94.88)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-8.82 (n=66, p=0.6875, within sign-flip null); ETH delta=-15.30 (n=61, p=0.625, within sign-flip null); HYPE delta=-6.71 (n=39, p=0.625, within sign-flip null)
+- reasons: windows improved 2/4 (majority=no); aggregate n=166 (gate >=30); aggregate PF=0.83 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-10 23:13 UTC — vwap_deceleration/decel_retrace_0.30 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (baseline): net=-151.09 n=251 PF=0.9
+- variant: net=-243.24 n=148 PF=0.748
+- per-window delta: 2026-05(-34.76), 2026-06(-107.81), 2026-07(+5.47), 2026-08(+44.95)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-50.31 (n=59, p=0.625, within sign-flip null); ETH delta=+21.86 (n=53, p=0.4375, within sign-flip null); HYPE delta=-63.79 (n=36, p=0.875, within sign-flip null)
+- reasons: windows improved 2/4 (majority=no); aggregate n=148 (gate >=30); aggregate PF=0.748 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-10 23:13 UTC — vwap_deceleration/decel_counter_close — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (baseline): net=-151.09 n=251 PF=0.9
+- variant: net=-311.11 n=148 PF=0.685
+- per-window delta: 2026-05(-64.04), 2026-06(-197.8), 2026-07(+30.26), 2026-08(+71.56)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-31.01 (n=59, p=0.6875, within sign-flip null); ETH delta=-68.14 (n=56, p=0.6875, within sign-flip null); HYPE delta=-60.90 (n=33, p=0.75, within sign-flip null)
+- reasons: windows improved 2/4 (majority=no); aggregate n=148 (gate >=30); aggregate PF=0.685 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-10 23:12 UTC — vwap_exhaustion/no_vol_filter — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (baseline (prod surge=1.5)): net=-151.09 n=251 PF=0.9
+- variant: net=-368.9 n=419 PF=0.844
+- per-window delta: 2026-05(-194.77), 2026-06(-34.99), 2026-07(+197.51), 2026-08(-185.56)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-62.52 (n=164, p=0.75, within sign-flip null); ETH delta=-130.14 (n=154, p=0.8125, within sign-flip null); HYPE delta=-25.15 (n=101, p=0.625, within sign-flip null)
+- reasons: windows improved 1/4 (majority=no); aggregate n=419 (gate >=30); aggregate PF=0.844 (gate >1.0); catastrophic window: worst variant -368.36 vs baseline worst -182.80 (>2.0x)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-10 23:12 UTC — vwap_exhaustion/exhaust_decay — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (baseline (prod surge=1.5)): net=-151.09 n=251 PF=0.9
+- variant: net=-242.26 n=234 PF=0.833
+- per-window delta: 2026-05(-33.2), 2026-06(-225.75), 2026-07(+74.4), 2026-08(+93.38)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-192.04 (n=86, p=0.8125, within sign-flip null); ETH delta=+33.18 (n=81, p=0.4375, within sign-flip null); HYPE delta=+67.68 (n=67, p=0.5, within sign-flip null)
+- reasons: windows improved 2/4 (majority=no); aggregate n=234 (gate >=30); aggregate PF=0.833 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-10 23:12 UTC — vwap_exhaustion/exhaust_below_mean — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (baseline (prod surge=1.5)): net=-151.09 n=251 PF=0.9
+- variant: net=-82.48 n=168 PF=0.893
+- per-window delta: 2026-05(-33.2), 2026-06(-80.02), 2026-07(+34.6), 2026-08(+147.23)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-0.30 (n=61, p=0.5625, within sign-flip null); ETH delta=+33.15 (n=60, p=0.4375, within sign-flip null); HYPE delta=+35.67 (n=47, p=0.125, within sign-flip null)
+- reasons: windows improved 2/4 (majority=no); aggregate n=168 (gate >=30); aggregate PF=0.893 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-10 23:12 UTC — vwap_exit_econ/exit_z_threshold=0.5 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (baseline (prod exits)): net=-151.09 n=251 PF=0.9
+- variant: net=-121.51 n=251 PF=0.919
+- per-window delta: 2026-05(+15.83), 2026-06(+3.92), 2026-07(-3.46), 2026-08(+13.29)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+5.78 (n=102, p=0.125, within sign-flip null); ETH delta=+10.93 (n=99, p=0.5, within sign-flip null); HYPE delta=+12.82 (n=50, p=0.5, within sign-flip null)
+- reasons: windows improved 3/4 (majority=yes); aggregate n=251 (gate >=30); aggregate PF=0.919 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-10 23:12 UTC — vwap_exit_econ/exit_z_threshold=0.15 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (baseline (prod exits)): net=-151.09 n=251 PF=0.9
+- variant: net=-167.31 n=247 PF=0.888
+- per-window delta: 2026-05(+0.26), 2026-06(+5.32), 2026-07(+4.44), 2026-08(-26.24)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+16.71 (n=101, p=0.25, within sign-flip null); ETH delta=-54.41 (n=96, p=1.0, within sign-flip null); HYPE delta=+21.41 (n=50, p=0.5, within sign-flip null)
+- reasons: windows improved 3/4 (majority=yes); aggregate n=247 (gate >=30); aggregate PF=0.888 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-10 23:12 UTC — vwap_exit_econ/take_profit_r_multiple=1.5 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (baseline (prod exits)): net=-151.09 n=251 PF=0.9
+- variant: net=-151.09 n=251 PF=0.9
+- per-window delta: 2026-05(+0.0), 2026-06(+0.0), 2026-07(+0.0), 2026-08(+0.0)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+0.00 (n=102, p=1.0, within sign-flip null); ETH delta=+0.00 (n=99, p=1.0, within sign-flip null); HYPE delta=+0.00 (n=50, p=1.0, within sign-flip null)
+- reasons: windows improved 0/4 (majority=no); aggregate n=251 (gate >=30); aggregate PF=0.9 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-10 23:12 UTC — vwap_exit_econ/max_hold_hours=2 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (baseline (prod exits)): net=-151.09 n=251 PF=0.9
+- variant: net=-430.16 n=280 PF=0.699
+- per-window delta: 2026-05(+14.94), 2026-06(-199.35), 2026-07(-22.99), 2026-08(-71.67)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-116.38 (n=107, p=0.875, within sign-flip null); ETH delta=-105.86 (n=108, p=0.75, within sign-flip null); HYPE delta=-56.90 (n=65, p=0.75, within sign-flip null)
+- reasons: windows improved 1/4 (majority=no); aggregate n=280 (gate >=30); aggregate PF=0.699 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
 ### 2026-09-09 20:17 UTC — iv_thresholds/high_iv>63.3 — INCONCLUSIVE
 - hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
 - windows: 2026-06-14..2026-09-08 (3 windows of 30d, non-overlapping)

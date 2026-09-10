@@ -122,32 +122,25 @@ feed had 30d of history) — those trades are blocked, never silently kept.
 Reopen gate unchanged: DVOL ≥ ~115d (~2026-10-08) for K=4; the reopen session
 compares the cuts against THIS baseline.
 
-## Queued — wired families run when their night comes (Q4/Q5/Q7 wired 2026-09-10)
+## Done / pending — Q4/Q5/Q7 all ran 2026-09-10 (verdicts below)
 
 Window guarantee on wiring: the same 05-18..09-08 30d split yields **4
 non-overlapping windows** OK (K=4 floor met by construction; data gaps
 demote verdicts honestly). Grid cap: **≤5 cells** (see budget rule).
 An entry becomes READY only after the family is wired and reviewed.
 
-- **Q4 — VWAP volume-exhaustion inversion (§1.2) — READY (wired
-  2026-09-10):** reversion wants seller volume dying, not 1.5× confirmation.
-  `buy_volume`/`sell_volume` persisted → harness-local `_ExhaustionGate`
-  vetoes entries where the aggressor side is still accelerating (missing
-  buy/sell volume vetoes — silence is no-evidence, never a pass).
-  - **Harness:** `python scripts/research/overnight_runner.py --family vwap_exhaustion --start 2026-05-18 --end 2026-09-08`
-  - **Grid (4 cells, fixed):** baseline surge=1.5 · `volume_surge:0` ablation
-    · surge=0 + aggressor decaying vs prior bar · surge=0 + aggressor below
-    own 24-bar mean. **Budget: 4 × 4 = 16 runs.**
-- **Q5 — VWAP deceleration confirmation (§1.1) — READY (wired
-  2026-09-10):** don't enter mid-impulse; wait for the z-score to stop
-  making new extremes. Harness-local `_DecelGate` tracks the running |z|
-  excursion extreme from its own 1h deque.
-  - **Harness:** `python scripts/research/overnight_runner.py --family vwap_deceleration --start 2026-05-18 --end 2026-09-08`
-  - **Grid (4 cells, fixed):** baseline · retrace ≥0.15σ · retrace ≥0.30σ ·
-    counter-close (signal bar closes against the move).
-    **Budget: 4 × 4 = 16 runs.**
-  - **Cannot share a night with Q4** (two full grids exceed 20 runs) — separate
-  nights by default.
+- **Q4 — VWAP volume-exhaustion inversion (§1.2) — DONE 2026-09-10, all
+  cells DISCARD:** reversion wants seller volume dying, not 1.5×
+  confirmation. Result: `below_mean` was the best variant yet (net −82.48,
+  half the baseline bleed) but still net-negative; `decay` −242.26;
+  `no_vol_filter` ablation −368.90 (the surge filter does add selectivity
+  value). Direction confirmed, magnitude insufficient.
+  Artifact `20260910_231256_vwap_exhaustion.json`.
+- **Q5 — VWAP deceleration confirmation (§1.1) — DONE 2026-09-10, all
+  cells DISCARD:** waiting for the z-score to stop making new extremes
+  costs more than it saves (reversion is fast; late entries get worse
+  prices). retrace_0.15 −181.86, retrace_0.30 −243.24, counter_close
+  −311.11. Artifact `20260910_231319_vwap_deceleration.json`.
 - **Q2 — VB long-only + follow-through (§1.5) — BLOCKED (K=4 floor; reopen
   ~ 2026-12-05):** **RIGOR NOTE — the variant was selected on the
   2026-05-18..08-07 forensic sample.** Only windows strictly after 08-07
@@ -158,17 +151,14 @@ An entry becomes READY only after the family is wired and reviewed.
   chosen**: per-window n~5-8 makes the sign-flip deltas noise. The n≥30
   path is also borderline (~37 over 120d). Prior forensic slice (selection
   data, never evidence): delayed entry n=37, WR 43.2%, PF 1.11, net +5.13.
-- **Q7 — VWAPDeviation exit-economics — READY (added + wired 2026-09-10):**
-  the 4-window baseline bleeds net −151.09 / PF 0.9 / n=251 (Night 2
-  artifact). Entry-side sweeps already failed (z=3.0, per-symbol) — the open
-  question is whether the loss is exit-side give-back. Hypothesis (fixed):
-  exits at |Z|<0.3 surrender reversion before tier-0 fees clear; a higher
-  `exit_z_threshold` or a tighter TP/time-stop improves net PnL on the same
-  entries.
-  - **Harness:** `python scripts/research/overnight_runner.py --family vwap_exit_econ --start 2026-05-18 --end 2026-09-08`
-  - **Grid (5 cells, fixed a priori):** baseline `exit_z=0.3 tp_r=2.0 hold=4h` ·
-    `exit_z_threshold: 0.5` · `exit_z_threshold: 0.15` ·
-    `take_profit_r_multiple: 1.5` · `max_hold_hours: 2`.
+- **Q7 — VWAPDeviation exit-economics — DONE 2026-09-10, all cells
+  DISCARD:** the loss is NOT exit-side give-back. `exit_z=0.5` recovers
+  ~20% (−121.51) but stays negative; `exit_z=0.15` −167.31; `tp_r=1.5`
+  −151.09 (TP rarely binds before the z-exit); `hold=2h` −430.16 (cutting
+  hold time kills the reversion — it needs the full 4h). Combined with the
+  failed entry-side sweeps, VWAPDeviation shows no exploitable edge on this
+  dataset from either side of the trade.
+  Artifact `20260910_231229_vwap_exit_econ.json`.
   - **Window set:** 2026-05-18..2026-09-08, 30d split → 4 non-overlapping
     windows (same fixed set as Night 2 — chosen once, never per-result).
   - **Budget:** 5 × 4 = **20 runs** (at cap; run alone).
