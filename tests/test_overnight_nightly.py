@@ -43,6 +43,13 @@ K3_QUEUE = """# queue
 - **Window set:** 2026-08-07..2026-09-09, split 30d -> windows.
 """
 
+DVOL_QUEUE = """# queue
+
+## Night 3 (READY — coverage-gated)
+- **Harness:** `python scripts/overnight_runner.py --family iv_thresholds --start dvol --end dvol --symbols BTC,ETH,SOL,HYPE --cells 0,1,2`
+- **Window set:** DVOL coverage (starts 2026-06-14), 30d split — K=4 needs ~115d.
+"""
+
 NO_READY_QUEUE = """# queue
 
 ## Night 1 — done (CLOSED)
@@ -108,6 +115,15 @@ class TestPickReady:
 """, encoding="utf-8")
         assert nw.pick_ready(q) is None
 
+    def test_dvol_span_entry_parsed_as_coverage_gated(self, tmp_path):
+        q = tmp_path / "QUEUE.md"
+        q.write_text(DVOL_QUEUE, encoding="utf-8")
+        ready = nw.pick_ready(q)
+        assert ready["family"] == "iv_thresholds"
+        assert ready["window"] == {"span": "dvol", "split_days": 30}
+        assert ready["cells"] == "0,1,2"
+        assert ready["symbols"] == "BTC,ETH,SOL,HYPE"
+
     def test_real_queue_q6_is_first_ready(self):
         # Live fact check: Q6 (hype_vwap_refine) is the FIRST READY — it is
         # fully runnable now (6 windows, research DB + live DB on disk) and
@@ -122,6 +138,18 @@ class TestPickReady:
         assert ready["cells"] == "0,1,2"
         assert nw.count_windows(ready["window"]) == 6
         assert nw.count_windows(ready["window"]) >= nw.K_FLOOR
+
+
+    def test_coverage_gated_ready_reports_no_precomputed_k(self, tmp_path):
+        """A dvol-gated entry defers the K=4 floor to the runner — the
+        status file marks it coverage_gated instead of a fixed K."""
+        q = tmp_path / "QUEUE.md"
+        q.write_text(DVOL_QUEUE, encoding="utf-8")
+        st = nw.build_nightly_status(queue_path=q)
+        nr = st["next_ready"]
+        assert nr["coverage_gated"] is True
+        assert nr["k_floor_ok"] is None
+        assert nr["windows"] is None
 
 
 class TestCountWindows:
@@ -205,6 +233,30 @@ class TestRunSession:
         assert res["returncode"] == 0
         assert "--summary" in captured["argv"]
         assert "--cells" not in captured["argv"]   # cells None → flag omitted
+
+    def test_run_session_passes_dvol_span_through(self, tmp_path, monkeypatch):
+        """A coverage-gated selection forwards --start dvol --end dvol to
+        the runner — the span is resolved at run time, not by the wrapper."""
+        captured = {}
+
+        class FakeProc:
+            returncode = 0
+            stdout = "overnight: family=iv_thresholds windows=4K\n"
+            stderr = ""
+
+        def fake_run(argv, **kw):
+            captured["argv"] = argv
+            return FakeProc()
+
+        monkeypatch.setattr(nw.subprocess, "run", fake_run)
+        sel = {"family": "iv_thresholds",
+               "window": {"span": "dvol", "split_days": 30}}
+        res = nw.run_session(sel, "BTC,ETH,SOL,HYPE")
+        assert res["returncode"] == 0
+        joined = " ".join(captured["argv"])
+        assert "--family iv_thresholds" in joined
+        assert "--start dvol" in joined and "--end dvol" in joined
+        assert "--symbols BTC,ETH,SOL,HYPE" in joined
 
     def test_timeout_is_reported_not_raised(self, tmp_path, monkeypatch):
         import subprocess as sp

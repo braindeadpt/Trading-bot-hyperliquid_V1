@@ -93,14 +93,24 @@ def _window_spec(body: str) -> Optional[Dict[str, Any]]:
 
 
 def pick_ready(queue_path: Path = QUEUE_PATH) -> Optional[Dict[str, Any]]:
-    """First READY section with a parseable family + window set."""
+    """First READY section with a parseable family + window set.
+
+    A harness declaring ``--end dvol`` (or ``--start dvol``) is a
+    coverage-gated entry: the span is resolved at run time from the
+    persisted DVOL coverage, so no fixed window spec is required — the
+    runner enforces the K=4 floor itself and BLOCKs early when the
+    coverage is still short (Night 3 reopen path).
+    """
     text = queue_path.read_text(encoding="utf-8")
     for sec in _sections(text):
         if not READY_RE.search(sec["title"]):
             continue
         harness = _field(sec["body"], "Harness")
         family = _family_from_harness(harness)
-        window = _window_spec(sec["body"])
+        if family and re.search(r"--(?:start|end|span)\s+dvol\b", harness):
+            window = {"span": "dvol", "split_days": 30}
+        else:
+            window = _window_spec(sec["body"])
         if family and window:
             cells = re.search(r"--cells\s+([\d,]+)", harness)
             symbols = re.search(r"--symbols\s+([A-Za-z0-9,]+)", harness)
@@ -202,13 +212,21 @@ def build_nightly_status(ran: Optional[Dict[str, Any]] = None,
                         else str(STATUS_PATH)),
     }
     if ready:
-        try:
-            k = count_windows(ready["window"])
-            ready["windows"] = k
-            ready["k_floor_ok"] = k >= K_FLOOR
-        except Exception as exc:  # noqa: BLE001
+        if ready["window"].get("span") == "dvol":
+            # Coverage-gated: K is resolved at run time from the persisted
+            # DVOL span; the runner BLOCKs (exit 0 + verdict) while the
+            # coverage cannot produce the K=4 floor yet.
+            ready["windows"] = None
             ready["k_floor_ok"] = None
-            ready["window_error"] = str(exc)
+            ready["coverage_gated"] = True
+        else:
+            try:
+                k = count_windows(ready["window"])
+                ready["windows"] = k
+                ready["k_floor_ok"] = k >= K_FLOOR
+            except Exception as exc:  # noqa: BLE001
+                ready["k_floor_ok"] = None
+                ready["window_error"] = str(exc)
         payload["next_ready"] = ready
     if reason:
         payload["reason"] = reason
@@ -220,9 +238,14 @@ def run_session(sel: Dict[str, Any], symbols: str) -> Dict[str, Any]:
     w = sel["window"]
     argv = [sys.executable, str(RUNNER),
             "--family", sel["family"],
-            "--start", w["start"], "--end", w["end"],
-            "--split-days", str(w["split_days"]),
+            "--split-days", str(w.get("split_days", 30)),
             "--symbols", symbols, "--summary"]
+    if w.get("span") == "dvol":
+        # Coverage-gated: the runner derives the span from the persisted
+        # DVOL coverage and BLOCKs while K < 4 (Night 3 reopen path).
+        argv += ["--start", "dvol", "--end", "dvol"]
+    else:
+        argv += ["--start", w["start"], "--end", w["end"]]
     if sel.get("cells"):
         argv += ["--cells", sel["cells"]]
 
@@ -306,24 +329,33 @@ def main() -> int:
             print("overnight: nothing READY in queue — status written, exiting 0")
             return 0
 
-    k = count_windows(sel["window"])
-    if k < K_FLOOR:
-        payload = build_nightly_status(
-            reason=f"{sel['family']}: only {k} windows < K={K_FLOOR} floor — refused",
-            queue_path=queue_path)
-        _write_status(payload)
-        print(f"overnight: REFUSED {sel['family']} — {k} windows < K={K_FLOOR}")
-        return 0
+    if sel["window"].get("span") == "dvol":
+        # Coverage-gated: the K=4 floor is enforced at run time by the
+        # runner (the span resolves from the persisted DVOL coverage).
+        pass
+    else:
+        k = count_windows(sel["window"])
+        if k < K_FLOOR:
+            payload = build_nightly_status(
+                reason=f"{sel['family']}: only {k} windows < K={K_FLOOR} floor — refused",
+                queue_path=queue_path)
+            _write_status(payload)
+            print(f"overnight: REFUSED {sel['family']} — {k} windows < K={K_FLOOR}")
+            return 0
 
     symbols = args.symbols if not sel.get("symbols") else sel["symbols"]
     if args.dry_run:
+        span_txt = (
+            f"{sel['window']['start']}..{sel['window']['end']} "
+            f"split={sel['window']['split_days']}d K={k}"
+            if sel["window"].get("span") != "dvol"
+            else "dvol coverage-gated (K resolved at run time)"
+        )
         payload = build_nightly_status(
-            reason=f"dry-run: {sel['family']} {sel['window']['start']}.."
-                   f"{sel['window']['end']} split={sel['window']['split_days']}d "
-                   f"K={k} symbols={symbols}",
+            reason=f"dry-run: {sel['family']} {span_txt} symbols={symbols}",
             queue_path=queue_path)
         _write_status(payload)
-        print(f"overnight dry-run: {sel['family']} K={k} symbols={symbols}")
+        print(f"overnight dry-run: {sel['family']} {span_txt} symbols={symbols}")
         return 0
 
     if not _lock_acquired():
