@@ -8,21 +8,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.strategies.base import Strategy, MarketEvent, Signal, Position, ExitSignal
 from src.strategies.ensemble import StrategyEnsemble, StrategyWeight
-from src.strategies.cvd_orderflow import CVDOrderFlow
-from src.strategies.cvd_orderflow_p90 import CVDOrderFlowP90
-from src.strategies.donchian_breakout import DonchianBreakout
-from src.strategies.funding_arbitrage import FundingArbitrage
 from src.strategies.funding_momentum import FundingMomentum
 from src.strategies.lead_lag import LeadLag
 from src.strategies.liquidation_catcher import LiquidationCatcher
-from src.strategies.mean_reversion import MeanReversion
 from src.strategies.orderbook_scalper import OrderBookScalper
-from src.strategies.range_grid import RangeGrid
-from src.strategies.sfp_reversion import SFPReversion
 from src.strategies.spot_perp_carry import SpotPerpCarry
-from src.strategies.trend_follow import TrendFollow
-from src.strategies.trend_pyramid import TrendPyramid
-from src.strategies.va_rejection import VARejection
 from src.strategies.volatility_breakout import VolatilityBreakout
 from src.strategies.vwap_deviation import VWAPDeviation
 from src.strategies.checklist_meta import ChecklistMeta
@@ -30,37 +20,34 @@ from src.strategies.top_trader_flow import TopTraderFlow
 
 logger = logging.getLogger(__name__)
 
+# Retired from the registry 2026-09-10 (class files kept for research
+# harnesses — they are importable but never instantiated by the factory):
+#   TrendFollow/SmartMoneyFlow  — baseline-signal gate FAIL (W2 B1=48, W3 B1=43)
+#   MeanReversion               — 0/6 paper wins; candle space CLOSED
+#   DonchianBreakout            — KILL (PF 0.50, Sharpe -7.4)
+#   FundingArbitrage            — KILLED v3.1.18 (cross-asset carry, not arb)
+#   CVDOrderFlow / _P90         — tape-native screen CLOSED (fails 11 bps)
+#   RangeGrid                   — KILL (PF 0.49, Sharpe -4.3)
+#   TrendPyramid                — candle trend; family closed (24m structure screen)
+#   SFPReversion / VARejection  — 24m structure screen CLOSED
+# YAML sections for these names are untouched (frozen Phase-10 config_hash);
+# phase08 lists referencing them now resolve to "unknown" and are skipped.
 PHASE08_DEFAULT_EXECUTION = ("ChecklistMeta", "VWAPDeviation")
 PHASE08_DEFAULT_SHADOW = (
     "VolatilityBreakout",
-    "CVDOrderFlow",
     "OrderBookScalper",
-    "FundingArbitrage",
     "FundingMomentum",
     "SpotPerpCarry",
 )
 
 _STRATEGY_REGISTRY = (
-    ("strategy.trend_follow", TrendFollow),
     ("strategy.volatility_breakout", VolatilityBreakout),
-    ("strategy.mean_reversion", MeanReversion),
-    ("strategy.donchian_breakout", DonchianBreakout),
-    ("strategy.funding_arbitrage", FundingArbitrage),
     ("strategy.vwap_deviation", VWAPDeviation),
     ("strategy.liquidation_catcher", LiquidationCatcher),
     ("strategy.orderbook_scalper", OrderBookScalper),
-    ("strategy.cvd_orderflow", CVDOrderFlow),
-    ("strategy.cvd_orderflow_p90", CVDOrderFlowP90),
     ("strategy.lead_lag", LeadLag),
-    # v3.1.20: 4 new strategies
     ("strategy.spot_perp_carry", SpotPerpCarry),
-    ("strategy.range_grid", RangeGrid),
-    ("strategy.trend_pyramid", TrendPyramid),
     ("strategy.funding_momentum", FundingMomentum),
-    # v3.1.33: SFP reversion (liquidity sweep + 75% magnet)
-    ("strategy.sfp_reversion", SFPReversion),
-    # v3.1.34: Volume Profile Value Area rejection
-    ("strategy.va_rejection", VARejection),
     # v3.1.37: Checklist meta-signal (replaces ensemble with weighted bull/bear)
     ("strategy.checklist_meta", ChecklistMeta),
     # Top-trader aggregate bias (shadow / research)
@@ -84,17 +71,11 @@ def default_ensemble_weights() -> List[StrategyWeight]:
     and RangeGrid are the new low-edge / mean-reversion entries.
     """
     return [
-        StrategyWeight("SmartMoneyFlow", 0.12, min_confidence=0.40),
-        StrategyWeight("TrendPyramid", 0.20, min_confidence=0.50),
         StrategyWeight("VolatilityBreakout", 0.12, min_confidence=0.50),
-        StrategyWeight("DonchianBreakout", 0.08, min_confidence=0.50),
         StrategyWeight("VWAPDeviation", 0.08, min_confidence=0.65),
-        StrategyWeight("RangeGrid", 0.10, min_confidence=0.50),
-        StrategyWeight("FundingArbitrage", 0.05, min_confidence=0.35),
         StrategyWeight("SpotPerpCarry", 0.12, min_confidence=0.60),
         StrategyWeight("FundingMomentum", 0.10, min_confidence=0.50),
         StrategyWeight("LiquidationCatcher", 0.08, min_confidence=0.60),
-        StrategyWeight("CVDOrderFlow", 0.08, min_confidence=0.55),
         StrategyWeight("LeadLag", 0.07, min_confidence=0.45),
     ]
 
@@ -119,10 +100,9 @@ def _should_load_strategy(section: dict) -> bool:
 
 
 # Strategies whose on_data / operational gate also consults ``auto_enable``
-# (OrderBookScalper, FundingArbitrage). Others only read ``enabled``.
+# (OrderBookScalper). Others only read ``enabled``.
 _SHADOW_AUTO_ENABLE_PATHS = frozenset({
     "strategy.orderbook_scalper",
-    "strategy.funding_arbitrage",
 })
 
 
@@ -169,8 +149,6 @@ def _instantiate_from_registry(
     if shadow:
         section["_shadow_mode"] = True
         _apply_shadow_section_overrides(section, path)
-    if path in ("strategy.mean_reversion", "strategy.funding_arbitrage"):
-        section = _enrich_funding_strategy_config(cfg, section)
     if not force and not _should_load_strategy(section):
         return None
     inst = cls(section)

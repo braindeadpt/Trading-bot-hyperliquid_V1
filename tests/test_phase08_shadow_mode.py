@@ -72,7 +72,7 @@ def test_phase08_factory_splits_execution_and_shadow() -> None:
     assert exec_names == set(PHASE08_DEFAULT_EXECUTION)
     assert "ChecklistMeta" in exec_names
     assert "VolatilityBreakout" in shadow_names
-    assert "CVDOrderFlow" in shadow_names
+    assert "OrderBookScalper" in shadow_names
     assert "ChecklistMeta" not in shadow_names
     assert execution[0] is not shadow[0]
 

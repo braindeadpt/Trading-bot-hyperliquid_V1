@@ -22,6 +22,13 @@ See `docs/BASELINE_SIGNAL_GATE.md`. Portfolio board:
 **First demotion:** ChecklistMeta powered FAIL → move to shadow.
 VWAPDeviation sole execution while underpowered.
 
+**Registry cleanup (2026-09-10):** TrendFollow/SmartMoneyFlow, MeanReversion,
+DonchianBreakout, FundingArbitrage, CVDOrderFlow(+P90), RangeGrid,
+TrendPyramid, SFPReversion, VARejection removed from `_STRATEGY_REGISTRY`
+(code-only; frozen config_hash `b208601c78f467af` preserved — YAML untouched).
+Class files stay importable for research harnesses; phase08 lists naming them
+log "unknown" and skip. Re-adding requires a fresh baseline-signal-gate PASS.
+
 Last updated: 2026-08-10 (paper OOS 90d protocol + tier-0 fees; XS momentum C)
 
 ### Fee note — maker/taker aligned to HL tier-0 (2026-08-10)

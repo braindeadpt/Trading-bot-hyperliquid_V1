@@ -8,7 +8,15 @@
 
 This is the **Hyperliquid Premium Trading Bot** — an async Python trading bot for the Hyperliquid perpetuals exchange. It supports **paper trading** (default), **testnet**, and **mainnet** execution modes.
 
-The bot is built around a **WebSocket-first event architecture**: real-time market data from Hyperliquid (and optional Binance feeds) flows through an async pub/sub `DataBus`, gets aggregated into multi-timeframe candles, and is consumed by twelve strategy modules (including the OrderBook Imbalance Scalper for tick-level orderbook micro-patterns, the CVD OrderFlow strategy for volume-tape divergence, the SpotPerpCarry delta-neutral funding arb, the RangeGrid maker grid, the TrendPyramid EMA pullback trend follower, and the FundingMomentum funding-flip strategy). A central `TradingEngine` orchestrates signal generation, risk gating, position sizing, and execution. All state is persisted to a local SQLite database, and a Flask + Socket.IO dashboard provides real-time monitoring.
+The bot is built around a **WebSocket-first event architecture**: real-time market data from Hyperliquid (and optional Binance feeds) flows through an async pub/sub `DataBus`, gets aggregated into multi-timeframe candles, and is consumed by a modular strategy system (live registry: VWAPDeviation, VolatilityBreakout, LiquidationCatcher, OrderBookScalper, LeadLag, SpotPerpCarry, FundingMomentum, ChecklistMeta, TopTraderFlow). A central `TradingEngine` orchestrates signal generation, risk gating, position sizing, and execution.
+
+> **Retired 2026-09-10** — removed from `_STRATEGY_REGISTRY` after documented
+> CLOSED/KILL/FAIL verdicts (`docs/RESEARCH_BACKLOG.md`, `docs/STRATEGY_AUDIT.md`):
+> TrendFollow/SmartMoneyFlow, MeanReversion, DonchianBreakout, FundingArbitrage,
+> CVDOrderFlow(+P90), RangeGrid, TrendPyramid, SFPReversion, VARejection.
+> Their class files remain importable for research harnesses but the factory
+> never instantiates them; phase08 lists naming them log "unknown" and skip.
+> Do not re-register without a fresh baseline-signal-gate PASS (§12). All state is persisted to a local SQLite database, and a Flask + Socket.IO dashboard provides real-time monitoring.
 
 **Key characteristics:**
 - Fully async (`asyncio`) with auto-reconnecting WebSocket clients.
@@ -69,7 +77,8 @@ trading-bot-hyperliquid/
 │   └── .env.example           # Template for API secrets
 ├── src/                       # All application code
 │   ├── core/                  # Engine, portfolio, risk, execution, Kelly sizer, correlation monitor
-│   ├── strategies/            # 10 sub-strategies + base ABC + indicators + ensemble
+│   ├── strategies/            # strategy modules + base ABC + indicators + ensemble
+│   │                          # (registry holds the 9 live names; retired classes kept for research)
 │   ├── exchanges/             # Hyperliquid WS/REST, Binance API, funding aggregator
 │   ├── data/                  # SQLite DB, candle builder, orderbook metrics, historical fetcher
 │   ├── dashboard/             # Flask + Socket.IO server + embedded HTML UI

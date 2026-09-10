@@ -15,7 +15,6 @@ from src.strategies.factory import (
     _instantiate_from_registry,
     build_phase08_strategies,
 )
-from src.strategies.funding_arbitrage import FundingArbitrage
 from src.strategies.funding_momentum import FundingMomentum
 from src.strategies.indicators import Candle
 from src.strategies.orderbook_scalper import OrderBookScalper
@@ -26,11 +25,11 @@ from src.utils.config import Config, compute_config_hash, load_config
 
 pytestmark = pytest.mark.unit
 
-# The five Phase08 shadow strategies that previously self-gated on enabled:false
+# The Phase08 shadow strategies that previously self-gated on enabled:false
+# (CVDOrderFlow / FundingArbitrage retired from the registry 2026-09-10 —
+# their shadow-gate coverage moved to the surviving names below).
 _SHADOW_GATED = (
-    ("CVDOrderFlow", CVDOrderFlow),
     ("OrderBookScalper", OrderBookScalper),
-    ("FundingArbitrage", FundingArbitrage),
     ("FundingMomentum", FundingMomentum),
     ("SpotPerpCarry", SpotPerpCarry),
 )
@@ -110,7 +109,7 @@ def test_shadow_force_bypasses_enabled_dormancy(name: str, cls: type) -> None:
     assert active is not None
     assert getattr(active, "_shadow_instance", False) is True
     assert active.MANUAL_ENABLED is True
-    if path in ("strategy.orderbook_scalper", "strategy.funding_arbitrage"):
+    if path == "strategy.orderbook_scalper":
         assert active.AUTO_ENABLE is True
     else:
         assert not hasattr(active, "AUTO_ENABLE")
@@ -126,12 +125,6 @@ def test_shadow_force_bypasses_enabled_dormancy(name: str, cls: type) -> None:
         sig = active.on_data(ev)
         assert sig is not None
         assert sig.strategy == "OrderBookScalper"
-    elif name == "FundingArbitrage":
-        assert active.is_active() is True
-        # Past enabled gate: funding cache updates even if pair scan needs more symbols
-        ev = _event(predicted_funding=0.001, funding=0.001, market_data_health="green")
-        active.on_data(ev)
-        assert "BTC" in active._latest_funding
     elif name == "FundingMomentum":
         # Past enabled gate: funding history updates
         ev1 = _event(timestamp_ms=1_800_000_000_000, predicted_funding=-0.001)
@@ -209,7 +202,7 @@ def test_phase08_build_shadow_instances_are_enabled() -> None:
     for name, _cls in _SHADOW_GATED:
         inst = by_name[name]
         assert inst.MANUAL_ENABLED is True
-        if name in ("OrderBookScalper", "FundingArbitrage"):
+        if name == "OrderBookScalper":
             assert inst.AUTO_ENABLE is True
 
 

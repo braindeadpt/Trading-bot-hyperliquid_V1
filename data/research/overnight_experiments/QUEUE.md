@@ -6,6 +6,13 @@ of **2026-09-09**. One entry per experiment family: hypothesis, harness
 and the evidence bar the verdict must clear. The runner
 (`scripts/overnight_runner.py`) executes families in queue order.
 
+**Registry cleanup 2026-09-10:** TrendFollow, MeanReversion, DonchianBreakout,
+FundingArbitrage, CVDOrderFlow(+P90), RangeGrid, TrendPyramid, SFPReversion and
+VARejection were removed from `_STRATEGY_REGISTRY` (verdicts in
+`docs/RESEARCH_BACKLOG.md`). They no longer instantiate — do NOT wire queue
+entries or families for retired names; class files remain importable for
+research harnesses that reference them directly.
+
 **Window-set guarantee (K=4 floor, enforced per entry):** every READY entry
 must declare a window set yielding **at least 4 non-overlapping windows** —
 the exact paired sign-flip noise gate cannot pass at K=3 (all-positive
@@ -140,6 +147,22 @@ An entry becomes READY only after the family is wired and reviewed.
   chosen**: per-window n~5-8 makes the sign-flip deltas noise. The n≥30
   path is also borderline (~37 over 120d). Prior forensic slice (selection
   data, never evidence): delayed entry n=37, WR 43.2%, PF 1.11, net +5.13.
+- **Q7 — VWAPDeviation exit-economics (added 2026-09-10):** the 4-window
+  baseline bleeds net −151.09 / PF 0.9 / n=251 (Night 2 artifact). Entry-side
+  sweeps already failed (z=3.0, per-symbol) — the open question is whether the
+  loss is exit-side give-back. Hypothesis (fixed): exits at |Z|<0.3 surrender
+  reversion before tier-0 fees clear; a higher `exit_z_threshold` or a tighter
+  TP/time-stop improves net PnL on the same entries.
+  - **Harness:** new family `vwap_exit_econ` (config-dict overrides of
+    `strategy.vwap_deviation` only — entry params frozen at current values).
+  - **Grid (5 cells, fixed a priori):** baseline `exit_z=0.3 tp_r=2.0 hold=4h` ·
+    `exit_z_threshold: 0.5` · `exit_z_threshold: 0.15` ·
+    `take_profit_r_multiple: 1.5` · `max_hold_hours: 2`.
+  - **Window set:** 2026-05-18..2026-09-08, 30d split → 4 non-overlapping
+    windows (same fixed set as Night 2 — chosen once, never per-result).
+  - **Budget:** 5 × 4 = **20 runs** (at cap; run alone).
+  - **Evidence bar:** standard KEEP rules; note exit-side variants shift n —
+    a cell that cuts n below 30 is INCONCLUSIVE by construction.
 - **OIR real-window re-gate (parked → data-blocked):** real OIR exists in
   `hyperliquid.db` `l2_snapshots` (~1.7M rows, window ending 09-09). A 30d
   split over the L2 window yields **2 windows** — K=4 needs ~60+ more days
