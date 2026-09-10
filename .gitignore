@@ -14,6 +14,12 @@ data/research/*
 data/research/phase10/*
 !data/research/phase10/phase10_preregister.json
 !data/research/phase08_preregister.json
+# Overnight research queue is the pre-registration artifact — it fixes the
+# windows before results are seen; keep it under version control so history
+# proves it was not edited after the fact. Session artifacts stay ignored.
+!data/research/overnight_experiments/
+data/research/overnight_experiments/*
+!data/research/overnight_experiments/QUEUE.md
 data/backtests/
 data/backups/
 # scratch config overrides for parity runs

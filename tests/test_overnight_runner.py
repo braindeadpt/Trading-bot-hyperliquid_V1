@@ -11,6 +11,7 @@ one block per experiment with the audit line.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -139,6 +140,57 @@ class TestPairedNoiseModel:
 
 # --- ledger reference header (queue format + verdict schema) ----------------
 
+class TestCandleSourceProvenance:
+    """A verdict must be traceable to which DB its candles actually came
+    from (research_db vs a live-bot.db fallback), not just that a fallback
+    happened somewhere in the run."""
+
+    def test_no_field_returns_none(self):
+        assert mod.summarize_candle_sources([cell(1, 1, 1, 1)]) is None
+
+    def test_single_source_collapses_to_one_group(self):
+        cells = [
+            {**cell(1, 1, 1, 1), "candle_source": {
+                "BTC": {"1m": "research_db", "5m": "research_db",
+                        "15m": "research_db", "1h": "research_db"}}},
+        ]
+        assert mod.summarize_candle_sources(cells) == "research_db (1m,5m,15m,1h)"
+
+    def test_mixed_sources_grouped_per_timeframe(self):
+        cells = [
+            {**cell(1, 1, 1, 1), "candle_source": {
+                "BTC": {"1m": "research_db", "5m": "research_db",
+                        "15m": "live_bot_db", "1h": "live_bot_db"}}},
+        ]
+        assert mod.summarize_candle_sources(cells) == (
+            "research_db (1m,5m) / live_bot_db (15m,1h)"
+        )
+
+    def test_disagreeing_cells_flagged_mixed(self):
+        cells = [
+            {**cell(1, 1, 1, 1), "candle_source": {"BTC": {"1m": "research_db"}}},
+            {**cell(1, 1, 1, 1), "candle_source": {"BTC": {"1m": "live_bot_db"}}},
+        ]
+        assert mod.summarize_candle_sources(cells) == "mixed (1m)"
+
+    def test_experiment_block_includes_candle_source_line(self):
+        session = {"family": "flush_fade", "span": {"start": "2026-01-01", "end": "2026-01-10", "split_days": 5}}
+        variant_cells = [
+            {**cell(5, 10, 20, 15), "candle_source": {
+                "BTC": {"1m": "research_db", "15m": "live_bot_db"}}},
+        ]
+        result = {
+            "tag": "delay=0 stopout=OFF", "verdict": "DISCARD",
+            "aggregate_baseline": {"pnl": -10.0, "n": 10, "pf": 0.5},
+            "aggregate_variant": {"pnl": 5.0, "n": 10, "pf": 1.2},
+            "windows": [("2026-01-01", "2026-01-05")], "deltas": [15.0],
+            "reasons": ["windows improved 1/1 (majority=yes)"],
+            "variant_cells": variant_cells,
+        }
+        block = mod.experiment_block(result, session)
+        assert "- candle source: research_db (1m) / live_bot_db (15m)" in block
+
+
 class TestLedgerReferenceHeader:
     """LEDGER_HEADER is the persistent reference re-written every session;
     it must keep documenting the queue states, the verdict schema, and the
@@ -196,6 +248,26 @@ def test_inconclusive_on_single_valid_window():
     assert any("valid window" in r for r in reasons)
 
 
+def test_discard_low_pf_beats_n_gate_even_below_n30():
+    # PF<=1 with n<30: the ordering fix — a negative result (still losing
+    # money) is DISCARD regardless of n, never parked as INCONCLUSIVE.
+    base = [cell(-50, 10, 30, 80), cell(-40, 8, 20, 60)]
+    small_losing = [cell(-10, 9, 20, 30), cell(-8, 7, 15, 23)]
+    v, reasons = mod.decide(base, small_losing)
+    assert v == "DISCARD"
+    assert not any("n<30" in r for r in reasons)
+
+
+def test_discard_catastrophic_beats_n_gate_even_below_n30():
+    # Catastrophic window with n<30: still DISCARD, not INCONCLUSIVE — a
+    # catastrophic result doesn't need n>=30 to be disqualifying.
+    base = [cell(-50, 10, 30, 80), cell(-10, 8, 40, 50)]
+    catastro_small = [cell(5, 9, 20, 15), cell(-120, 9, 20, 140)]
+    v, reasons = mod.decide(base, catastro_small)
+    assert v == "DISCARD"
+    assert any("catastrophic" in r for r in reasons)
+
+
 def test_discard_without_majority():
     base = [cell(-50, 20, 30, 80), cell(-10, 15, 40, 50)]
     mixed = [cell(8, 35, 60, 52), cell(-60, 35, 100, 160)]
@@ -247,6 +319,21 @@ def test_verdict_excludes_no_evidence_windows_from_majority():
     assert v == "KEEP"
     assert any("no-evidence window" in r for r in reasons)
     assert any("improved 2/2" in r for r in reasons)
+
+
+def test_families_defined_exactly_once():
+    """FAMILIES must be assigned exactly once in the module source — a
+    second later assignment would silently shadow the first (dead code),
+    and any family only wired into the shadowed dict would vanish from
+    the sweep without an error."""
+    src = Path(mod.__file__).read_text(encoding="utf-8")
+    assignments = re.findall(r"^FAMILIES\s*=\s*\{", src, flags=re.MULTILINE)
+    assert len(assignments) == 1, (
+        f"expected exactly one top-level `FAMILIES = {{` assignment, found "
+        f"{len(assignments)}"
+    )
+    for name in ("flush_fade", "vwap_thresholds", "iv_thresholds", "hype_vwap_refine"):
+        assert name in mod.FAMILIES, f"family {name!r} missing from FAMILIES"
 
 
 def test_aggregate_pf_from_gross_flows():
@@ -503,17 +590,92 @@ class TestHypeVwapRefineFamily:
         assert mod.resolve_symbol_overrides(section, {}, "SOL") == section
 
     def test_db_for_window_seam(self):
-        # Preregistered one-source-per-window rule: research DB through the
-        # 2026-07-10 seam (W4 seals it), live bot.db after (W5/W6).
+        # Preregistered one-source-per-window rule via the GENERIC seam
+        # resolver: research DB through the 2026-07-10 seam (W4 seals it),
+        # live bot.db through the end of the Q6 window set (W5/W6).
         research, live = "E:/research/hyperliquid.db", "data/live/bot.db"
+        specs = ((mod.HYPE_VWAP_SEAM_DATE, research),
+                 (mod.HYPE_WINDOW_SPAN_END, live))
         for w_end in ("2026-04-11", "2026-05-11", "2026-06-10", "2026-07-10"):
-            assert mod.db_for_hype_window(research, live, w_end) == research
+            assert mod.db_for_window(specs, w_end) == research
         for w_end in ("2026-07-11", "2026-08-09", "2026-09-08"):
-            assert mod.db_for_hype_window(research, live, w_end) == live
+            assert mod.db_for_window(specs, w_end) == live
         assert mod.HYPE_VWAP_SEAM_DATE == "2026-07-10"
+        assert mod.HYPE_WINDOW_SPAN_END == "2026-09-08"
 
     def test_family_registered(self):
         assert "hype_vwap_refine" in mod.FAMILIES
+
+
+# --- generic per-window DB plans --------------------------------------------
+
+class TestWindowDbPlan:
+    """The generic multi-DB per-window seam mechanism (any family can mix
+    DB sources at preregistered seams; sweep() validates and records it)."""
+
+    def test_first_matching_seam_wins(self):
+        specs = (("2026-07-10", "R"), ("2026-09-08", "L"))
+        assert mod.db_for_window(specs, "2026-04-11") == "R"
+        assert mod.db_for_window(specs, "2026-07-10") == "R"   # seam inclusive
+        assert mod.db_for_window(specs, "2026-07-11") == "L"
+        assert mod.db_for_window(specs, "2026-09-08") == "L"
+
+    def test_three_source_plan(self):
+        # Generic beyond two sources: a mid-history archive DB between the
+        # early and the current one.
+        specs = (("2026-03-31", "archive_a"), ("2026-06-30", "archive_b"),
+                 ("2026-09-08", "live"))
+        assert mod.db_for_window(specs, "2026-03-13") == "archive_a"
+        assert mod.db_for_window(specs, "2026-05-11") == "archive_b"
+        assert mod.db_for_window(specs, "2026-09-08") == "live"
+
+    def test_uncovered_window_is_none_not_fallback(self):
+        # No implicit catch-all: a window after the last seam resolves to
+        # None — the sweep raises, it never silently uses another DB.
+        specs = (("2026-07-10", "R"), ("2026-09-08", "L"))
+        assert mod.db_for_window(specs, "2026-09-09") is None
+        assert mod.db_for_window([], "2026-07-01") is None
+
+    def test_window_db_plan_resolves_every_window(self):
+        specs = (("2026-07-10", "R"), ("2026-09-08", "L"))
+        windows = [("2026-03-13", "2026-04-11"), ("2026-04-12", "2026-05-11"),
+                   ("2026-05-12", "2026-06-10"), ("2026-06-11", "2026-07-10"),
+                   ("2026-07-11", "2026-08-09"), ("2026-08-10", "2026-09-08")]
+        plan = mod.window_db_plan(specs, windows)
+        assert len(plan) == 6
+        assert all("db_path" in w for w in plan)
+        assert [w["db_path"] for w in plan] == ["R"] * 4 + ["L"] * 2
+
+    def test_hype_family_declares_the_q6_plan(self):
+        _, _, _, db_specs = mod.hype_vwap_refine_family()
+        assert len(db_specs) == 2
+        assert db_specs[0][0] == "2026-07-10"       # research seam
+        assert db_specs[1][0] == "2026-09-08"       # live seam = span end
+
+    def test_sweep_records_window_dbs_and_fails_on_gap(self, monkeypatch):
+        def fake_run_one(start, end, symbols, params):
+            c = cell(0.0, 0, 0.0, 0.0)
+            c["trade_pnls"] = []
+            return c
+
+        # Plan covering only the first 4 windows of the 6-window span.
+        specs = (("2026-07-10", "R"),)     # W5/W6 uncovered
+        monkeypatch.setitem(
+            mod.FAMILIES, "gap_family",
+            lambda: (["base"], fake_run_one, None, specs))
+        with pytest.raises(ValueError, match="no preregistered DB seam"):
+            mod.sweep("gap_family", "2026-03-13", "2026-09-08",
+                      ["HYPE"], split_days=30)
+
+        # Full plan: the session records the objective per-window source.
+        specs_full = (("2026-07-10", "R"), ("2026-09-08", "L"))
+        monkeypatch.setitem(
+            mod.FAMILIES, "gap_family",
+            lambda: (["base"], fake_run_one, None, specs_full))
+        session = mod.sweep("gap_family", "2026-03-13", "2026-09-08",
+                            ["HYPE"], split_days=30)
+        assert [w["db_path"] for w in session["window_dbs"]] == ["R"] * 4 + ["L"] * 2
+
 
 
 def test_sweep_dispatches_nested_dict_params_to_family(monkeypatch):
@@ -899,6 +1061,28 @@ def test_trade_pnls_by_symbol_extractor():
     legacy = cell(1.0, 1, 1.0, 0.0)            # no symbol lists at all
     maps = mod.trade_pnls_by_symbol([legacy])
     assert maps[0] is None and "trade_pnls_by_symbol" not in legacy
+
+
+# --- DVOL coverage-gated span (Night 3 reopen path) ------------------------
+
+def test_dvol_span_from_rows_bounds():
+    rows = [(1_788_000_000_000, 42.0), (1_788_086_400_000, 41.5),
+            (1_788_172_800_000, 43.0)]
+    start, end = mod.dvol_span_from_rows(rows)
+    assert start == "2026-08-29" and end == "2026-08-31"
+
+
+def test_dvol_span_from_rows_empty_raises():
+    with pytest.raises(RuntimeError, match="no closes"):
+        mod.dvol_span_from_rows([])
+
+
+def test_coverage_window_count_matches_night3_math():
+    # the accumulator's K=3 (DVOL starts 06-14; 88d of coverage)
+    assert mod.coverage_window_count("2026-06-14", "2026-09-10") == 3
+    # ~120d of coverage clears the K=4 noise-gate floor
+    assert mod.coverage_window_count("2026-06-14", "2026-10-12") >= 4
+    assert mod.IV_COVERAGE_MIN_WINDOWS == 4
 
 
 # --- artifact shape --------------------------------------------------------

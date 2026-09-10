@@ -222,3 +222,34 @@ it, and its per-trade PnL is not stored in the artifact, so none is shown.)
 - per-window delta: 2026-08(+17.95), 2026-08(+None), 2026-08(+33.68), 2026-09(+7.39)
 - reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 3/3 (majority=yes); aggregate n=55 (gate >=30); aggregate PF=0.231 (gate >1.0)
 - audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+---
+### 2026-09-10 — CORRECTION to Night 3 (`iv_thresholds`, 2026-09-09 20:17 UTC)
+
+`decide()` had a gate-ordering bug: `n < N_GATE` was checked BEFORE the
+majority/PF/catastrophic checks, so a negative result with small n was
+parked as INCONCLUSIVE instead of DISCARDed. The three `iv_thresholds`
+verdicts above were all decided under that buggy ordering. The fix makes
+`n >= 30` a precondition for **KEEP only**, never a precondition for
+DISCARD (research_program.md, `scripts/overnight_runner.py::decide`).
+
+Re-applying the corrected rule to the numbers already on record above
+(unchanged — this is a re-read, not a re-run):
+
+- `high_iv>63.3`: PF=0.239 (n=28) — PF<=1 → **DISCARD**, not INCONCLUSIVE.
+- `high_iv>66.7`: PF=0.29 (n=24) — PF<=1 → **DISCARD**, not INCONCLUSIVE.
+- `high_iv>70.0`: PF=0.325 (n=17) — PF<=1 → **DISCARD**, not INCONCLUSIVE.
+
+All three windows improved on the baseline (majority=yes in each block
+above), but the aggregate variant still loses money in every cut. This is
+exactly the "improved everywhere but still loses money" DISCARD case named
+in research_program.md: the IV gate reduces the bleed but does not create
+an edge. Under the old ordering these looked like "park with the bar
+attached" (n<30, direction noted) — under the corrected ordering a
+losing PF never earns that benefit of the doubt, however small n is.
+
+This is a correction note only — the original blocks above are NOT
+edited (the ledger is append-only and a test enforces that the historical
+text survives verbatim).
+- audit line: correction DRAFTED by manual audit review — advisory; the
+  original session's raw JSON artifact is unchanged.

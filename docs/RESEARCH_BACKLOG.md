@@ -376,6 +376,30 @@ they are preregistered before any run. That their values were chosen after
 reading Night 2's forensics is legitimate hypothesis generation; the fixed
 step sizes and the no-iteration kill rule are the protection.
 
+**Overlap disclosure (audit correction, 2026-09-10):** the hypothesis above
+was generated from Night 2 forensics run on span 2026-05-18..2026-09-08.
+The new span, 2026-03-13..2026-09-08, extends further back but its tail
+still fully contains the forensics window — so **4 of the 6 preregistered
+windows (W3–W6) sit inside the same data that produced the hypothesis**;
+only W1–W2 (2026-03-13..2026-05-11, roughly) are genuinely out-of-sample.
+The selection-bias note above covers the parameter *values* (3.5σ/4.0σ/
+vs2.0 never produced a result before being chosen); it does NOT cover the
+*windows* — most of the evidence a KEEP would cite is the same data that
+motivated the design. A KEEP verdict on this family must say so explicitly
+and weight W1–W2 as the only load-bearing out-of-sample evidence; it must
+not be reported as a clean 6-window replication.
+
+**Mixed-source disclosure:** W1–W4 read the E: research DB and W5–W6 read
+the live `bot.db` (one source per window, never mixed mid-window — see
+"Window set" above). That discipline keeps any single window internally
+honest, but it does not make the six windows strictly comparable to each
+other: a research-DB window and a live-DB window can differ in candle
+provenance, collector behavior, and backfill completeness independent of
+the strategy variant being tested. Any verdict text must name which
+windows are research_db vs live_bot_db (not just report the aggregate)
+so a reader can see whether a majority-improved result concentrates on one
+source.
+
 **Can it clear the multi-window gate? (the design question)** Structurally
 yes — but on shape, not on n:
 

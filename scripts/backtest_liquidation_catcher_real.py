@@ -49,7 +49,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -80,11 +80,20 @@ def ms(date_str: str, end: bool = False) -> int:
 def _copy_candles(
     src: ResearchDatabase, dst: ResearchDatabase, symbol: str,
     start_ms: int, end_ms: int,
-) -> Dict[str, int]:
+) -> Tuple[Dict[str, int], Dict[str, str]]:
+    """Copy candles research-DB-first, live-bot.db fallback per timeframe.
+
+    Returns ``(counts, source)`` where ``source[tf]`` is ``"research_db"``
+    or ``"live_bot_db"`` — a verdict must be traceable to which DB its
+    candles actually came from, not just that a fallback happened
+    *somewhere* in the run.
+    """
     counts: Dict[str, int] = {}
+    source: Dict[str, str] = {}
     live_fallback_used = False
     for tf in ("1m", "5m", "15m", "1h"):
         rows = src.get_candles(symbol, tf, limit=500_000, start_ms=start_ms, end_ms=end_ms)
+        tf_source = "research_db"
         if not rows:
             # Research DB has no candles for this symbol/tf/window — the live
             # bot DB persists everything the connector sees. LOUD fallback
@@ -99,10 +108,12 @@ def _copy_candles(
             from src.data.database import Database
             live = Database(str(LIVE_DB))
             rows = live.get_candles(symbol, tf, limit=500_000, start_ms=start_ms, end_ms=end_ms)
+            tf_source = "live_bot_db"
         if rows:
             dst.save_research_candles(rows, tf, SeriesMetadata.hl_candles())
         counts[tf] = len(rows)
-    return counts
+        source[tf] = tf_source
+    return counts, source
 
 
 def _copy_liquidations(
@@ -169,8 +180,9 @@ def _prepare_db(cfg: Any, symbols: List[str], start_ms: int, end_ms: int) -> Res
     print(f"  LiquidationCatcher backtest - REAL feed {ms_to_dt(start_ms)} -> {ms_to_dt(end_ms, end=True)}")
     print(f"  symbols: {', '.join(symbols)}")
 
+    candle_source: Dict[str, Dict[str, str]] = {}
     for sym in symbols:
-        candle_counts = _copy_candles(research_src, bt_db, sym, start_ms, end_ms)
+        candle_counts, candle_source[sym] = _copy_candles(research_src, bt_db, sym, start_ms, end_ms)
         liq_counts = _copy_liquidations(LIVE_DB, bt_db, sym, start_ms, end_ms)
         n_funding = _copy_funding(LIVE_DB, bt_db, sym, start_ms, end_ms)
         n_real = sum(v for k, v in liq_counts.items() if k in REAL_SOURCES)
@@ -179,6 +191,10 @@ def _prepare_db(cfg: Any, symbols: List[str], start_ms: int, end_ms: int) -> Res
             f"15m={candle_counts['15m']} 1h={candle_counts['1h']} · "
             f"liquidations real={n_real} proxy={liq_counts.get('proxy', 0)} · funding={n_funding}"
         )
+    # Attached to the connection object (not returned separately) so every
+    # existing call site of _prepare_db keeps working unchanged — run_cell
+    # reads it back below to put the provenance in the cell it returns.
+    bt_db.candle_source = candle_source  # type: ignore[attr-defined]
     return bt_db
 
 
@@ -353,6 +369,11 @@ def run_cell(
             for k, v in sorted(exit_stats.items())
         },
         "manifest": manifest,
+        # Candle provenance per symbol/timeframe ("research_db" vs
+        # "live_bot_db" fallback), stashed on bt_db by _prepare_db — a
+        # verdict must be traceable to which DB its candles came from.
+        # Instrumentation only: never changes what data is used.
+        "candle_source": dict(getattr(bt_db, "candle_source", {}) or {}),
     }
 
 

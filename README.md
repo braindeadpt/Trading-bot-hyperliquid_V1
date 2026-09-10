@@ -115,16 +115,20 @@ New strategies and parameter variants are not hand-picked into the bot: they
 go through the standing research contract in [`research_program.md`](research_program.md).
 It defines the overnight loop — an agent (or cron) proposes variants from the
 backlog queue, sweeps them across **all non-overlapping windows** of a fixed
-span with the existing backtest harnesses, and keeps/discards them using the
-same gates the bot already enforces (≥2 valid windows with majority
-improvement, aggregate n≥30, PF>1, no catastrophic window, and a paired
-per-window sign-flip noise gate at α=0.10 — a positive delta is not enough,
-KEEP means *beyond luck*). A KEEP is only ever a **shadow candidate**;
-promotion runs through shadow accumulation + watchdog recheck with a human
-reading the dashboard. The agent never touches anything that affects
-execution — no `settings.yaml`, no `src/`, no window re-registration, no
-`.env` — and that invariant is enforced by
-`tests/test_research_program_never_rules.py` (softening the rules fails CI).
+span with the existing backtest harnesses, and keeps/discards them using
+its own statistical gates (≥2 valid windows with majority improvement,
+aggregate n≥30, PF>1, no catastrophic window, and a paired per-window
+sign-flip noise gate at α=0.10 — new to the research program, not a rule the
+live bot enforces — so a positive delta is not enough, KEEP means *beyond
+luck*). A KEEP is only ever a **shadow candidate**; promotion runs through
+shadow accumulation + watchdog recheck with a human reading the dashboard.
+The agent is meant to never touch anything that affects execution — no
+`settings.yaml`, no `src/`, no window re-registration, no `.env`. Nothing in
+CI stops an agent from actually doing so; the guardrail is *social*, not
+technical: `tests/test_research_program_never_rules.py` only checks that
+`research_program.md`'s own text still states the invariant in absolute,
+unhedged terms (a rule quietly deleted or softened into a suggestion fails
+that test), not that any code path is blocked.
 Session results land in `docs/OVERNIGHT_RESEARCH_LOG.md` (queue format,
 verdict schema and a worked example are in its reference header).
 

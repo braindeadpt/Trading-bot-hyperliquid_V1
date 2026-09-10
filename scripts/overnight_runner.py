@@ -15,6 +15,12 @@ alpha=0.10 — an exact paired per-window randomization test), and writes:
 Design constraints (research_program.md, hard rules):
   * sweep knobs are CLI/config-dict ONLY — no strategy-code edits, no
     settings.yaml writes, no window re-registration (config-hash invariant);
+  * a family may mix DB sources across windows by returning an optional 4th
+    factory element — preregistered (inclusive seam_end, db_path) specs,
+    sorted ascending (see db_for_window / window_db_plan). sweep() resolves
+    the plan for every window, RAISES before any backtest if a window falls
+    outside the seams (no silent fallback), and records the objective
+    per-window source in the session payload under "window_dbs";
   * the window split comes from ``split_windows`` (regime-router A/B pattern)
     — non-overlapping windows, chosen once per family, never per-result;
   * verdicts are drafted automatically but ADVISORY: promotion still runs
@@ -28,8 +34,11 @@ Usage:
   # 3.0σ HYPE-only vs 3.0σ everywhere
   python scripts/overnight_runner.py --family vwap_thresholds --start 2026-05-18 --end 2026-09-08
 
-  # IV high/low cut sweep (Night 3 accumulator, QUEUE.md — K-capped by DVOL
-  # coverage: INCONCLUSIVE/DISCARD are the only possible verdicts):
+  # IV high/low cut sweep (Night 3, QUEUE.md). Coverage-gated reopen
+  # path: --end dvol derives the span from the persisted DVOL coverage
+  # and BLOCKs (exit 0) until it spans >= ~115d -> K=4 windows:
+  python scripts/overnight_runner.py --family iv_thresholds --start dvol --end dvol --symbols BTC,ETH,SOL,HYPE
+  # Fixed span form (e.g. the accumulator that already ran):
   python scripts/overnight_runner.py --family iv_thresholds --start 2026-06-14 --end 2026-09-08 --symbols BTC,ETH,SOL,HYPE
 
   # Q6 — HYPE-only VWAP refinement: nested per-symbol config dicts, DB per
@@ -45,6 +54,7 @@ import argparse
 import json
 import random
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -97,8 +107,8 @@ Spare budget is never spent on unplanned windows.
 | Verdict | Condition (all must hold for KEEP) |
 |---|---|
 | **KEEP** | ≥2 valid windows ∧ strict majority improved ∧ aggregate n≥30 ∧ PF>1 ∧ no window worse than 2× the baseline's worst ∧ noise gate passed (exact paired per-window sign-flip test, one-sided alpha=0.10 — the unit is the window PAIR so regime correlation is preserved; p = fraction of sign patterns with sum ≥ observed; with all K windows favoring the variant p = 2^−K, so K=3 cannot clear alpha and K=4 is the practical floor; skipped with an explicit reason when per-trade PnL is unavailable) → **shadow candidate** with a named shadow path |
-| **INCONCLUSIVE** | fewer than 2 valid windows (a majority of one is not multi-window evidence) ∨ n<30 ∨ noise gate failed (paired delta not beyond the window sign-flip null) — parked with the evidence bar attached |
-| **DISCARD** | no majority ∨ PF≤1 ∨ catastrophic window — including the case "improved everywhere but still loses money": less bad than the baseline is not an edge |
+| **DISCARD** | catastrophic window ∨ no majority ∨ PF≤1 — including the case "improved everywhere but still loses money": less bad than the baseline is not an edge. Checked **before** the n gate: a negative result does not need n≥30 to be negative, so a small-n DISCARD is still DISCARD, never parked as INCONCLUSIVE |
+| **INCONCLUSIVE** | only reached once the result is otherwise positive (majority improved ∧ PF>1 ∧ no catastrophic window): fewer than 2 valid windows (a majority of one is not multi-window evidence) ∨ n<30 ∨ noise gate failed (paired delta not beyond the window sign-flip null) — parked with the evidence bar attached. n≥30 is a **KEEP** precondition, never a DISCARD precondition |
 | **BLOCKED** | no window cells survived to compare (or the experiment needs forbidden changes — program-level BLOCKED, logged, never run) |
 
 Reasons vocabulary the runner emits: `windows improved X/Y`,
@@ -489,8 +499,14 @@ def decide(baseline_windows: Sequence[Dict[str, Any]],
       * aggregate PF > 1,
       * no window degrades worse than CATASTROPHIC_MULT x the baseline's
         own worst window loss (the "no catastrophic window" rule).
-    INCONCLUSIVE overrides when aggregate n < 30 (park with the bar attached)
-    or when fewer than 2 windows survived.
+
+    Ordering principle: ``n >= N_GATE`` is a precondition for KEEP, never a
+    precondition for DISCARD. A negative result (catastrophic window, no
+    majority, PF <= PF_GATE) does not need a large n to be negative — a
+    small n undermines a *positive* claim, not a negative one. So the
+    DISCARD checks (catastrophic / majority / PF) run BEFORE the n and
+    window-count gates; only once a result clears those does insufficient
+    n or window count park it as INCONCLUSIVE instead of promoting it.
 
     ``noise_model=True`` (research_program.md: KEEP must reject the
     paired window-level null, not just print a positive delta) adds one
@@ -540,6 +556,14 @@ def decide(baseline_windows: Sequence[Dict[str, Any]],
             f"baseline worst {-worst_base_loss:.2f} (>{CATASTROPHIC_MULT}x)"
         )
 
+    # Negative-result checks first: none of these need a large n to hold.
+    if catastrophic:
+        return "DISCARD", reasons
+    if not majority or agg_v["pf"] <= PF_GATE:
+        return "DISCARD", reasons
+
+    # Only a result that is otherwise positive can be parked as
+    # INCONCLUSIVE for insufficient evidence — never a negative one.
     if len(valid) < 2:
         return "INCONCLUSIVE", reasons + [
             f"only {len(valid)} valid window survived — a majority of one is "
@@ -549,29 +573,26 @@ def decide(baseline_windows: Sequence[Dict[str, Any]],
         return "INCONCLUSIVE", reasons + [
             "n<30 — park with evidence bar attached (IV-gate n=13 precedent)"
         ]
-    if catastrophic:
-        return "DISCARD", reasons
-    if majority and agg_v["pf"] > PF_GATE:
-        if noise_model:
-            ng = paired_bootstrap_noise_gate(baseline_windows, variant_windows)
-            if ng["evaluated"]:
-                reasons.append(
-                    f"noise gate: paired sign-flip p={ng['p_value']} "
-                    f"(alpha={ng['alpha']}, K={ng['n_windows']} windows, "
-                    f"{ng['method']}) — "
-                    + ("passed" if ng["pass"] else "NOT passed")
-                )
-                if not ng["pass"]:
-                    return "INCONCLUSIVE", reasons + [
-                        "noise: paired delta not beyond the window sign-flip "
-                        "null — accumulate windows or re-test out-of-sample"
-                    ]
-            else:
-                reasons.append(f"noise gate skipped: {ng['reason']}")
-        return "KEEP", reasons + [
-            "becomes a SHADOW CANDIDATE — name the shadow path + watchdog recheck; never a direct promotion"
-        ]
-    return "DISCARD", reasons
+
+    if noise_model:
+        ng = paired_bootstrap_noise_gate(baseline_windows, variant_windows)
+        if ng["evaluated"]:
+            reasons.append(
+                f"noise gate: paired sign-flip p={ng['p_value']} "
+                f"(alpha={ng['alpha']}, K={ng['n_windows']} windows, "
+                f"{ng['method']}) — "
+                + ("passed" if ng["pass"] else "NOT passed")
+            )
+            if not ng["pass"]:
+                return "INCONCLUSIVE", reasons + [
+                    "noise: paired delta not beyond the window sign-flip "
+                    "null — accumulate windows or re-test out-of-sample"
+                ]
+        else:
+            reasons.append(f"noise gate skipped: {ng['reason']}")
+    return "KEEP", reasons + [
+        "becomes a SHADOW CANDIDATE — name the shadow path + watchdog recheck; never a direct promotion"
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -615,9 +636,9 @@ def flush_fade_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], Calla
     return tags, run_one, cfg
 
 
-FAMILIES = {
-    "flush_fade": flush_fade_family,
-}
+# NOTE: the FAMILIES registry lives in ONE place, further below, once every
+# family function is defined — see the comment there and
+# tests/test_overnight_runner.py::test_families_defined_exactly_once.
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +771,46 @@ def vwap_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], 
 
 
 # ---------------------------------------------------------------------------
+# Generic per-window DB plans (the "one source per window" rule).
+#
+# A family may mix DB sources across its preregistered windows by returning
+# an optional 4th element from its factory: a sequence of (inclusive
+# seam_end, db_path) specs, sorted ascending by seam date. sweep() resolves
+# the plan for EVERY window and records it in the session payload
+# (window_dbs) — the objective audit trail for "never mixed mid-window",
+# independent of the prose in QUEUE.md.
+#
+# The resolver NEVER infers a source: a window that no seam covers is a
+# planning error — sweep() raises before any backtest runs, it never falls
+# back silently to another DB. (Same philosophy as the iv family hard-
+# failing on missing DVOL coverage: silence fabricates evidence.)
+# ---------------------------------------------------------------------------
+
+WindowDBSpec = Tuple[str, str]  # (inclusive seam_end "YYYY-MM-DD", db_path)
+
+
+def db_for_window(db_specs: Sequence[WindowDBSpec], w_end: str) -> Optional[str]:
+    """First spec whose inclusive seam covers w_end, else None.
+
+    Specs are evaluated in order, so they must be sorted ascending by seam
+    date. None means no preregistered seam covers the window — a planning
+    error for the sweep, never a silent fallback to a different source.
+    """
+    for seam, _path in db_specs:
+        if w_end <= seam:
+            return _path
+    return None
+
+
+def window_db_plan(db_specs: Sequence[WindowDBSpec],
+                   windows: Sequence[Tuple[str, str]]) -> List[Dict[str, str]]:
+    """Resolve every (start, end) window to its DB path — the objective
+    per-window source record for the artifact/ledger."""
+    return [{"start": s, "end": e, "db_path": db_for_window(db_specs, e)}
+            for s, e in windows]
+
+
+# ---------------------------------------------------------------------------
 # Family: hype_vwap_refine — HYPE-only VWAP refinement (Q6, §1.3 phase 2).
 #
 # QUEUE.md preregistration: the Night-2 forensics showed HYPE's thin book
@@ -768,6 +829,7 @@ def vwap_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], 
 # ---------------------------------------------------------------------------
 
 HYPE_VWAP_SEAM_DATE = "2026-07-10"  # research DB ends exactly here; W4 seals the seam
+HYPE_WINDOW_SPAN_END = "2026-09-08"  # end of the preregistered Q6 window set; live DB seam
 
 HYPE_VWAP_REFINE_GRID: Tuple[Dict[str, Dict[str, float]], ...] = (
     {},                                 # baseline: production everywhere (z=2.5, surge=1.5)
@@ -792,20 +854,17 @@ def resolve_symbol_overrides(section: Dict[str, Any],
     return out
 
 
-def db_for_hype_window(research_path: str, live_path: str, w_end: str) -> str:
-    """One DB per window, preregistered: research DB through the seam,
-    live bot.db after. Never mixed mid-window (QUEUE.md Q6)."""
-    return research_path if w_end <= HYPE_VWAP_SEAM_DATE else live_path
-
-
-def hype_vwap_refine_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], Callable[..., Any]]:
+def hype_vwap_refine_family() -> Tuple[List[str], Callable[..., Dict[str, Any]],
+                                       Callable[..., Any], Sequence[WindowDBSpec]]:
     """Wire the Q6 HYPE-only VWAP refinement to the same light_replay harness.
 
-    Nested per-symbol config dicts, per-window DB selection sealed at
-    HYPE_VWAP_SEAM_DATE, same fee model and per-symbol isolated-capital
-    sizing convention as ``vwap_thresholds`` so the comparison stays
-    internally consistent. ``require_oir_confirm`` disabled exactly as the
-    harness's own fade path does (light replay has no OIR feed).
+    Nested per-symbol config dicts, per-window DB selection via the generic
+    seam resolver (db_specs returned as the factory's 4th element — sweep()
+    validates that every window resolves and records the plan), same fee
+    model and per-symbol isolated-capital sizing convention as
+    ``vwap_thresholds`` so the comparison stays internally consistent.
+    ``require_oir_confirm`` disabled exactly as the harness's own fade path
+    does (light replay has no OIR feed).
 
     Imports inside this function so ``--selftest`` never pulls the strategies.
     """
@@ -823,6 +882,14 @@ def hype_vwap_refine_family() -> Tuple[List[str], Callable[..., Dict[str, Any]],
     )
     commission_pct = float(cfg.get("backtest.commission_pct", 0.04))
     slippage_bps = float(cfg.get("backtest.slippage_bps", 2.0))
+    # Preregistered one-source-per-window plan (QUEUE.md Q6): the research
+    # DB through its 2026-07-10 end, the live bot.db through the end of the
+    # window set. Seam-inclusive, sorted ascending, cover EVERY planned
+    # window — sweep() raises if a window falls outside the plan.
+    db_specs: Sequence[WindowDBSpec] = (
+        (HYPE_VWAP_SEAM_DATE, research_path),
+        (HYPE_WINDOW_SPAN_END, live_path),
+    )
 
     def tag_for(ov: Dict[str, Dict[str, float]]) -> str:
         if not ov:
@@ -837,8 +904,12 @@ def hype_vwap_refine_family() -> Tuple[List[str], Callable[..., Dict[str, Any]],
         e_ms = int(datetime.strptime(end, "%Y-%m-%d").replace(
             hour=23, minute=59, second=59, microsecond=999000,
             tzinfo=timezone.utc).timestamp() * 1000)
+        db_path = db_for_window(db_specs, end)
+        if not db_path:
+            return {"error": f"no preregistered DB seam covers window ending {end}",
+                    "overrides": dict(overrides)}
         try:
-            db = Database(db_for_hype_window(research_path, live_path, end))
+            db = Database(db_path)
             trades_all: List[Dict[str, Any]] = []
             per_symbol: Dict[str, Dict[str, Any]] = {}
             for sym in symbols:
@@ -886,13 +957,14 @@ def hype_vwap_refine_family() -> Tuple[List[str], Callable[..., Dict[str, Any]],
                 for k, v in sorted(exits.items())
             },
             "per_symbol": per_symbol,
-            "db_source": "research" if end <= HYPE_VWAP_SEAM_DATE else "live",
+            "db_source": "research" if db_path == research_path else "live",
+            "db_path": db_path,
             "cost_model": {"commission_pct": commission_pct, "slippage_bps": slippage_bps},
             "sizing_convention": "per-symbol isolated capital (same for baseline and variants)",
         }
 
     tags = [tag_for(ov) for ov in HYPE_VWAP_REFINE_GRID]
-    return tags, run_one, cfg
+    return tags, run_one, cfg, db_specs
 
 
 # ---------------------------------------------------------------------------
@@ -1024,6 +1096,60 @@ def _load_dvol_series(
     return {s: dvol_series_for(s, btc_iv, eth_iv) for s in symbols}, btc_iv
 
 
+# The K=4 window floor the noise gate needs (same constant the nightly
+# wrapper enforces at runtime — a coverage-gated session can never KEEP at
+# K=3: the sign-flip null floors at 2^-3 = 12.5% > alpha=0.10).
+IV_COVERAGE_MIN_WINDOWS = 4
+
+
+def dvol_span_from_rows(
+    rows: List[Tuple[int, float]],
+) -> Tuple[str, str]:
+    """ISO (start, end) days spanned by a ``dvol_daily`` coverage series.
+
+    Pure: takes the rows the research DB would return, so the span logic is
+    unit-testable without a DB. Raises on empty coverage — an overnight run
+    must fail loud rather than fabricate a span.
+    """
+    if not rows:
+        raise RuntimeError(
+            "dvol_daily has no closes — run the bot's DVOL feed first; "
+            "refusing to invent a span"
+        )
+    start_ms, end_ms = rows[0][0], rows[-1][0]
+    fmt = lambda ms: datetime.fromtimestamp(  # noqa: E731
+        ms / 1000.0, tz=timezone.utc
+    ).strftime("%Y-%m-%d")
+    return fmt(start_ms), fmt(end_ms)
+
+
+def dvol_coverage_span() -> Tuple[str, str]:
+    """Coverage bounds of the persisted ``dvol_daily`` (BTC currency) — the
+    same persisted table the family classifies from, never the network.
+    ``--end dvol`` on the CLI resolves the sweep span from this, so the
+    Night 3 reopen needs no manual date arithmetic: when the coverage
+    reaches ~115d the span yields K=4 and the run proceeds.
+    """
+    from src.data.research_database import ResearchDatabase  # noqa: E402
+
+    rdb = ResearchDatabase.open()
+    try:
+        rows = rdb.load_dvol_daily(
+            "BTC", 0, int(time.time() * 1000) + 86_400_000
+        )
+    finally:
+        rdb.close()
+    return dvol_span_from_rows(rows)
+
+
+def coverage_window_count(start: str, end: str, split_days: int = 30) -> int:
+    """Non-overlapping windows the resolved span produces — the K the
+    noise gate would run at. Same splitter the sweep uses."""
+    from scripts.regime_router_a_b_test import split_windows  # noqa: E402
+
+    return len(split_windows(start, end, split_days))
+
+
 def iv_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], Callable[..., Any]]:
     """Wire the iv_thresholds family — post-hoc IV-gate cut sweep.
 
@@ -1114,7 +1240,13 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
     """Run baseline + the selected grid cells across ALL non-overlapping windows."""
     from scripts.regime_router_a_b_test import split_windows  # noqa: E402
 
-    tags_all, run_one, _cfg = FAMILIES[family]()
+    factory = FAMILIES[family]()
+    tags_all, run_one, _cfg = factory[0], factory[1], factory[2]
+    # Optional 4th element: preregistered per-window DB seams (generic
+    # multi-DB plans). sweep() resolves the plan for every window and RAISES
+    # before any backtest if a window falls outside the seams — a planning
+    # error must fail loud, never fall back silently to another DB.
+    db_specs = factory[3] if len(factory) > 3 else None
     sel = select_cells(len(tags_all), cell_spec)
     tags = [tags_all[i] for i in sel]
     if family == "flush_fade":
@@ -1130,6 +1262,16 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
     windows = split_windows(start, end, split_days)
     if max_windows:
         windows = windows[:max_windows]
+    if db_specs:
+        plan = window_db_plan(db_specs, windows)
+        uncovered = [w["end"] for w in plan if not w["db_path"]]
+        if uncovered:
+            raise ValueError(
+                f"{family}: window(s) ending {uncovered} have no preregistered "
+                f"DB seam — extend the family's window-db plan before running"
+            )
+    else:
+        plan = None
 
     def sweep_tag(tag: str, params: Any) -> List[Dict[str, Any]]:
         cells: List[Dict[str, Any]] = []
@@ -1190,6 +1332,7 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
         "span": {"start": start, "end": end, "split_days": split_days},
         "symbols": symbols,
         "windows": windows,
+        "window_dbs": plan,
         "baseline_tag": tags[0],
         "results": results,
     }
@@ -1201,6 +1344,36 @@ def write_artifact(session: Dict[str, Any]) -> Path:
     path = ARTIFACT_DIR / f"{ts}_{session['family']}.json"
     path.write_text(json.dumps(session, indent=2, default=str), encoding="utf-8")
     return path
+
+
+def summarize_candle_sources(cells: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """Collapse the per-symbol/per-timeframe ``candle_source`` maps a cell
+    may carry (research_db vs live_bot_db fallback, see
+    backtest_liquidation_catcher_real.py::_copy_candles) into one ledger
+    line: which timeframes came from which DB across the whole variant.
+    Returns ``None`` when no cell carries the field (older artifacts, or a
+    family whose harness doesn't wire it) — never invents a source.
+    """
+    by_tf: Dict[str, set] = {}
+    for c in cells:
+        cs = c.get("candle_source")
+        if not cs:
+            continue
+        for _sym, tfs in cs.items():
+            for tf, source in tfs.items():
+                by_tf.setdefault(tf, set()).add(source)
+    if not by_tf:
+        return None
+    tf_order = ["1m", "5m", "15m", "1h"]
+    by_source: Dict[str, List[str]] = {}
+    for tf, sources in by_tf.items():
+        label = "mixed" if len(sources) > 1 else next(iter(sources))
+        by_source.setdefault(label, []).append(tf)
+    parts = []
+    for source, tfs in by_source.items():
+        tfs_sorted = sorted(tfs, key=lambda t: tf_order.index(t) if t in tf_order else 99)
+        parts.append(f"{source} ({','.join(tfs_sorted)})")
+    return " / ".join(parts)
 
 
 def experiment_block(result: Dict[str, Any], session: Dict[str, Any]) -> str:
@@ -1243,6 +1416,9 @@ def experiment_block(result: Dict[str, Any], session: Dict[str, Any]) -> str:
                 for g in sg
             )
         )
+    candle_src = summarize_candle_sources(result.get("variant_cells") or [])
+    if candle_src:
+        lines.append(f"- candle source: {candle_src}")
     lines += [
         f"- reasons: {'; '.join(result['reasons'])}",
         f"- audit line: verdict DRAFTED by overnight_runner — advisory; "
@@ -1428,7 +1604,27 @@ def main() -> int:
         ap.error("--family is required (or use --selftest)")
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
-    session = sweep(args.family, args.start, args.end, symbols,
+
+    # Coverage-gated span (Night 3 reopen path): ``--start dvol --end dvol``
+    # derives the sweep span from the persisted DVOL coverage — no manual
+    # date arithmetic at reopen time. If the coverage cannot produce the
+    # K=4 noise-gate floor yet, the session is BLOCKED (exit 0 with the
+    # reason in the summary) — the nightly wrapper records the verdict and
+    # tries again tomorrow.
+    if args.start == "dvol" or args.end == "dvol":
+        start, end = dvol_coverage_span()
+        k = coverage_window_count(start, end, args.split_days)
+        if k < IV_COVERAGE_MIN_WINDOWS:
+            print(f"-> BLOCKED (coverage: DVOL {start}..{end} -> K={k} < "
+                  f"{IV_COVERAGE_MIN_WINDOWS} — need ~115d for the K=4 "
+                  f"noise-gate floor; not running)")
+            return 0
+        print(f"[dvol span] coverage {start}..{end} -> K={k} windows",
+              flush=True)
+    else:
+        start, end = args.start, args.end
+
+    session = sweep(args.family, start, end, symbols,
                     split_days=args.split_days, max_windows=args.max_windows,
                     cell_spec=args.cells,
                     log=lambda m: print(m, flush=True))

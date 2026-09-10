@@ -111,9 +111,17 @@ Map to the standing rules in `docs/RESEARCH_BACKLOG.md` and
 - **DISCARD** — fails any KEEP condition, or the improvement exists only in
   the aggregate and not in the window breakdown (overlap caveat in disguise),
   or the improvement is within cost-model noise (compare against the fee
-  sensitivity noted in the backlog's tier-0 note).
-- **INCONCLUSIVE** — `n < 30`. Park with the evidence bar attached, exactly
-  like the IV gate's n=13 verdict: direction is noted, promotion is not.
+  sensitivity noted in the backlog's tier-0 note). This includes a
+  catastrophic window, no majority of improved windows, or aggregate
+  `PF ≤ 1` — a negative result does not need `n ≥ 30` to be negative; a
+  small n undermines a *positive* claim, not a negative one. DISCARD is
+  checked before the n gate.
+- **INCONCLUSIVE** — the result clears the negative-result checks above
+  (no catastrophic window, majority improved, `PF > 1`) but `n < 30`, or
+  fewer than 2 windows survived to compare. Park with the evidence bar
+  attached, exactly like the IV gate's n=13 verdict: direction is noted,
+  promotion is not. `n ≥ 30` is a precondition for **KEEP**, never a
+  precondition for **DISCARD**.
 
 **Per-symbol slices are diagnostics, never gates.** The runner also computes
 the same paired sign-flip test restricted to each symbol
@@ -146,7 +154,7 @@ keep the judge statistical.
 | **Frozen window** | A fixed val split, never refreshed — but never protected either: ~100 adaptive experiments all peek at the same eval set and silently overfit it | The Fase 10 window stays frozen and is re-registered only by a human with justification (`compute_config_hash` assert + `tests/test_config_hash_frozen.py`). The automation never holds the re-register pen |
 | **Non-overlapping windows** | N/A — i.i.d. tokens; overlap is not a concept | Non-overlapping windows are the only aggregation unit. Verdicts cite the window breakdown, never just the aggregate — the overlap caveat is how the same flush gets counted three times |
 | **FDR / multiple-testing control** | None. Sequential adaptivity is unbounded: the next experiment is proposed from all previous results | FDR + date-block bootstrap applies to any *family* of tests. A parameter sweep is a family; a night of 20 experiments on one strategy is one multiple-testing event, not 20 independent chances |
-| **Minimum evidence (n≥30 ∧ PF>1)** | No n concept — the metric's sample size is huge by construction | n≥30 is our translation of "val_bpb is precise". Below the bar the verdict is INCONCLUSIVE with the evidence bar attached, never KEEP. And above the bar the paired delta must reject the window sign-flip null (paired per-window randomization) — autoresearch's "any improvement" rule is exactly the don't-copy below |
+| **Minimum evidence (n≥30 ∧ PF>1)** | No n concept — the metric's sample size is huge by construction | n≥30 is our translation of "val_bpb is precise", but only as a **KEEP** precondition: it gates promotion, not rejection. A result that already fails on majority, PF≤1, or a catastrophic window is DISCARD regardless of n. Below the bar (and only when the result is otherwise positive) the verdict is INCONCLUSIVE with the evidence bar attached, never KEEP. Above the bar the paired delta must reject the window sign-flip null (paired per-window randomization) — autoresearch's "any improvement" rule is exactly the don't-copy below |
 | **Shadow-then-enforce** | The winning edit is promoted immediately and automatically | A KEEP produces only a shadow candidate with a named shadow path; promotion runs through shadow accumulation + watchdog recheck and is decided by a human |
 | **Budget cap** | A fixed 5-minute budget — good for comparability, but no bound on adaptivity | ≤20 runs/night bounds sequential adaptivity per session; the family-switch rule (3 consecutive failures) stops grinding a dead family. Their comparability trick is worth keeping too: fixed budget, one primary metric, fixed harness |
 
