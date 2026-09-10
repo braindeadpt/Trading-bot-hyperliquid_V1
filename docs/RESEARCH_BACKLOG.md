@@ -500,6 +500,31 @@ First step when revisited is **IV as a signal**, not options execution.
 
 ---
 
+## Candidate — TopTraderFlow inversion (observed 2026-09-10)
+
+Shadow scoreboard (07/Sep eval): TopTraderFlow net PF **0.002**, WR **1.3%**,
+n=985 evaluated, gross −33.7%. A signal this consistently wrong is a candidate
+*contrarian* signal — fading aggregate top-wallet bias may have real edge.
+
+**Caveats before touching it:**
+
+- 1,261 of 2,246 decisions (56%) skipped `insufficient_candles` — the evaluated
+  set is only decisions old enough to have 120h of forward candles (window
+  survivorship bias; recent regime unmeasured).
+- `funding_coverage_ok: False` (mean coverage ≈ 0) — 5-day holds in the sim
+  don't charge funding, so even the gross/net numbers are unreliable.
+- Tracker snapshots are currently thin (`n_wallets=1` on BTC/SOL vs
+  `min_wallets=3`) — the aggregate signal may be driven by few wallets.
+- Inversion is NOT symmetric: stop-loss exits at −4% invert to wins, but the
+  bias-flip hybrid exit and fee/slippage model must be re-simulated on the
+  mirrored side, not assumed from PF⁻¹.
+
+**Evidence bar to proceed:** pre-register a "fade top-trader bias" variant with
+fixed horizon/exits, run against the frozen OOS rules, require n≥30,
+PF>1 net of tier-0 costs, and funding coverage ≥0.90 in the evaluator.
+
+---
+
 ## Discipline note
 
 The recurring pattern this file guards against: a compelling new idea

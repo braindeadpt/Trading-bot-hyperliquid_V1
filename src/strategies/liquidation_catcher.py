@@ -416,6 +416,7 @@ class LiquidationCatcher(Strategy):
         return self._state[symbol]
 
     def on_candle(self, candle: Candle, symbol: str) -> None:
-        """Callback for completed candles."""
+        """Callback for completed candles (dedup by timestamp)."""
         state = self._get_state(symbol)
-        state.candles_1h.append(candle)
+        if not state.candles_1h or state.candles_1h[-1].timestamp_ms != candle.timestamp_ms:
+            state.candles_1h.append(candle)

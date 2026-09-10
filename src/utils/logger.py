@@ -121,6 +121,12 @@ def setup_logger(
 
     # --- Console handler ---
     if console:
+        # Windows consoles default to cp1252 — reconfigure stdout to UTF-8 so
+        # unicode chars in messages render correctly instead of mojibake.
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except (AttributeError, ValueError, OSError):
+            pass
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logger.level)
         console_handler.setFormatter(formatter)

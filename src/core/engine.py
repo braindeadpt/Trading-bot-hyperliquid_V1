@@ -4511,7 +4511,11 @@ class TradingEngine:
                     if deq is not None and hasattr(deq, "extend"):
                         deq.extend(candles)
             except Exception:
-                pass
+                logger.warning(
+                    "Candle restore failed for %s tf=%ds strategy=%s",
+                    symbol, tf_s, getattr(s, "name", type(s).__name__),
+                    exc_info=True,
+                )
 
     @property
     def restore_invocation_count(self) -> int:

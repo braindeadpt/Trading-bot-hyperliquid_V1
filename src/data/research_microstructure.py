@@ -423,7 +423,7 @@ class ResearchMicrostructureRecorder:
             )
         except Exception as exc:
             logger.debug("Gap record failed %s %s: %s", symbol, feed, exc)
-        logger.info(
+        logger.debug(
             "Microstructure gap %s %s %dms (%s)",
             symbol, feed, gap_end_ms - gap_start_ms, (detail or {}).get("reason", "?"),
         )

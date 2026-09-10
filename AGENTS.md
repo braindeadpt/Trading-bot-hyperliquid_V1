@@ -251,11 +251,9 @@ python -m pytest tests/test_cvd_orderflow.py -v       # ad-hoc: single file
   `manual_socketio_ws_check.py` (moved out of `tests/` — they were plain
   connect-and-print scripts with no assertions) require a locally running
   Socket.IO server and are not part of any CI suite.
-- `tests/test_monte_carlo.py` is excluded from collection via
-  `tests/conftest.py` — it targets a `MCResult`/`PercentileCI`/`run_monte_carlo`
-  API removed from `src/backtest/monte_carlo.py` (current API: `MCMetrics`,
-  `bootstrap_metrics`, `block_bootstrap_metrics`). Needs a rewrite before
-  re-enabling.
+- `tests/test_monte_carlo.py` covers the current `src/backtest/monte_carlo.py`
+  API (`MCMetrics`, `bootstrap_metrics`, `block_bootstrap_metrics`) and runs
+  in default CI (19 tests, `unit` marker).
 - **`tests/test_critical_fixes.py`** — drawdown circuit, portfolio restore, FundingArbitrage lifecycle, execution exit price fix. Always run after modifying core engine, portfolio, risk, or execution.
 - **`tests/test_cascade_simulation.py`** — VolatilityCircuitBreaker trip/extend/per-symbol isolation/snapshot, FundingBlackoutFilter boundary cases, DD CB regression, cold-start guard.
 - **`tests/test_engine_boot_integration.py`** — full boot/shutdown cycle against a fully-stubbed `TradingEngine`: feed subscription, OMS poller start, startup reconciliation, then graceful shutdown (background task cancellation, unsubscribe, OMS stop). Companion to `tests/test_mainnet_readiness_5_6.py`, which covers `start()`/`stop()` in isolation.
