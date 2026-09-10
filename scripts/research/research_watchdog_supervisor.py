@@ -72,6 +72,7 @@ WATCHDOG_IDS = (
     "feed_age_creep",
     "feed_cadence",
     "liq_feed_gap",
+    "nightly_keepalive",
 )
 
 # ── helpers reused from the per-gate scripts (single source of truth) ──
@@ -221,6 +222,11 @@ def fresh_state() -> Dict[str, Dict[str, Any]]:
             "runs": [],
             "open_gap_start_ms": None,
         },
+        "nightly_keepalive": {
+            "triggered": False,
+            "runs": [],
+            "alerted_since_ms": None,
+        },
     }
 
 
@@ -234,6 +240,8 @@ def _normalize_sub(raw: Any) -> Dict[str, Any]:
         out["feeds_alerted"] = dict(sub.get("feeds_alerted") or {})
     if "open_gap_start_ms" in sub:
         out["open_gap_start_ms"] = sub.get("open_gap_start_ms")
+    if "alerted_since_ms" in sub:
+        out["alerted_since_ms"] = sub.get("alerted_since_ms")
     return out
 
 
@@ -746,9 +754,72 @@ def check_liq_gap(
     return False
 
 
+# ── nightly keep-alive watchdog ───────────────────────────────────────
+#
+# The scheduled task writes NIGHTLY_STATUS.json every run. If the status
+# file goes stale (task disabled, PC asleep, scheduler silently dead),
+# every coverage gate keeps "waiting" and nobody notices — the same class
+# of invisible failure as the liq gap. Alert once per stale episode.
+
+NIGHTLY_STATUS_PATH = ROOT / "data" / "research" / "overnight_experiments" / "NIGHTLY_STATUS.json"
+NIGHTLY_STALE_MS = 40 * 3_600_000  # >40h since last session heartbeat
+
+
+def check_nightly_keepalive(
+    shared: Dict[str, Dict[str, Any]],
+    *,
+    force: bool = False,
+) -> bool:
+    sub = shared["nightly_keepalive"]
+    now_ms = int(time.time() * 1000)
+    age_ms: Optional[int] = None
+    try:
+        if NIGHTLY_STATUS_PATH.exists():
+            payload = json.loads(NIGHTLY_STATUS_PATH.read_text(encoding="utf-8"))
+            gen = payload.get("generated_ms")
+            if isinstance(gen, (int, float)):
+                age_ms = now_ms - int(gen)
+    except Exception as exc:
+        log(f"keepalive: status unreadable: {exc}")
+
+    stale = age_ms is None or age_ms > NIGHTLY_STALE_MS
+    alerted = sub.get("alerted_since_ms")
+    if stale:
+        if alerted is None or force:
+            sub["alerted_since_ms"] = now_ms
+            age_h = (age_ms or 0) / 3_600_000
+            sub["runs"].append({
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "status_age_h": round(age_h, 1) if age_ms is not None else None,
+            })
+            save_shared_state(shared)
+            notifier = build_alert_notifier()
+            if notifier is not None:
+                try:
+                    notifier.send(
+                        "⚠️ <b>NIGHTLY KEEP-ALIVE</b>\n"
+                        f"NIGHTLY_STATUS.json tem <b>{age_h:.1f}h</b> "
+                        f"(limiar {NIGHTLY_STALE_MS // 3_600_000}h) — a task "
+                        "agendada não correu. Os gates forward estão parados."
+                    )
+                except Exception as exc:
+                    log(f"keepalive: notify failed: {exc}")
+            log(f"keepalive: ALERT — status stale {age_h:.1f}h")
+            return True
+        log(f"keepalive: episódio em curso — já alertado")
+        return False
+    if alerted is not None:
+        sub["alerted_since_ms"] = None
+        save_shared_state(shared)
+        log("keepalive: nightly retomou — episódio fechado, re-armado")
+        return False
+    log(f"keepalive: ok (status há {(age_ms or 0) / 3_600_000:.1f}h)")
+    return False
+
+
 def check_all(
     shared: Dict[str, Dict[str, Any]], *, force: bool = False
-) -> Tuple[bool, bool, bool, bool, bool, bool]:
+) -> Tuple[bool, bool, bool, bool, bool, bool, bool]:
     """Run all six gates once. Returns (bias_ran, flush_ran, iv_ran,
     creep_ran, cadence_ran, liq_gap_ran)."""
     bias_ran = check_bias(shared, force=force)
@@ -757,7 +828,9 @@ def check_all(
     creep_ran = check_creeping_age(shared, force=force)
     cadence_ran = check_cadence_degrading(shared, force=force)
     liq_gap_ran = check_liq_gap(shared, force=force)
-    return bias_ran, flush_ran, iv_ran, creep_ran, cadence_ran, liq_gap_ran
+    keepalive_ran = check_nightly_keepalive(shared, force=force)
+    return (bias_ran, flush_ran, iv_ran, creep_ran, cadence_ran,
+            liq_gap_ran, keepalive_ran)
 
 
 def main() -> int:

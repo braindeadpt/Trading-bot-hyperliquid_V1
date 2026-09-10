@@ -313,11 +313,13 @@ def paired_bootstrap_noise_gate(baseline_windows: Sequence[Dict[str, Any]],
     ge = sum(1 for x in null_aggs if x >= observed - 1e-9)
     p_value = ge / len(null_aggs)
     required = float(np_percentile(null_aggs, BOOTSTRAP_CI_PCTL))
+    dd_gate = _paired_dd_gate(baseline_windows, variant_windows)
     return {
         "evaluated": True,
         "pass": bool(p_value <= alpha),
         "alpha": alpha,
         "p_value": round(p_value, 4),
+        "dd_gate": dd_gate,
         "null_ge_observed_frac": round(p_value, 4),
         "observed_delta": round(observed, 2),
         "required_delta": round(required, 2),  # null p90 — informative
@@ -325,6 +327,56 @@ def paired_bootstrap_noise_gate(baseline_windows: Sequence[Dict[str, Any]],
         "n_windows": len(deltas),
         "per_window_deltas": [round(d, 2) for d in deltas],
         "method": method,
+    }
+
+
+def _max_drawdown(pnls: Sequence[float]) -> float:
+    """Max peak-to-trough drawdown of the cumulative trade-PnL path."""
+    peak = run = 0.0
+    worst = 0.0
+    for p in pnls:
+        run += float(p)
+        peak = max(peak, run)
+        worst = max(worst, peak - run)
+    return worst
+
+
+def _paired_dd_gate(baseline_windows: Sequence[Dict[str, Any]],
+                    variant_windows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """ADVISORY drawdown gate: same paired sign-flip on max-DD deltas.
+
+    Per window: dd_delta = maxDD(variant) - maxDD(baseline); negative =
+    variant trades with shallower dips. The sign-flip p asks whether the
+    variant's DD improvement exceeds the window null — a cell that wins on
+    PnL while hiding deeper drawdowns shows it here. Advisory only: it is
+    reported in the artifact and the ledger reasons but never changes the
+    verdict on its own.
+    """
+    dd_deltas: List[float] = []
+    for b, v in zip(baseline_windows, variant_windows):
+        if "error" in b or "error" in v:
+            continue
+        bp, vp = b.get("trade_pnls"), v.get("trade_pnls")
+        if not isinstance(bp, (list, tuple)) or not isinstance(vp, (list, tuple)):
+            continue
+        if not bp and not vp:
+            continue
+        dd_deltas.append(_max_drawdown(vp) - _max_drawdown(bp))
+    if not dd_deltas:
+        return {"evaluated": False, "reason": "no paired DD windows"}
+    observed = sum(dd_deltas)  # <0 means variant DD better overall
+    null_aggs, method = signflip_null(dd_deltas, resamples=BOOTSTRAP_RESAMPLES,
+                                    seed=BOOTSTRAP_SEED)
+    # improvement = negative sum; p = P_H0(sum <= observed)
+    le = sum(1 for x in null_aggs if x <= observed + 1e-9)
+    return {
+        "evaluated": True,
+        "dd_delta_total": round(observed, 2),
+        "dd_improved_windows": sum(1 for d in dd_deltas if d < 0),
+        "n_windows": len(dd_deltas),
+        "p_value": round(le / len(null_aggs), 4),
+        "method": method,
+        "note": "advisory only — deeper variant DD does not veto KEEP",
     }
 
 
@@ -585,6 +637,14 @@ def decide(baseline_windows: Sequence[Dict[str, Any]],
                 f"{ng['method']}) — "
                 + ("passed" if ng["pass"] else "NOT passed")
             )
+            dd = ng.get("dd_gate") or {}
+            if dd.get("evaluated"):
+                reasons.append(
+                    f"dd guard (advisory): ΔDD={dd['dd_delta_total']:+} "
+                    f"across {dd['n_windows']} windows "
+                    f"({dd['dd_improved_windows']} shallower, "
+                    f"p={dd['p_value']})"
+                )
             if not ng["pass"]:
                 return "INCONCLUSIVE", reasons + [
                     "noise: paired delta not beyond the window sign-flip "
@@ -764,6 +824,7 @@ def vwap_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], 
                 k: {"n": int(v["n"]), "pnl_usd": round(v["pnl_usd"], 2)}
                 for k, v in sorted(exits.items())
             },
+            "trades": trades_all,
             "per_symbol": per_symbol,
             "cost_model": {"commission_pct": commission_pct, "slippage_bps": slippage_bps},
             "sizing_convention": "per-symbol isolated capital (same for baseline and variants)",
@@ -960,6 +1021,7 @@ def hype_vwap_refine_family() -> Tuple[List[str], Callable[..., Dict[str, Any]],
                 k: {"n": int(v["n"]), "pnl_usd": round(v["pnl_usd"], 2)}
                 for k, v in sorted(exits.items())
             },
+            "trades": trades_all,
             "per_symbol": per_symbol,
             "db_source": "research" if db_path == research_path else "live",
             "db_path": db_path,
@@ -1066,6 +1128,7 @@ def _vwap_fade_run_one(fade_section: Dict[str, Any], db_path: str,
             k: {"n": int(v["n"]), "pnl_usd": round(v["pnl_usd"], 2)}
             for k, v in sorted(exits.items())
         },
+        "trades": trades_all,
         "per_symbol": per_symbol,
         "db_path": db_path,
         "cost_model": {"commission_pct": commission_pct, "slippage_bps": slippage_bps},
@@ -1427,6 +1490,7 @@ def iv_cell_from_raw(
         "gross_loss_usd": round(abs(sum(p for p in pnls if p < 0)), 2),
         "trade_pnls": [round(p, 2) for p in pnls],
         "trade_symbols": [str(t.get("symbol") or "") for t in kept],
+        "trades": kept,
         "n_raw": len(raw),
         "n_no_iv": sum(1 for t in raw if t.get("_iv_pct") is None),
         "n_blocked": len(blocked),

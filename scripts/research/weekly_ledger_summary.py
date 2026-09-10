@@ -26,6 +26,18 @@ ARTIFACT_DIR = ROOT / "data" / "research" / "overnight_experiments"
 DIGEST_PATH = ROOT / "docs" / "OVERNIGHT_WEEKLY_DIGEST.md"
 STATE_PATH = ROOT / "data" / "research" / "weekly_digest_state.json"
 WEEK_MS = 7 * 86_400_000
+BOT_DB = ROOT / "data" / "live" / "bot.db"
+
+
+def _research_db_path() -> Path:
+    """Research DB from config (it lives outside the repo on this box)."""
+    try:
+        from src.utils.config import load_config
+        from src.data.research_database import ResearchDatabase
+        return ResearchDatabase.resolve_path(
+            load_config(ROOT / "config" / "settings.yaml"))
+    except Exception:
+        return ROOT / "data" / "research" / "hyperliquid.db"
 
 
 def _load_artifacts(since_ms: int) -> List[Dict[str, Any]]:
@@ -97,7 +109,78 @@ def build_digest(now_ms: int) -> str:
     hist = ", ".join(f"{k}={v}" for k, v in sorted(verdicts.items()))
     lines.append(f"**Totals:** {runs} runs | verdicts: {hist}")
     lines.append("")
+    lines.extend(_forward_gates(now_ms))
     return "\n".join(lines)
+
+
+def _span_days(db_path: Path, sql: str, params: tuple = ()) -> tuple:
+    """(span_days, n_rows) — n is -1 when not requested (big tables).
+
+    ``sql`` must yield timestamp_ms as its single column; span is taken
+    via two index-assisted LIMIT-1 queries (a plain MIN/MAX/COUNT scan
+    hangs for minutes on the multi-GB l2_snapshots table). Immutable URI
+    avoids lock contention with the live writer.
+    """
+    import sqlite3
+    if not db_path.exists():
+        return None, 0
+    try:
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro&immutable=1", uri=True)
+        mn = conn.execute(f"{sql} ORDER BY 1 ASC LIMIT 1", params).fetchone()
+        mx = conn.execute(f"{sql} ORDER BY 1 DESC LIMIT 1", params).fetchone()
+        conn.close()
+        if not mn or not mx or mn[0] is None:
+            return None, 0
+        return (mx[0] - mn[0]) / 86_400_000.0, -1
+    except Exception:
+        return None, 0
+
+
+def _forward_gates(now_ms: int) -> List[str]:
+    """Days-remaining countdown for the coverage-gated queue entries."""
+    gates: List[str] = ["**Forward gates:**"]
+    # liquidation feed — flush recheck needs 30d continuous
+    span, n = _span_days(
+        BOT_DB,
+        "SELECT timestamp_ms FROM liquidation_events "
+        "WHERE source IN ('okx','bybit')",
+    )
+    if span is None:
+        gates.append("- liq feed: no data")
+    else:
+        rem = max(0.0, 30.0 - span)
+        gates.append(
+            f"- liq feed (flush recheck, needs 30d): {span:.1f}d collected"
+            + (f" — {rem:.0f}d remaining" if rem else " — READY"))
+
+    # L2 snapshots — OIR re-gate needs ~60d continuous
+    span, n = _span_days(
+        _research_db_path(),
+        "SELECT timestamp_ms FROM l2_snapshots",
+    )
+    if span is None:
+        gates.append("- l2_snapshots: no data")
+    else:
+        rem = max(0.0, 60.0 - span)
+        gates.append(
+            f"- l2_snapshots (OIR re-gate, needs ~60d): {span:.1f}d"
+            + (f" — {rem:.0f}d remaining" if rem else " — READY"))
+
+    # DVOL daily — Night 3 reopens when coverage spans ~115d (K=4)
+    span, n = _span_days(
+        _research_db_path(),
+        "SELECT timestamp_ms FROM dvol_daily WHERE currency='BTC'",
+    )
+    if span is None:
+        gates.append("- dvol_daily: no data")
+    else:
+        rem = max(0.0, 115.0 - span)
+        gates.append(
+            f"- dvol_daily (iv_thresholds K=4, needs ~115d): {span:.1f}d"
+            + (f" — {rem:.0f}d remaining" if rem else " — READY"))
+    gates.append("")
+    return gates
 
 
 def append_digest(text: str) -> None:
