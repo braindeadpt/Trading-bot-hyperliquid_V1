@@ -311,6 +311,14 @@ class TradingEngine:
         executor: ExecutionEngine,
         notifier: Optional[Any] = None,
         shadow_strategies: Optional[List[Strategy]] = None,
+        # Runtime sibling of the boot preflight verdict: feeds the boot
+        # classified stale-since-downtime (with their last evidence ms, the
+        # boot instant and inferred downtime) keep a grace window in the
+        # FeedSilenceMonitor before early-warning alerts may fire. Wired by
+        # main.py from the persisted boot report; absent -> no suppression.
+        boot_stale_latest_ms: Optional[Dict[str, int]] = None,
+        boot_at_ms: Optional[int] = None,
+        boot_downtime_sec: float = 0.0,
     ) -> None:
         self._config = config
         self._db = db
@@ -655,6 +663,9 @@ class TradingEngine:
             cadence_min_samples=feed_silence_cadence_min_samples(),
             cadence_gap_history=feed_silence_cadence_gap_history(),
             on_alert=self._record_feed_silence_alert,
+            boot_stale_latest_ms=boot_stale_latest_ms,
+            boot_at_ms=boot_at_ms,
+            boot_downtime_sec=boot_downtime_sec,
         )
         self._feed_silence_enabled = _silence_enabled
         if not _silence_enabled:

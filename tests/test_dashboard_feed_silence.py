@@ -547,6 +547,70 @@ class TestFeedSilencePayload:
         assert d["feed_silence_spark"] == {}  # best-effort empty
 
 
+    def test_payload_merges_boot_stale_verdict_per_feed(self, monkeypatch, tmp_path) -> None:
+        """After a downtime boot, the persisted preflight report is merged
+        into each feed row: boot_status / boot_stale / boot_downtime_sec /
+        boot_at_ms — so the panel can label feeds stale@boot vs dead@boot."""
+        report = tmp_path / "preflight_last.json"
+        report.write_text(
+            """{
+              "now_ms": 1788990000000,
+              "downtime_sec": 43200.0,
+              "feeds": {
+                "funding_hl": {"status": "stale-since-downtime",
+                               "stale_since_downtime": true,
+                               "age_sec": 43201.0},
+                "liquidation_okx": {"status": "fail",
+                                     "stale_since_downtime": false,
+                                     "age_sec": 999999.0},
+                "liquidation_bybit": {"status": "ok",
+                                       "stale_since_downtime": false,
+                                       "age_sec": 10.0}
+              }
+            }""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(self._web, "PREFLIGHT_REPORT_PATH", str(report))
+        silence = _SilenceStub(
+            {
+                "funding_hl": {"last_event_ms": 1, "age_sec": 43201.0,
+                                "max_silence_sec": 3600.0, "degraded": True},
+                "liquidation_okx": {"last_event_ms": 1, "age_sec": 999999.0,
+                                    "max_silence_sec": 21600.0, "degraded": True},
+                "liquidation_bybit": {"last_event_ms": 1, "age_sec": 10.0,
+                                      "max_silence_sec": 21600.0, "degraded": False},
+            }
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        fs = d["feed_silence"]
+        # stale-by-downtime and dead feeds carry the boot verdict;
+        assert fs["funding_hl"]["boot_status"] == "stale-since-downtime"
+        assert fs["funding_hl"]["boot_stale"] is True
+        assert fs["funding_hl"]["boot_downtime_sec"] == 43200.0
+        assert fs["funding_hl"]["boot_at_ms"] == 1788990000000
+        assert fs["liquidation_okx"]["boot_status"] == "fail"
+        assert fs["liquidation_okx"]["boot_stale"] is False
+        # a feed that was fresh at boot stays clean — no invented badge
+        assert "boot_status" not in fs["liquidation_bybit"]
+
+    def test_payload_without_boot_report_has_no_badges(self, monkeypatch, tmp_path) -> None:
+        """No persisted report (first boot / manual start) -> feed rows have
+        no boot fields at all."""
+        monkeypatch.setattr(
+            self._web, "PREFLIGHT_REPORT_PATH", str(tmp_path / "missing.json")
+        )
+        silence = _SilenceStub(
+            {"funding_hl": {"last_event_ms": 1, "age_sec": 30.0,
+                            "max_silence_sec": 3600.0, "degraded": False}}
+        )
+        self._web._engine = _EngineStub(silence, summary=_HealthSummaryStub())
+        d = self._client.get("/api/market_data_health").get_json()
+        fs = d["feed_silence"]
+        assert "boot_status" not in fs["funding_hl"]
+        assert "boot_stale" not in fs["funding_hl"]
+
+
 class TestWarnLevelDerivation:
     """The single derivation of the escalation level lives in the monitor;
     every consumer (snapshot, cadence script, endpoint, JS) uses it."""
@@ -711,6 +775,20 @@ class TestFeedSilenceTemplate:
         assert "closest(\"svg[data-tips]\")" in html
         assert "fmtTime(ts) + \" · \" + v.toFixed(1) + \"% do threshold\"" in html
         assert "fmtDate(ts) + \" · max \" + fmtDur(v)" in html
+
+    def test_template_renders_boot_verdict_badges(self) -> None:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        # post-downtime boots: the row labels which feeds were merely stale
+        # (bot off — not gated) vs genuinely dead while the bot ran (blocked)
+        assert 'st.boot_status === "stale-since-downtime"' in html
+        assert "stale@boot" in html
+        assert ">dead@boot</span>" in html
+        assert "pill-stale" in html
+        assert "pill-dead" in html
+        assert "boot_downtime_sec" in html
+        assert "boot_at_ms" in html
+        # the badge is rendered in the same cell as feed/creep/cadence
+        assert "creepBadge + ' ' + cadenceBadge + ' ' + bootBadge" in html
 
     def test_template_shows_fractions_in_alerted_column(self) -> None:
         html = TEMPLATE_PATH.read_text(encoding="utf-8")

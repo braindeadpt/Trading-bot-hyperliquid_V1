@@ -400,6 +400,30 @@ def test_downtime_tolerance_is_module_constant_not_config() -> None:
     assert mod.DOWNTIME_TOLERANCE_SEC == 300.0
 
 
+def test_downtime_tolerance_single_source_of_truth() -> None:
+    """DOWNTIME_TOLERANCE_SEC must be defined in exactly ONE place
+    (src/data/market_data_health.py) and imported everywhere else — two
+    independent constants that must agree by definition will eventually
+    diverge. preflight_feed_check.py imports it rather than redefining it,
+    so the two are literally the same object."""
+    from src.data.market_data_health import DOWNTIME_TOLERANCE_SEC as health_value
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("pfc2", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod.DOWNTIME_TOLERANCE_SEC == health_value
+    assert mod.DOWNTIME_TOLERANCE_SEC is health_value
+
+    src = SCRIPT.read_text(encoding="utf-8")
+    assert "DOWNTIME_TOLERANCE_SEC =" not in src, (
+        "preflight_feed_check.py must import DOWNTIME_TOLERANCE_SEC from "
+        "src.data.market_data_health, never redefine it"
+    )
+
+
 def test_feed_dead_while_bot_ran_still_blocks_boot() -> None:
     """fstream protection intact: liquidation_okx 7h old while OTHER evidence
     is 30s old -> the bot was alive 30s ago, so okx was ALREADY dead during
@@ -480,6 +504,56 @@ def test_stale_since_downtime_marked_in_json_report() -> None:
         assert all(st["status"] == "stale-since-downtime"
                    for f, st in feeds.items() if f in stale)
         assert all(st["status"] != "fail" for st in feeds.values())
+
+
+def test_out_writes_json_report_file() -> None:
+    """--out persists the same JSON report to a file — the boot wiring uses
+    this so the dashboard feed panel can show the boot's verdict per feed."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        _make_db(db, liq_okx_ms=NOW - 5_000, liq_bybit_ms=NOW - 5_000,
+                 funding_ms=NOW - 5_000, candle_ms=_now() - 30_000,
+                 candle_15m_ms=_now() - 60_000)
+        out = os.path.join(tmp, "preflight_last.json")
+        r = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp), "--out", out])
+        assert r.returncode == 0, r.stdout + r.stderr
+        report = _json.loads(Path(out).read_text(encoding="utf-8"))
+        # Boot context the dashboard needs to explain the verdicts:
+        assert report["downtime_sec"] >= 0
+        assert report["last_alive_ms"] and report["now_ms"]
+        feeds = report["feeds"]
+        assert feeds["funding_hl"]["status"] == "ok"
+        assert feeds["l2_book_recording"]["status"] == "self-produced"
+        assert feeds["liquidation_coinalyze_check"]["status"] == "skipped"
+
+
+def test_out_report_carries_stale_since_downtime_flags() -> None:
+    """A post-downtime run persists per-feed stale_since_downtime + the
+    inferred downtime, so the dashboard can label feeds stale@boot."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        old = NOW - 8 * 3600_000
+        _make_db(db, liq_okx_ms=old - 60_000, liq_bybit_ms=old - 90_000,
+                 funding_ms=old - 30_000, candle_ms=old,
+                 candle_15m_ms=old - 120_000)
+        out = os.path.join(tmp, "preflight_last.json")
+        r = _run(["--db", db, "--l2-dir", _make_old_l2_dir(tmp, old),
+                  "--out", out,
+                  "--candle-1m-max-age-sec", "36000",
+                  "--candle-15m-max-age-sec", "36000"])
+        assert r.returncode == 2, r.stdout + r.stderr
+        report = _json.loads(Path(out).read_text(encoding="utf-8"))
+        assert report["downtime_sec"] > 3600
+        stale = [f for f, st in report["feeds"].items()
+                 if st.get("stale_since_downtime")]
+        assert stale, _json.dumps(report["feeds"], indent=2)[:800]
+        assert all(report["feeds"][f]["status"] == "stale-since-downtime"
+                   for f in stale)
+        assert report["feeds"][stale[0]]["stale_since_downtime"] is True
 
 
 def test_empty_db_no_downtime_invented_unchanged_behavior() -> None:

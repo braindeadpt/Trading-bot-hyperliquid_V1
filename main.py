@@ -39,6 +39,7 @@ if __name__ == "__main__" and "--audit" in sys.argv:
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -56,6 +57,7 @@ from utils.helpers import safe_ensure_dir
 from utils.instance_lock import acquire_instance_lock, release_instance_lock
 
 from data.database import Database
+from scripts.preflight_feed_check import PREFLIGHT_REPORT_PATH  # noqa: E402
 from exchanges.hyperliquid_ws import HyperliquidWSClient, DataBus
 from exchanges.hyperliquid_rest import HyperliquidRESTClient
 from exchanges.binance_api import BinanceRESTClient, BinanceWSClient
@@ -134,6 +136,7 @@ def _preflight_feed_check(
     *,
     candles_only: bool = False,
     min_latest_ms: Optional[int] = None,
+    json_report_out: Optional[Path] = None,
 ) -> int:
     """Run scripts/preflight_feed_check.py at boot / before backtest; return
     its exit code.
@@ -155,8 +158,43 @@ def _preflight_feed_check(
         cmd += ["--min-latest-ms", str(min_latest_ms)]
     if l2_dir is not None:
         cmd += ["--l2-dir", str(l2_dir)]
+    if json_report_out is not None:
+        # Persist the verdict: the dashboard feed panel reads this file to
+        # show which feeds the boot classified stale-since-downtime vs dead.
+        cmd += ["--json", "--out", str(json_report_out)]
     result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=False)
     return result.returncode
+
+
+def _boot_silence_context(
+    report_path: Path,
+) -> tuple:
+    """Parse the persisted boot preflight report into the runtime grace
+    context the FeedSilenceMonitor needs: (stale_feed_latest_ms, boot_at_ms,
+    downtime_sec). Only feeds the boot classified stale-since-downtime
+    participate — dead feeds keep alerting immediately. Missing/corrupt
+    report -> all-empty (no suppression, behavior unchanged).
+    """
+    try:
+        if not report_path.exists():
+            return ({}, None, 0.0)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        stale_latest = {
+            feed: int(st["latest_ms"])
+            for feed, st in (report.get("feeds") or {}).items()
+            if st.get("status") == "stale-since-downtime" and st.get("latest_ms")
+        }
+        return (
+            stale_latest,
+            int(report["now_ms"]) if report.get("now_ms") else None,
+            float(report.get("downtime_sec") or 0.0),
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        # _logger is only set inside main(); stay safe standalone.
+        (_logger or logging.getLogger(__name__)).warning(
+            "Boot report unreadable — feed-silence grace disabled: %s", exc
+        )
+        return ({}, None, 0.0)
 
 
 def _run_preflight_at_boot(
@@ -166,6 +204,7 @@ def _run_preflight_at_boot(
     skip: bool = False,
     logger: Optional[logging.Logger] = None,
     l2_dir: Optional[Path] = None,
+    report_out: Optional[Path] = None,
 ) -> Optional[int]:
     """Preflight feed-delivery check at boot: fail early instead of waiting
     for the watchdog silence threshold (the 2026-06-29 fstream outage lesson).
@@ -179,7 +218,9 @@ def _run_preflight_at_boot(
     if skip:
         log.info("Preflight feed check skipped (--skip-preflight).")
         return None
-    rc = _preflight_feed_check(db_path, config_path, l2_dir=l2_dir)
+    rc = _preflight_feed_check(
+        db_path, config_path, l2_dir=l2_dir, json_report_out=report_out
+    )
     if rc == 1:
         print(
             "[FATAL] Preflight feed check FAILED — contracted feed(s) not "
@@ -467,7 +508,9 @@ async def main() -> None:
     l2_dir = _resolve_path(str(cfg.get("market_data.l2_recording.path", "data/research/l2_books")))
     boot_exit = _run_preflight_at_boot(
         db_path, config_path, skip=args.skip_preflight, logger=logger, l2_dir=l2_dir,
+        report_out=PREFLIGHT_REPORT_PATH,
     )
+    boot_silence_ctx = _boot_silence_context(PREFLIGHT_REPORT_PATH)
     if boot_exit is not None:
         raise SystemExit(boot_exit)
 
@@ -658,6 +701,9 @@ async def main() -> None:
         executor=executor,
         notifier=notifier,
         shadow_strategies=shadow_strategies,
+        boot_stale_latest_ms=boot_silence_ctx[0],
+        boot_at_ms=boot_silence_ctx[1],
+        boot_downtime_sec=boot_silence_ctx[2],
     )
     engine.set_ws_client(hl_ws)
     global _engine

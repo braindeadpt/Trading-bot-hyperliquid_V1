@@ -11,6 +11,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Deque
 
 from flask import Flask, jsonify, request, abort, render_template
@@ -22,6 +23,7 @@ from src.dashboard.auth import (
     validate_dashboard_token,
 )
 from src.utils.helpers import safe_float
+from scripts.preflight_feed_check import PREFLIGHT_REPORT_PATH  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +250,59 @@ def _feed_silence_creep(feed_silence: Dict[str, Any]) -> Dict[str, Dict[str, Any
         logger.warning("feed_silence_creep failed: %s", exc)
         return out
     return _ttl_put("feed_silence_creep", out, _FEED_SPARK_TTL_S)
+
+
+def _feed_silence_boot() -> Dict[str, Any]:
+    """Last boot's preflight verdict (per-feed status + stale_since_downtime).
+
+    The boot wiring persists the preflight JSON report to
+    PREFLIGHT_REPORT_PATH; this reads it back so the Feed Silence panel can
+    show, after a downtime, which feeds the boot classified as merely stale
+    (bot was off — not gated) vs genuinely dead while it ran (boot blocked).
+    Missing/unreadable file -> empty dict (no badges); TTL-cached so the
+    60s poll never hits the disk every tick.
+    """
+    cached = _ttl_get("feed_silence_boot")
+    if cached is not None:
+        return cached
+    try:
+        p = Path(PREFLIGHT_REPORT_PATH)
+        if not p.exists():
+            return _ttl_put("feed_silence_boot", {}, _MD_HEALTH_TTL_S)
+        report = json.loads(p.read_text(encoding="utf-8"))
+        out = {
+            "downtime_sec": report.get("downtime_sec"),
+            "boot_at_ms": report.get("now_ms"),
+            "feeds": report.get("feeds", {}) or {},
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("feed_silence_boot failed: %s", exc)
+        out = {}
+    return _ttl_put("feed_silence_boot", out, _MD_HEALTH_TTL_S)
+
+
+def _attach_feed_silence_boot(body: Dict[str, Any]) -> None:
+    """Merge the boot preflight verdict into each feed's silence snapshot row.
+
+    Only stale-since-downtime / fail verdicts are attached (fresh/warn boots
+    have nothing to explain); the runtime warn_level stays the source of
+    truth for the row's color.
+    """
+    sil = body.get("feed_silence")
+    if not sil:
+        return
+    boot = _feed_silence_boot()
+    feeds = boot.get("feeds", {})
+    if not feeds:
+        return
+    for feed, st in sil.items():
+        b = feeds.get(feed)
+        if not b or b.get("status") not in ("stale-since-downtime", "fail"):
+            continue
+        st["boot_status"] = b.get("status")
+        st["boot_stale"] = bool(b.get("stale_since_downtime"))
+        st["boot_downtime_sec"] = boot.get("downtime_sec")
+        st["boot_at_ms"] = boot.get("boot_at_ms")
 
 
 def _feed_silence_imminent(feed_silence: Dict[str, Any]) -> bool:
@@ -1203,6 +1258,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
             body["feed_silence_creep"] = _feed_silence_creep(
                 body.get("feed_silence", {})
             )
+            _attach_feed_silence_boot(body)
             return jsonify(_ttl_put("market_data_health", body, _MD_HEALTH_TTL_S))
         health = getattr(_engine, "_market_data_health", {}) or {}
         rows = [h.to_dict() for h in health.values()]
@@ -1228,6 +1284,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
         body["feed_silence_creep"] = _feed_silence_creep(
             body.get("feed_silence", {})
         )
+        _attach_feed_silence_boot(body)
         return jsonify(_ttl_put("market_data_health", body, _MD_HEALTH_TTL_S))
 
     @app.route("/api/live_data")

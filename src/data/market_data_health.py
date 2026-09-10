@@ -10,6 +10,12 @@ from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
+# The boot preflight classifies a feed as "stale-since-downtime" when its
+# age is within this grace above the inferred downtime (the bot was off,
+# not the feed dying). The runtime monitor mirrors the SAME constant so
+# its post-boot suppression window is exactly the boot's verdict window.
+DOWNTIME_TOLERANCE_SEC = 300.0
+
 
 @dataclass
 class PollRecord:
@@ -329,6 +335,15 @@ class FeedSilenceMonitor:
         cadence_min_samples: int = 100,
         cadence_gap_history: int = 4000,
         on_alert: Optional[Callable[[str, str, int, str], None]] = None,
+        # Runtime sibling of the boot preflight verdict (2026-09-09): feeds
+        # the boot classified stale-since-downtime keep a grace window right
+        # after boot — age still inside downtime+tolerance means the silence
+        # is explained by the bot being off, so early-warning alerts must
+        # NOT fire yet. Once the window passes (or a beat arrives), the
+        # normal escalation resumes untouched.
+        boot_stale_latest_ms: Optional[Dict[str, int]] = None,
+        boot_at_ms: Optional[int] = None,
+        boot_downtime_sec: float = 0.0,
     ) -> None:
         # feed_name -> max silence seconds
         defaults = {
@@ -361,6 +376,12 @@ class FeedSilenceMonitor:
         # message). The engine uses it to persist the real silence history to
         # the research DB for audit vs the daily max-age rollup.
         self._on_alert = on_alert
+        # Boot verdict context (preflight report): feed -> last evidence ms
+        # for feeds classified stale-since-downtime, plus the boot instant
+        # and inferred downtime. Absent -> no suppression (behavior unchanged).
+        self._boot_stale_latest_ms = dict(boot_stale_latest_ms or {})
+        self._boot_at_ms = int(boot_at_ms) if boot_at_ms else None
+        self._boot_downtime_sec = float(boot_downtime_sec or 0.0)
         self._enabled_feeds: set[str] = set(cfg.keys())
         # time.monotonic() is since an arbitrary epoch (often system boot on
         # Windows), NOT process start. Never-seen silence must use age since
@@ -420,6 +441,27 @@ class FeedSilenceMonitor:
     def disable_feed(self, feed: str) -> None:
         self._enabled_feeds.discard(feed)
 
+    def _in_boot_downtime_window(self, name: str, now_ms: int) -> bool:
+        """True while this feed's age is still explained by the boot downtime.
+
+        The runtime sibling of the preflight's stale-since-downtime verdict:
+        only for feeds the boot classified stale (``boot_stale_latest_ms``)
+        and that have NOT delivered a beat since (``last_event_ms`` None —
+        the never-seen branch this helper is called from). Age grows from
+        the last persisted evidence, so ``age <= downtime + tolerance``
+        holds exactly until ~``DOWNTIME_TOLERANCE_SEC`` after boot — after
+        that the silence is no longer explained by the bot being off and
+        the normal escalation resumes. A ``beat()`` ends the window by
+        switching the feed to the age-based path with fresh evidence.
+        """
+        if self._boot_at_ms is None or self._boot_downtime_sec <= 0:
+            return False
+        latest = self._boot_stale_latest_ms.get(name)
+        if not latest:
+            return False
+        age_sec = (now_ms - int(latest)) / 1000.0
+        return age_sec <= self._boot_downtime_sec + DOWNTIME_TOLERANCE_SEC
+
     def beat(self, feed: str, timestamp_ms: Optional[int] = None) -> None:
         if feed not in self._states:
             self._states[feed] = FeedSilenceState(feed=feed)
@@ -453,6 +495,12 @@ class FeedSilenceMonitor:
             if st is None:
                 continue
             if st.last_event_ms is None:
+                # Right after a downtime boot, feeds the boot classified
+                # stale-since-downtime are still inside downtime+tolerance —
+                # the silence is explained by the bot being off, so neither
+                # early warnings nor the never-produced degrade may fire yet.
+                if self._in_boot_downtime_window(name, now):
+                    continue
                 # Never seen — degrade only after max_silence from *monitor start*
                 # (not raw monotonic, which can be days since boot on Windows).
                 if uptime_sec > st.max_silence_sec:
@@ -515,6 +563,12 @@ class FeedSilenceMonitor:
             if st is None or st.degraded:
                 continue
             if st.last_event_ms is None:
+                # Boot-downtime grace: a feed the boot classified
+                # stale-since-downtime must not fire early/imminent while
+                # its age is still inside downtime+tolerance right after
+                # boot — the silence is explained, not a new outage.
+                if self._in_boot_downtime_window(name, now):
+                    continue
                 # Never seen — escalate on uptime before the never-produced
                 # degrade threshold. Fire early then imminent, independently.
                 if not st.warned_50_pct and uptime_sec >= st.max_silence_sec * warn_fraction:

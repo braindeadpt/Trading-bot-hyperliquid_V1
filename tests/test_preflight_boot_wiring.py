@@ -227,6 +227,118 @@ def test_real_preflight_backtest_candles_blocks_backlog(tmp_path) -> None:
     assert rc == 0
 
 
+def test_preflight_report_out_passes_json_flags(tmp_path, monkeypatch) -> None:
+    """json_report_out -> the boot run persists the verdict for the
+    dashboard: the script is invoked with --json --out <path>."""
+    db = tmp_path / "bot.db"
+    cfg = tmp_path / "settings.yaml"
+    out = tmp_path / "preflight_last.json"
+    calls: list = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return _FakeResult(0)
+
+    monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+
+    rc = main_mod._preflight_feed_check(db, cfg, json_report_out=out)
+    assert rc == 0
+    cmd = calls[0]
+    assert "--json" in cmd
+    assert "--out" in cmd and str(out) in cmd
+
+
+def test_run_preflight_at_boot_forwards_report_out(tmp_path, monkeypatch) -> None:
+    """_run_preflight_at_boot forwards report_out to the check, so the boot
+    call site controls where the dashboard report is persisted."""
+    db = tmp_path / "bot.db"
+    cfg = tmp_path / "settings.yaml"
+    out = tmp_path / "preflight_last.json"
+    seen: dict = {}
+
+    def fake_check(*args, **kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(main_mod, "_preflight_feed_check", fake_check)
+    rc = main_mod._run_preflight_at_boot(db, cfg, report_out=out, logger=_log())
+    assert rc is None
+    assert seen.get("json_report_out") == out
+
+
+def test_real_script_writes_boot_report(tmp_path) -> None:
+    """End-to-end through the real script: a boot run persists a parseable
+    report whose per-feed statuses match the printed verdict."""
+    import json as _json
+
+    db = tmp_path / "bot.db"
+    _make_db(db, liq_okx_ms=NOW - 5_000, liq_bybit_ms=NOW - 9_000,
+             funding_ms=NOW - 5_000, candle_ms=_now() - 30_000,
+             candle_15m_ms=_now() - 60_000)
+    l2 = tmp_path / "l2"
+    l2.mkdir()
+    (l2 / "book.json").write_text("{}", encoding="utf-8")
+    out = tmp_path / "preflight_last.json"
+
+    rc = main_mod._preflight_feed_check(
+        db, ROOT / "config" / "settings.yaml", l2_dir=l2,
+        json_report_out=out,
+    )
+    assert rc == 0
+    report = _json.loads(out.read_text(encoding="utf-8"))
+    assert report["downtime_sec"] >= 0
+    assert report["feeds"]["funding_hl"]["status"] == "ok"
+    assert "candles" in report
+
+
+def test_boot_silence_context_parses_stale_feeds(tmp_path) -> None:
+    """_boot_silence_context extracts the runtime grace context from the
+    persisted boot report: only stale-since-downtime feeds participate (dead
+    feeds keep alerting immediately), plus the boot instant + downtime."""
+    import json as _json
+
+    report = tmp_path / "preflight_last.json"
+    report.write_text(
+        _json.dumps(
+            {
+                "now_ms": 1788990000000,
+                "downtime_sec": 43200.0,
+                "feeds": {
+                    "funding_hl": {"status": "stale-since-downtime",
+                                   "latest_ms": 1788946800000},
+                    "liquidation_okx": {"status": "fail",
+                                         "latest_ms": 1700000000000},
+                    "taker_split": {"status": "ok",
+                                     "latest_ms": 1788989900000},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale, boot_at, downtime = main_mod._boot_silence_context(report)
+    assert stale == {"funding_hl": 1788946800000}
+    assert boot_at == 1788990000000
+    assert downtime == 43200.0
+
+
+def test_boot_silence_context_missing_report_is_empty(tmp_path) -> None:
+    stale, boot_at, downtime = main_mod._boot_silence_context(
+        tmp_path / "nope.json"
+    )
+    assert stale == {}
+    assert boot_at is None
+    assert downtime == 0.0
+
+
+def test_boot_silence_context_corrupt_report_is_empty(tmp_path) -> None:
+    p = tmp_path / "preflight_last.json"
+    p.write_text("{not json", encoding="utf-8")
+    stale, boot_at, downtime = main_mod._boot_silence_context(p)
+    assert stale == {}
+    assert boot_at is None
+    assert downtime == 0.0
+
+
 def test_real_preflight_blocks_with_stale_evidence(tmp_path) -> None:
     """A contracted feed past its silence threshold blocks boot (rc 1)."""
     db = tmp_path / "bot.db"

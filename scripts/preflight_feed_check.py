@@ -48,6 +48,10 @@ downtime_sec is derived per-run from the evidence itself:
 wrote anything). With NO evidence at all the behavior is unchanged — no
 downtime is invented.
 
+``--out PATH`` persists the same JSON report to a file (the boot wiring
+uses it so the dashboard feed panel can show, after a downtime, which
+feeds the boot classified as merely stale vs genuinely dead).
+
 Per-symbol candle freshness (1m/15m) is also validated for every trading
 symbol — a data backlog (the collector fell behind) shows up here before a
 backtest silently reads a window that ends days ago. Two modes:
@@ -86,10 +90,17 @@ from src.core.engine import (  # noqa: E402
     feed_silence_contracts,
     feed_silence_warn_fraction,
 )
+from src.data.market_data_health import DOWNTIME_TOLERANCE_SEC  # noqa: E402
 from src.utils.config import get_trading_symbols, load_config  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = ROOT / "data" / "live" / "bot.db"
+
+# Where the boot wiring persists the last preflight verdict so the
+# dashboard feed panel can show, after a downtime, which feeds were merely
+# stale (bot off) vs genuinely dead while it ran. Not config — a fixed
+# research artifact path, same convention as NIGHTLY_STATUS.json.
+PREFLIGHT_REPORT_PATH = ROOT / "data" / "research" / "preflight_last.json"
 L2_BOOKS_DIR = ROOT / "data" / "research" / "l2_books"
 
 # Grace added to the computed downtime when classifying an over-threshold
@@ -99,8 +110,10 @@ L2_BOOKS_DIR = ROOT / "data" / "research" / "l2_books"
 # went stale because the bot was OFF; anything older was already dead while
 # the bot ran (the fstream failure mode) and still blocks boot. Module
 # constant on purpose — NOT config (a new key would drift the Fase-10
-# config_hash manifest).
-DOWNTIME_TOLERANCE_SEC = 300.0
+# config_hash manifest). Shared with the runtime monitor
+# (src.data.market_data_health) so the post-boot alert-suppression window
+# is exactly the boot's verdict window — imported above (the import
+# already binds DOWNTIME_TOLERANCE_SEC in this module for callers/tests).
 
 
 def _db_latest(db: sqlite3.Connection, table: str, col: str,
@@ -193,6 +206,8 @@ def main() -> int:
                         help="warn when age exceeds this fraction of threshold "
                              "(default: FEED_SILENCE_WARN_FRACTION env, else 0.5)")
     parser.add_argument("--json", action="store_true", help="emit JSON report")
+    parser.add_argument("--out", default=None, help="also write the JSON report to this file "
+                                                  "(used by the boot wiring / dashboard panel)")
     parser.add_argument("--gate-coinalyze", action="store_true",
                         help="fail if coinalyze has no evidence (default: skipped, verify-only)")
     parser.add_argument("--candles-only", action="store_true",
@@ -238,7 +253,14 @@ def main() -> int:
         max(0.0, (now_ms - last_alive_ms) / 1000.0) if last_alive_ms else 0.0
     )
 
-    report: dict = {"now_ms": now_ms, "feeds": {}, "candles": {}}
+    report: dict = {
+        "now_ms": now_ms,
+        # Boot context the dashboard needs to explain the per-feed verdicts:
+        "downtime_sec": round(downtime_sec, 1),
+        "last_alive_ms": last_alive_ms or None,
+        "feeds": {},
+        "candles": {},
+    }
     failures = 0
     warnings = 0
 
@@ -324,6 +346,15 @@ def main() -> int:
                 "status": status,
             }
     db.close()
+
+    if args.out:
+        out = Path(args.out)
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        except OSError as exc:
+            print(f"WARN: could not write preflight report to {out}: {exc}",
+                  file=sys.stderr)
 
     if args.json:
         print(json.dumps(report, indent=2))

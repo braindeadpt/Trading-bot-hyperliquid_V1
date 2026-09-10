@@ -41,6 +41,7 @@ def _bare_engine(
     *,
     warn_fraction: float = 0.5,
     on_alert=None,
+    **mon_kwargs,
 ):
     """Bare TradingEngine with the attrs _refresh_market_data_health needs.
 
@@ -48,6 +49,8 @@ def _bare_engine(
     test passes ``feed_silence_warn_fraction()`` (exactly what the engine's
     constructor does) to prove the env reaches the monitor. ``on_alert`` is
     forwarded to the monitor — the engine wires it to the research DB.
+    Extra ``**mon_kwargs`` (e.g. the boot-downtime grace context) are
+    forwarded to the FeedSilenceMonitor constructor.
     """
     from src.core.engine import TradingEngine
     from src.data.market_data_health import (
@@ -78,6 +81,7 @@ def _bare_engine(
         feeds={"liquidation_okx": MAX_SILENCE_SEC},
         warn_fraction=warn_fraction,
         on_alert=on_alert,
+        **mon_kwargs,
     )
     for name in list(mon._enabled_feeds):
         if name != "liquidation_okx":
@@ -400,6 +404,66 @@ def test_disabled_feed_silence_sends_nothing(
         clock["t"] += 0.6 * 3600.0
         await _refresh(engine)
         assert notifier.alerts == []
+
+    asyncio.run(scenario())
+
+
+def test_boot_grace_suppresses_imminent_page_after_downtime_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime sibling of the boot's stale-since-downtime verdict: a feed the
+    boot classified stale does NOT page imminent (or degrade) while its age
+    is still inside downtime+tolerance right after boot — the silence is
+    explained by the bot being off. Once the window closes, the never-seen
+    escalation resumes and the imminent checkpoint pages exactly once.
+
+    NOTE: the monitor's uptime clock is set via ``_started_mono`` instead of
+    patching ``time.monotonic`` — asyncio's event loop uses that clock for
+    its own timers, so a frozen monotonic would deadlock ``asyncio.sleep``.
+    The feed threshold is shrunk to 120s so its escalation (early 60s /
+    imminent 108s / degraded 121s of uptime) starts inside the 300s boot
+    window — with production 1h+ thresholds the escalation floors sit far
+    beyond the window by design."""
+    import time as _time
+
+    from src.data.market_data_health import DOWNTIME_TOLERANCE_SEC
+
+    async def scenario() -> None:
+        clock = {"t": 1_000_000.0}
+        boot_at_ms = int(clock["t"] * 1000)
+        downtime = 12 * 3600.0
+        last_evidence = int(boot_at_ms - downtime * 1000)
+        engine, mon, notifier = _bare_engine(
+            clock, monkeypatch,
+            boot_stale_latest_ms={"liquidation_okx": last_evidence},
+            boot_at_ms=boot_at_ms,
+            boot_downtime_sec=downtime,
+        )
+        # Small threshold + 200s of uptime: normally degraded + imminent by
+        # now, but the age is still inside downtime+tolerance.
+        mon._states["liquidation_okx"].max_silence_sec = 120.0
+        mon._started_mono = _time.monotonic() - 200.0
+
+        await _refresh(engine)  # now == boot instant -> inside the window
+        assert notifier.alerts == []
+        assert not mon.snapshot()["liquidation_okx"]["degraded"]
+        assert mon.snapshot()["liquidation_okx"]["warned_90_pct"] is False
+
+        clock["t"] += 100.0  # still inside downtime+tolerance
+        await _refresh(engine)
+        assert notifier.alerts == []
+
+        # window closes (age > downtime + tolerance): the silence is no
+        # longer explained by the boot — the engine's check() runs first and
+        # degrades the feed in the same refresh, so the outage alert (FEED
+        # SILENT) pages. (The imminent checkpoint is fire-once for the
+        # age-based path where degradation comes later — covered at the
+        # monitor level; here degraded owns the episode.)
+        clock["t"] += DOWNTIME_TOLERANCE_SEC + 60.0
+        await _refresh(engine)
+        msgs = _messages(notifier)
+        assert any("FEED SILENT" in m and "liquidation_okx" in m for m in msgs), msgs
+        assert mon.snapshot()["liquidation_okx"]["degraded"] is True
 
     asyncio.run(scenario())
 

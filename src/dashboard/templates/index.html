@@ -99,6 +99,8 @@ tr:hover td { background: var(--panel-hover); }
 .pill-creep { background: rgba(210,153,34,0.18); color: #d29922; }
 .pill-creep-hi { background: rgba(239,68,68,0.18); color: #ef4444; }
 .pill-cadence { background: rgba(239,68,68,0.15); color: #ef4444; }
+.pill-stale { background: rgba(210,153,34,0.18); color: #d29922; }
+.pill-dead { background: rgba(239,68,68,0.18); color: #ef4444; }
 .pill-approved { background: rgba(26,71,42,0.3); color: var(--up); }
 .pill-rejected { background: rgba(239,68,68,0.15); color: #ef4444; }
 .pill-executed { background: rgba(59,130,246,0.15); color: #3b82f6; }
@@ -1759,8 +1761,20 @@ function renderFeedSilence(payload) {
         const cadenceBadge = cadenceBad && p99 != null
             ? '<span class="pill pill-cadence" title="gap atual ' + fmtDur(age) + ' > p99 histórico ' + fmtDur(p99) + ' (n=' + nSamples + ')' + (st.warned_cadence ? ' — alerta cadence emitido' : '') + ' — cadência a degradar">cadence</span>'
             : '';
+        // Boot verdict badge: the preflight that ran at boot classified this
+        // feed as merely stale (bot was off — age explained by the downtime,
+        // boot NOT gated) vs genuinely dead while the bot ran (boot blocked,
+        // the fstream lesson). Verdict of the LAST boot; the runtime
+        // warn_level above stays the source of truth for the row's color.
+        const bootDowntime = st.boot_downtime_sec == null ? null : Number(st.boot_downtime_sec);
+        const bootAt = st.boot_at_ms ? fmtHM(Number(st.boot_at_ms)) : '';
+        const bootBadge = st.boot_status === "stale-since-downtime"
+            ? '<span class="pill pill-stale" title="no boot o feed estava obsoleto porque o bot esteve desligado (downtime ' + (bootDowntime == null ? '?' : fmtDur(bootDowntime)) + ' + tolerância) — o preflight NÃO bloqueou o arranque; o monitor runtime assume a partir daqui' + (bootAt ? ' · boot às ' + bootAt : '') + '">stale@boot</span>'
+            : st.boot_status === "fail"
+                ? '<span class="pill pill-dead" title="no boot o feed já estava morto enquanto o bot corria — o preflight bloqueou o arranque (lição fstream)' + (bootAt ? ' · boot às ' + bootAt : '') + '">dead@boot</span>'
+                : '';
         return '<tr style="border-top:1px solid var(--border);">' +
-            '<td style="padding:3px 4px;font-family:monospace;">' + feed + ' ' + creepBadge + ' ' + cadenceBadge + '</td>' +
+            '<td style="padding:3px 4px;font-family:monospace;">' + feed + ' ' + creepBadge + ' ' + cadenceBadge + ' ' + bootBadge + '</td>' +
             '<td style="padding:3px 4px;">' + ageTxt +
                 '<div style="font-size:9px;color:' + expColor + ';white-space:nowrap;" title="Distribuição de gaps do feed (p50/p95/p99 = ' + (p50 == null ? "—" : fmtDur(p50)) + ' / ' + (p95 == null ? "—" : fmtDur(p95)) + ' / ' + (p99 == null ? "—" : fmtDur(p99)) + ')' + gapPctTxt + ' · learning needs ' + (st.cadence_min_samples == null ? 100 : Number(st.cadence_min_samples)) + ' gap samples (FEED_CADENCE_MIN_SAMPLES)">' + expTxt + '</div>' +
             '</td>' +
