@@ -518,8 +518,13 @@ def test_sweep_dispatches_dict_params_to_family(tmp_path, monkeypatch):
     improved = by_tag["z=2.5+HYPE:3.0"]
     assert improved["aggregate_variant"]["pnl"] == 160.0
     assert improved["noise_gate"]["evaluated"] is True
-    # 4/4 windows improved → sign-flip p=2^-4=0.0625 ≤ 0.10.
-    assert improved["verdict"] == "KEEP"
+    # 4/4 windows improved → sign-flip p=2^-4=0.0625. With 2 variants the
+    # Bonferroni family correction sets alpha_eff=0.10/2=0.05, so
+    # p=0.0625 no longer clears the bar → INCONCLUSIVE (the correction is
+    # the point: N cells fishing one lucky window must not promote).
+    assert improved["alpha_eff"] == 0.05
+    assert improved["n_family_variants"] == 2
+    assert improved["verdict"] == "INCONCLUSIVE"
     worse = by_tag["z=3.0 all"]
     assert worse["verdict"] == "DISCARD"
 

@@ -320,6 +320,7 @@ def light_replay(
     initial_capital: float,
     commission_pct: float,
     slippage_bps: float,
+    intrabar_tf: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Drive strategy on confirm-TF bars with simple fill / fee model.
 
@@ -327,17 +328,31 @@ def light_replay(
     - Fee = commission_pct/100 * notional per side
     - Hard SL checked on bar high/low when stop_loss_pct provided
     - One position per symbol
+    - ``intrabar_tf`` (optional, e.g. ``"1m"`` for ``bar_tf="15m"``):
+      resolves SL hits at sub-bar granularity — a 15m wick through the
+      stop only counts when a finer bar's own extreme confirms it. The
+      metrics report ``stops_avoided`` (confirm-TF pierce with no sub-bar
+      confirmation) so the fidelity delta is measurable, not silent.
     """
     fee_rate = commission_pct / 100.0
     slip = slippage_bps / 10_000.0
+    bar_ms = {"1m": 60_000, "5m": 300_000, "15m": 900_000,
+              "30m": 1_800_000, "1h": 3_600_000}.get(bar_tf)
+    intra_ms = {"1m": 60_000, "5m": 300_000}.get(intrabar_tf or "")
+    use_intrabar = bool(intra_ms and bar_ms and intra_ms < bar_ms)
 
     bars_by_sym: Dict[str, List[Candle]] = {}
     hours_by_sym: Dict[str, List[Candle]] = {}
+    intra_by_sym: Dict[str, List[Candle]] = {}
     for sym in symbols:
         raw = db.get_candles(sym, bar_tf, limit=500_000, start_ms=start_ms, end_ms=end_ms)
         bars_by_sym[sym] = [db_candle_to_ind(c) for c in raw]
         raw_h = db.get_candles(sym, "1h", limit=500_000, start_ms=start_ms, end_ms=end_ms)
         hours_by_sym[sym] = [db_candle_to_ind(c) for c in raw_h]
+        if use_intrabar:
+            raw_i = db.get_candles(sym, intrabar_tf, limit=500_000,
+                                   start_ms=start_ms, end_ms=end_ms)
+            intra_by_sym[sym] = raw_i  # raw DB candles; only hi/lo/ts used
 
     timeline: List[Tuple[int, str, Candle]] = []
     for sym, bars in bars_by_sym.items():
@@ -354,6 +369,36 @@ def light_replay(
     open_pos: Dict[str, _OpenPos] = {}
     hour_idx: Dict[str, int] = {s: 0 for s in symbols}
     last_1h: Dict[str, Optional[Candle]] = {s: None for s in symbols}
+    intra_idx: Dict[str, int] = {s: 0 for s in symbols}
+    stats = {"intrabar_bars_seen": 0, "stops_confirmed": 0,
+             "stops_avoided": 0}
+
+    def sl_hit_intrabar(sym: str, pos: "_OpenPos", bar_close_ms: int) -> Optional[bool]:
+        """SL touched inside this confirm bar, per sub-bar extremes.
+
+        Returns True/False when sub-bars cover the span; None (caller
+        falls back to the coarse check) when no sub-bars exist for it.
+        """
+        subs = intra_by_sym.get(sym)
+        if not subs or bar_ms is None or intra_ms is None:
+            return None
+        span_start = bar_close_ms - bar_ms
+        i = intra_idx[sym]
+        while i < len(subs) and subs[i].timestamp_ms <= span_start:
+            i += 1
+        intra_idx[sym] = i
+        seen = False
+        j = i
+        while j < len(subs) and subs[j].timestamp_ms <= bar_close_ms:
+            seen = True
+            s = subs[j]
+            stats["intrabar_bars_seen"] += 1
+            if pos.side == "long" and float(s.low) <= pos.stop_loss_price:
+                return True
+            if pos.side == "short" and float(s.high) >= pos.stop_loss_price:
+                return True
+            j += 1
+        return False if seen else None
 
     def advance_1h(sym: str, ts: int) -> Optional[Candle]:
         hours = hours_by_sym[sym]
@@ -452,6 +497,16 @@ def light_replay(
                     exit_px = pos.stop_loss_price
                 else:
                     exit_px = bar.close
+                if hit and use_intrabar:
+                    # Coarse pierce — confirm at sub-bar granularity. A
+                    # 15m wick through the SL with no 1m confirmation is
+                    # not a fill; uncovered spans fall back to coarse.
+                    confirmed = sl_hit_intrabar(sym, pos, ts)
+                    if confirmed is True:
+                        stats["stops_confirmed"] += 1
+                    elif confirmed is False:
+                        stats["stops_avoided"] += 1
+                        hit = False
                 if hit:
                     settle(pos, exit_px, ts, "stop_loss")
                     equity.append((ts, capital))
@@ -491,6 +546,11 @@ def light_replay(
         "trades": trades,
         "equity_curve": equity,
         "metrics": {},
+        "intrabar": {
+            "enabled": use_intrabar,
+            "tf": intrabar_tf if use_intrabar else None,
+            **stats,
+        },
     }
 
 

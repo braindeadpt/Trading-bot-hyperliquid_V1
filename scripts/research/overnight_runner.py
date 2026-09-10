@@ -485,7 +485,8 @@ def aggregate(cells: Sequence[Dict[str, Any]]) -> Dict[str, float]:
 
 def decide(baseline_windows: Sequence[Dict[str, Any]],
            variant_windows: Sequence[Dict[str, Any]],
-           noise_model: bool = False) -> Tuple[str, List[str]]:
+           noise_model: bool = False,
+           alpha: float = NOISE_ALPHA) -> Tuple[str, List[str]]:
     """Apply the research_program.md verdict rules to a window-set result.
 
     Returns ``(verdict, reasons)`` with verdict in
@@ -575,7 +576,8 @@ def decide(baseline_windows: Sequence[Dict[str, Any]],
         ]
 
     if noise_model:
-        ng = paired_bootstrap_noise_gate(baseline_windows, variant_windows)
+        ng = paired_bootstrap_noise_gate(baseline_windows, variant_windows,
+                                         alpha=alpha)
         if ng["evaluated"]:
             reasons.append(
                 f"noise gate: paired sign-flip p={ng['p_value']} "
@@ -727,6 +729,7 @@ def vwap_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], 
                     initial_capital=initial_capital,
                     commission_pct=commission_pct,
                     slippage_bps=slippage_bps,
+                    intrabar_tf="1m",
                 )
                 trs = list(res.get("trades", []) or [])
                 for t in trs:
@@ -923,6 +926,7 @@ def hype_vwap_refine_family() -> Tuple[List[str], Callable[..., Dict[str, Any]],
                     initial_capital=initial_capital,
                     commission_pct=commission_pct,
                     slippage_bps=slippage_bps,
+                    intrabar_tf="1m",
                 )
                 trs = list(res.get("trades", []) or [])
                 for t in trs:
@@ -1028,6 +1032,7 @@ def _vwap_fade_run_one(fade_section: Dict[str, Any], db_path: str,
                 initial_capital=initial_capital,
                 commission_pct=commission_pct,
                 slippage_bps=slippage_bps,
+                    intrabar_tf="1m",
             )
             trs = list(res.get("trades", []) or [])
             for t in trs:
@@ -1682,10 +1687,23 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
     for tag, params in zip(tags[1:], grid_params[1:]):
         variants[tag] = sweep_tag(tag, params)
 
+    # Family-wise error control: the noise gate's per-cell alpha is
+    # Bonferroni-scaled by the number of variant cells tested against the
+    # shared baseline this run — N cells fishing one lucky window is the
+    # exact false-positive this closes. Recorded on every result so the
+    # ledger shows the effective bar each cell cleared.
+    n_variants = max(1, len(tags) - 1)
+    alpha_eff = NOISE_ALPHA / n_variants
+    if n_variants > 1:
+        log_fn = log or print
+        log_fn(f"  family correction: Bonferroni alpha {NOISE_ALPHA}/"
+               f"{n_variants} = {alpha_eff:.4f} per cell")
+
     results: List[Dict[str, Any]] = []
     for tag, cells in variants.items():
-        verdict, reasons = decide(baseline, cells, noise_model=True)
-        noise = paired_bootstrap_noise_gate(baseline, cells)
+        verdict, reasons = decide(baseline, cells, noise_model=True,
+                                  alpha=alpha_eff)
+        noise = paired_bootstrap_noise_gate(baseline, cells, alpha=alpha_eff)
         # Per-symbol slices — the SAME paired sign-flip test restricted to
         # each symbol. Advisory only: they never feed decide(); the
         # cell-level verdict above is the only promotion gate.
@@ -1709,6 +1727,8 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
             "verdict": verdict,
             "reasons": reasons,
             "baseline_tag": tags[0],
+            "alpha_eff": round(alpha_eff, 4),
+            "n_family_variants": n_variants,
         })
 
     return {
@@ -1718,6 +1738,12 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
         "windows": windows,
         "window_dbs": plan,
         "baseline_tag": tags[0],
+        "family_correction": {
+            "method": "bonferroni",
+            "base_alpha": NOISE_ALPHA,
+            "n_variants": n_variants,
+            "alpha_eff": round(alpha_eff, 4),
+        },
         "results": results,
     }
 

@@ -260,8 +260,12 @@ def run_session(sel: Dict[str, Any], symbols: str) -> Dict[str, Any]:
 
     started = time.time()
     try:
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"  # sigma in cell tags killed the
+        # 02:00 run when the child picked cp1252 — force it here too, not
+        # only in the .bat, so any invocation path is safe
         proc = subprocess.run(
-            argv, cwd=str(ROOT), capture_output=True, text=True,
+            argv, cwd=str(ROOT), capture_output=True, text=True, env=env,
             encoding="utf-8", errors="replace", timeout=SUBPROCESS_TIMEOUT_S,
         )
         out = proc.stdout or ""
@@ -383,6 +387,22 @@ def main() -> int:
         _write_status(build_nightly_status(ran=result, reason=reason,
                                            queue_path=queue_path))
         print(result["summary_tail"] or f"runner exit {result['returncode']}")
+        # Weekly ledger digest — idempotent, at most one entry per ISO
+        # week (state file inside the script). Best-effort: a digest
+        # failure never fails the nightly session.
+        try:
+            dg = subprocess.run(
+                [sys.executable,
+                 str(ROOT / "scripts" / "research" / "weekly_ledger_summary.py"),
+                 "--if-due"],
+                cwd=str(ROOT), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=60,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            )
+            if dg.returncode == 0 and (dg.stdout or "").strip():
+                print(f"weekly digest: {dg.stdout.strip()}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"weekly digest skipped: {exc}")
         return 0 if result["returncode"] == 0 else 1
     finally:
         _lock_release()
