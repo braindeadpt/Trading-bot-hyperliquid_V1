@@ -180,6 +180,18 @@ def main() -> int:
 
     parser.add_argument(
 
+        "--provider",
+
+        default="auto",
+
+        choices=["auto", "goldrush", "coinalyze"],
+
+        help="auto tries goldrush then coinalyze (coinalyze = HL-native *_PERP.A)",
+
+    )
+
+    parser.add_argument(
+
         "--report-dir",
 
         default="data/research",
@@ -239,6 +251,8 @@ def main() -> int:
         min_coverage_pct=min_cov,
 
         run_parity=not args.no_parity,
+
+        provider=args.provider,
 
     )
 

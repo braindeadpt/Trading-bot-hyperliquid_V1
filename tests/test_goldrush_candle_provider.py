@@ -107,6 +107,95 @@ def test_goldrush_requires_env_key() -> None:
         assert raised
 
 
+# --- Coinalyze HL provider (GoldRush replacement, wired 2026-09-11) ---------
+
+from src.data.candle_providers.coinalyze_hl import (
+    CoinalyzeCandleProvider,
+    CoinalyzeConfigError,
+    coinalyze_symbol,
+)
+from src.data.hl_research_backfill import hl_snapshot_to_candle
+from src.data.series_metadata import SOURCE_COINALYZE_HL
+
+
+def test_coinalyze_requires_env_key() -> None:
+    with patch.dict(os.environ, {}, clear=True):
+        try:
+            CoinalyzeCandleProvider()
+            raised = False
+        except CoinalyzeConfigError:
+            raised = True
+        assert raised
+
+
+def test_coinalyze_symbol_maps_to_hl_perp() -> None:
+    assert coinalyze_symbol("hype") == "HYPEUSDT_PERP.A"
+    assert coinalyze_symbol("BTC") == "BTCUSDT_PERP.A"
+
+
+def test_coinalyze_fetch_page_converts_to_hl_wire() -> None:
+    """Seconds->ms timestamps, HL-wire field names, bv/btx passthrough."""
+    prov = CoinalyzeCandleProvider(api_key="test")
+    t_sec = 1_788_825_600  # 2026-09-10 00:00 UTC
+    payload = [{"symbol": "HYPEUSDT_PERP.A", "history": [
+        {"t": t_sec, "o": 85.0, "h": 85.3, "l": 84.6, "c": 85.2,
+         "v": 196253.1, "bv": 101907.0, "tx": 13684, "btx": 6251},
+        {"t": t_sec + 3600, "o": 85.2, "h": 86.0, "l": 85.0, "c": 85.9,
+         "v": 100.0, "bv": 60.0, "tx": 10, "btx": 7},
+    ]}]
+
+    async def _run() -> CandlePage:
+        with patch.object(prov, "_get", new=AsyncMock(return_value=payload)):
+            await prov.connect()
+            try:
+                return await prov.fetch_page("HYPE", "1h", t_sec * 1000, (t_sec + 7200) * 1000)
+            finally:
+                await prov.disconnect()
+
+    page = asyncio.run(_run())
+    assert page.provider == "coinalyze_hl"
+    assert len(page.rows) == 2
+    r = page.rows[0]
+    assert r["t"] == t_sec * 1000
+    assert r["T"] == t_sec * 1000 + 3_600_000 - 1
+    assert r["s"] == "HYPE" and r["i"] == "1h"
+    assert r["bv"] == "101907.0" and r["btx"] == 6251
+
+
+def test_coinalyze_empty_history_returns_empty_page() -> None:
+    prov = CoinalyzeCandleProvider(api_key="test")
+
+    async def _run() -> CandlePage:
+        with patch.object(prov, "_get", new=AsyncMock(return_value=[{"symbol": "X", "history": []}])):
+            await prov.connect()
+            try:
+                return await prov.fetch_page("HYPE", "1h", 0, 3_600_000)
+            finally:
+                await prov.disconnect()
+
+    page = asyncio.run(_run())
+    assert page.rows == []
+
+
+def test_hl_snapshot_to_candle_maps_bv_to_buy_sell() -> None:
+    """bv (taker buy) -> buy_volume; sell_volume = volume - bv."""
+    row = _row("HYPE", "1h", 1_700_000_000_000, v="10.0")
+    row["bv"] = "4.0"
+    c = hl_snapshot_to_candle(row, "HYPE")
+    assert c.buy_volume == 4.0
+    assert c.sell_volume == 6.0
+    # plain HL rows keep the NULL contract (no bv key)
+    c2 = hl_snapshot_to_candle(_row("BTC", "1h", 1_700_000_000_000), "BTC")
+    assert c2.buy_volume is None and c2.sell_volume is None
+
+
+def test_coinalyze_metadata_source() -> None:
+    meta = SeriesMetadata.coinalyze_hl_candles()
+    assert meta.source == SOURCE_COINALYZE_HL
+    assert meta.venue == "hyperliquid"
+    assert meta.api_version == "coinalyze-v1"
+
+
 def test_validate_candle_row_rejects_bad_order() -> None:
     row = _row("BTC", "1m", 1_000_000)
     row["T"] = row["t"]

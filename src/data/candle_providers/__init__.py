@@ -6,6 +6,7 @@ from src.data.candle_providers.base import (
     CandleProviderError,
     ProviderName,
 )
+from src.data.candle_providers.coinalyze_hl import CoinalyzeCandleProvider
 from src.data.candle_providers.goldrush_hypercore import GoldrushHypercoreCandleProvider
 from src.data.candle_providers.hyperliquid_public import HyperliquidPublicCandleProvider
 from src.data.candle_providers.node_trades_fetcher import (
@@ -28,6 +29,7 @@ __all__ = [
     "CandleProvider",
     "CandleProviderError",
     "ProviderName",
+    "CoinalyzeCandleProvider",
     "GoldrushHypercoreCandleProvider",
     "HyperliquidPublicCandleProvider",
     "FakeNodeTradesFetcher",

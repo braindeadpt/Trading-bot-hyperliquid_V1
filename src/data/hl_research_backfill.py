@@ -50,6 +50,16 @@ def hl_snapshot_to_candle(row: Dict[str, Any], symbol: str) -> Candle:
     open_time = int(row["t"])
     volume = safe_float(row.get("v"), 0.0)
     trade_count = int(row.get("n", 0))
+    # Providers that expose taker-buy volume (Coinalyze ``bv``, Binance kline
+    # taker field) populate real buy/sell splits; plain HL snapshots leave
+    # them NULL so CVD cannot misread neutral flow as real data.
+    buy_volume: Optional[float] = None
+    sell_volume: Optional[float] = None
+    if row.get("bv") is not None:
+        bv = safe_float(row.get("bv"), -1.0)
+        if bv >= 0.0:
+            buy_volume = bv
+            sell_volume = max(volume - bv, 0.0)
     c = Candle(
         symbol=symbol.upper(),
         timestamp_ms=close_time,
@@ -61,8 +71,8 @@ def hl_snapshot_to_candle(row: Dict[str, Any], symbol: str) -> Candle:
         funding_rate=None,
         oi_total=None,
         oi_delta=None,
-        buy_volume=None,
-        sell_volume=None,
+        buy_volume=buy_volume,
+        sell_volume=sell_volume,
         trade_count=trade_count,
     )
     object.__setattr__(c, "open_time_ms", open_time)  # type: ignore[misc]

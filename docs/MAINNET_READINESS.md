@@ -198,6 +198,22 @@ Per `AGENTS.md` §1 ("Current operational status") and
 - **Status: OOS validation and data-readiness are both still blocked**,
   independent of the Fase 10 paper-trading gate above.
 
+**Update 2026-09-11 — Coinalyze wired as GoldRush replacement, parity FAILS:**
+`CoinalyzeCandleProvider` (HL-native `*_PERP.A` markets, free with the
+existing `COINALYZE_API_KEY`) was added and run via
+`goldrush_research_backfill.py --provider coinalyze`. Mechanics work —
+2187 HYPE candles inserted with real taker-buy volume (`bv` →
+buy/sell_volume split, which official snapshots lack). But measured parity
+vs `candleSnapshot`: **10,952 OHLC mismatches over 2,850 matched 1m bars**
+(~0.02% systematic deltas, well above tick tolerance) and 1m depth only
+~48h (65.9% coverage of a 3d window; 1h reaches ~60-90d). Same class of
+divergence previously seen on GoldRush — third-party indexers reconstruct
+candles differently than the official feed. **Verdict: Coinalyze candles
+are research/screening-grade only — NOT OOS-grade** under the same rule
+that blocks GoldRush. Its unique value is the taker-split volume; for
+deep OOS candles the S3 node-fills rebuild remains the only venue-of-record
+path.
+
 **Update 2026-09-10 — parity diagnostic executed, BLOCKED on billing:**
 `python scripts/research/goldrush_parity_diagnostic.py` was run for real
 (4 symbols × {1h,15m,5m,1m} × 300-bar overlap). All 16 cells failed with

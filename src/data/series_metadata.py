@@ -22,6 +22,8 @@ SOURCE_HL_TRADE_WS = "hl_trades_ws"
 SOURCE_HL_WS_CANDLE_AGG = "hl_ws_1m_tape_agg"
 SOURCE_GOLDRUSH = "goldrush"
 GOLDRUSH_API_VERSION = "hypercore-info-v1"
+SOURCE_COINALYZE_HL = "coinalyze_hl"
+COINALYZE_API_VERSION = "coinalyze-v1"
 
 PROTECTED_OFFICIAL_SOURCES = frozenset({
     SOURCE_HL_CANDLE_SNAPSHOT,
@@ -58,6 +60,22 @@ class SeriesMetadata:
                 "volume_unit": "base",
                 "close_time_key": "T",
                 "provider": "goldrush_hypercore",
+            },
+            volume_unit="base",
+        )
+
+    @classmethod
+    def coinalyze_hl_candles(cls) -> "SeriesMetadata":
+        return cls(
+            source=SOURCE_COINALYZE_HL,
+            venue=VENUE_HYPERLIQUID,
+            api_version=COINALYZE_API_VERSION,
+            ingested_at_ms=int(time.time() * 1000),
+            quality_flags={
+                "taker_split": True,   # bv field -> real buy/sell volume
+                "volume_unit": "base",
+                "close_time_key": "T",
+                "provider": "coinalyze_hl",
             },
             volume_unit="base",
         )
