@@ -205,9 +205,15 @@ downloaded the 4 required `node_fills_by_block/hourly` objects for the
 support-package priority windows and rebuilt **226 official 1m candles**
 (74 BTC + 152 ETH, 2026-07-10 window) into the research DB with
 `source=hl_node_trades_rebuild` — zero fetch failures, cost ~$0.002
-requester-pays. Rebuilt rows still await their own secondary-validation
-pass before being treated as OOS-grade (the `revalidate_fn` hook exists
-but is not yet wired into the CLI).
+requester-pays. Secondary validation is now wired into the CLI
+(`--execute` runs `revalidate_rebuilt_rows` per window; `--no-revalidate`
+opts out): self-consistency (OHLC sanity, monotonic closes) + rollup
+parity vs official candleSnapshot at 1h/15m/5m/1m (coarsest first).
+Verdicts: `pass` requires a matched official bar with zero mismatches;
+`inconclusive` when no official overlap exists (absence of evidence is
+never a fail/pass); `fail` on real divergence. Live run: ETH **pass**
+(1h rollup matched official exactly), BTC **inconclusive** (73-min
+window forms no complete official bucket).
 
 **Update 2026-09-11 — Coinalyze wired as GoldRush replacement, parity FAILS:**
 `CoinalyzeCandleProvider` (HL-native `*_PERP.A` markets, free with the

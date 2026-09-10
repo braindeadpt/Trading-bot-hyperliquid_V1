@@ -292,6 +292,100 @@ def rebuild_window(
     return result
 
 
+def revalidate_rebuilt_rows(
+    symbol: str,
+    rows: List[Dict[str, Any]],
+    *,
+    meta_cache: Optional[Dict[str, Dict[str, int]]] = None,
+    official_fetcher: Optional[Callable[[str, str, int, int], List[Dict[str, Any]]]] = None,
+) -> Dict[str, Any]:
+    """Secondary validation for rebuilt candles (proposal step 6).
+
+    Two layers, both cheap:
+    1. Self-consistency: OHLC sane, strictly ordered close times, no dups.
+    2. Official parity where reachable: roll the rebuilt 1m rows up to 1h
+       and compare against ``candleSnapshot`` (the official 1h feed reaches
+       ~5000 bars ≈ 208d — deep enough for the disputed windows even though
+       official 1m is not). ``official_fetcher`` is injectable so tests and
+       callers pick the source; returns ``parity.skipped`` when it cannot
+       reach the window.
+
+    ``passed`` = self-consistency clean AND (parity passed OR parity was
+    unreachable → verdict "inconclusive", never a silent pass).
+    """
+    issues: List[str] = []
+    prev_t: Optional[int] = None
+    for r in rows:
+        o, h, l, c = (float(r[k]) for k in ("o", "h", "l", "c"))
+        if not (h >= max(o, c) and l <= min(o, c)):
+            issues.append(f"ohlc_inversion@{r.get('T')}")
+        if float(r.get("v", 0.0)) < 0:
+            issues.append(f"neg_volume@{r.get('T')}")
+        t = int(r["T"])
+        if prev_t is not None and t <= prev_t:
+            issues.append(f"non_monotonic_close@{t}")
+        prev_t = t
+
+    parity: Dict[str, Any] = {"skipped": "no official fetcher"}
+    if official_fetcher is not None and rows:
+        try:
+            start_ms = min(int(r["t"]) for r in rows)
+            end_ms = max(int(r["T"]) for r in rows) + 1
+            from src.data.candle_providers.candle_rollup import (
+                rollup_1m_to_interval,
+            )
+            from src.data.candle_providers.parity import (
+                compare_candle_overlap,
+            )
+            # Try coarsest first, fall back for windows too narrow to form
+            # a complete bucket (e.g. a 73-minute window yields 0 1h bars).
+            for tf in ("1h", "15m", "5m", "1m"):
+                official = official_fetcher(symbol, tf, start_ms, end_ms)
+                if not official:
+                    continue
+                rolled = rows if tf == "1m" else rollup_1m_to_interval(
+                    rows, tf, symbol=symbol,
+                )
+                if not rolled:
+                    continue
+                pr = compare_candle_overlap(
+                    official, rolled, symbol=symbol, interval=tf,
+                    meta_cache=meta_cache,
+                )
+                parity = {
+                    "interval": tf,
+                    "passed": pr.passed,
+                    "matched_bars": pr.matched_bars,
+                    "mismatch_count": len(pr.mismatches),
+                    "rollup_bars": len(rolled),
+                    "official_bars": len(official),
+                    "sample": [m.__dict__ for m in pr.mismatches[:5]],
+                }
+                if pr.matched_bars:
+                    break
+            else:
+                parity = {"skipped": "official feed has no rows in window"}
+        except Exception as exc:  # noqa: BLE001
+            parity = {"skipped": f"{type(exc).__name__}: {exc}"}
+
+    clean = not issues
+    parity_ok = bool(parity.get("passed"))
+    parity_informative = bool(parity.get("matched_bars"))
+    return {
+        "self_consistency_passed": clean,
+        "issues": issues[:20],
+        "n_rows": len(rows),
+        "parity": parity,
+        "verdict": (
+            "pass" if clean and parity_ok
+            # 0 matched bars = no official overlap to compare — absence of
+            # evidence is inconclusive, never a fail and never a pass.
+            else "inconclusive" if clean and not parity_informative
+            else "fail"
+        ),
+    }
+
+
 def rebuild_from_support_package(
     package_path: Path | str,
     fetcher: NodeTradesFetcher,

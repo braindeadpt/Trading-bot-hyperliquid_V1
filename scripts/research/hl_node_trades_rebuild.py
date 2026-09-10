@@ -22,6 +22,7 @@ docs/NODE_TRADES_REBUILD.md.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import sys
@@ -97,6 +98,12 @@ def main() -> int:
         action="store_true",
         help="Perform the real S3 download + rebuild (requires boto3 + AWS credentials)",
     )
+    parser.add_argument(
+        "--no-revalidate",
+        action="store_true",
+        help="Skip secondary validation of rebuilt rows (self-consistency "
+             "+ 1h rollup parity vs official candleSnapshot)",
+    )
     args = parser.parse_args()
 
     symbols = (
@@ -124,6 +131,28 @@ def main() -> int:
         logger.error("%s", exc)
         return 2
 
+    revalidate_fn = None
+    if not args.no_revalidate:
+        from src.data.candle_providers.hyperliquid_public import (
+            HyperliquidPublicCandleProvider,
+        )
+        from src.data.candle_providers.node_trades_rebuild import (
+            revalidate_rebuilt_rows,
+        )
+
+        def _official_fetcher(symbol: str, interval: str,
+                              start_ms: int, end_ms: int) -> list:
+            async def _go() -> list:
+                async with HyperliquidPublicCandleProvider() as hl:
+                    page = await hl.fetch_page(symbol, interval, start_ms, end_ms)
+                    return list(page.rows)
+            return asyncio.run(_go())
+
+        def revalidate_fn(symbol: str, rows: list) -> dict:
+            return revalidate_rebuilt_rows(
+                symbol, rows, official_fetcher=_official_fetcher,
+            )
+
     if args.db:
         db = ResearchDatabase(Path(args.db))
     else:
@@ -132,8 +161,12 @@ def main() -> int:
         db = ResearchDatabase.open(load_config(ROOT / "config" / "settings.yaml"))
     result = rebuild_from_support_package(
         package_path, fetcher, db, symbols=symbols, interval=args.interval,
+        revalidate_fn=revalidate_fn,
     )
     print(json.dumps(result, indent=2))
+    if any((r.get("revalidation") or {}).get("verdict") == "fail"
+           for r in result.get("results", [])):
+        return 2
     return 0
 
 
