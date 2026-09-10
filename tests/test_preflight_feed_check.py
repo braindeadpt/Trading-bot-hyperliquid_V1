@@ -556,6 +556,203 @@ def test_out_report_carries_stale_since_downtime_flags() -> None:
         assert report["feeds"][stale[0]]["stale_since_downtime"] is True
 
 
+# ---------------------------------------------------------------------------
+# Candle freshness — stale-since-downtime generalization (2026-09-10 fix)
+# ---------------------------------------------------------------------------
+
+
+def _set_candle_ms(db_path, table, symbol, ts_ms) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(f"DELETE FROM {table} WHERE symbol = ?", (symbol,))
+    conn.execute(
+        f"INSERT INTO {table} VALUES (?, ?,1,2,0,1,10,0,100,0,5,5,100)",
+        (symbol, ts_ms),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_candles_stale_since_downtime_do_not_block_boot() -> None:
+    """Candles obsolete by exactly the amount the bot was off (~8h, like
+    every other feed) must NOT block boot — the exact deadlock the fix
+    targets: candles only refresh once the bot starts, so gating boot on
+    their absolute age after a long stop makes the bot unable to ever start."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        old = NOW - 8 * 3600_000
+        # Feeds fresh-relative-to-downtime -> stale-since-downtime, warn only.
+        _make_db(db, liq_okx_ms=old - 60_000, liq_bybit_ms=old - 90_000,
+                 funding_ms=old - 30_000, candle_ms=old,
+                 candle_15m_ms=old - 120_000)
+        r = _run(["--db", db, "--l2-dir", _make_old_l2_dir(tmp, old)])
+        assert r.returncode in (0, 2), r.stdout + r.stderr
+        assert "candles_1m" in r.stdout
+        assert "candles_15m" in r.stdout
+        # No candle line should be FAIL.
+        candle_lines = [ln for ln in r.stdout.splitlines() if ln.startswith("candles_")]
+        assert candle_lines, r.stdout
+        assert all("FAIL" not in ln for ln in candle_lines), r.stdout
+        assert any("STALE-SINCE-DOWNTIME" in ln for ln in candle_lines), r.stdout
+
+
+def test_candles_backlog_older_than_downtime_still_blocks_boot() -> None:
+    """A candle backlog MUCH older than the inferred downtime (collector fell
+    behind while the bot was actually running) must still fail — this is the
+    genuine backlog case the check exists to catch."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        # Other evidence is fresh (bot alive ~30s ago) but candles are 3h old
+        # -> far older than downtime(~30s)+grace(300s) -> genuine backlog.
+        _make_db(db, liq_okx_ms=NOW - 30_000, liq_bybit_ms=NOW - 30_000,
+                 funding_ms=NOW - 30_000,
+                 candle_ms=NOW - 3 * 3600_000,
+                 candle_15m_ms=NOW - 3 * 3600_000)
+        r = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp)])
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "candles_1m" in r.stdout
+        candle_lines = [ln for ln in r.stdout.splitlines() if ln.startswith("candles_")]
+        assert any("FAIL" in ln for ln in candle_lines), r.stdout
+
+
+def test_mixed_symbol_backlog_plus_downtime_stale_still_blocks() -> None:
+    """One symbol has a genuine backlog (candles far older than downtime)
+    while others are merely stale-since-downtime -> the backlog must still
+    block boot (exit 1), the stale ones must not be conflated with it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        old = NOW - 8 * 3600_000
+        _make_db(db, liq_okx_ms=old - 60_000, liq_bybit_ms=old - 90_000,
+                 funding_ms=old - 30_000, candle_ms=old,
+                 candle_15m_ms=old - 120_000)
+        # SOL's 1m candles are a real backlog: far older than downtime+grace.
+        _set_candle_ms(db, "candles_1m", "SOL", NOW - 30 * 3600_000)
+        r = _run(["--db", db, "--l2-dir", _make_old_l2_dir(tmp, old)])
+        assert r.returncode == 1, r.stdout + r.stderr
+        candle_lines = [ln for ln in r.stdout.splitlines() if ln.startswith("candles_")]
+        sol_1m = [ln for ln in candle_lines if "SOL" in ln and "1m" in ln.split()[0]]
+        assert sol_1m and "FAIL" in sol_1m[0], r.stdout
+        assert any("STALE-SINCE-DOWNTIME" in ln for ln in candle_lines), r.stdout
+
+
+def test_min_latest_ms_coverage_mode_gets_no_downtime_grace() -> None:
+    """Coverage mode (--min-latest-ms, used before backtests) must NOT apply
+    the downtime grace: candles that are old (consistent with downtime) but
+    fail to reach the requested window end must still fail, exactly like
+    before this fix — this is a historical-coverage question, not liveness."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        old = NOW - 8 * 3600_000
+        _make_db(db, liq_okx_ms=old - 60_000, liq_bybit_ms=old - 90_000,
+                 funding_ms=old - 30_000, candle_ms=old,
+                 candle_15m_ms=old - 120_000)
+        min_latest = old + 3600_000  # window end after the candles we have
+        r = _run(["--db", db, "--candles-only", "--min-latest-ms", str(min_latest)])
+        assert r.returncode == 1, r.stdout + r.stderr
+        candle_lines = [ln for ln in r.stdout.splitlines() if ln.startswith("candles_")]
+        assert any("FAIL" in ln for ln in candle_lines), r.stdout
+        assert not any("STALE-SINCE-DOWNTIME" in ln for ln in candle_lines), r.stdout
+
+
+def test_candles_no_evidence_no_downtime_invented() -> None:
+    """No candle evidence at all for a symbol, and no downtime evidence
+    anywhere (empty DB) -> unchanged behavior: fail, never stale-since-
+    downtime (nothing to infer downtime from)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        _make_db(db, liq_okx_ms=0, liq_bybit_ms=0, funding_ms=0, candle_ms=0)
+        r = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp)])
+        assert r.returncode == 1, r.stdout + r.stderr
+        candle_lines = [ln for ln in r.stdout.splitlines() if ln.startswith("candles_")]
+        assert candle_lines, r.stdout
+        assert all("STALE-SINCE-DOWNTIME" not in ln for ln in candle_lines), r.stdout
+
+
+# ---------------------------------------------------------------------------
+# Series-period grace (2026-09-10 fix): a 15m candle's last COMPLETE bar
+# always lags fast-cadence downtime evidence by up to one bar period, so
+# comparing raw age to downtime_sec without adding the period is a unit
+# mismatch that false-fails slower series right after a restart. Part B is
+# the guard that keeps this widened grace from excusing a real 1m backlog
+# while the bot is alive (downtime_sec ~ 0).
+# ---------------------------------------------------------------------------
+
+
+def test_15m_stale_within_downtime_plus_tolerance_plus_period_does_not_block() -> None:
+    """downtime=1410s, 15m limit=1800s, age=1950s -> grace = 1410+300+900 =
+    2610 >= 1950 -> stale-since-downtime, boot proceeds (exit 0 or 2). Without
+    the trailing +interval_sec term (900s for 15m) this would wrongly FAIL:
+    1410+300=1710 < 1950."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        last_alive = NOW - 1410_000
+        _make_db(db, liq_okx_ms=last_alive, liq_bybit_ms=last_alive,
+                 funding_ms=last_alive, candle_ms=last_alive,
+                 candle_15m_ms=NOW - 1950_000)
+        r = _run(["--db", db, "--l2-dir", _make_old_l2_dir(tmp, last_alive)])
+        assert r.returncode in (0, 2), r.stdout + r.stderr
+        candle_lines = [ln for ln in r.stdout.splitlines() if ln.startswith("candles_")]
+        c15 = [ln for ln in candle_lines if ln.split()[0] == "candles_15m"]
+        assert c15 and "FAIL" not in c15[0], r.stdout
+        assert "STALE-SINCE-DOWNTIME" in c15[0], r.stdout
+
+
+def test_1m_genuine_backlog_while_bot_running_still_fails_regression_guard() -> None:
+    """Part B regression guard: with the bot RUNNING (downtime_sec well below
+    DOWNTIME_TOLERANCE_SEC, i.e. no real stop), a 1m candle 310s old (past
+    its 300s threshold) is a genuine collector backlog and MUST still fail
+    (exit 1). Without the guard, Part A's grace alone would compute
+    0 + 300 + 60 = 360s >= 310s and wrongly excuse it -- this test exists to
+    catch exactly that regression."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        _make_db(db, liq_okx_ms=NOW - 5_000, liq_bybit_ms=NOW - 5_000,
+                 funding_ms=NOW - 5_000,
+                 candle_ms=NOW - 310_000,
+                 candle_15m_ms=NOW - 60_000)
+        r = _run(["--db", db, "--l2-dir", _make_l2_dir(tmp)])
+        assert r.returncode == 1, r.stdout + r.stderr
+        candle_lines = [ln for ln in r.stdout.splitlines() if ln.startswith("candles_")]
+        c1 = [ln for ln in candle_lines if ln.split()[0] == "candles_1m" and "BTC" in ln]
+        assert c1 and "FAIL" in c1[0], r.stdout
+        assert "STALE-SINCE-DOWNTIME" not in c1[0], r.stdout
+
+
+def test_long_downtime_plus_real_backlog_on_top_still_fails() -> None:
+    """downtime=1410s, 15m limit=1800s, age=4000s -> grace = 1410+300+900 =
+    2610 < 4000 -> a genuine backlog ON TOP OF a real stop still fails, the
+    grace from Part A does not turn into a blanket exemption."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        last_alive = NOW - 1410_000
+        _make_db(db, liq_okx_ms=last_alive, liq_bybit_ms=last_alive,
+                 funding_ms=last_alive, candle_ms=last_alive,
+                 candle_15m_ms=NOW - 4000_000)
+        r = _run(["--db", db, "--l2-dir", _make_old_l2_dir(tmp, last_alive)])
+        assert r.returncode == 1, r.stdout + r.stderr
+        candle_lines = [ln for ln in r.stdout.splitlines() if ln.startswith("candles_")]
+        c15 = [ln for ln in candle_lines if ln.split()[0] == "candles_15m"]
+        assert c15 and "FAIL" in c15[0], r.stdout
+
+
+def test_min_latest_ms_still_has_no_grace_with_new_interval_term() -> None:
+    """--min-latest-ms coverage mode stays completely unaffected by the
+    interval_sec term added in this fix: old candles that fail to reach the
+    requested window end still fail regardless of how large the (unused)
+    grace would have been."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bot.db")
+        last_alive = NOW - 1410_000
+        _make_db(db, liq_okx_ms=last_alive, liq_bybit_ms=last_alive,
+                 funding_ms=last_alive, candle_ms=last_alive,
+                 candle_15m_ms=last_alive)
+        min_latest = last_alive + 3600_000  # window end after the candles we have
+        r = _run(["--db", db, "--candles-only", "--min-latest-ms", str(min_latest)])
+        assert r.returncode == 1, r.stdout + r.stderr
+        candle_lines = [ln for ln in r.stdout.splitlines() if ln.startswith("candles_")]
+        assert any("FAIL" in ln for ln in candle_lines), r.stdout
+        assert not any("STALE-SINCE-DOWNTIME" in ln for ln in candle_lines), r.stdout
+
+
 def test_empty_db_no_downtime_invented_unchanged_behavior() -> None:
     """No evidence at all (first run / empty DB): the classic gate applies
     unchanged — missing feeds fail (exit 1), no downtime is invented, so a

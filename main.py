@@ -57,7 +57,7 @@ from utils.helpers import safe_ensure_dir
 from utils.instance_lock import acquire_instance_lock, release_instance_lock
 
 from data.database import Database
-from scripts.preflight_feed_check import PREFLIGHT_REPORT_PATH  # noqa: E402
+from scripts.preflight_feed_check import EXIT_INTERNAL_ERROR, PREFLIGHT_REPORT_PATH  # noqa: E402
 from exchanges.hyperliquid_ws import HyperliquidWSClient, DataBus
 from exchanges.hyperliquid_rest import HyperliquidRESTClient
 from exchanges.binance_api import BinanceRESTClient, BinanceWSClient
@@ -144,7 +144,9 @@ def _preflight_feed_check(
     0 = all contracted feeds have fresh evidence AND candles are
     fresh/covered · 1 = a contracted feed is not delivering (or has none), or
     a symbol's candles failed (backlog / window end not covered) · 2 = past
-    the warn fraction but still delivering.
+    the warn fraction but still delivering · EXIT_INTERNAL_ERROR (3) = the
+    checker itself crashed — NOT a verdict about feed/candle health, callers
+    must not treat this as "feed failed".
     """
     cmd = [
         sys.executable,
@@ -162,7 +164,21 @@ def _preflight_feed_check(
         # Persist the verdict: the dashboard feed panel reads this file to
         # show which feeds the boot classified stale-since-downtime vs dead.
         cmd += ["--json", "--out", str(json_report_out)]
-    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=False)
+    # Capture output instead of inheriting the console: the preflight
+    # subprocess can crash (e.g. OOM) with a traceback that a closed launcher
+    # console would swallow entirely, leaving only an ambiguous rc=1 behind.
+    # Both streams are logged to logs/bot.log so the cause survives; stdout
+    # is also echoed to the console for interactive visibility.
+    result = subprocess.run(
+        cmd, cwd=str(PROJECT_ROOT), check=False,
+        capture_output=True, text=True,
+    )
+    log = _logger or logging.getLogger(__name__)
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+        log.info("Preflight feed check stdout:\n%s", result.stdout.rstrip())
+    if result.stderr:
+        log.warning("Preflight feed check stderr:\n%s", result.stderr.rstrip())
     return result.returncode
 
 
@@ -212,7 +228,8 @@ def _run_preflight_at_boot(
     Returns the process exit code to terminate with, or ``None`` to continue
     booting. Blocks (exit 1) when a contracted feed is not delivering;
     warns and continues on exit 2 (past warn fraction — feeds refresh on
-    start).
+    start); blocks (exit 3) when the checker itself crashed — an unknown
+    feed state, NOT a confirmed feed failure, but still unsafe to boot on.
     """
     log = logger or _logger
     if skip:
@@ -221,6 +238,21 @@ def _run_preflight_at_boot(
     rc = _preflight_feed_check(
         db_path, config_path, l2_dir=l2_dir, json_report_out=report_out
     )
+    if rc == EXIT_INTERNAL_ERROR:
+        print(
+            "[FATAL] Preflight feed check CRASHED — this is NOT a feed "
+            "failure, the checker itself raised an unhandled exception "
+            "(see logs/bot.log for the traceback). Refusing to start since "
+            "feed health is unknown. Fix the checker or boot with "
+            "--skip-preflight.",
+            file=sys.stderr,
+        )
+        log.error(
+            "Preflight feed check crashed (exit %s) — boot blocked; feed "
+            "state is UNKNOWN, this is not a feed-delivery failure.",
+            rc,
+        )
+        return rc
     if rc == 1:
         print(
             "[FATAL] Preflight feed check FAILED — contracted feed(s) not "
@@ -476,6 +508,20 @@ async def main() -> None:
         bt_rc = _preflight_feed_check(
             bt_db, config_path, candles_only=True, min_latest_ms=to_ms,
         )
+        if bt_rc == EXIT_INTERNAL_ERROR:
+            print(
+                "[FATAL] Preflight candle check CRASHED — this is NOT a "
+                "backlog verdict, the checker itself raised an unhandled "
+                "exception (see logs/bot.log for the traceback). Refusing "
+                "to backtest since candle coverage is unknown.",
+                file=sys.stderr,
+            )
+            logger.error(
+                "Preflight candle check crashed (exit %s) — backtest "
+                "blocked; coverage is UNKNOWN, this is not a backlog.",
+                bt_rc,
+            )
+            raise SystemExit(bt_rc)
         if bt_rc == 1:
             print(
                 "[FATAL] Preflight candle check FAILED — 1m/15m candles do not "

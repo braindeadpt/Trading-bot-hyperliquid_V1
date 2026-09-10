@@ -57,19 +57,42 @@ symbol — a data backlog (the collector fell behind) shows up here before a
 backtest silently reads a window that ends days ago. Two modes:
 
   * freshness (default): the latest 1m/15m candle per symbol must be within
-    --candle-1m-max-age-sec / --candle-15m-max-age-sec of now;
+    --candle-1m-max-age-sec / --candle-15m-max-age-sec of now. Candles are
+    written by the bot's own connector, so they are exactly as
+    downtime-sensitive as the external feeds above: the SAME stale-vs-dead
+    rule applies (2026-09-10 fix) — a symbol whose candle age fits inside
+    ``downtime_sec + DOWNTIME_TOLERANCE_SEC + interval_sec`` is
+    ``stale-since-downtime`` (warning, never blocks boot); older than that
+    is a genuine collector backlog while the bot was running and still
+    fails. The trailing ``+ interval_sec`` term (the series' own bar
+    period — 60s for 1m, 900s for 15m, derived from the label) matters
+    because a slower series' last COMPLETE bar always lags the fast-cadence
+    downtime evidence by up to one full period even with zero real
+    backlog — comparing age to downtime without it is a unit mismatch that
+    false-fails 15m right after a restart. GUARD: this grace only applies
+    when ``downtime_sec > DOWNTIME_TOLERANCE_SEC`` (a genuine stop, not a
+    quick restart) — with the bot running, downtime_sec ≈ 0 and the grace
+    would otherwise exceed the 1m threshold itself, excusing a real 1m
+    backlog while the bot is alive; below the tolerance the plain
+    threshold check applies with no grace at all;
   * coverage (--min-latest-ms, used before backtests): the latest candle
     must REACH the requested end-of-window timestamp, whatever its age —
     catches a backlog at the end of the window without blocking historical
-    windows.
+    windows. Coverage is about historical completeness, not freshness, so
+    the downtime grace does NOT apply here — behavior is unchanged.
 
 Exit codes:
   0  all contracted feeds have fresh evidence AND candles are fresh/covered
   1  at least one feed aged past its silence threshold (or missing entirely)
-     or a symbol's candles failed (missing / past max age / below min)
+     or a symbol's candles failed (missing / past max age / below min) with
+     no downtime explaining it
   2  at least one check aged past --warn-fraction of its threshold (default:
      FEED_SILENCE_WARN_FRACTION env — the same early-warning level the
-     bot's FeedSilenceMonitor uses — else 0.5; --warn-fraction overrides)
+     bot's FeedSilenceMonitor uses — else 0.5; --warn-fraction overrides),
+     or classified stale-since-downtime
+  3  the check itself crashed (EXIT_INTERNAL_ERROR) — an unhandled exception,
+     NOT a verdict about feed/candle health; the caller must not treat this
+     as "feed failed" (see main.py's boot wiring)
 """
 
 from __future__ import annotations
@@ -95,6 +118,14 @@ from src.utils.config import get_trading_symbols, load_config  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = ROOT / "data" / "live" / "bot.db"
+
+# Distinct exit code for "the checker itself crashed" — must never be
+# confused with rc=1 ("a feed/candle is genuinely failing"). Python's
+# default unhandled-exception exit code is also 1, which is exactly the
+# ambiguity this constant exists to remove (2026-09-10: an OOM'd preflight
+# process was logged as "feed FAILED" with no diagnostic). Module constant,
+# not config — see the DOWNTIME_TOLERANCE_SEC note below for why.
+EXIT_INTERNAL_ERROR = 3
 
 # Where the boot wiring persists the last preflight verdict so the
 # dashboard feed panel can show, after a downtime, which feeds were merely
@@ -133,6 +164,20 @@ def _candle_latest(db: sqlite3.Connection, table: str, symbol: str) -> int:
     return int(row[0]) if row and row[0] else 0
 
 
+# Interval, in seconds, implied by a candle-series label. Used to widen the
+# downtime grace by one bar period (2026-09-10 fix): a candle series only
+# closes bars every ``interval_sec``, so its last COMPLETE bar is always up
+# to one full period further behind "now" than the fast-cadence evidence
+# used to compute ``downtime_sec`` — comparing the two directly without this
+# term is a unit mismatch that false-fails slower series (e.g. 15m) right
+# after a restart. Derived from the label so callers never pass it by hand.
+_INTERVAL_SEC_BY_LABEL = {"1m": 60, "15m": 900}
+
+
+def _interval_sec(label: str) -> float:
+    return float(_INTERVAL_SEC_BY_LABEL.get(label, 0))
+
+
 def _candle_status(
     latest_ms: int,
     now_ms: int,
@@ -140,14 +185,42 @@ def _candle_status(
     max_age_sec: float,
     warn_fraction: float,
     min_latest_ms: Optional[int] = None,
+    last_alive_ms: int = 0,
+    downtime_sec: float = 0.0,
+    interval_sec: float = 0.0,
 ) -> tuple:
-    """Status (ok/warn/fail) + age for one symbol/interval.
+    """Status (ok/warn/fail/stale-since-downtime) + age for one symbol/interval.
 
     Coverage mode (``min_latest_ms`` set — the backtest window end): the
     data must REACH the requested timestamp; freshness-vs-now is irrelevant
-    for a historical window. Freshness mode: fail at ``max_age_sec``, warn
-    past ``warn_fraction`` of it — a data backlog means the collector fell
-    behind.
+    for a historical window, and the downtime grace below does NOT apply —
+    this is about historical completeness, not liveness.
+
+    Freshness mode: fail at ``max_age_sec``, warn past ``warn_fraction`` of
+    it — a data backlog means the collector fell behind. Candles are
+    written by the bot's own connector, so after any downtime they are
+    stale by definition — same reasoning as the external-feed generalization
+    in this module's docstring. An over-threshold candle whose age is fully
+    explained by the bot being off is ``stale-since-downtime`` (warning,
+    never blocks boot); older than that is a genuine collector backlog
+    while the bot ran and still fails.
+
+    The grace is ``downtime_sec + DOWNTIME_TOLERANCE_SEC + interval_sec``
+    (2026-09-10): the trailing ``+ interval_sec`` accounts for the series'
+    own bar period (a 15m bar only closes every 15 minutes, so the last
+    complete bar lags the fast-cadence downtime evidence by up to one full
+    period even with zero real backlog) — comparing ``age_sec`` to
+    ``downtime_sec`` without it is a unit mismatch that false-fails slower
+    series right after a restart.
+
+    GUARD (do not remove — closes the hole the grace above opens): the
+    grace applies ONLY when ``downtime_sec > DOWNTIME_TOLERANCE_SEC``, i.e.
+    there was a genuine stop, not just a quick restart. With the bot
+    running, ``downtime_sec`` is ~0 and the 1m grace would otherwise be
+    ``0 + DOWNTIME_TOLERANCE_SEC + 60``, which EXCEEDS the 1m series' own
+    300s threshold — a real collector backlog while the bot is alive would
+    be silently excused. Below the tolerance, classification falls back to
+    the plain threshold check with no grace at all.
     """
     if latest_ms == 0:
         return "fail", None
@@ -155,6 +228,12 @@ def _candle_status(
     if min_latest_ms is not None:
         return ("ok" if latest_ms >= min_latest_ms else "fail"), age_sec
     if age_sec >= max_age_sec:
+        if (
+            last_alive_ms
+            and downtime_sec > DOWNTIME_TOLERANCE_SEC
+            and age_sec <= downtime_sec + DOWNTIME_TOLERANCE_SEC + interval_sec
+        ):
+            return "stale-since-downtime", age_sec
         return "fail", age_sec
     if age_sec >= max_age_sec * warn_fraction:
         return "warn", age_sec
@@ -191,7 +270,7 @@ def collect_evidence(db: sqlite3.Connection, *, l2_dir: Path = L2_BOOKS_DIR) -> 
     return ev
 
 
-def main() -> int:
+def _main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default=str(DEFAULT_DB),
                         help="bot.db path (default: data/live/bot.db)")
@@ -333,10 +412,13 @@ def main() -> int:
                 max_age_sec=max_age,
                 warn_fraction=warn_frac,
                 min_latest_ms=args.min_latest_ms,
+                last_alive_ms=last_alive_ms,
+                downtime_sec=downtime_sec,
+                interval_sec=_interval_sec(label),
             )
             if status == "fail":
                 failures += 1
-            elif status == "warn":
+            elif status in ("warn", "stale-since-downtime"):
                 warnings += 1
             report["candles"][symbol][label] = {
                 "latest_ms": latest or None,
@@ -344,6 +426,7 @@ def main() -> int:
                 "max_age_sec": None if args.min_latest_ms is not None else max_age,
                 "min_latest_ms": args.min_latest_ms,
                 "status": status,
+                "stale_since_downtime": status == "stale-since-downtime",
             }
     db.close()
 
@@ -388,20 +471,52 @@ def main() -> int:
               f"candle(s) — check before starting (silence/backlog would only degrade later).",
               file=sys.stderr if not args.json else sys.stdout)
         return 1
-    stale = [f for f, st in report["feeds"].items()
-             if st["status"] == "stale-since-downtime"]
+    stale_feeds = [f for f, st in report["feeds"].items()
+                   if st["status"] == "stale-since-downtime"]
+    stale_candles = [
+        f"{symbol}/{label}"
+        for symbol, cells in report["candles"].items()
+        for label, st in cells.items()
+        if st["status"] == "stale-since-downtime"
+    ]
     if warnings:
         print(f"\n[WARN] {warnings} check(s) past {warn_frac * 100:.0f}% "
               "of threshold — delivery/backlog forming?", file=sys.stderr)
-        if stale:
-            print(f"       {len(stale)} feed(s) stale-since-downtime "
-                  f"({', '.join(sorted(stale))}) — ages consistent with the bot "
-                  f"being off ~{downtime_sec / 3600:.1f}h; boot proceeds, the "
-                  "runtime FeedSilenceMonitor owns them.", file=sys.stderr)
+        if stale_feeds or stale_candles:
+            parts = []
+            if stale_feeds:
+                parts.append(f"{len(stale_feeds)} feed(s) "
+                             f"({', '.join(sorted(stale_feeds))})")
+            if stale_candles:
+                parts.append(f"{len(stale_candles)} candle series "
+                             f"({', '.join(sorted(stale_candles))})")
+            print(f"       stale-since-downtime: {' and '.join(parts)} — ages "
+                  f"consistent with the bot being off ~{downtime_sec / 3600:.1f}h; "
+                  "boot proceeds, the runtime FeedSilenceMonitor / next "
+                  "collector cycle owns them.", file=sys.stderr)
         return 2
     if not args.json:
         print("\n[PASS] all contracted feeds fresh and candles up to date.")
     return 0
+
+
+def main() -> int:
+    """Thin crash barrier around ``_main`` — see EXIT_INTERNAL_ERROR: a
+    checker crash (traceback on stderr, exit 3) must never be reported by a
+    caller as "feed failed" (rc 1), which is also Python's default exit code
+    for an unhandled exception. Do not add real check logic here."""
+    try:
+        return _main()
+    except Exception:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        print(
+            f"\n[INTERNAL ERROR] preflight_feed_check.py crashed — exit "
+            f"{EXIT_INTERNAL_ERROR}. This is NOT a feed/candle verdict; see "
+            "the traceback above.",
+            file=sys.stderr,
+        )
+        return EXIT_INTERNAL_ERROR
 
 
 if __name__ == "__main__":

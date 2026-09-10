@@ -10,6 +10,10 @@ Pins the boot contract (``main._preflight_feed_check`` /
   * exit 2 (past the warn fraction) warns and continues (feeds refresh on
     start);
   * exit 0 passes;
+  * exit 3 (EXIT_INTERNAL_ERROR — the checker crashed) BLOCKS boot too (feed
+    state unknown = unsafe), but with a distinct message: this is NOT a feed
+    failure, and must not be confused with Python's own default exit code
+    for an unhandled exception (also 1);
   * ``--skip-preflight`` skips the check entirely;
   * the real script through the wiring returns 0 on fresh evidence and 1 on
     missing/stale evidence.
@@ -36,8 +40,10 @@ pytestmark = pytest.mark.unit
 
 
 class _FakeResult:
-    def __init__(self, returncode: int) -> None:
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
         self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 def _log() -> logging.Logger:
@@ -120,6 +126,28 @@ def test_preflight_invokes_script_with_resolved_paths(tmp_path, monkeypatch) -> 
     assert cwd == str(main_mod.PROJECT_ROOT)
 
 
+def test_preflight_captures_and_logs_stderr(tmp_path, monkeypatch, caplog) -> None:
+    """A crashed subprocess's stderr (traceback) must be captured and logged
+    — not sent to an inherited console that can close before anyone reads it
+    (the 2026-09-10 OOM incident: rc=1 with zero diagnostic)."""
+    db = tmp_path / "bot.db"
+    cfg = tmp_path / "settings.yaml"
+
+    def fake_run(cmd, **kwargs):
+        assert kwargs.get("capture_output") is True
+        return _FakeResult(
+            main_mod.EXIT_INTERNAL_ERROR,
+            stdout="some progress\n",
+            stderr="Traceback (most recent call last):\nMemoryError\n",
+        )
+
+    monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+    with caplog.at_level(logging.WARNING):
+        rc = main_mod._preflight_feed_check(db, cfg)
+    assert rc == main_mod.EXIT_INTERNAL_ERROR
+    assert any("MemoryError" in rec.message for rec in caplog.records)
+
+
 def test_preflight_candles_only_passes_flags(tmp_path, monkeypatch) -> None:
     """The backtest path requests candles-only + window-end coverage."""
     db = tmp_path / "bot.db"
@@ -160,6 +188,22 @@ def test_preflight_rc2_warns_and_continues(monkeypatch) -> None:
 def test_preflight_rc0_passes(monkeypatch) -> None:
     monkeypatch.setattr(main_mod, "_preflight_feed_check", lambda *a, **k: 0)
     assert main_mod._run_preflight_at_boot(Path("db"), Path("cfg"), logger=_log()) is None
+
+
+def test_preflight_rc3_crash_blocks_boot_distinctly(monkeypatch, capsys) -> None:
+    """rc=3 (EXIT_INTERNAL_ERROR) is a checker crash, NOT a feed failure — it
+    must still block boot (feed state unknown = unsafe to start), but with a
+    distinct message that does not say "feed FAILED"."""
+    monkeypatch.setattr(
+        main_mod, "_preflight_feed_check",
+        lambda *a, **k: main_mod.EXIT_INTERNAL_ERROR,
+    )
+    rc = main_mod._run_preflight_at_boot(Path("db"), Path("cfg"), logger=_log())
+    assert rc == main_mod.EXIT_INTERNAL_ERROR
+    out = capsys.readouterr().err
+    assert "CRASHED" in out
+    assert "NOT a feed" in out
+    assert "FAILED — contracted feed(s) not delivering" not in out
 
 
 def test_preflight_skip_does_not_invoke(monkeypatch) -> None:
@@ -337,6 +381,19 @@ def test_boot_silence_context_corrupt_report_is_empty(tmp_path) -> None:
     assert stale == {}
     assert boot_at is None
     assert downtime == 0.0
+
+
+def test_real_script_crash_returns_exit_internal_error(tmp_path) -> None:
+    """End-to-end: a genuinely corrupt DB (exists, but not a valid sqlite
+    file) makes the real script raise inside _main() — the crash barrier
+    must turn that into EXIT_INTERNAL_ERROR (3), not the ambiguous default-1
+    Python gives an unhandled exception, and print a traceback to stderr."""
+    db = tmp_path / "bot.db"
+    db.write_bytes(b"not a sqlite database")
+
+    rc = main_mod._preflight_feed_check(db, ROOT / "config" / "settings.yaml")
+    assert rc == main_mod.EXIT_INTERNAL_ERROR
+    assert rc != 1
 
 
 def test_real_preflight_blocks_with_stale_evidence(tmp_path) -> None:
