@@ -9,8 +9,10 @@ paths with a fully mocked SDK and never touch the network.
 
 ## What you need
 
-- A **funded Hyperliquid testnet account** (testnet has no real value — get
-  test funds via Hyperliquid's testnet faucet/UI).
+- A **funded Hyperliquid testnet account**. The faucet
+  (`app.hyperliquid-testnet.xyz/drip`, 1,000 mock USDC, once per address)
+  only works for a wallet that has **already deposited on mainnet** — connect
+  that wallet to the testnet UI first, then claim.
 - The account's private key, set as the environment variable
   `HYPERLIQUID_PRIVATE_KEY` (64 hex chars, with or without a `0x` prefix —
   see `src/exchanges/hyperliquid_live.py::normalize_private_key`).
@@ -20,6 +22,13 @@ paths with a fully mocked SDK and never touch the network.
   deliberately flattens whatever positions it finds on the account. Using a
   mainnet key would mean real financial exposure and possible unintended
   liquidation of unrelated mainnet positions.
+
+  **Recommended — API/agent wallet:** in the *testnet* UI,
+  Settings → API Wallets → Generate produces a fresh key authorized to trade
+  the testnet account but unable to withdraw. Put that key in
+  `HYPERLIQUID_PRIVATE_KEY` and the master wallet address in
+  `HYPERLIQUID_ACCOUNT_ADDRESS` (`0x` + 40 hex). The agent key was never
+  authorized on mainnet, so leaking it exposes nothing real.
 - Optionally override the market/sizes used (defaults are conservative):
   - `HYPERLIQUID_TESTNET_SYMBOL` (default `BTC`)
   - `HYPERLIQUID_TESTNET_SIZE` (default `0.001`)

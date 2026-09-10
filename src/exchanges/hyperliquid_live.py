@@ -22,10 +22,12 @@ logger = logging.getLogger(__name__)
 
 VAULT_KEY = "hyperliquid_private_key"
 ENV_KEY = "HYPERLIQUID_PRIVATE_KEY"
+ENV_ACCOUNT_KEY = "HYPERLIQUID_ACCOUNT_ADDRESS"
 TESTNET_URL = "https://api.hyperliquid-testnet.xyz"
 MAINNET_URL = "https://api.hyperliquid.xyz"
 
 _KEY_PATTERN = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
+_ADDR_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 # Cache of asset metadata: symbol → {sz_decimals, px_decimals}
 _meta_cache: Dict[str, Dict[str, int]] = {}
@@ -64,6 +66,22 @@ def resolve_private_key(vault: Optional[Vault] = None) -> Optional[str]:
     except Exception as exc:
         logger.error("Failed to load Hyperliquid private key: %s", exc)
         return None
+
+
+def resolve_account_address() -> Optional[str]:
+    """Optional master-account address for agent-wallet (API wallet) signing.
+
+    When ``HYPERLIQUID_ACCOUNT_ADDRESS`` is set, the signing key is treated as
+    an HL API/agent wallet: orders are signed by the agent but executed on
+    this account. Returns None when unset or malformed.
+    """
+    val = os.environ.get(ENV_ACCOUNT_KEY, "").strip()
+    if not val:
+        return None
+    if not _ADDR_PATTERN.match(val):
+        logger.error("Invalid %s (expected 0x + 40 hex chars)", ENV_ACCOUNT_KEY)
+        return None
+    return val
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -131,9 +149,19 @@ class HyperliquidLiveClient:
         await client.close()
     """
 
-    def __init__(self, private_key: str, *, use_testnet: bool = True) -> None:
+    def __init__(
+        self,
+        private_key: str,
+        *,
+        use_testnet: bool = True,
+        account_address: Optional[str] = None,
+    ) -> None:
         self._private_key = normalize_private_key(private_key)
         self._use_testnet = use_testnet
+        # Agent-wallet mode: sign with *private_key*, trade *account_address*.
+        self._account_address = (
+            account_address or resolve_account_address()
+        )
         self._exchange: Any = None
         self._info: Any = None
         self._wallet_address: Optional[str] = None
@@ -168,15 +196,20 @@ class HyperliquidLiveClient:
 
         wallet = Account.from_key(self._private_key)
         base_url = TESTNET_URL if self._use_testnet else MAINNET_URL
-        self._exchange = Exchange(wallet, base_url=base_url)
+        self._exchange = Exchange(
+            wallet, base_url=base_url, account_address=self._account_address
+        )
         self._info = Info(base_url=base_url, skip_ws=True)
-        self._wallet_address = wallet.address
+        # Queries (positions/orders/fills) must target the traded account —
+        # the master address when signing via an agent wallet.
+        self._wallet_address = self._account_address or wallet.address
         # Warm the meta cache for symbol normalisation
         build_meta_cache(self._info)
         logger.info(
-            "HyperliquidLiveClient ready mode=%s wallet=%s",
+            "HyperliquidLiveClient ready mode=%s wallet=%s signer=%s",
             "testnet" if self._use_testnet else "mainnet",
             self._wallet_address,
+            wallet.address if self._account_address else "self",
         )
 
     async def open(self) -> None:
