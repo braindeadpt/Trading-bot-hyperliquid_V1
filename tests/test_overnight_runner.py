@@ -468,6 +468,99 @@ def test_experiment_block_carries_preregistered_vwap_hypotheses():
     assert "parameter variant" in fallback
 
 
+# --- hype_vwap_refine family (Q6) -------------------------------------------
+
+class TestHypeVwapRefineFamily:
+    """The HYPE-only VWAP refinement sweep preregistered in QUEUE.md (Q6)."""
+
+    def test_grid_is_preregistered_four_cells(self):
+        # QUEUE.md Q6: baseline (production everywhere) vs HYPE-only z=3.5 /
+        # z=4.0 / volume_surge=2.0. Baseline must be cell 0 and untouched.
+        assert len(mod.HYPE_VWAP_REFINE_GRID) == 4
+        assert mod.HYPE_VWAP_REFINE_GRID[0] == {}
+        assert mod.HYPE_VWAP_REFINE_GRID[1] == {"HYPE": {"z_threshold": 3.5}}
+        assert mod.HYPE_VWAP_REFINE_GRID[2] == {"HYPE": {"z_threshold": 4.0}}
+        assert mod.HYPE_VWAP_REFINE_GRID[3] == {"HYPE": {"volume_surge": 2.0}}
+
+    def test_resolve_symbol_overrides_precedence(self):
+        # Nested per-symbol dict: only the named symbol's keys move, and the
+        # wildcard '*' is NOT part of this family — a variant can never leak
+        # onto the BTC/ETH control.
+        section = {"z_threshold": 2.5, "volume_surge": 1.5, "enabled": False}
+        h = mod.resolve_symbol_overrides(
+            section, {"HYPE": {"z_threshold": 3.5}}, "HYPE")
+        assert h["z_threshold"] == 3.5
+        assert h["volume_surge"] == 1.5          # untouched
+        assert h["enabled"] is False             # untouched
+        b = mod.resolve_symbol_overrides(
+            section, {"HYPE": {"z_threshold": 3.5}}, "BTC")
+        assert b == section                       # control is byte-identical
+        # volume_surge cell: z stays production.
+        s = mod.resolve_symbol_overrides(
+            section, {"HYPE": {"volume_surge": 2.0}}, "HYPE")
+        assert s["volume_surge"] == 2.0 and s["z_threshold"] == 2.5
+        # Unknown symbol + empty overrides -> untouched.
+        assert mod.resolve_symbol_overrides(section, {}, "SOL") == section
+
+    def test_db_for_window_seam(self):
+        # Preregistered one-source-per-window rule: research DB through the
+        # 2026-07-10 seam (W4 seals it), live bot.db after (W5/W6).
+        research, live = "E:/research/hyperliquid.db", "data/live/bot.db"
+        for w_end in ("2026-04-11", "2026-05-11", "2026-06-10", "2026-07-10"):
+            assert mod.db_for_hype_window(research, live, w_end) == research
+        for w_end in ("2026-07-11", "2026-08-09", "2026-09-08"):
+            assert mod.db_for_hype_window(research, live, w_end) == live
+        assert mod.HYPE_VWAP_SEAM_DATE == "2026-07-10"
+
+    def test_family_registered(self):
+        assert "hype_vwap_refine" in mod.FAMILIES
+
+
+def test_sweep_dispatches_nested_dict_params_to_family(monkeypatch):
+    """sweep() must pass the real hype_vwap_refine nested config dicts
+    straight through to run_one — params is a per-symbol config dict, not a
+    tuple and not an index."""
+    seen: list = []
+
+    def fake_run_one(start, end, symbols, params):
+        seen.append((start, end, tuple(symbols), dict(params)))
+        if params == {"HYPE": {"z_threshold": 3.5}}:
+            c = cell(40.0, 20, 60.0, 20.0)        # improves every window
+            c["trade_pnls"] = [2.0] * 20
+        elif params == {}:                         # baseline
+            c = cell(-20.0, 20, 10.0, 30.0)
+            c["trade_pnls"] = [-1.0] * 20
+        else:                                      # worse everywhere
+            c = cell(-40.0, 20, 20.0, 60.0)
+            c["trade_pnls"] = [-2.0] * 20
+        return c
+
+    tags = ["baseline (production 2.5σ)", "HYPE z_threshold=3.5",
+            "HYPE z_threshold=4.0"]
+    monkeypatch.setitem(mod.FAMILIES, "hype_vwap_refine",
+                        lambda: (tags, fake_run_one, None))
+
+    session = mod.sweep("hype_vwap_refine", "2026-03-13", "2026-09-08",
+                        ["HYPE", "BTC", "ETH"], split_days=30)
+
+    assert session["family"] == "hype_vwap_refine"
+    assert len(session["windows"]) == 6           # the Q6 window set
+    # 3 cells x 6 windows = 18 run_one calls, nested dicts passed verbatim.
+    assert len(seen) == 18
+    baseline_calls = [s for s in seen if s[3] == {}]
+    hype_calls = [s for s in seen if s[3] == {"HYPE": {"z_threshold": 3.5}}]
+    assert len(baseline_calls) == 6 and len(hype_calls) == 6
+    assert all(s[2] == ("HYPE", "BTC", "ETH") for s in seen)
+
+    by_tag = {r["tag"]: r for r in session["results"]}
+    improved = by_tag["HYPE z_threshold=3.5"]
+    assert improved["aggregate_variant"]["pnl"] == 240.0
+    assert improved["noise_gate"]["evaluated"] is True
+    # 6/6 windows improved -> sign-flip p=2^-6=0.0156 <= 0.10, n=120 >= 30.
+    assert improved["verdict"] == "KEEP"
+    assert by_tag["HYPE z_threshold=4.0"]["verdict"] == "DISCARD"
+
+
 # --- iv_thresholds family (Night 3) ------------------------------------------
 
 class TestIvThresholdsFamily:

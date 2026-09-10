@@ -108,9 +108,20 @@ class TestPickReady:
 """, encoding="utf-8")
         assert nw.pick_ready(q) is None
 
-    def test_real_queue_currently_has_nothing_ready(self):
-        # Live fact check: the shipped queue is all CLOSED/BLOCKED/NEEDS-WIRING.
-        assert nw.pick_ready(nw.QUEUE_PATH) is None
+    def test_real_queue_q6_is_first_ready(self):
+        # Live fact check: Q6 (hype_vwap_refine) is the FIRST READY — it is
+        # fully runnable now (6 windows, research DB + live DB on disk) and
+        # the nightly wrapper runs only the first READY section. Night 3
+        # (iv_thresholds) stays READY coverage-gated behind it.
+        ready = nw.pick_ready(nw.QUEUE_PATH)
+        assert ready is not None
+        assert ready["family"] == "hype_vwap_refine"
+        assert ready["window"] == {"start": "2026-03-13",
+                                    "end": "2026-09-08", "split_days": 30}
+        assert ready["symbols"] == "HYPE,BTC,ETH"
+        assert ready["cells"] == "0,1,2"
+        assert nw.count_windows(ready["window"]) == 6
+        assert nw.count_windows(ready["window"]) >= nw.K_FLOOR
 
 
 class TestCountWindows:

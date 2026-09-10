@@ -32,6 +32,10 @@ Usage:
   # coverage: INCONCLUSIVE/DISCARD are the only possible verdicts):
   python scripts/overnight_runner.py --family iv_thresholds --start 2026-06-14 --end 2026-09-08 --symbols BTC,ETH,SOL,HYPE
 
+  # Q6 — HYPE-only VWAP refinement: nested per-symbol config dicts, DB per
+  # window (research DB through the 2026-07-10 seam, live bot.db after):
+  python scripts/overnight_runner.py --family hype_vwap_refine --start 2026-03-13 --end 2026-09-08 --symbols HYPE,BTC,ETH
+
   # Self-test: verdict + report logic only, canned results, no backtests:
   python scripts/overnight_runner.py --selftest
 """
@@ -746,6 +750,152 @@ def vwap_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], 
 
 
 # ---------------------------------------------------------------------------
+# Family: hype_vwap_refine — HYPE-only VWAP refinement (Q6, §1.3 phase 2).
+#
+# QUEUE.md preregistration: the Night-2 forensics showed HYPE's thin book
+# bleeding on flush-driven entries; this family tests whether a stricter
+# HYPE-only entry filter fixes it WITHOUT touching BTC/ETH. The grid is a
+# NESTED per-symbol config dict — {"HYPE": {"z_threshold": 3.5}} means
+# "HYPE trades use z=3.5, every other symbol keeps production config" (no
+# '*' wildcard in this family): BTC/ETH are the untouched control in every
+# cell, not a variant surface.
+#
+# Per-window DB contract (the "one source per window" rule): the E: research
+# DB ends exactly 2026-07-10 (HYPE 15m+1h ~100% coverage from 2026-01-11),
+# so windows ending on/before HYPE_VWAP_SEAM_DATE read the research DB and
+# the later windows read the live bot.db. The seam is preregistered in
+# QUEUE.md — never mixed mid-window.
+# ---------------------------------------------------------------------------
+
+HYPE_VWAP_SEAM_DATE = "2026-07-10"  # research DB ends exactly here; W4 seals the seam
+
+HYPE_VWAP_REFINE_GRID: Tuple[Dict[str, Dict[str, float]], ...] = (
+    {},                                 # baseline: production everywhere (z=2.5, surge=1.5)
+    {"HYPE": {"z_threshold": 3.5}},     # +1σ HYPE-only entry filter
+    {"HYPE": {"z_threshold": 4.0}},     # +1.5σ HYPE-only entry filter
+    {"HYPE": {"volume_surge": 2.0}},    # surge confirm 2.0x HYPE-only (z stays 2.5)
+)
+
+
+def resolve_symbol_overrides(section: Dict[str, Any],
+                             overrides: Dict[str, Dict[str, float]],
+                             symbol: str) -> Dict[str, Any]:
+    """Merge a nested per-symbol config dict into a strategy section.
+
+    Only the named symbol's keys move; every other symbol keeps the section
+    untouched (explicit-symbol precedence — no '*' wildcard in this family,
+    so a variant can never leak onto the BTC/ETH control).
+    """
+    out = dict(section)
+    for k, v in (overrides.get(symbol) or {}).items():
+        out[k] = v
+    return out
+
+
+def db_for_hype_window(research_path: str, live_path: str, w_end: str) -> str:
+    """One DB per window, preregistered: research DB through the seam,
+    live bot.db after. Never mixed mid-window (QUEUE.md Q6)."""
+    return research_path if w_end <= HYPE_VWAP_SEAM_DATE else live_path
+
+
+def hype_vwap_refine_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], Callable[..., Any]]:
+    """Wire the Q6 HYPE-only VWAP refinement to the same light_replay harness.
+
+    Nested per-symbol config dicts, per-window DB selection sealed at
+    HYPE_VWAP_SEAM_DATE, same fee model and per-symbol isolated-capital
+    sizing convention as ``vwap_thresholds`` so the comparison stays
+    internally consistent. ``require_oir_confirm`` disabled exactly as the
+    harness's own fade path does (light replay has no OIR feed).
+
+    Imports inside this function so ``--selftest`` never pulls the strategies.
+    """
+    from scripts.backtest_vwap_trend_vs_fade import light_replay  # noqa: E402
+    from src.data.database import Database  # noqa: E402
+    from src.strategies.vwap_deviation import VWAPDeviation  # noqa: E402
+    from src.utils.config import load_config  # noqa: E402
+
+    cfg = load_config(str(ROOT / "config" / "settings.yaml"))
+    fade_section = dict(cfg.get("strategy.vwap_deviation", {}) or {})
+    research_path = str(cfg.get("research.database.path", ""))
+    live_path = str(cfg.get("database.path", "data/live/bot.db"))
+    initial_capital = float(
+        cfg.get("backtest.initial_capital", cfg.get("risk.initial_capital", 10_000.0))
+    )
+    commission_pct = float(cfg.get("backtest.commission_pct", 0.04))
+    slippage_bps = float(cfg.get("backtest.slippage_bps", 2.0))
+
+    def tag_for(ov: Dict[str, Dict[str, float]]) -> str:
+        if not ov:
+            return "baseline (production 2.5σ)"
+        sym, kv = next(iter(sorted(ov.items())))
+        inner = ",".join(f"{k}={v}" for k, v in sorted(kv.items()))
+        return f"{sym} {inner}"
+
+    def run_one(start: str, end: str, symbols: List[str],
+                overrides: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
+        s_ms = int(datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+        e_ms = int(datetime.strptime(end, "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59, microsecond=999000,
+            tzinfo=timezone.utc).timestamp() * 1000)
+        try:
+            db = Database(db_for_hype_window(research_path, live_path, end))
+            trades_all: List[Dict[str, Any]] = []
+            per_symbol: Dict[str, Dict[str, Any]] = {}
+            for sym in symbols:
+                section = resolve_symbol_overrides(fade_section, overrides, sym)
+                section["enabled"] = True
+                section["require_oir_confirm"] = False
+                strategy = VWAPDeviation(section)
+                res = light_replay(
+                    db, strategy, [sym], s_ms, e_ms,
+                    bar_tf="15m",
+                    initial_capital=initial_capital,
+                    commission_pct=commission_pct,
+                    slippage_bps=slippage_bps,
+                )
+                trs = list(res.get("trades", []) or [])
+                for t in trs:
+                    t["trade_symbol"] = sym
+                    t["_overrides"] = dict(overrides.get(sym) or {})
+                trades_all.extend(trs)
+                per_symbol[sym] = {
+                    "n_trades": len(trs),
+                    "total_pnl_usd": round(sum(float(t.get("pnl_usd", 0.0)) for t in trs), 2),
+                }
+        except Exception as exc:  # noqa: BLE001 — a failed cell must not kill the sweep
+            return {"error": f"{type(exc).__name__}: {exc}", "overrides": dict(overrides)}
+
+        pnls = [float(t.get("pnl_usd", 0.0)) for t in trades_all]
+        exits: Dict[str, Dict[str, float]] = {}
+        for t in trades_all:
+            r = str(t.get("exit_reason") or "unknown")
+            exits.setdefault(r, {"n": 0, "pnl_usd": 0.0})
+            exits[r]["n"] += 1
+            exits[r]["pnl_usd"] += float(t.get("pnl_usd", 0.0))
+        return {
+            "overrides": dict(overrides),
+            "n_trades": len(pnls),
+            "total_pnl_usd": round(sum(pnls), 2),
+            "gross_win_usd": round(sum(p for p in pnls if p > 0), 2),
+            "gross_loss_usd": round(abs(sum(p for p in pnls if p < 0)), 2),
+            "trade_pnls": [round(p, 2) for p in pnls],
+            "trade_symbols": [str(t.get("trade_symbol") or t.get("symbol") or "")
+                              for t in trades_all],
+            "trades_summary": {
+                k: {"n": int(v["n"]), "pnl_usd": round(v["pnl_usd"], 2)}
+                for k, v in sorted(exits.items())
+            },
+            "per_symbol": per_symbol,
+            "db_source": "research" if end <= HYPE_VWAP_SEAM_DATE else "live",
+            "cost_model": {"commission_pct": commission_pct, "slippage_bps": slippage_bps},
+            "sizing_convention": "per-symbol isolated capital (same for baseline and variants)",
+        }
+
+    tags = [tag_for(ov) for ov in HYPE_VWAP_REFINE_GRID]
+    return tags, run_one, cfg
+
+
+# ---------------------------------------------------------------------------
 # Family: iv_thresholds — high/low-IV cut sweep (Night 3).
 #
 # QUEUE.md preregistration: the IV gate variant "both strategies only in
@@ -930,6 +1080,7 @@ FAMILIES = {
     "flush_fade": flush_fade_family,
     "vwap_thresholds": vwap_thresholds_family,
     "iv_thresholds": iv_thresholds_family,
+    "hype_vwap_refine": hype_vwap_refine_family,
 }
 
 
@@ -972,6 +1123,8 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
         grid_params = [VWAP_THRESHOLDS_GRID[i] for i in sel]
     elif family == "iv_thresholds":
         grid_params = [IV_THRESHOLDS_GRID[i] for i in sel]
+    elif family == "hype_vwap_refine":
+        grid_params = [HYPE_VWAP_REFINE_GRID[i] for i in sel]
     else:  # generic families: params parallel to tags via sel
         grid_params = list(sel)
     windows = split_windows(start, end, split_days)
