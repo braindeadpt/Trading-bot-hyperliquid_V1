@@ -92,13 +92,89 @@ noise-model commit would add a `noise gate:` line here; this run predates
 it, and its per-trade PnL is not stored in the artifact, so none is shown.)
 
 ---
-## Morning report — 2026-09-11 13:39 UTC — family `hype_vwap_refine`
+## Morning report — 2026-09-11 16:20 UTC — family `sma_rebalance`
 
-- span: 2026-03-13..2026-09-08 (6 non-overlapping windows of 30d) · symbols: HYPE, BTC, ETH
-- verdicts: 0 KEEP · 0 INCONCLUSIVE · 1 DISCARD
-- artifact: `data\research\overnight_experiments\20260911_133915_hype_vwap_refine.json`
+- span: 2026-05-18..2026-09-08 (4 non-overlapping windows of 30d) · symbols: BTC, ETH
+- verdicts: 0 KEEP · 0 INCONCLUSIVE · 4 DISCARD
+- artifact: `data\research\overnight_experiments\20260911_162054_sma_rebalance.json`
 
 ---
+### 2026-09-11 16:20 UTC — sma_rebalance/sep0.30% tp=sma200-dyn sl=1R — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (sep0.15% tp=sma200-dyn sl=1R): net=-176.67 n=200 PF=0.846
+- variant: net=-131.61 n=167 PF=0.882
+- per-window delta: 2026-05(+8.29), 2026-06(+4.08), 2026-07(+18.47), 2026-08(+14.22)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+10.58 (n=65, p=0.125, within sign-flip null); ETH delta=+34.44 (n=102, p=0.125, within sign-flip null)
+- reasons: windows improved 4/4 (majority=yes); aggregate n=167 (gate >=30); aggregate PF=0.882 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-11 16:20 UTC — sma_rebalance/sep0.05% tp=sma200-dyn sl=1R — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (sep0.15% tp=sma200-dyn sl=1R): net=-176.67 n=200 PF=0.846
+- variant: net=-197.63 n=219 PF=0.831
+- per-window delta: 2026-05(-4.06), 2026-06(-0.93), 2026-07(-8.58), 2026-08(-7.39)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-2.93 (n=74, p=1.0, within sign-flip null); ETH delta=-18.01 (n=145, p=1.0, within sign-flip null)
+- reasons: windows improved 0/4 (majority=no); aggregate n=219 (gate >=30); aggregate PF=0.831 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-11 16:20 UTC — sma_rebalance/sep0.15% tp=sma200-lock sl=1R — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (sep0.15% tp=sma200-dyn sl=1R): net=-176.67 n=200 PF=0.846
+- variant: net=-176.67 n=200 PF=0.846
+- per-window delta: 2026-05(+0.0), 2026-06(+0.0), 2026-07(+0.0), 2026-08(+0.0)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+0.00 (n=72, p=1.0, within sign-flip null); ETH delta=+0.00 (n=128, p=1.0, within sign-flip null)
+- reasons: windows improved 0/4 (majority=no); aggregate n=200 (gate >=30); aggregate PF=0.846 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-11 16:20 UTC — sma_rebalance/sep0.15% tp=fixed1.5% sl=fixed0.75% — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (sep0.15% tp=sma200-dyn sl=1R): net=-176.67 n=200 PF=0.846
+- variant: net=-329.54 n=292 PF=0.797
+- per-window delta: 2026-05(-121.82), 2026-06(+36.42), 2026-07(-88.08), 2026-08(+20.61)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-167.28 (n=130, p=0.875, within sign-flip null); ETH delta=+14.52 (n=162, p=0.5, within sign-flip null)
+- reasons: windows improved 2/4 (majority=no); aggregate n=292 (gate >=30); aggregate PF=0.797 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-11 16:18 UTC — sma_rebalance/sep0.30% tp=sma200-dyn sl=1R — BLOCKED
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (sep0.15% tp=sma200-dyn sl=1R): net=0 n=0 PF=0.0
+- variant: net=0 n=0 PF=0.0
+- per-window delta: 2026-05(+n/e), 2026-06(+n/e), 2026-07(+n/e), 2026-08(+n/e)
+- reasons: all window cells failed — nothing to compare
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-11 16:18 UTC — sma_rebalance/sep0.05% tp=sma200-dyn sl=1R — BLOCKED
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (sep0.15% tp=sma200-dyn sl=1R): net=0 n=0 PF=0.0
+- variant: net=0 n=0 PF=0.0
+- per-window delta: 2026-05(+n/e), 2026-06(+n/e), 2026-07(+n/e), 2026-08(+n/e)
+- reasons: all window cells failed — nothing to compare
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-11 16:18 UTC — sma_rebalance/sep0.15% tp=sma200-lock sl=1R — BLOCKED
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (sep0.15% tp=sma200-dyn sl=1R): net=0 n=0 PF=0.0
+- variant: net=0 n=0 PF=0.0
+- per-window delta: 2026-05(+n/e), 2026-06(+n/e), 2026-07(+n/e), 2026-08(+n/e)
+- reasons: all window cells failed — nothing to compare
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-11 16:18 UTC — sma_rebalance/sep0.15% tp=fixed1.5% sl=fixed0.75% — BLOCKED
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (sep0.15% tp=sma200-dyn sl=1R): net=0 n=0 PF=0.0
+- variant: net=0 n=0 PF=0.0
+- per-window delta: 2026-05(+n/e), 2026-06(+n/e), 2026-07(+n/e), 2026-08(+n/e)
+- reasons: all window cells failed — nothing to compare
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
 ### 2026-09-11 13:39 UTC — hype_vwap_refine/HYPE volume_surge=2.0 — DISCARD
 - hypothesis: parameter variant
 - windows: 2026-03-13..2026-09-08 (6 windows of 30d, non-overlapping)

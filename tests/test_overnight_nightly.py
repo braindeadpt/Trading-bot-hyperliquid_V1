@@ -124,20 +124,17 @@ class TestPickReady:
         assert ready["cells"] == "0,1,2"
         assert ready["symbols"] == "BTC,ETH,SOL,HYPE"
 
-    def test_real_queue_q6_is_first_ready(self):
-        # Live fact check: Q6 (hype_vwap_refine) is the FIRST READY — it is
-        # fully runnable now (6 windows, research DB + live DB on disk) and
-        # the nightly wrapper runs only the first READY section. Night 3
-        # (iv_thresholds) stays READY coverage-gated behind it.
+    def test_real_queue_first_ready(self):
+        # Live fact check: Q6 CLOSED 2026-09-11 (all cells DISCARD) — the
+        # first READY entry is now Night 3 (iv_thresholds), which stays
+        # coverage-gated on the dvol span (the runner derives K itself;
+        # count_windows cannot evaluate "dvol" so no floor check here).
         ready = nw.pick_ready(nw.QUEUE_PATH)
         assert ready is not None
-        assert ready["family"] == "hype_vwap_refine"
-        assert ready["window"] == {"start": "2026-03-13",
-                                    "end": "2026-09-08", "split_days": 30}
-        assert ready["symbols"] == "HYPE,BTC,ETH"
+        assert ready["family"] == "iv_thresholds"
+        assert ready["window"] == {"span": "dvol", "split_days": 30}
+        assert ready["symbols"] == "BTC,ETH,SOL,HYPE"
         assert ready["cells"] == "0,1,2"
-        assert nw.count_windows(ready["window"]) == 6
-        assert nw.count_windows(ready["window"]) >= nw.K_FLOOR
 
 
     def test_coverage_gated_ready_reports_no_precomputed_k(self, tmp_path):

@@ -183,6 +183,41 @@ An entry becomes READY only after the family is wired and reviewed.
   of continuous collection (bot running). Revisit ~ 2026-11-28 at the
   earliest.
 
+## Q9 — sma_rebalance ("Trend Rebalance Map [Herman]" port) — DONE 2026-09-11, all cells DISCARD
+
+- **Result:** the "80% winrate" does not port to crypto perps under
+  tier-0 costs. Baseline (author params adapted): net −176.67, n=200,
+  PF 0.85. Stricter separation (0.30%) is the least bad (−131.61,
+  PF 0.88) — the filter does add selectivity but not enough to reach
+  PF>1. Looser filter −197.63; locked TP identical to dynamic;
+  fixed bracket worst (−329.54, PF 0.80). Consistent with every other
+  candle-only family on this dataset.
+  Artifact `20260911_162054_sma_rebalance.json`.
+
+- **Hypothesis:** a pullback re-entry toward the slow SMA — close crosses
+  back over SMA50 while SMA50 < SMA200 (long) or SMA50 > SMA200 (short),
+  gated on a minimum SMA separation — carries edge on crypto perps, i.e.
+  the author's "80% winrate" survives OUR harness: tier-0 costs, intrabar
+  SL resolution, and the paired noise gate.
+- **Harness:** `python scripts/research/overnight_runner.py --family
+  sma_rebalance --start 2026-05-18 --end 2026-09-08`
+- **Window set:** 2026-05-18..2026-09-08, 30d split → 4 non-overlapping
+  windows (same fixed set as Night 2 / Q4 / Q5 / Q7).
+- **Grid (5 cells = 20 runs, at cap):**
+  1. baseline — sep 0.15%, TP=SMA200 dynamic, SL=1R
+  2. sep 0.30% (stricter trend filter)
+  3. sep 0.05% (looser — does the gate add value?)
+  4. TP=SMA200 locked-at-entry
+  5. TP=fixed 1.5%, SL=fixed 0.75%
+- **Source:** candle-only — no L2/tape needed. Pine semantics mapped
+  faithfully (close-fill entries, TP on bar extremes, hard SL intrabar).
+- **Evidence bar:** standard KEEP rules + Bonferroni alpha_eff=0.025
+  (4 variants). High-WR/low-PF is a possible honest outcome — WR is a
+  diagnostic, the verdict is PF/net as always.
+- **Expected verdict:** unknown — the family is candle-based (the class
+  that keeps dying), but the entry logic is genuinely different (re-entry
+  into separation, not deviation fade). No priors claimed.
+
 
 ## NOT testable tonight — gate status table
 

@@ -55,6 +55,7 @@ import json
 import random
 import sys
 import time
+import types
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -1646,6 +1647,216 @@ def iv_thresholds_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], Ca
     return tags, run_one, cfg
 
 
+# ---------------------------------------------------------------------------
+# sma_rebalance — research port of "Trend Rebalance Map [Herman]" (Pine v6,
+# github.com/HermanTrading). Candle-only: no microstructure needed.
+#
+# Faithful mapping of the Pine semantics onto light_replay:
+#   * entry  = close of the confirm bar (process_orders_on_close = true)
+#   * long   = close crosses ABOVE sma50 while sma50 < sma200 (the author's
+#     direction — a "rebalance" toward the slow average, NOT trend-follow)
+#   * short  = close crosses below sma50 while sma50 > sma200
+#   * gate   = |sma50 - sma200| / close >= sep_pct (points -> % of price)
+#   * TP     = current sma200 ("dynamic" follows it, "locked" freezes at
+#     entry) or a fixed % — checked on the bar's own high/low
+#   * SL     = 1R-to-TP (mirror of entry->initial-TP distance) or fixed % —
+#     hard stop checked on bar extremes by the replay itself
+#   * 1 position per symbol; the bar that closed a trade cannot re-enter
+#     (light_replay `continue`s after settle, same as Pine's lastExitBar)
+# Fidelity note: TP exits settle at bar CLOSE (not the level) — slightly
+# conservative for "sma200" targets since price typically trades past the
+# level before closing. SL exits fill at the stop level via light_replay,
+# now confirmed at intrabar_tf granularity.
+# ---------------------------------------------------------------------------
+
+
+class _SMARebalanceStrategy:
+    """light_replay protocol port of the Pine v6 engine (one per symbol)."""
+
+    def __init__(self, symbol: str, params: Dict[str, Any]):
+        self.symbol = symbol
+        p = params
+        self.fast = int(p.get("sma_fast", 50))
+        self.slow = int(p.get("sma_slow", 200))
+        self.sep_pct = float(p.get("sep_pct", 0.0015))
+        self.tp_mode = str(p.get("tp_mode", "sma200"))      # sma200|fixed
+        self.tp_dynamic = bool(p.get("tp_dynamic", True))   # sma200 only
+        self.tp_fixed_pct = float(p.get("tp_fixed_pct", 0.015))
+        self.sl_mode = str(p.get("sl_mode", "r1"))          # r1|fixed
+        self.sl_fixed_pct = float(p.get("sl_fixed_pct", 0.0075))
+        self.size_pct = float(p.get("size_pct", 0.01))
+
+        self._closes: "collections.deque" = collections.deque(maxlen=self.slow)
+        self._prev_close: Optional[float] = None
+        self._prev_sma_fast: Optional[float] = None
+        # entry context stashed when a signal fires; adopted by on_position
+        self._sig_ctx: Optional[Dict[str, Any]] = None
+        self._pos_key: Optional[int] = None
+        self._tp_price: Optional[float] = None
+        self._tp_dyn: bool = True
+
+    def _smas(self) -> Tuple[Optional[float], Optional[float]]:
+        n = len(self._closes)
+        if n < self.slow:
+            return None, None
+        cl = list(self._closes)
+        return (sum(cl[-self.fast:]) / self.fast,
+                sum(cl) / self.slow)
+
+    def on_data(self, event: Any) -> Any:
+        bar = event.candle_15m
+        close = float(bar.close)
+        self._closes.append(close)
+        sma_f, sma_s = self._smas()
+        sig = None
+        if sma_f is not None and self._prev_sma_fast is not None:
+            sep_ok = abs(sma_f - sma_s) / close >= self.sep_pct
+            crossed_up = self._prev_close <= self._prev_sma_fast and close > sma_f
+            crossed_dn = self._prev_close >= self._prev_sma_fast and close < sma_f
+            side = None
+            if crossed_up and sma_f < sma_s and sep_ok:
+                side = "long"
+            elif crossed_dn and sma_f > sma_s and sep_ok:
+                side = "short"
+            if side is not None:
+                if self.tp_mode == "sma200":
+                    tp = sma_s
+                else:
+                    tp = (close * (1 + self.tp_fixed_pct) if side == "long"
+                          else close * (1 - self.tp_fixed_pct))
+                if self.sl_mode == "r1":
+                    sl_pct = abs(tp - close) / close
+                else:
+                    sl_pct = self.sl_fixed_pct
+                self._sig_ctx = {"tp": tp, "tp_dynamic": self.tp_dynamic}
+                sig = types.SimpleNamespace(
+                    symbol=self.symbol, side=side, strategy="sma_rebalance",
+                    size_pct=self.size_pct, stop_loss_pct=sl_pct)
+        self._prev_close = close
+        self._prev_sma_fast = sma_f
+        return sig
+
+    def on_position(self, pos: Any, event: Any) -> Any:
+        if self._pos_key != pos.entry_time_ms:
+            # adopt the context stashed when this position's signal fired
+            self._pos_key = pos.entry_time_ms
+            ctx = self._sig_ctx or {}
+            self._tp_price = ctx.get("tp")
+            self._tp_dyn = ctx.get("tp_dynamic", True)
+        if self._tp_price is None:
+            return None
+        bar = event.candle_15m
+        tp = self._tp_price
+        if self.tp_mode == "sma200" and self._tp_dyn:
+            _, sma_s = self._smas()
+            if sma_s is not None:
+                tp = sma_s
+        hit = ((pos.side == "long" and float(bar.high) >= tp) or
+               (pos.side == "short" and float(bar.low) <= tp))
+        if not hit:
+            return None
+        reason = "tp_sma200" if self.tp_mode == "sma200" else "tp_fixed"
+        return types.SimpleNamespace(reason=reason)
+
+
+SMA_REBALANCE_GRID: List[Dict[str, Any]] = [
+    # baseline — author's defaults adapted to crypto % (30pts on NQ~23k ≈
+    # 0.13%; TP at the slow SMA, dynamic; SL = 1R to the entry TP)
+    {"sep_pct": 0.0015, "tp_mode": "sma200", "tp_dynamic": True,
+     "sl_mode": "r1"},
+    # stricter trend-separation filter
+    {"sep_pct": 0.0030, "tp_mode": "sma200", "tp_dynamic": True,
+     "sl_mode": "r1"},
+    # looser filter — does the gate add or remove trades?
+    {"sep_pct": 0.0005, "tp_mode": "sma200", "tp_dynamic": True,
+     "sl_mode": "r1"},
+    # locked-at-entry target (no dynamic drift while open)
+    {"sep_pct": 0.0015, "tp_mode": "sma200", "tp_dynamic": False,
+     "sl_mode": "r1"},
+    # fixed asymmetric bracket (TP 1.5% / SL 0.75%)
+    {"sep_pct": 0.0015, "tp_mode": "fixed", "tp_fixed_pct": 0.015,
+     "sl_mode": "fixed", "sl_fixed_pct": 0.0075},
+]
+
+
+def sma_rebalance_family() -> Tuple[List[str], Callable, Dict[str, Any]]:
+    """Trend Rebalance Map [Herman] port — candle-only, 15m confirm bars.
+
+    Returns (tags, run_one, cfg). No db_specs — live bot.db covers the
+    whole span (SMA200 warmup eats ~2d per window; documented cost).
+    """
+    from scripts.research.backtest_vwap_trend_vs_fade import light_replay  # noqa: E402
+    cfg, _fade, live_path, initial_capital, commission_pct, slippage_bps = _vwap_cfg()
+
+    def tag_for(p: Dict[str, Any]) -> str:
+        tp = ("sma200-" + ("dyn" if p.get("tp_dynamic", True) else "lock")
+              if p.get("tp_mode") == "sma200" else f"fixed{p['tp_fixed_pct']*100:.1f}%")
+        sl = ("1R" if p.get("sl_mode") == "r1"
+              else f"fixed{p['sl_fixed_pct']*100:.2f}%")
+        return f"sep{p['sep_pct']*100:.2f}% tp={tp} sl={sl}"
+
+    def run_one(start: str, end: str, symbols: List[str],
+                params: Dict[str, Any]) -> Dict[str, Any]:
+        s_ms, e_ms = _window_ms(start, end)
+        try:
+            from src.data.database import Database
+            db = Database(Path(live_path))
+            trades_all: List[Dict[str, Any]] = []
+            per_symbol: Dict[str, Dict[str, Any]] = {}
+            for sym in symbols:
+                strategy = _SMARebalanceStrategy(sym, params)
+                res = light_replay(
+                    db, strategy, [sym], s_ms, e_ms,
+                    bar_tf="15m",
+                    initial_capital=initial_capital,
+                    commission_pct=commission_pct,
+                    slippage_bps=slippage_bps,
+                    intrabar_tf="1m",
+                )
+                trs = list(res.get("trades", []) or [])
+                for t in trs:
+                    t["trade_symbol"] = sym
+                trades_all.extend(trs)
+                per_symbol[sym] = {
+                    "n_trades": len(trs),
+                    "total_pnl_usd": round(
+                        sum(float(t.get("pnl_usd", 0.0)) for t in trs), 2),
+                }
+        except Exception as exc:  # noqa: BLE001 — a failed cell must not kill the sweep
+            return {"error": f"{type(exc).__name__}: {exc}",
+                    "params": dict(params)}
+
+        pnls = [float(t.get("pnl_usd", 0.0)) for t in trades_all]
+        exits: Dict[str, Dict[str, float]] = {}
+        for t in trades_all:
+            r = str(t.get("exit_reason") or "unknown")
+            exits.setdefault(r, {"n": 0, "pnl_usd": 0.0})
+            exits[r]["n"] += 1
+            exits[r]["pnl_usd"] += float(t.get("pnl_usd", 0.0))
+        return {
+            "params": dict(params),
+            "n_trades": len(pnls),
+            "total_pnl_usd": round(sum(pnls), 2),
+            "gross_win_usd": round(sum(p for p in pnls if p > 0), 2),
+            "gross_loss_usd": round(abs(sum(p for p in pnls if p < 0)), 2),
+            "trade_pnls": [round(p, 2) for p in pnls],
+            "trade_symbols": [str(t.get("trade_symbol") or t.get("symbol") or "")
+                              for t in trades_all],
+            "trades_summary": {
+                k: {"n": int(v["n"]), "pnl_usd": round(v["pnl_usd"], 2)}
+                for k, v in sorted(exits.items())
+            },
+            "trades": trades_all,
+            "per_symbol": per_symbol,
+            "cost_model": {"commission_pct": commission_pct,
+                           "slippage_bps": slippage_bps},
+            "sizing_convention": "per-symbol isolated capital (same for baseline and variants)",
+        }
+
+    tags = [tag_for(p) for p in SMA_REBALANCE_GRID]
+    return tags, run_one, cfg
+
+
 FAMILIES = {
     "flush_fade": flush_fade_family,
     "vwap_thresholds": vwap_thresholds_family,
@@ -1654,6 +1865,7 @@ FAMILIES = {
     "vwap_exit_econ": vwap_exit_econ_family,
     "vwap_exhaustion": vwap_exhaustion_family,
     "vwap_deceleration": vwap_deceleration_family,
+    "sma_rebalance": sma_rebalance_family,
 }
 
 
@@ -1710,6 +1922,8 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
         grid_params = [VWAP_EXHAUSTION_GRID[i] for i in sel]
     elif family == "vwap_deceleration":
         grid_params = [VWAP_DECELERATION_GRID[i] for i in sel]
+    elif family == "sma_rebalance":
+        grid_params = [SMA_REBALANCE_GRID[i] for i in sel]
     else:  # generic families: params parallel to tags via sel
         grid_params = list(sel)
     windows = split_windows(start, end, split_days)
