@@ -590,6 +590,22 @@ pointers.
 | `testnet-e2e` | Live suite: credentials, env vars, kill-switch warning |
 | `dashboard-dev` | Flask/Socket.IO conventions, bindSocketHandlers closure gotcha, authFetch, TTL cache |
 
+**Vendored external skills** (installed via `npx skills add`, committed so every
+agent/machine sees them; update with the same command):
+
+| Skill | Source | Purpose |
+|---|---|---|
+| `systematic-debugging` | `obra/superpowers` | Reproduce → trace → isolate root cause before fixing |
+| `test-driven-development` | `obra/superpowers` | Failing test first, then implementation |
+| `verification-before-completion` | `obra/superpowers` | Evidence before success claims |
+| `writing-plans` / `executing-plans` | `obra/superpowers` | Multi-step implementation plans with checkpoints |
+| `writing-skills` | `obra/superpowers` | Authoring/testing new skills |
+| `webapp-testing` | `anthropics/skills` | Playwright-based UI verification (dashboard) |
+
+Install/refresh: `npx skills add <owner/repo> --skill <name> -y` (lands in
+`.agents/skills/`; the installer auto-creates local `.claude/skills/`
+junctions — gitignored, machine-local).
+
 ---
 
 *Last updated: 2026-08-10 (v3.1.48 public alignment — version, README roster, GitHub release).*
