@@ -154,7 +154,7 @@ def _forward_gates(now_ms: int) -> List[str]:
             f"- liq feed (flush recheck, needs 30d): {span:.1f}d collected"
             + (f" — {rem:.0f}d remaining" if rem else " — READY"))
 
-    # L2 snapshots — OIR re-gate needs ~60d continuous
+    # L2 snapshots — OIR re-gate needs K=4 x 30d windows ≈ 120d continuous
     span, n = _span_days(
         _research_db_path(),
         "SELECT timestamp_ms FROM l2_snapshots",
@@ -162,9 +162,9 @@ def _forward_gates(now_ms: int) -> List[str]:
     if span is None:
         gates.append("- l2_snapshots: no data")
     else:
-        rem = max(0.0, 60.0 - span)
+        rem = max(0.0, 120.0 - span)
         gates.append(
-            f"- l2_snapshots (OIR re-gate, needs ~60d): {span:.1f}d"
+            f"- l2_snapshots (OIR re-gate, needs ~120d for K=4): {span:.1f}d"
             + (f" — {rem:.0f}d remaining" if rem else " — READY"))
 
     # DVOL daily — Night 3 reopens when coverage spans ~115d (K=4)
