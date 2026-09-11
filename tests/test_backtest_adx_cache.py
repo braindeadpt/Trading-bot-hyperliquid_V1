@@ -74,6 +74,25 @@ def test_adx_for_below_min_history_returns_none():
     assert eng._adx_for("BTC", short) is None
 
 
+def test_ind_candle_converted_once_per_timestamp():
+    """5m/15m/1h candle objects are rebuilt once per close, not per event."""
+    from types import SimpleNamespace
+    eng = object.__new__(BacktestEngine)
+    data: dict = {}
+    db_candle = SimpleNamespace(
+        open=1.0, high=2.0, low=0.5, close=1.5, volume=10.0,
+        timestamp_ms=1234, oi_total=None, buy_volume=None,
+        sell_volume=None, trade_count=0,
+    )
+    first = eng._ind_candle(data, "15m", db_candle)
+    second = eng._ind_candle(data, "15m", db_candle)
+    assert first is second  # same object — no reconstruction
+    db_candle2 = SimpleNamespace(**{**vars(db_candle), "timestamp_ms": 5678})
+    third = eng._ind_candle(data, "15m", db_candle2)
+    assert third is not first
+    assert third.timestamp_ms == 5678
+
+
 def test_adx_cache_matches_batch_value(monkeypatch):
     """Cache returns exactly what a fresh batch call would return."""
     import math

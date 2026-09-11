@@ -624,7 +624,10 @@ class Database:
             rows = cur.fetchall()
         # Reverse to restore ASC order (chronological)
         rows = list(reversed(rows))
-        return [self._row_to_candle(row) for row in rows]
+        # Column set is identical for every row — compute once. Calling
+        # row.keys() per row was ~1.1M calls on a 14d replay profile.
+        keys = rows[0].keys() if rows else ()
+        return [self._row_to_candle(row, keys) for row in rows]
 
     def count_candles(self, symbol: str, timeframe: str) -> int:
         """Return number of stored candles for a symbol/timeframe."""
@@ -659,7 +662,12 @@ class Database:
         )
 
     @staticmethod
-    def _row_to_candle(row: sqlite3.Row) -> Candle:
+    def _row_to_candle(
+        row: sqlite3.Row,
+        keys: Optional[Any] = None,
+    ) -> Candle:
+        if keys is None:
+            keys = row.keys()
         return Candle(
             symbol=row["symbol"],
             timestamp_ms=row["timestamp_ms"],
@@ -671,9 +679,9 @@ class Database:
             funding_rate=row["funding_rate"],
             oi_total=row["oi_total"],
             oi_delta=row["oi_delta"],
-            buy_volume=row["buy_volume"] if "buy_volume" in row.keys() and row["buy_volume"] is not None else None,
-            sell_volume=row["sell_volume"] if "sell_volume" in row.keys() and row["sell_volume"] is not None else None,
-            trade_count=row["trade_count"] if "trade_count" in row.keys() else 0,
+            buy_volume=row["buy_volume"] if "buy_volume" in keys and row["buy_volume"] is not None else None,
+            sell_volume=row["sell_volume"] if "sell_volume" in keys and row["sell_volume"] is not None else None,
+            trade_count=row["trade_count"] if "trade_count" in keys else 0,
         )
 
     def _resolve_table(self, timeframe: str) -> str:

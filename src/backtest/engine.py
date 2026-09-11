@@ -817,6 +817,21 @@ class BacktestEngine:
             return None
         return candles[idx]
 
+    def _ind_candle(
+        self, data: Dict[str, Any], key: str, c: Optional[DBCandle]
+    ) -> Optional[Candle]:
+        """Convert DBCandle→Candle once per candle, cached in the per-symbol
+        data dict by timestamp. 5m/15m/1h candles change only on their own
+        close, so per-1m-event conversion was ~450k wasted constructions on
+        a 14d replay."""
+        if c is None:
+            return None
+        k = "_ind_" + key
+        if data.get(k + "_ts") != c.timestamp_ms:
+            data[k] = self._to_indicator_candle(c)
+            data[k + "_ts"] = c.timestamp_ms
+        return data[k]
+
     @staticmethod
     def _to_indicator_candle(c: Optional[DBCandle]) -> Optional[Candle]:
         if c is None:
@@ -928,9 +943,9 @@ class BacktestEngine:
         )
 
         if c15 is not None:
-            ind15 = self._to_indicator_candle(c15)
             hist: List[Candle] = data["hist_15m"]
-            if not hist or hist[-1].timestamp_ms != ind15.timestamp_ms:
+            if not hist or hist[-1].timestamp_ms != c15.timestamp_ms:
+                ind15 = self._ind_candle(data, "15m", c15)
                 hist.append(ind15)
                 if len(hist) > 50:
                     data["hist_15m"] = hist[-50:]
@@ -993,9 +1008,9 @@ class BacktestEngine:
             price=c1m.close,
             timestamp_ms=ts,
             candle_1m=self._to_indicator_candle(c1m),
-            candle_5m=self._to_indicator_candle(c5),
-            candle_15m=self._to_indicator_candle(c15),
-            candle_1h=self._to_indicator_candle(c1h),
+            candle_5m=self._ind_candle(data, "5m", c5),
+            candle_15m=self._ind_candle(data, "15m", c15),
+            candle_1h=self._ind_candle(data, "1h", c1h),
             funding=funding_current,
             predicted_funding=funding_predicted,
             oi_total=oi_row[1] if oi_row else None,
