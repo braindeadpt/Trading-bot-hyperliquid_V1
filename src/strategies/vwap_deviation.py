@@ -49,6 +49,11 @@ class _VWAPDevState:
     # v3.1.26: SL-to-BE after 1R tracking
     last_entry_time_ms: int = 0
     r1_hit: bool = False
+    # VWAP stats memo: (len, last_ts) key -> (vwap, stddev). candles_1h
+    # changes only on hourly close; recomputing per 1m event was ~6% of
+    # backtest wall (87k calls over a 14d replay).
+    vwap_key: Optional[Tuple[int, int]] = None
+    vwap_stats: Tuple[Optional[float], Optional[float]] = (None, None)
 
 
 class VWAPDeviation(Strategy):
@@ -124,6 +129,26 @@ class VWAPDeviation(Strategy):
     def name(self) -> str:
         return "VWAPDeviation"
 
+    def _vwap_stats(
+        self,
+        state: _VWAPDevState,
+        candles_1h: List[Candle],
+        price: float,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """(vwap, stddev) for the 1h candle set — memoized on candle content.
+
+        The z-score also needs the live price, so it is NOT cached here;
+        callers derive it per event as (price - vwap) / stddev.
+        """
+        key = (len(candles_1h), candles_1h[-1].timestamp_ms)
+        if state.vwap_key != key:
+            vwap, stddev, _ = calculate_vwap_zscore(
+                candles_1h, price, lookback=24
+            )
+            state.vwap_key = key
+            state.vwap_stats = (vwap, stddev)
+        return state.vwap_stats
+
     # ------------------------------------------------------------------
     # Entry logic
     # ------------------------------------------------------------------
@@ -156,11 +181,11 @@ class VWAPDeviation(Strategy):
             return None  # Need 24h of 1h data
 
         # --- Calculate VWAP + Z-score ---
-        vwap, stddev, zscore = calculate_vwap_zscore(
-            candles_1h, event.price, lookback=24,
-        )
-        if vwap is None or zscore is None:
+        # Stats cached per candle set (hourly close); z derived per event.
+        vwap, stddev = self._vwap_stats(state, candles_1h, event.price)
+        if vwap is None or stddev is None or stddev == 0.0:
             return None
+        zscore = (event.price - vwap) / stddev
 
         # --- v3.1.26: dynamic Z threshold by ATR regime ---
         # Low-vol regime → 2.5σ is a small absolute move (more fakes).
