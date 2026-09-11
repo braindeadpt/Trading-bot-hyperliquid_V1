@@ -74,16 +74,17 @@ from src.exchanges.hyperliquid_live import (
     HyperliquidLiveClient,
     resolve_private_key,
 )
+from src.utils.helpers import safe_float
 
 # ── Suite-wide constants ────────────────────────────────────────────────
 TESTNET_SYMBOL = os.environ.get("HYPERLIQUID_TESTNET_SYMBOL", "BTC")
 # Deliberately tiny — testnet funds are fake but we still don't want to
 # blow through margin/liquidity limits chasing a partial fill.
 TESTNET_SIZE = float(os.environ.get("HYPERLIQUID_TESTNET_SIZE", "0.001"))
-# Used for the "large size" partial-fill attempt only.
-TESTNET_PARTIAL_SIZE = float(
-    os.environ.get("HYPERLIQUID_TESTNET_PARTIAL_SIZE", "5.0")
-)
+# Used for the "large size" partial-fill attempt only. Optional env override;
+# when unset the test sizes the attempt from the account's real equity
+# (~1.5x notional) so it fits testnet margin on any balance.
+TESTNET_PARTIAL_SIZE = os.environ.get("HYPERLIQUID_TESTNET_PARTIAL_SIZE")
 FAR_OFFSET_PCT = 0.30  # 30% away from mid — safe "won't fill" limit price offset
 
 
@@ -285,6 +286,19 @@ async def test_partial_fill_tracked_correctly(live_client: HyperliquidLiveClient
     any resulting position so the account ends flat.
     """
     mid = await _mid_price(live_client, TESTNET_SYMBOL)
+    # Account-aware sizing: a fixed default blew past a 1000-USDC testnet
+    # account's margin ("Insufficient margin to place order"). Size the
+    # attempt at ~1.5x account notional — oversized vs testnet book depth,
+    # within margin on any balance. Env var overrides.
+    if TESTNET_PARTIAL_SIZE is not None:
+        partial_size = float(TESTNET_PARTIAL_SIZE)
+    else:
+        state = await live_client.get_user_state()
+        account_value = safe_float(
+            (state.get("marginSummary") or {}).get("accountValue")
+        ) or 1000.0
+        partial_size = round(account_value * 1.5 / mid, 3)
+
     # Marketable limit: cross the book aggressively so *some* fill is likely,
     # while still being a "limit" order so a remainder can rest if liquidity
     # runs out (this is the realistic proxy for a partial fill on testnet).
@@ -295,7 +309,7 @@ async def test_partial_fill_tracked_correctly(live_client: HyperliquidLiveClient
         resp = await live_client.place_entry(
             TESTNET_SYMBOL,
             "long",
-            TESTNET_PARTIAL_SIZE,
+            partial_size,
             order_type="limit_maker",
             limit_price=aggressive_price,
             post_only=False,  # Gtc, not Alo — must be allowed to take liquidity
@@ -317,7 +331,7 @@ async def test_partial_fill_tracked_correctly(live_client: HyperliquidLiveClient
         if resting and filled_positions:
             # Partial: some filled (position exists), remainder still resting.
             filled_size = filled_positions[0]["size"]
-            assert 0 < filled_size < TESTNET_PARTIAL_SIZE, (
+            assert 0 < filled_size < partial_size, (
                 "Expected a partial position size strictly between 0 and "
                 f"the requested size, got {filled_size}"
             )

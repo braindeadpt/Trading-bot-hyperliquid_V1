@@ -81,13 +81,26 @@ deeper dive belongs in the backlog, not the queue.
   windows (K=4 floor met by construction).
 - **Budget:** 3 × 4 = **12 runs OK**.
 
-## Q6 — HYPE-only VWAP refinement (§1.3 phase 2) — (READY, wired as `hype_vwap_refine`)
+## Q6 — HYPE-only VWAP refinement (§1.3 phase 2) — CLOSED 2026-09-11, all cells DISCARD
+
+**Session A (artifact `20260911_090104_hype_vwap_refine.json`):**
+z=3.5 → net −406.32 n=370 PF 0.827, improved 4/6 → DISCARD (PF<1).
+z=4.0 → net −432.31 n=348 PF 0.804, improved 4/6 → DISCARD (PF<1).
+**Session B (artifact `20260911_133915_hype_vwap_refine.json`):**
+volume_surge=2.0 → net −730.29 n=418 PF 0.753, improved 0/6 → DISCARD.
+
+Conclusion: two variants did improve 4/6 windows vs baseline (−563.52) but
+every cell still loses money net of tier-0 fees — less-bad is not an edge,
+and no remaining preregistered cell exists. Per the kill rule's intent,
+§1.3 thin-book refinement produces no exploitable edge in this regime;
+no further threshold iteration on this family (fixed steps were
+preregistered precisely to prevent grid-shopping).
 
 Grid 4 cells preregistered — baseline 2.5σ / `z_threshold: 3.5` /
 `z_threshold: 4.0` / `volume_surge: 2.0` (z stays 2.5) — HYPE-only
 overrides, BTC/ETH untouched (control in every cell).
 
-- **Harness:** `python scripts/research/overnight_runner.py --family hype_vwap_refine --start 2026-03-13 --end 2026-09-08 --symbols HYPE,BTC,ETH --cells 0,1,2`
+- **Harness (session B — repointed 2026-09-11 after A landed):** `python scripts/research/overnight_runner.py --family hype_vwap_refine --start 2026-03-13 --end 2026-09-08 --symbols HYPE,BTC,ETH --cells 0,3`
 - **Window set: 2026-03-13..2026-09-08 split 30d → 6 non-overlapping windows.** W1–W4 read the E: research DB (HYPE 15m+1h from 2026-01-11, ~100% coverage in every planned window; that DB ends exactly 2026-07-10, so W4 seals the seam); W5–W6 read the live `bot.db` — one source per window, preregistered, never mixed mid-window. K=6 makes the sign-flip gate passable (floor p=1/64=0.0156) and aggregate n≥30 clears at every tested parameter (projected n≈45–100).
 - **Budget: two preregistered sessions** — A `--cells 0,1,2` (18 runs) = the harness line above; after A lands, repoint the line to B `--cells 0,3` (12 runs); both ≤20, no third session.
 - **Kill rule:** no variant improves ≥4/6 windows → §1.3 thin-book hypothesis is dead for this regime, HYPE moves to exclude-candidates, no further threshold iteration (fixed +1σ/+2σ steps and single vs2.0 value prevent grid-shopping).

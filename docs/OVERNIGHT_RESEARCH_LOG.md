@@ -92,13 +92,23 @@ noise-model commit would add a `noise gate:` line here; this run predates
 it, and its per-trade PnL is not stored in the artifact, so none is shown.)
 
 ---
-## Morning report — 2026-09-11 09:01 UTC — family `hype_vwap_refine`
+## Morning report — 2026-09-11 13:39 UTC — family `hype_vwap_refine`
 
 - span: 2026-03-13..2026-09-08 (6 non-overlapping windows of 30d) · symbols: HYPE, BTC, ETH
-- verdicts: 0 KEEP · 0 INCONCLUSIVE · 2 DISCARD
-- artifact: `data\research\overnight_experiments\20260911_090104_hype_vwap_refine.json`
+- verdicts: 0 KEEP · 0 INCONCLUSIVE · 1 DISCARD
+- artifact: `data\research\overnight_experiments\20260911_133915_hype_vwap_refine.json`
 
 ---
+### 2026-09-11 13:39 UTC — hype_vwap_refine/HYPE volume_surge=2.0 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-03-13..2026-09-08 (6 windows of 30d, non-overlapping)
+- baseline (baseline (production 2.5σ)): net=-563.52 n=454 PF=0.821
+- variant: net=-730.29 n=418 PF=0.753
+- per-window delta: 2026-03(-80.29), 2026-04(-13.19), 2026-05(-2.46), 2026-06(-43.64), 2026-07(-26.31), 2026-08(-0.88)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+0.00 (n=163, p=1.0, within sign-flip null); ETH delta=+0.00 (n=156, p=1.0, within sign-flip null); HYPE delta=-166.73 (n=99, p=1.0, within sign-flip null)
+- reasons: windows improved 0/6 (majority=no); aggregate n=418 (gate >=30); aggregate PF=0.753 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
 ### 2026-09-11 09:01 UTC — hype_vwap_refine/HYPE z_threshold=3.5 — DISCARD
 - hypothesis: parameter variant
 - windows: 2026-03-13..2026-09-08 (6 windows of 30d, non-overlapping)

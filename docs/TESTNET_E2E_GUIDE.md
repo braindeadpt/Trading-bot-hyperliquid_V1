@@ -32,8 +32,9 @@ paths with a fully mocked SDK and never touch the network.
 - Optionally override the market/sizes used (defaults are conservative):
   - `HYPERLIQUID_TESTNET_SYMBOL` (default `BTC`)
   - `HYPERLIQUID_TESTNET_SIZE` (default `0.001`)
-  - `HYPERLIQUID_TESTNET_PARTIAL_SIZE` (default `5.0`, used only by the
-    partial-fill scenario to increase the odds of crossing the book)
+  - `HYPERLIQUID_TESTNET_PARTIAL_SIZE` (optional override; when unset the
+    partial-fill scenario sizes the attempt from the account's real equity —
+    ~1.5x account notional — so it fits margin on any testnet balance)
 
 The suite reads credentials the same way production code does
 (`resolve_private_key()` — env var first, then the encrypted vault). It does

@@ -97,3 +97,6 @@ scripts/vb_pnl_*.py
 
 # Machine-specific inventory (local operations journal)
 docs/DISK_AND_CODE_INVENTORY.md
+
+# playwright-mcp scratch artifacts
+.playwright-mcp/

@@ -50,6 +50,12 @@ never disagree about what counts as a matched IV decision.
 # One-shot check of ALL gates (exits after; no-op until a trigger is met)
 python scripts/research/research_watchdog_supervisor.py --once
 
+# Windows scheduled task (registered 2026-09-11, every 6h):
+watchdog_supervisor.bat
+#   schtasks /Create /SC HOURLY /MO 6 /TN "Hyperliquid Research Watchdogs" \
+#     /TR "<repo>\watchdog_supervisor.bat" /F
+# Log: logs\watchdog_supervisor_cron.log
+
 # Daemon mode (check all gates every 6h, re-run probes on triggers, then watch-only)
 nohup python -u scripts/research/research_watchdog_supervisor.py > logs/research_watchdogs.out 2>&1 &
 
