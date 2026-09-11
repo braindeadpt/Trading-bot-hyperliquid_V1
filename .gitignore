@@ -48,7 +48,9 @@ env/
 # IDE / local agent tooling
 .vscode/
 .idea/
-.claude/
+.claude/*
+# skill pointers to .agents/skills/ are committed; settings.local.json stays ignored
+!.claude/skills/
 .freebuff/
 *.swp
 *.swo

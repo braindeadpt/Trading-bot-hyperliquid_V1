@@ -571,4 +571,25 @@ Hooks: `src/research/phase08_preregister.py`, `phase10_preregister.py`.
 
 ---
 
+## 13. Agent skills (`.agents/skills/`)
+
+Project skills live in **`.agents/skills/<name>/SKILL.md`** — the
+cross-platform standard location (readable by Devin CLI, and any
+`.agents`-compatible agent). Thin forwarders in `.claude/skills/` point Claude
+Code at the same canonical files; `CLAUDE.md` at the root includes this file
+(`@AGENTS.md`). Edit skills only in `.agents/skills/` — never fork the
+pointers.
+
+| Skill | Purpose |
+|---|---|
+| `pre-push` | Full gate: preflight → security audit → config-hash → CI battery |
+| `research-experiment` | `research_program.md` invariants, window discipline, verdict vocabulary, ledger format |
+| `data-provenance` | Provider tiers — which candle source is OOS-grade vs research-only |
+| `promotion-gate` | Checklist before any promotion/demotion/registry change |
+| `bot-ops` | Start/stop/status, lock, paper reset, watchdogs, nightly runner, dashboard health |
+| `testnet-e2e` | Live suite: credentials, env vars, kill-switch warning |
+| `dashboard-dev` | Flask/Socket.IO conventions, bindSocketHandlers closure gotcha, authFetch, TTL cache |
+
+---
+
 *Last updated: 2026-08-10 (v3.1.48 public alignment — version, README roster, GitHub release).*
