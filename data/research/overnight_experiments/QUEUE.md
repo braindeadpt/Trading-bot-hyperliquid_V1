@@ -219,6 +219,42 @@ An entry becomes READY only after the family is wired and reviewed.
   into separation, not deviation fade). No priors claimed.
 
 
+## Q10 - toptrader_fade (contrarian port of TopTraderFlow) - WIRED 2026-09-11, BLOCKED (bias-feed coverage)
+
+- **Status:** family wired (`toptrader_fade`, 5 cells) + bespoke replay
+  `scripts/research/toptrader_fade_replay.py` (entry at first 1m open after
+  the sample - no lookahead; intrabar SL-before-TP; hourly funding charged
+  from live bot.db; tier-0 taker both sides; $1000 fixed notional).
+- **Why BLOCKED:** `top_trader_bias_samples` looked continuous (08-11..09-11,
+  42k rows) but has a **380h hole 08-15..08-31** plus a 71h hole
+  09-01..09-04. A 4x7d preregistered split over 08-12..09-08 yields W2 with
+  ZERO samples. Effective continuous coverage is ~2026-09-04 onward
+  (~1 week). K=4 with 7d windows needs 28 clean days - **reopen
+  ~2026-10-05**, later if the feed gaps again (collector runs inside the
+  live pipeline; bot must stay up - same prerequisite as L2/OIR gating).
+- **Pilot disclosure (recorded, not evidence):** a baseline smoke run over
+  the full hole-y span printed net +368 across 4 symbols (HYPE +248,
+  ETH +201, PF>1). The subsequent PREREGISTERED 4x7d sweep over the same
+  span gave baseline net **-398.06, PF 0.79** (windows +232 / 0 / -1040 /
+  +409) - the pilot sign does not survive window discipline, and W2 was
+  empty anyway. Sweep artifact `20260911_183427_toptrader_fade.json`:
+  thr=0.7 DISCARD, thr=0.85 DISCARD, minW3 DISCARD (filters nothing - avg
+  wallets 3.3-4.6 already >=3), sl3/tp1.5 INCONCLUSIVE (PF 1.04). **These
+  results are structurally invalid as evidence** - the gap makes windows
+  non-comparable. Grid frozen; the reopen session reruns all 5 cells on
+  clean data.
+- **Hypothesis (fixed):** extreme aggregate top-wallet bias reverts -
+  fading |net_bias| >= threshold is net-positive under tier-0 costs +
+  real funding. Shadow PF 0.002 is the prior, not proof.
+- **Harness:** `python scripts/research/overnight_runner.py --family
+  toptrader_fade --start <last-28-clean-days> --end <today> --symbols
+  BTC,ETH,SOL,HYPE --split-days 7`
+- **Grid (5 cells = 20 runs, at cap):** thr 0.55 / 0.70 / 0.85 /
+  0.55+min_wallets>=3 / 0.55 with sl 3.0%/tp 1.5%.
+- **Evidence bar:** standard KEEP rules + Bonferroni alpha_eff=0.025;
+  aggregate n>=30; funding coverage reported per cell.
+
+
 ## NOT testable tonight — gate status table
 
 | Item | Gate to reopen | Status 2026-09-09 |
@@ -228,6 +264,7 @@ An entry becomes READY only after the family is wired and reviewed.
 | FundingArbitrage | ≥30 pair-scan opportunities / 90d | EMIT bursts rare; frequency insufficient |
 | Liq-map veto/fuel (§1.4, §1.6) | Phase 3: dozens of zone events + forward approaches | needs L2 zone data; books stale — requires bot running |
 | ret_lag fade (reversion) | live maker fills beat BE 4.21 bps | maker harness ready (`maker_fill_adverse_selection_l2.py`) but L2 data stale |
+| toptrader_fade (Q10) | 28d continuous `top_trader_bias_samples` | **NOT MET** — 380h hole 08-15→08-31 + 71h 09-01→09-04; clean coverage from ~09-04 → reopen ~2026-10-05 |
 | CVD / feature screens | — | strategy CLOSED (FDR verdicts); feature pipeline only, never a strategy loop |
 | ORB warm-up fix | — | strategy-code change → NEEDS-CODE, human decision ("when ORB work resumes") |
 | MM feasibility | — | CLOSED definitive (verdict C ×2) |

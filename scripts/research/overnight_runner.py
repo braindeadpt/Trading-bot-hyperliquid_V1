@@ -1857,6 +1857,97 @@ def sma_rebalance_family() -> Tuple[List[str], Callable, Dict[str, Any]]:
     return tags, run_one, cfg
 
 
+# ---------------------------------------------------------------------------
+# toptrader_fade — contrarian port of TopTraderFlow (backlog §inversion).
+# Fades extreme top-wallet net_bias. Replay: scripts/research/
+# toptrader_fade_replay.py — entry at first 1m open after the sample,
+# intrabar SL-before-TP, hourly funding charged from live bot.db, tier-0
+# taker fees both sides. Data: research DB bias samples + candles_1m
+# (2026-08-11→), funding live bot.db.
+# ---------------------------------------------------------------------------
+
+TOPTRADER_FADE_GRID: List[Dict[str, Any]] = [
+    # baseline — production bias_threshold mirrored to the fade side
+    {"bias_threshold": 0.55},
+    # stronger consensus only
+    {"bias_threshold": 0.70},
+    # extreme consensus only (HYPE avg|bias| ~0.85 makes this thin but real)
+    {"bias_threshold": 0.85},
+    # thin-wallet filter: require >=3 tracked wallets (backlog caveat)
+    {"bias_threshold": 0.55, "min_wallets": 3},
+    # asymmetric bracket — reversion catches (wider SL, tighter TP)
+    {"bias_threshold": 0.55, "sl_pct": 0.03, "tp_pct": 0.015},
+]
+
+
+def toptrader_fade_family() -> Tuple[List[str], Callable, Dict[str, Any]]:
+    """Fade top-trader extreme bias — bespoke replay (not light_replay).
+
+    Returns (tags, run_one, cfg). No db_specs: sources are fixed
+    (bias+1m candles from research DB, funding from live bot.db).
+    """
+    from scripts.research.toptrader_fade_replay import (  # noqa: E402
+        LIVE_DB, RESEARCH_DB, load_1m, load_bias, load_funding, replay_fade,
+    )
+    from src.utils.config import load_config  # noqa: E402
+    cfg = load_config(str(ROOT / "config" / "settings.yaml"))
+
+    def tag_for(p: Dict[str, Any]) -> str:
+        tag = f"thr={p['bias_threshold']}"
+        if p.get("min_wallets"):
+            tag += f" minW{p['min_wallets']}"
+        if p.get("sl_pct") or p.get("tp_pct"):
+            tag += (f" sl{float(p.get('sl_pct', 0.02)) * 100:.1f}%"
+                    f"/tp{float(p.get('tp_pct', 0.02)) * 100:.1f}%")
+        return tag
+
+    def run_one(start: str, end: str, symbols: List[str],
+                params: Dict[str, Any]) -> Dict[str, Any]:
+        s_ms, e_ms = _window_ms(start, end)
+        try:
+            trades_all: List[Dict[str, Any]] = []
+            per_symbol: Dict[str, Dict[str, Any]] = {}
+            for sym in symbols:
+                bias = load_bias(RESEARCH_DB, sym, s_ms, e_ms)
+                # extend candle span past the window so late entries settle
+                c_ts, c_ohlc = load_1m(
+                    RESEARCH_DB, sym, s_ms, e_ms + 48 * 3_600_000)
+                funding = load_funding(LIVE_DB, sym)
+                trs = replay_fade(bias, c_ts, c_ohlc, funding, sym, params)
+                for t in trs:
+                    t["trade_symbol"] = sym
+                trades_all.extend(trs)
+                per_symbol[sym] = {
+                    "n_trades": len(trs),
+                    "total_pnl_usd": round(
+                        sum(float(t["pnl_usd"]) for t in trs), 2),
+                    "bias_samples": len(bias),
+                }
+        except Exception as exc:  # noqa: BLE001 — a failed cell must not kill the sweep
+            return {"error": f"{type(exc).__name__}: {exc}",
+                    "params": dict(params)}
+
+        pnls = [float(t["pnl_usd"]) for t in trades_all]
+        return {
+            "params": dict(params),
+            "n_trades": len(pnls),
+            "total_pnl_usd": round(sum(pnls), 2),
+            "gross_win_usd": round(sum(p for p in pnls if p > 0), 2),
+            "gross_loss_usd": round(abs(sum(p for p in pnls if p < 0)), 2),
+            "trade_pnls": [round(p, 2) for p in pnls],
+            "trade_symbols": [str(t.get("trade_symbol") or "")
+                              for t in trades_all],
+            "trades": trades_all,
+            "per_symbol": per_symbol,
+            "cost_model": {"taker_fee_pct": 0.00045,
+                           "funding": "hourly from live bot.db current",
+                           "sizing": "$1000 notional per trade fixed"},
+        }
+
+    tags = [tag_for(p) for p in TOPTRADER_FADE_GRID]
+    return tags, run_one, cfg
+
+
 FAMILIES = {
     "flush_fade": flush_fade_family,
     "vwap_thresholds": vwap_thresholds_family,
@@ -1866,6 +1957,7 @@ FAMILIES = {
     "vwap_exhaustion": vwap_exhaustion_family,
     "vwap_deceleration": vwap_deceleration_family,
     "sma_rebalance": sma_rebalance_family,
+    "toptrader_fade": toptrader_fade_family,
 }
 
 
@@ -1924,6 +2016,8 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
         grid_params = [VWAP_DECELERATION_GRID[i] for i in sel]
     elif family == "sma_rebalance":
         grid_params = [SMA_REBALANCE_GRID[i] for i in sel]
+    elif family == "toptrader_fade":
+        grid_params = [TOPTRADER_FADE_GRID[i] for i in sel]
     else:  # generic families: params parallel to tags via sel
         grid_params = list(sel)
     windows = split_windows(start, end, split_days)
