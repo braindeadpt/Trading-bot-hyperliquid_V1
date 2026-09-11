@@ -226,6 +226,9 @@ class BacktestEngine:
         self._pipeline_ctx = PipelineContext()
         self._full_config: Optional[Config] = None
         self._last_candle_close: Dict[str, float] = {}
+        # ADX memoization: hist_15m only changes when a 15m candle closes,
+        # but _build_market_event runs per 1m event. Key: (len, last ts).
+        self._adx_cache: Dict[str, Tuple[Tuple[int, int], Optional[float]]] = {}
         self._excursion_trackers: Dict[int, ExcursionTracker] = {}
         self._next_excursion_id = 1
         self._data_contract: Optional[DataContractResult] = None
@@ -890,6 +893,23 @@ class BacktestEngine:
 
         return max(signals, key=lambda s: s.confidence)
 
+    def _adx_for(self, symbol: str, hist_15m: List[Candle]) -> Optional[float]:
+        """ADX for the 15m history, memoized per symbol.
+
+        hist_15m is append-on-new-15m-close and trimmed from the front, so
+        (len, last timestamp_ms) uniquely identifies its content. Without the
+        cache this was ~40% of backtest wall time (per-1m-event recompute).
+        """
+        if len(hist_15m) < 29:  # 2*period+1 for period=14
+            return None
+        key = (len(hist_15m), hist_15m[-1].timestamp_ms)
+        cached = self._adx_cache.get(symbol)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        adx = calculate_adx(hist_15m, 14)
+        self._adx_cache[symbol] = (key, adx)
+        return adx
+
     def _build_market_event(
         self,
         symbol: str,
@@ -933,10 +953,7 @@ class BacktestEngine:
             data["oi_ts"], ts, keys=data.get("oi_keys"),
         )
 
-        adx = None
-        hist_15m = data.get("hist_15m", [])
-        if len(hist_15m) >= 29:
-            adx = calculate_adx(hist_15m, 14)
+        adx = self._adx_for(symbol, data.get("hist_15m", []))
 
         spread_pct = None
         oir = None
