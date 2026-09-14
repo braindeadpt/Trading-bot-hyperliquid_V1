@@ -92,13 +92,313 @@ noise-model commit would add a `noise gate:` line here; this run predates
 it, and its per-trade PnL is not stored in the artifact, so none is shown.)
 
 ---
-## Morning report — 2026-09-11 16:20 UTC — family `sma_rebalance`
+## Morning report — 2026-09-14 22:38 UTC — family `cvd_vwap`
 
-- span: 2026-05-18..2026-09-08 (4 non-overlapping windows of 30d) · symbols: BTC, ETH
+- span: 2026-05-18..2026-09-08 (4 non-overlapping windows of 30d) · symbols: BTC, ETH, SOL, HYPE
 - verdicts: 0 KEEP · 0 INCONCLUSIVE · 4 DISCARD
-- artifact: `data\research\overnight_experiments\20260911_162054_sma_rebalance.json`
+- artifact: `data\research\overnight_experiments\20260914_223820_cvd_vwap.json`
 
 ---
+### 2026-09-14 22:38 UTC — cvd_vwap/roc=4.0% — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (roc=8.0%): net=492.43 n=2 PF=inf
+- variant: net=141.84 n=19 PF=1.185
+- per-window delta: 2026-05(-165.3), 2026-06(-538.43), 2026-07(+n/e), 2026-08(+353.14)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+86.22 (n=4, p=0.5, within sign-flip null); ETH delta=-251.32 (n=4, p=1.0, within sign-flip null); HYPE delta=-192.34 (n=6, p=0.75, within sign-flip null); SOL delta=+6.86 (n=5, p=0.5, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 1/3 (majority=no); aggregate n=19 (gate >=30); aggregate PF=1.185 (gate >1.0); catastrophic window: worst variant -538.43 vs baseline worst -0.00 (>2.0x)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-14 22:38 UTC — cvd_vwap/roc=2.5% — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (roc=8.0%): net=492.43 n=2 PF=inf
+- variant: net=672.41 n=33 PF=1.758
+- per-window delta: 2026-05(+200.6), 2026-06(-419.39), 2026-07(-15.66), 2026-08(+414.43)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+24.63 (n=5, p=0.5, within sign-flip null); ETH delta=+57.87 (n=8, p=0.3125, within sign-flip null); HYPE delta=-69.13 (n=10, p=0.75, within sign-flip null); SOL delta=+166.57 (n=10, p=0.375, within sign-flip null)
+- reasons: windows improved 2/4 (majority=no); aggregate n=33 (gate >=30); aggregate PF=1.758 (gate >1.0); catastrophic window: worst variant -419.39 vs baseline worst -0.00 (>2.0x)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-14 22:38 UTC — cvd_vwap/roc=4.0% noCVD — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (roc=8.0%): net=492.43 n=2 PF=inf
+- variant: net=100.46 n=20 PF=1.114
+- per-window delta: 2026-05(-165.3), 2026-06(-369.66), 2026-07(-98.03), 2026-08(+241.02)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+86.29 (n=4, p=0.5, within sign-flip null); ETH delta=-173.45 (n=4, p=1.0, within sign-flip null); HYPE delta=-196.15 (n=7, p=0.875, within sign-flip null); SOL delta=-108.66 (n=5, p=0.875, within sign-flip null)
+- reasons: windows improved 1/4 (majority=no); aggregate n=20 (gate >=30); aggregate PF=1.114 (gate >1.0); catastrophic window: worst variant -369.66 vs baseline worst -0.00 (>2.0x)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-14 22:38 UTC — cvd_vwap/roc=4.0% noAVWAP — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (roc=8.0%): net=492.43 n=2 PF=inf
+- variant: net=157.28 n=19 PF=1.206
+- per-window delta: 2026-05(-165.3), 2026-06(-538.43), 2026-07(+n/e), 2026-08(+368.58)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+86.22 (n=4, p=0.5, within sign-flip null); ETH delta=-251.32 (n=4, p=1.0, within sign-flip null); HYPE delta=-176.90 (n=6, p=0.75, within sign-flip null); SOL delta=+6.86 (n=5, p=0.5, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 1/3 (majority=no); aggregate n=19 (gate >=30); aggregate PF=1.206 (gate >1.0); catastrophic window: worst variant -538.43 vs baseline worst -0.00 (>2.0x)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-13 08:08 UTC — iv_thresholds/high_iv>63.3 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-13 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-145.03 n=187 PF=0.606
+- variant: net=-24.01 n=38 PF=0.62
+- per-window delta: 2026-06(+11.47), 2026-07(+95.33), 2026-08(+13.31), 2026-09(+0.91)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+39.66 (n=12, p=0.125, within sign-flip null); ETH delta=+33.38 (n=13, p=0.25, within sign-flip null); HYPE delta=+43.86 (n=6, p=0.1875, within sign-flip null); SOL delta=+4.13 (n=7, p=0.4375, within sign-flip null)
+- reasons: windows improved 4/4 (majority=yes); aggregate n=38 (gate >=30); aggregate PF=0.62 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-13 08:08 UTC — iv_thresholds/high_iv>66.7 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-13 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-145.03 n=187 PF=0.606
+- variant: net=-14.07 n=34 PF=0.736
+- per-window delta: 2026-06(+11.47), 2026-07(+102.21), 2026-08(+16.37), 2026-09(+0.91)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+42.72 (n=11, p=0.125, within sign-flip null); ETH delta=+40.25 (n=10, p=0.25, within sign-flip null); HYPE delta=+43.86 (n=6, p=0.1875, within sign-flip null); SOL delta=+4.13 (n=7, p=0.4375, within sign-flip null)
+- reasons: windows improved 4/4 (majority=yes); aggregate n=34 (gate >=30); aggregate PF=0.736 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-13 07:09 UTC — iv_thresholds/high_iv>63.3 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-13 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-147.51 n=186 PF=0.599
+- variant: net=-24.01 n=38 PF=0.62
+- per-window delta: 2026-06(+11.47), 2026-07(+95.33), 2026-08(+13.31), 2026-09(+3.39)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+39.66 (n=12, p=0.125, within sign-flip null); ETH delta=+33.38 (n=13, p=0.25, within sign-flip null); HYPE delta=+43.55 (n=6, p=0.1875, within sign-flip null); SOL delta=+6.92 (n=7, p=0.3125, within sign-flip null)
+- reasons: windows improved 4/4 (majority=yes); aggregate n=38 (gate >=30); aggregate PF=0.62 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-13 07:09 UTC — iv_thresholds/high_iv>66.7 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-13 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-147.51 n=186 PF=0.599
+- variant: net=-14.07 n=34 PF=0.736
+- per-window delta: 2026-06(+11.47), 2026-07(+102.21), 2026-08(+16.37), 2026-09(+3.39)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+42.72 (n=11, p=0.125, within sign-flip null); ETH delta=+40.25 (n=10, p=0.25, within sign-flip null); HYPE delta=+43.55 (n=6, p=0.1875, within sign-flip null); SOL delta=+6.92 (n=7, p=0.3125, within sign-flip null)
+- reasons: windows improved 4/4 (majority=yes); aggregate n=34 (gate >=30); aggregate PF=0.736 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-13 06:09 UTC — iv_thresholds/high_iv>63.3 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-13 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-147.48 n=185 PF=0.599
+- variant: net=-24.01 n=38 PF=0.62
+- per-window delta: 2026-06(+11.47), 2026-07(+95.33), 2026-08(+13.31), 2026-09(+3.36)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+39.66 (n=12, p=0.125, within sign-flip null); ETH delta=+33.38 (n=13, p=0.25, within sign-flip null); HYPE delta=+43.55 (n=6, p=0.1875, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: windows improved 4/4 (majority=yes); aggregate n=38 (gate >=30); aggregate PF=0.62 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-13 06:09 UTC — iv_thresholds/high_iv>66.7 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-13 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-147.48 n=185 PF=0.599
+- variant: net=-14.07 n=34 PF=0.736
+- per-window delta: 2026-06(+11.47), 2026-07(+102.21), 2026-08(+16.37), 2026-09(+3.36)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+42.72 (n=11, p=0.125, within sign-flip null); ETH delta=+40.25 (n=10, p=0.25, within sign-flip null); HYPE delta=+43.55 (n=6, p=0.1875, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: windows improved 4/4 (majority=yes); aggregate n=34 (gate >=30); aggregate PF=0.736 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-13 05:09 UTC — iv_thresholds/high_iv>63.3 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-13 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-147.48 n=185 PF=0.599
+- variant: net=-24.01 n=38 PF=0.62
+- per-window delta: 2026-06(+11.47), 2026-07(+95.33), 2026-08(+13.31), 2026-09(+3.36)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+39.66 (n=12, p=0.125, within sign-flip null); ETH delta=+33.38 (n=13, p=0.25, within sign-flip null); HYPE delta=+43.55 (n=6, p=0.1875, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: windows improved 4/4 (majority=yes); aggregate n=38 (gate >=30); aggregate PF=0.62 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-13 05:09 UTC — iv_thresholds/high_iv>66.7 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-13 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-147.48 n=185 PF=0.599
+- variant: net=-14.07 n=34 PF=0.736
+- per-window delta: 2026-06(+11.47), 2026-07(+102.21), 2026-08(+16.37), 2026-09(+3.36)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+42.72 (n=11, p=0.125, within sign-flip null); ETH delta=+40.25 (n=10, p=0.25, within sign-flip null); HYPE delta=+43.55 (n=6, p=0.1875, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: windows improved 4/4 (majority=yes); aggregate n=34 (gate >=30); aggregate PF=0.736 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-13 04:08 UTC — iv_thresholds/high_iv>63.3 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-13 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-147.48 n=185 PF=0.599
+- variant: net=-24.01 n=38 PF=0.62
+- per-window delta: 2026-06(+11.47), 2026-07(+95.33), 2026-08(+13.31), 2026-09(+3.36)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+39.66 (n=12, p=0.125, within sign-flip null); ETH delta=+33.38 (n=13, p=0.25, within sign-flip null); HYPE delta=+43.55 (n=6, p=0.1875, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: windows improved 4/4 (majority=yes); aggregate n=38 (gate >=30); aggregate PF=0.62 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-13 04:08 UTC — iv_thresholds/high_iv>66.7 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-13 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-147.48 n=185 PF=0.599
+- variant: net=-14.07 n=34 PF=0.736
+- per-window delta: 2026-06(+11.47), 2026-07(+102.21), 2026-08(+16.37), 2026-09(+3.36)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+42.72 (n=11, p=0.125, within sign-flip null); ETH delta=+40.25 (n=10, p=0.25, within sign-flip null); HYPE delta=+43.55 (n=6, p=0.1875, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: windows improved 4/4 (majority=yes); aggregate n=34 (gate >=30); aggregate PF=0.736 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-12 09:11 UTC — iv_thresholds/high_iv>63.3 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-12 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-144.12 n=184 PF=0.604
+- variant: net=-24.01 n=38 PF=0.62
+- per-window delta: 2026-06(+11.47), 2026-07(+95.33), 2026-08(+13.31), 2026-09(+n/e)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+39.66 (n=12, p=0.125, within sign-flip null); ETH delta=+33.38 (n=13, p=0.25, within sign-flip null); HYPE delta=+40.19 (n=6, p=0.25, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 3/3 (majority=yes); aggregate n=38 (gate >=30); aggregate PF=0.62 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-12 09:11 UTC — iv_thresholds/high_iv>66.7 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-12 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-144.12 n=184 PF=0.604
+- variant: net=-14.07 n=34 PF=0.736
+- per-window delta: 2026-06(+11.47), 2026-07(+102.21), 2026-08(+16.37), 2026-09(+n/e)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+42.72 (n=11, p=0.125, within sign-flip null); ETH delta=+40.25 (n=10, p=0.25, within sign-flip null); HYPE delta=+40.19 (n=6, p=0.25, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 3/3 (majority=yes); aggregate n=34 (gate >=30); aggregate PF=0.736 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-12 08:08 UTC — iv_thresholds/high_iv>63.3 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-12 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-144.12 n=184 PF=0.604
+- variant: net=-24.01 n=38 PF=0.62
+- per-window delta: 2026-06(+11.47), 2026-07(+95.33), 2026-08(+13.31), 2026-09(+n/e)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+39.66 (n=12, p=0.125, within sign-flip null); ETH delta=+33.38 (n=13, p=0.25, within sign-flip null); HYPE delta=+40.19 (n=6, p=0.25, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 3/3 (majority=yes); aggregate n=38 (gate >=30); aggregate PF=0.62 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-12 08:08 UTC — iv_thresholds/high_iv>66.7 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-12 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-144.12 n=184 PF=0.604
+- variant: net=-14.07 n=34 PF=0.736
+- per-window delta: 2026-06(+11.47), 2026-07(+102.21), 2026-08(+16.37), 2026-09(+n/e)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+42.72 (n=11, p=0.125, within sign-flip null); ETH delta=+40.25 (n=10, p=0.25, within sign-flip null); HYPE delta=+40.19 (n=6, p=0.25, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 3/3 (majority=yes); aggregate n=34 (gate >=30); aggregate PF=0.736 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-12 07:08 UTC — iv_thresholds/high_iv>63.3 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-12 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-144.12 n=184 PF=0.604
+- variant: net=-24.01 n=38 PF=0.62
+- per-window delta: 2026-06(+11.47), 2026-07(+95.33), 2026-08(+13.31), 2026-09(+n/e)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+39.66 (n=12, p=0.125, within sign-flip null); ETH delta=+33.38 (n=13, p=0.25, within sign-flip null); HYPE delta=+40.19 (n=6, p=0.25, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 3/3 (majority=yes); aggregate n=38 (gate >=30); aggregate PF=0.62 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-12 07:08 UTC — iv_thresholds/high_iv>66.7 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-12 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-144.12 n=184 PF=0.604
+- variant: net=-14.07 n=34 PF=0.736
+- per-window delta: 2026-06(+11.47), 2026-07(+102.21), 2026-08(+16.37), 2026-09(+n/e)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+42.72 (n=11, p=0.125, within sign-flip null); ETH delta=+40.25 (n=10, p=0.25, within sign-flip null); HYPE delta=+40.19 (n=6, p=0.25, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 3/3 (majority=yes); aggregate n=34 (gate >=30); aggregate PF=0.736 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-12 06:08 UTC — iv_thresholds/high_iv>63.3 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-12 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-144.12 n=184 PF=0.604
+- variant: net=-24.01 n=38 PF=0.62
+- per-window delta: 2026-06(+11.47), 2026-07(+95.33), 2026-08(+13.31), 2026-09(+n/e)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+39.66 (n=12, p=0.125, within sign-flip null); ETH delta=+33.38 (n=13, p=0.25, within sign-flip null); HYPE delta=+40.19 (n=6, p=0.25, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 3/3 (majority=yes); aggregate n=38 (gate >=30); aggregate PF=0.62 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-12 06:08 UTC — iv_thresholds/high_iv>66.7 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-12 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-144.12 n=184 PF=0.604
+- variant: net=-14.07 n=34 PF=0.736
+- per-window delta: 2026-06(+11.47), 2026-07(+102.21), 2026-08(+16.37), 2026-09(+n/e)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+42.72 (n=11, p=0.125, within sign-flip null); ETH delta=+40.25 (n=10, p=0.25, within sign-flip null); HYPE delta=+40.19 (n=6, p=0.25, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 3/3 (majority=yes); aggregate n=34 (gate >=30); aggregate PF=0.736 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-12 05:08 UTC — iv_thresholds/high_iv>63.3 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-12 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-144.12 n=184 PF=0.604
+- variant: net=-24.01 n=38 PF=0.62
+- per-window delta: 2026-06(+11.47), 2026-07(+95.33), 2026-08(+13.31), 2026-09(+n/e)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+39.66 (n=12, p=0.125, within sign-flip null); ETH delta=+33.38 (n=13, p=0.25, within sign-flip null); HYPE delta=+40.19 (n=6, p=0.25, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 3/3 (majority=yes); aggregate n=38 (gate >=30); aggregate PF=0.62 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-12 05:08 UTC — iv_thresholds/high_iv>66.7 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-12 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-144.12 n=184 PF=0.604
+- variant: net=-14.07 n=34 PF=0.736
+- per-window delta: 2026-06(+11.47), 2026-07(+102.21), 2026-08(+16.37), 2026-09(+n/e)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+42.72 (n=11, p=0.125, within sign-flip null); ETH delta=+40.25 (n=10, p=0.25, within sign-flip null); HYPE delta=+40.19 (n=6, p=0.25, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 3/3 (majority=yes); aggregate n=34 (gate >=30); aggregate PF=0.736 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-12 04:08 UTC — iv_thresholds/high_iv>63.3 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-12 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-144.12 n=184 PF=0.604
+- variant: net=-24.01 n=38 PF=0.62
+- per-window delta: 2026-06(+11.47), 2026-07(+95.33), 2026-08(+13.31), 2026-09(+n/e)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+39.66 (n=12, p=0.125, within sign-flip null); ETH delta=+33.38 (n=13, p=0.25, within sign-flip null); HYPE delta=+40.19 (n=6, p=0.25, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 3/3 (majority=yes); aggregate n=38 (gate >=30); aggregate PF=0.62 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-12 04:08 UTC — iv_thresholds/high_iv>66.7 — DISCARD
+- hypothesis: the high_iv regime concentrates both strategies' edge (IV_PERCENTILE_REGIME_GATE / IV_HIGH_ONLY_AB_SPLIT); sweeping the cut tests how much of the bleed the implicit-vol signal removes — 63.3/66.7/70 = lower tercile/canonical/strict
+- windows: 2026-06-14..2026-09-12 (4 windows of 30d, non-overlapping)
+- baseline (no gate (baseline)): net=-144.12 n=184 PF=0.604
+- variant: net=-14.07 n=34 PF=0.736
+- per-window delta: 2026-06(+11.47), 2026-07(+102.21), 2026-08(+16.37), 2026-09(+n/e)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+42.72 (n=11, p=0.125, within sign-flip null); ETH delta=+40.25 (n=10, p=0.25, within sign-flip null); HYPE delta=+40.19 (n=6, p=0.25, within sign-flip null); SOL delta=+6.89 (n=7, p=0.375, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 3/3 (majority=yes); aggregate n=34 (gate >=30); aggregate PF=0.736 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-11 18:34 UTC — toptrader_fade/thr=0.7 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-08-12..2026-09-08 (4 windows of 7d, non-overlapping)
+- baseline (thr=0.55): net=-398.06 n=36 PF=0.785
+- variant: net=-343.22 n=33 PF=0.8
+- per-window delta: 2026-08(+200.88), 2026-08(+n/e), 2026-08(+0.0), 2026-09(-146.04)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-5.70 (n=6, p=1.0, within sign-flip null); ETH delta=+112.71 (n=7, p=0.5, within sign-flip null); HYPE delta=-54.10 (n=16, p=1.0, within sign-flip null); SOL delta=+1.92 (n=4, p=0.5, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 1/3 (majority=no); aggregate n=33 (gate >=30); aggregate PF=0.8 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-11 18:34 UTC — toptrader_fade/thr=0.85 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-08-12..2026-09-08 (4 windows of 7d, non-overlapping)
+- baseline (thr=0.55): net=-398.06 n=36 PF=0.785
+- variant: net=-95.42 n=27 PF=0.917
+- per-window delta: 2026-08(-162.48), 2026-08(+n/e), 2026-08(+288.13), 2026-09(+176.99)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+415.38 (n=4, p=0.5, within sign-flip null); ETH delta=-246.70 (n=6, p=1.0, within sign-flip null); HYPE delta=+158.07 (n=14, p=0.5, within sign-flip null); SOL delta=-24.12 (n=3, p=0.75, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 2/3 (majority=yes); aggregate n=27 (gate >=30); aggregate PF=0.917 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-11 18:34 UTC — toptrader_fade/thr=0.55 minW3 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-08-12..2026-09-08 (4 windows of 7d, non-overlapping)
+- baseline (thr=0.55): net=-398.06 n=36 PF=0.785
+- variant: net=-398.06 n=36 PF=0.785
+- per-window delta: 2026-08(+0.0), 2026-08(+n/e), 2026-08(+0.0), 2026-09(+0.0)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+0.00 (n=6, p=1.0, within sign-flip null); ETH delta=+0.00 (n=9, p=1.0, within sign-flip null); HYPE delta=+0.00 (n=17, p=1.0, within sign-flip null); SOL delta=+0.00 (n=4, p=1.0, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 0/3 (majority=no); aggregate n=36 (gate >=30); aggregate PF=0.785 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-11 18:34 UTC — toptrader_fade/thr=0.55 sl3.0%/tp1.5% — INCONCLUSIVE
+- hypothesis: parameter variant
+- windows: 2026-08-12..2026-09-08 (4 windows of 7d, non-overlapping)
+- baseline (thr=0.55): net=-398.06 n=36 PF=0.785
+- variant: net=75.96 n=36 PF=1.041
+- per-window delta: 2026-08(+64.93), 2026-08(+n/e), 2026-08(+411.26), 2026-09(-2.17)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+55.39 (n=7, p=0.25, within sign-flip null); ETH delta=+445.56 (n=7, p=0.125, within sign-flip null); HYPE delta=-27.38 (n=19, p=1.0, within sign-flip null); SOL delta=+0.44 (n=3, p=0.5, within sign-flip null)
+- reasons: excluded 1 no-evidence window(s) (both cells n=0 — absence of data, not improvement); windows improved 2/3 (majority=yes); aggregate n=36 (gate >=30); aggregate PF=1.041 (gate >1.0); noise gate: paired sign-flip p=0.25 (alpha=0.025, K=3 windows, paired_window_signflip_exact_k3) — NOT passed; dd guard (advisory): ΔDD=-408.34 across 3 windows (2 shallower, p=0.375); noise: paired delta not beyond the window sign-flip null — accumulate windows or re-test out-of-sample
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
 ### 2026-09-11 16:20 UTC — sma_rebalance/sep0.30% tp=sma200-dyn sl=1R — DISCARD
 - hypothesis: parameter variant
 - windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)

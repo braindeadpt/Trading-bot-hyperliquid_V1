@@ -255,6 +255,58 @@ An entry becomes READY only after the family is wired and reviewed.
   aggregate n>=30; funding coverage reported per cell.
 
 
+## Q11 - cvd_vwap ("Anchored Rolling CVDVWAP Signal" port, fmzquant) - DONE 2026-09-14, all cells DISCARD
+
+- **Result:** first family in the program to post positive aggregate nets —
+  and still DISCARD on every cell, on window discipline. Baseline
+  (roc=8%, author's params) fired only **2 trades in 113 days** (net
+  +492, PF=inf) — the published params basically never trigger on 15m
+  crypto bars. Variants: roc=4% +142/n=19/PF 1.19; roc=2.5% +672/n=33/
+  PF 1.76; noCVD +100/n=20; noAVWAP +157/n=19. But per-window: roc=2.5%
+  was +200 / **-419** / -15 / **+907** — all profit concentrated in W4
+  (08-16..09-08). No strict majority of improved windows + losing
+  windows vs a 0-trade baseline => catastrophic-window/no-majority
+  DISCARD. Momentum continuation exists in some regimes but shows no
+  robust edge here. Artifact `20260914_223820_cvd_vwap.json`.
+
+- **Source:** `fmzquant/strategies` repo, "基于锚定滚动CVDVWAP的信号策略 /
+  Anchored-Rolling-CVDVWAP-Signal-Strategy" (Pine). Picked as the one
+  candidate in the repo using a non-price-only signal dimension.
+- **Honest disclosure of the port:** the author's "CVD" is
+  `cum(volume - sma(volume, 20))` — a volume-anomaly accumulator, NOT
+  true buy/sell delta. No L2/tape needed; candle `volume` suffices.
+  dip→short / rip→long is MOMENTUM (author's semantics kept, not a fade).
+  Entries at signal-bar close (Pine process_orders_on_close). Opposite
+  signals while open are dropped (Pine would reverse) — documented diff.
+- **Hypothesis (fixed):** large 7-bar moves (|roc| >= thr) that are
+  volume-anomaly-confirmed and on the far side of the anchor-VWAP
+  continue to a 2R target before hitting the 200-bar extreme stop —
+  i.e. momentum continuation survives tier-0 costs on crypto 15m.
+- **Harness:** `python scripts/research/overnight_runner.py --family
+  cvd_vwap --start 2026-05-18 --end 2026-09-08 --symbols BTC,ETH,SOL,HYPE`
+  (light_replay, 15m bars, intrabar 1m SL resolution, tier-0 taker
+  0.045%/side + 2bps slip, per-symbol isolated sizing 1%).
+- **Window set:** 2026-05-18..2026-09-08, 30d split -> 4 non-overlapping
+  windows (same fixed set as Night 2 / Q4 / Q5 / Q7 / Q9).
+- **Grid (5 cells = 20 runs, at cap):**
+  1. baseline — author's: roc_thr=8.0%, cvd+avwap filters, tp 2R, sl 200-bar
+  2. roc_thr=4.0% (15m crypto bars move less than the author's daily bars)
+  3. roc_thr=2.5% (does the threshold matter at all?)
+  4. roc_thr=4.0% + noCVD (ablation — is the volume-anomaly gate real?)
+  5. roc_thr=4.0% + noAVWAP (ablation — is the side filter real?)
+- **Sample-size disclosure (measured at wiring):** smoke run of cell 2
+  (roc=4%) over 08-16..09-13 on 4 symbols gave 8 trades. Aggregate
+  n>=30 for KEEP is plausible only at the looser thresholds; if all
+  cells land n<30 the session's honest ceiling is INCONCLUSIVE —
+  DISCARD still applies whenever PF<=1.
+- **Evidence bar:** standard KEEP rules + Bonferroni alpha_eff=0.025
+  (4 variants vs baseline).
+- **Expected verdict:** prior LOW-MED — momentum continuation is a
+  different entry logic than every closed family (all were fades or
+  threshold gates), but it remains candle-derived on the dataset where
+  ~30 candle cells have already died.
+
+
 ## NOT testable tonight — gate status table
 
 | Item | Gate to reopen | Status 2026-09-09 |

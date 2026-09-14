@@ -1974,6 +1974,229 @@ def toptrader_fade_family() -> Tuple[List[str], Callable, Dict[str, Any]]:
     return tags, run_one, cfg
 
 
+# ---------------------------------------------------------------------------
+# cvd_vwap — research port of "Anchored Rolling CVDVWAP Signal" (Pine,
+# fmzquant/strategies). Candle+volume only (the author's "CVD" is
+# cum(volume - sma(volume)) — a volume-anomaly accumulator, NOT buy/sell
+# delta, so no L2/trade-tape data needed).
+#
+# Faithful mapping of the Pine semantics onto light_replay (15m bars):
+#   * anchor  = bar where volume == highest(volume, 20); AVWAP then
+#     accumulates (h+l+c)*v / (3v) from that bar onward, and the envelope
+#     stddev is the running std of closes SINCE the anchor
+#   * dip     = ROC(close, 7) <= -thr AND cvd rising AND close < AVWAP
+#     -> SHORT entry (author's semantics: momentum, not a fade)
+#   * rip     = ROC >= +thr AND cvd rising AND close > AVWAP -> LONG
+#   * entry   = close of the signal bar (Pine default, same as
+#     process_orders_on_close)
+#   * SL      = highest(high, slPeriods) for shorts / lowest(low) for longs
+#   * TP      = entry +/- (entry - SL) * tp_r (author's tpPercent=200 -> 2R)
+#   * one position per symbol (light_replay); opposite signals while open
+#     are dropped (Pine would reverse — documented difference)
+# ---------------------------------------------------------------------------
+
+
+class _CVDVWAPStrategy:
+    """light_replay protocol port of Anchored Rolling CVDVWAP Signal."""
+
+    def __init__(self, symbol: str, params: Dict[str, Any]):
+        self.symbol = symbol
+        p = params
+        self.anchor_n = int(p.get("anchor_n", 20))
+        self.roc_n = int(p.get("roc_n", 7))
+        self.thr = float(p.get("roc_thr_pct", 8.0))
+        self.cvd_len = int(p.get("cvd_len", 20))
+        self.use_cvd = bool(p.get("use_cvd", True))
+        self.use_avwap = bool(p.get("use_avwap", True))
+        self.tp_r = float(p.get("tp_r", 2.0))
+        self.sl_n = int(p.get("sl_periods", 200))
+        self.size_pct = float(p.get("size_pct", 0.01))
+
+        n_hist = max(self.sl_n, self.anchor_n, self.cvd_len, self.roc_n + 1) + 2
+        self._bars: "collections.deque" = collections.deque(maxlen=n_hist)
+        # anchor state (reset on each new rolling-max-volume bar)
+        self._num = 0.0
+        self._den = 0.0
+        self._sum_c = 0.0
+        self._cnt = 0
+        self._sum_dev = 0.0
+        self._anchored = False
+        self._cvd = 0.0
+        self._cvd_prev = 0.0
+        # entry context for on_position (TP level)
+        self._sig_ctx: Optional[Dict[str, Any]] = None
+        self._pos_key: Optional[int] = None
+        self._tp_price: Optional[float] = None
+
+    def on_data(self, event: Any) -> Any:
+        bar = event.candle_15m
+        h, l, c, v = (float(bar.high), float(bar.low),
+                      float(bar.close), float(bar.volume))
+        self._bars.append(bar)
+
+        n = len(self._bars)
+        vols = [float(b.volume) for b in self._bars]
+
+        # --- anchor: current volume == rolling max -> re-anchor at this bar
+        if n >= 2 and v == max(vols[-self.anchor_n:]):
+            self._num = (h + l + c) * v
+            self._den = 3.0 * v
+            self._sum_c = c
+            self._cnt = 1
+            self._sum_dev = 0.0
+            self._anchored = True
+        elif self._anchored:
+            self._num += (h + l + c) * v
+            self._den += 3.0 * v
+            self._sum_c += c
+            self._cnt += 1
+            mean_c = self._sum_c / self._cnt
+            self._sum_dev += (c - mean_c) ** 2
+
+        # --- CVD (author's): cum(volume - sma(volume, cvd_len))
+        if n >= self.cvd_len:
+            self._cvd_prev = self._cvd
+            self._cvd += v - sum(vols[-self.cvd_len:]) / self.cvd_len
+        cvd_rising = self._cvd > self._cvd_prev
+
+        # --- ROC on closes
+        closes = [float(b.close) for b in self._bars]
+        if n < self.roc_n + 1 or not self._anchored or self._den == 0:
+            return None
+        roc = (c / closes[-(self.roc_n + 1)] - 1.0) * 100.0
+
+        avwap = self._num / self._den
+        ok_cvd = (not self.use_cvd) or cvd_rising
+
+        side = None
+        if roc <= -self.thr and ok_cvd and (not self.use_avwap or c < avwap):
+            side = "short"
+        elif roc >= self.thr and ok_cvd and (not self.use_avwap or c > avwap):
+            side = "long"
+        if side is None:
+            return None
+
+        # SL at the sl_n-bar extreme in the adverse direction
+        recent = list(self._bars)[-self.sl_n:]
+        sl_px = (min(float(b.low) for b in recent) if side == "long"
+                 else max(float(b.high) for b in recent))
+        sl_pct = abs(c - sl_px) / c
+        if sl_pct <= 0 or sl_pct > 0.20:  # degenerate / >20% stop = skip
+            return None
+        self._sig_ctx = {
+            "tp": (c + (c - sl_px) * self.tp_r if side == "long"
+                   else c - (sl_px - c) * self.tp_r)
+        }
+        return types.SimpleNamespace(
+            symbol=self.symbol, side=side, strategy="cvd_vwap",
+            size_pct=self.size_pct, stop_loss_pct=sl_pct)
+
+    def on_position(self, pos: Any, event: Any) -> Any:
+        if self._pos_key != pos.entry_time_ms:
+            self._pos_key = pos.entry_time_ms
+            self._tp_price = (self._sig_ctx or {}).get("tp")
+        if self._tp_price is None:
+            return None
+        bar = event.candle_15m
+        tp = self._tp_price
+        hit = ((pos.side == "long" and float(bar.high) >= tp) or
+               (pos.side == "short" and float(bar.low) <= tp))
+        return types.SimpleNamespace(reason="tp_2r") if hit else None
+
+
+CVD_VWAP_GRID: List[Dict[str, Any]] = [
+    # baseline — author's defaults (roc 7 bars, +-8%, cvd+avwap filters, 2R)
+    {"roc_thr_pct": 8.0},
+    # tighter trigger — 15m crypto bars move less than the author's daily
+    {"roc_thr_pct": 4.0},
+    # loosest — does the threshold matter at all?
+    {"roc_thr_pct": 2.5},
+    # ablation: drop the CVD filter (is the volume-anomaly gate real?)
+    {"roc_thr_pct": 4.0, "use_cvd": False},
+    # ablation: drop the AVWAP side filter
+    {"roc_thr_pct": 4.0, "use_avwap": False},
+]
+
+
+def cvd_vwap_family() -> Tuple[List[str], Callable, Dict[str, Any]]:
+    """Anchored Rolling CVDVWAP port — candle+volume only, 15m bars.
+
+    Returns (tags, run_one, cfg). No db_specs — live bot.db covers the
+    whole span (sl_n=200 warmup eats ~2d of 15m bars per window).
+    """
+    from scripts.research.backtest_vwap_trend_vs_fade import light_replay  # noqa: E402
+    cfg, _fade, live_path, initial_capital, commission_pct, slippage_bps = _vwap_cfg()
+
+    def tag_for(p: Dict[str, Any]) -> str:
+        tag = f"roc={p['roc_thr_pct']}%"
+        if not p.get("use_cvd", True):
+            tag += " noCVD"
+        if not p.get("use_avwap", True):
+            tag += " noAVWAP"
+        return tag
+
+    def run_one(start: str, end: str, symbols: List[str],
+                params: Dict[str, Any]) -> Dict[str, Any]:
+        s_ms, e_ms = _window_ms(start, end)
+        try:
+            from src.data.database import Database
+            db = Database(Path(live_path))
+            trades_all: List[Dict[str, Any]] = []
+            per_symbol: Dict[str, Dict[str, Any]] = {}
+            for sym in symbols:
+                strategy = _CVDVWAPStrategy(sym, params)
+                res = light_replay(
+                    db, strategy, [sym], s_ms, e_ms,
+                    bar_tf="15m",
+                    initial_capital=initial_capital,
+                    commission_pct=commission_pct,
+                    slippage_bps=slippage_bps,
+                    intrabar_tf="1m",
+                )
+                trs = list(res.get("trades", []) or [])
+                for t in trs:
+                    t["trade_symbol"] = sym
+                trades_all.extend(trs)
+                per_symbol[sym] = {
+                    "n_trades": len(trs),
+                    "total_pnl_usd": round(
+                        sum(float(t.get("pnl_usd", 0.0)) for t in trs), 2),
+                }
+        except Exception as exc:  # noqa: BLE001 — a failed cell must not kill the sweep
+            return {"error": f"{type(exc).__name__}: {exc}",
+                    "params": dict(params)}
+
+        pnls = [float(t.get("pnl_usd", 0.0)) for t in trades_all]
+        exits: Dict[str, Dict[str, float]] = {}
+        for t in trades_all:
+            r = str(t.get("exit_reason") or "unknown")
+            exits.setdefault(r, {"n": 0, "pnl_usd": 0.0})
+            exits[r]["n"] += 1
+            exits[r]["pnl_usd"] += float(t.get("pnl_usd", 0.0))
+        return {
+            "params": dict(params),
+            "n_trades": len(pnls),
+            "total_pnl_usd": round(sum(pnls), 2),
+            "gross_win_usd": round(sum(p for p in pnls if p > 0), 2),
+            "gross_loss_usd": round(abs(sum(p for p in pnls if p < 0)), 2),
+            "trade_pnls": [round(p, 2) for p in pnls],
+            "trade_symbols": [str(t.get("trade_symbol") or t.get("symbol") or "")
+                              for t in trades_all],
+            "trades_summary": {
+                k: {"n": int(v["n"]), "pnl_usd": round(v["pnl_usd"], 2)}
+                for k, v in sorted(exits.items())
+            },
+            "trades": trades_all,
+            "per_symbol": per_symbol,
+            "cost_model": {"commission_pct": commission_pct,
+                           "slippage_bps": slippage_bps},
+            "sizing_convention": "per-symbol isolated capital (same for baseline and variants)",
+        }
+
+    tags = [tag_for(p) for p in CVD_VWAP_GRID]
+    return tags, run_one, cfg
+
+
 FAMILIES = {
     "flush_fade": flush_fade_family,
     "vwap_thresholds": vwap_thresholds_family,
@@ -1984,6 +2207,7 @@ FAMILIES = {
     "vwap_deceleration": vwap_deceleration_family,
     "sma_rebalance": sma_rebalance_family,
     "toptrader_fade": toptrader_fade_family,
+    "cvd_vwap": cvd_vwap_family,
 }
 
 
@@ -2044,6 +2268,8 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
         grid_params = [SMA_REBALANCE_GRID[i] for i in sel]
     elif family == "toptrader_fade":
         grid_params = [TOPTRADER_FADE_GRID[i] for i in sel]
+    elif family == "cvd_vwap":
+        grid_params = [CVD_VWAP_GRID[i] for i in sel]
     else:  # generic families: params parallel to tags via sel
         grid_params = list(sel)
     windows = split_windows(start, end, split_days)
