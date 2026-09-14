@@ -1545,6 +1545,32 @@ def _load_dvol_series(
 # wrapper enforces at runtime — a coverage-gated session can never KEEP at
 # K=3: the sign-flip null floors at 2^-3 = 12.5% > alpha=0.10).
 IV_COVERAGE_MIN_WINDOWS = 4
+# The preregistered gate is ~115d of DVOL coverage (QUEUE.md Night 3).
+# Counting windows alone admits a 2-day remainder stub as "window 4" —
+# observed 2026-09-12/13: the nightly ran the sweep hourly at 91d coverage.
+IV_COVERAGE_MIN_DAYS = 115
+
+
+def dvol_gate_blocked_reason(
+    start: str, end: str, split_days: int = 30
+) -> Optional[str]:
+    """None when DVOL coverage supports the reopen, else the BLOCKED reason.
+
+    Requires BOTH >= IV_COVERAGE_MIN_DAYS of coverage AND K=4 windows —
+    window-count alone treats a stub remainder as a full window.
+    """
+    span_days = (
+        datetime.strptime(end, "%Y-%m-%d")
+        - datetime.strptime(start, "%Y-%m-%d")
+    ).days
+    k = coverage_window_count(start, end, split_days)
+    if span_days < IV_COVERAGE_MIN_DAYS or k < IV_COVERAGE_MIN_WINDOWS:
+        return (
+            f"coverage: DVOL {start}..{end} -> {span_days}d, K={k} "
+            f"< {IV_COVERAGE_MIN_WINDOWS} - need >= {IV_COVERAGE_MIN_DAYS}d "
+            f"for the K=4 noise-gate floor; not running"
+        )
+    return None
 
 
 def dvol_span_from_rows(
@@ -2403,14 +2429,13 @@ def main() -> int:
     # tries again tomorrow.
     if args.start == "dvol" or args.end == "dvol":
         start, end = dvol_coverage_span()
-        k = coverage_window_count(start, end, args.split_days)
-        if k < IV_COVERAGE_MIN_WINDOWS:
-            print(f"-> BLOCKED (coverage: DVOL {start}..{end} -> K={k} < "
-                  f"{IV_COVERAGE_MIN_WINDOWS} — need ~115d for the K=4 "
-                  f"noise-gate floor; not running)")
+        blocked = dvol_gate_blocked_reason(start, end, args.split_days)
+        if blocked:
+            print(f"-> BLOCKED ({blocked})")
             return 0
-        print(f"[dvol span] coverage {start}..{end} -> K={k} windows",
-              flush=True)
+        print(f"[dvol span] coverage {start}..{end} -> "
+              f"K={coverage_window_count(start, end, args.split_days)} "
+              f"windows", flush=True)
     else:
         start, end = args.start, args.end
 
