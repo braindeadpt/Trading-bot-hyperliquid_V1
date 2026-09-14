@@ -38,7 +38,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[2]
-BIAS_DB = ROOT / "data" / "research" / "hyperliquid.db"
 STATE_DIR = ROOT / "data" / "research"
 STATE_PATH = STATE_DIR / "top_trader_bias_recheck_state.json"
 PROBE_SCRIPT = ROOT / "scripts" / "research" / "feature_screening_top_trader_bias.py"
@@ -53,6 +52,20 @@ def log(msg: str) -> None:
     print(f"[{datetime.now(timezone.utc).isoformat(timespec='seconds')}] {msg}", flush=True)
 
 
+def resolve_bias_db() -> Path:
+    """Research DB path from config — never the legacy hardcoded default.
+
+    BUGFIX 2026-09-14: BIAS_DB pointed at data/research/hyperliquid.db while
+    the collector writes to `research.database.path` (E: since 2026-08-14).
+    The watchdog counted 0 dates forever and the probe would have screened
+    an empty DB.
+    """
+    from src.data.research_database import ResearchDatabase
+    from src.utils.config import load_config
+    cfg = load_config(str(ROOT / "config" / "settings.yaml"))
+    return ResearchDatabase.resolve_path(cfg)
+
+
 def bias_date_count(
     db: Optional[Path] = None,
 ) -> Tuple[int, int, Optional[int], Optional[int]]:
@@ -61,7 +74,7 @@ def bias_date_count(
     Dates are UTC-day indices (`timestamp_ms // 86_400_000`), matching the
     probe's `date` column (`ts.dt.strftime("%Y-%m-%d")` in UTC).
     """
-    db_path = db or BIAS_DB
+    db_path = db or resolve_bias_db()
     if not db_path.exists():
         return 0, 0, None, None
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -105,7 +118,8 @@ def run_probe(json_out: Optional[Path] = None) -> Optional[Path]:
     log(f"launching {PROBE_SCRIPT.name} --json-out {out}")
     t0 = time.time()
     proc = subprocess.run(
-        [sys.executable, str(PROBE_SCRIPT), "--json-out", str(out)],
+        [sys.executable, str(PROBE_SCRIPT), "--json-out", str(out),
+         "--bias-db", str(resolve_bias_db())],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=1800,
     )

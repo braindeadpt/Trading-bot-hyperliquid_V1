@@ -233,7 +233,10 @@ def write_report(
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--candles-db", type=Path, default=CANDLES_DB)
-    ap.add_argument("--bias-db", type=Path, default=BIAS_DB)
+    # None -> resolved from research.database.path at run time (the table
+    # moved to E: on 2026-08-14; a hardcoded default silently screened the
+    # empty legacy DB).
+    ap.add_argument("--bias-db", type=Path, default=None)
     ap.add_argument("--symbols", default=",".join(SYMBOLS_DEFAULT))
     ap.add_argument("--n-boot", type=int, default=N_BOOT_DEFAULT)
     ap.add_argument(
@@ -250,7 +253,14 @@ def main() -> int:
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     t0 = time.time()
 
-    bias = load_bias_samples(args.bias_db, symbols)
+    bias_db = args.bias_db
+    if bias_db is None:
+        from src.data.research_database import ResearchDatabase
+        from src.utils.config import load_config
+        bias_db = ResearchDatabase.resolve_path(
+            load_config(str(ROOT / "config" / "settings.yaml"))
+        )
+    bias = load_bias_samples(bias_db, symbols)
     print(f"Bias samples: {len(bias)} ({time.time()-t0:.1f}s)")
     if bias.empty:
         raise SystemExit("Sem top_trader_bias_samples — o tracker ainda não gravou.")
