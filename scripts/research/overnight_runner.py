@@ -2011,8 +2011,13 @@ class _CVDVWAPStrategy:
         self.tp_r = float(p.get("tp_r", 2.0))
         self.sl_n = int(p.get("sl_periods", 200))
         self.size_pct = float(p.get("size_pct", 0.01))
+        # Q12: optional trend-regime gate — ADX(14,15m) >= adx_min required
+        # at signal time. 0.0 disables (Q11 semantics preserved exactly).
+        self.adx_min = float(p.get("adx_min", 0.0))
 
         n_hist = max(self.sl_n, self.anchor_n, self.cvd_len, self.roc_n + 1) + 2
+        if self.adx_min > 0.0:
+            n_hist = max(n_hist, 2 * 14 + 2)
         self._bars: "collections.deque" = collections.deque(maxlen=n_hist)
         # anchor state (reset on each new rolling-max-volume bar)
         self._num = 0.0
@@ -2068,6 +2073,13 @@ class _CVDVWAPStrategy:
         avwap = self._num / self._den
         ok_cvd = (not self.use_cvd) or cvd_rising
 
+        # Q12 regime gate: ADX(14) on the same 15m bars
+        if self.adx_min > 0.0:
+            from src.strategies.indicators import calculate_adx  # noqa: E402
+            adx = calculate_adx(list(self._bars), 14)
+            if adx is None or adx < self.adx_min:
+                return None
+
         side = None
         if roc <= -self.thr and ok_cvd and (not self.use_avwap or c < avwap):
             side = "short"
@@ -2104,6 +2116,19 @@ class _CVDVWAPStrategy:
         return types.SimpleNamespace(reason="tp_2r") if hit else None
 
 
+CVD_VWAP_ADX_GRID: List[Dict[str, Any]] = [
+    # Q12 baseline — ungated roc=2.5% (identical to Q11 cell 2; control arm)
+    {"roc_thr_pct": 2.5},
+    # canonical trend-strength gate (literature default)
+    {"roc_thr_pct": 2.5, "adx_min": 25.0},
+    # looser / stricter gate — is the effect monotone in gate strength?
+    {"roc_thr_pct": 2.5, "adx_min": 20.0},
+    {"roc_thr_pct": 2.5, "adx_min": 30.0},
+    # the regime effect must not depend on the observed-best threshold
+    {"roc_thr_pct": 4.0, "adx_min": 25.0},
+]
+
+
 CVD_VWAP_GRID: List[Dict[str, Any]] = [
     # baseline — author's defaults (roc 7 bars, +-8%, cvd+avwap filters, 2R)
     {"roc_thr_pct": 8.0},
@@ -2116,6 +2141,19 @@ CVD_VWAP_GRID: List[Dict[str, Any]] = [
     # ablation: drop the AVWAP side filter
     {"roc_thr_pct": 4.0, "use_avwap": False},
 ]
+
+
+def cvd_vwap_adx_family() -> Tuple[List[str], Callable, Dict[str, Any]]:
+    """Q12 — Q11 momentum gated by ADX(14,15m) >= adx_min. Same harness."""
+    tags, run_one, cfg = cvd_vwap_family()
+
+    def tag_for(p: Dict[str, Any]) -> str:
+        tag = f"roc={p['roc_thr_pct']}%"
+        if p.get("adx_min", 0.0) > 0:
+            tag += f" adx>={p['adx_min']:.0f}"
+        return tag
+
+    return [tag_for(p) for p in CVD_VWAP_ADX_GRID], run_one, cfg
 
 
 def cvd_vwap_family() -> Tuple[List[str], Callable, Dict[str, Any]]:
@@ -2208,6 +2246,7 @@ FAMILIES = {
     "sma_rebalance": sma_rebalance_family,
     "toptrader_fade": toptrader_fade_family,
     "cvd_vwap": cvd_vwap_family,
+    "cvd_vwap_adx": cvd_vwap_adx_family,
 }
 
 
@@ -2270,6 +2309,8 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
         grid_params = [TOPTRADER_FADE_GRID[i] for i in sel]
     elif family == "cvd_vwap":
         grid_params = [CVD_VWAP_GRID[i] for i in sel]
+    elif family == "cvd_vwap_adx":
+        grid_params = [CVD_VWAP_ADX_GRID[i] for i in sel]
     else:  # generic families: params parallel to tags via sel
         grid_params = list(sel)
     windows = split_windows(start, end, split_days)

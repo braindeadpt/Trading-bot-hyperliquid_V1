@@ -92,13 +92,53 @@ noise-model commit would add a `noise gate:` line here; this run predates
 it, and its per-trade PnL is not stored in the artifact, so none is shown.)
 
 ---
-## Morning report — 2026-09-14 22:38 UTC — family `cvd_vwap`
+## Morning report — 2026-09-15 01:55 UTC — family `cvd_vwap_adx`
 
 - span: 2026-05-18..2026-09-08 (4 non-overlapping windows of 30d) · symbols: BTC, ETH, SOL, HYPE
 - verdicts: 0 KEEP · 0 INCONCLUSIVE · 4 DISCARD
-- artifact: `data\research\overnight_experiments\20260914_223820_cvd_vwap.json`
+- artifact: `data\research\overnight_experiments\20260915_015542_cvd_vwap_adx.json`
 
 ---
+### 2026-09-15 01:55 UTC — cvd_vwap_adx/roc=2.5% adx>=25 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (roc=2.5%): net=672.41 n=33 PF=1.758
+- variant: net=809.92 n=29 PF=2.22
+- per-window delta: 2026-05(+0.0), 2026-06(+75.88), 2026-07(+61.63), 2026-08(+0.0)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+0.00 (n=5, p=1.0, within sign-flip null); ETH delta=-15.06 (n=6, p=1.0, within sign-flip null); HYPE delta=+65.96 (n=9, p=0.5, within sign-flip null); SOL delta=+86.64 (n=9, p=0.5, within sign-flip null)
+- reasons: windows improved 2/4 (majority=no); aggregate n=29 (gate >=30); aggregate PF=2.22 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-15 01:55 UTC — cvd_vwap_adx/roc=2.5% adx>=20 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (roc=2.5%): net=672.41 n=33 PF=1.758
+- variant: net=751.91 n=32 PF=1.932
+- per-window delta: 2026-05(+0.0), 2026-06(+80.85), 2026-07(-1.35), 2026-08(+0.0)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+0.00 (n=5, p=1.0, within sign-flip null); ETH delta=-1.34 (n=8, p=1.0, within sign-flip null); HYPE delta=+0.00 (n=10, p=1.0, within sign-flip null); SOL delta=+80.85 (n=9, p=0.5, within sign-flip null)
+- reasons: windows improved 1/4 (majority=no); aggregate n=32 (gate >=30); aggregate PF=1.932 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-15 01:55 UTC — cvd_vwap_adx/roc=2.5% adx>=30 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (roc=2.5%): net=672.41 n=33 PF=1.758
+- variant: net=621.39 n=28 PF=1.836
+- per-window delta: 2026-05(+0.0), 2026-06(-57.81), 2026-07(+6.79), 2026-08(+0.0)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-51.50 (n=5, p=1.0, within sign-flip null); ETH delta=-12.18 (n=6, p=1.0, within sign-flip null); HYPE delta=-142.44 (n=9, p=0.75, within sign-flip null); SOL delta=+155.13 (n=8, p=0.5, within sign-flip null)
+- reasons: windows improved 1/4 (majority=no); aggregate n=28 (gate >=30); aggregate PF=1.836 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-15 01:55 UTC — cvd_vwap_adx/roc=4.0% adx>=25 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)
+- baseline (roc=2.5%): net=672.41 n=33 PF=1.758
+- variant: net=233.18 n=17 PF=1.343
+- per-window delta: 2026-05(-365.9), 2026-06(-27.7), 2026-07(+15.66), 2026-08(-61.29)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+55.35 (n=3, p=0.375, within sign-flip null); ETH delta=-309.19 (n=4, p=1.0, within sign-flip null); HYPE delta=-25.63 (n=5, p=0.75, within sign-flip null); SOL delta=-159.71 (n=5, p=0.75, within sign-flip null)
+- reasons: windows improved 1/4 (majority=no); aggregate n=17 (gate >=30); aggregate PF=1.343 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
 ### 2026-09-14 22:38 UTC — cvd_vwap/roc=4.0% — DISCARD
 - hypothesis: parameter variant
 - windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)

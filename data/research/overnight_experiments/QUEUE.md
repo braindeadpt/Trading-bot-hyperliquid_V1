@@ -307,6 +307,53 @@ An entry becomes READY only after the family is wired and reviewed.
   ~30 candle cells have already died.
 
 
+## Q12 - cvd_vwap_adx (Q11 momentum + trend-regime gate) - DONE 2026-09-15, all cells DISCARD, family CLOSED
+
+- **Result:** the ADX(14,15m) gate did NOT isolate the trending regime.
+  roc=2.5%+adx>=25: +200.6 / **-343.5** / +46.0 / +906.9 — W2 bleed cut
+  from -419 to -343 but not eliminated (13 of 15 W2 trades still fired:
+  ADX is direction-agnostic — sharp countertrend moves are also high-ADX).
+  adx>=20: -338; adx>=30: -477 (worse). roc=4%+adx>=25: W1 flips
+  negative (-165 vs +201 ungated) and W3 goes to 0 trades. No strict
+  majority of improved windows anywhere -> DISCARD x4.
+  Artifact `20260915_015542_cvd_vwap_adx.json`.
+- **Mechanism conclusion (recorded):** the edge is real only in
+  macro-trending regimes (W4: 36% aggregate move). A 15m-bar ADX gate
+  cannot predict that regime — it fires locally on any strong move,
+  including ones that chop back. A slower regime filter (daily
+  SMA200-side / 30d realized trend) could isolate it, but that is
+  iteration #3 on already-seen data — garden of forking paths. Per the
+  pre-registered failure modes, the family CLOSES here.
+
+- **Motivation (honest, post-hoc but mechanism-driven):** the Q11
+  diagnostic correlated per-window PnL of roc=2.5% with window
+  trendiness: |move| 13.7/4.1/2.6/36.3% and path-efficiency
+  0.028/0.008/0.005/0.060 map onto PnL +201/-419/-16/+907 — profit
+  concentrated where trend existed. The gate hypothesis predates the
+  observation (time-series momentum needs trend; canonical filter
+  ADX(14)>=25). We measured a mechanism, not a tuned parameter — but
+  this disclosure stays on record: the family enters its second session
+  having seen the data once.
+- **Hypothesis (fixed):** dip/rip signals (roc>=thr, CVD+AVWAP filters
+  as in Q11) taken ONLY when ADX(14,15m) >= adx_min are net-positive in
+  a strict majority of windows under tier-0 costs — i.e. the chop-
+  regime bleed (W2/W3) is removed while the trend-regime edge survives.
+- **Harness:** `python scripts/research/overnight_runner.py --family
+  cvd_vwap_adx --start 2026-05-18 --end 2026-09-08 --symbols
+  BTC,ETH,SOL,HYPE` (identical harness/costs/windows as Q11).
+- **Grid (5 cells = 20 runs, at cap):**
+  1. baseline — roc=2.5%, no gate (Q11 cell 2 rerun as control arm)
+  2. roc=2.5% + adx>=25 (canonical)
+  3. roc=2.5% + adx>=20 (looser)
+  4. roc=2.5% + adx>=30 (stricter — monotone effect check)
+  5. roc=4.0% + adx>=25 (effect must not depend on observed-best thr)
+- **Evidence bar:** standard KEEP rules + Bonferroni alpha_eff=0.025.
+- **Failure modes anticipated (pre-registered):** if the gate merely
+  retro-selects W4, per-window n collapses -> INCONCLUSIVE ceiling;
+  if chop-bleed persists through the gate -> DISCARD; either is a
+  legitimate outcome and the family then CLOSES.
+
+
 ## NOT testable tonight — gate status table
 
 | Item | Gate to reopen | Status 2026-09-09 |
