@@ -111,14 +111,7 @@ def _load_wallets() -> List[str]:
     return out
 
 
-def _leaderboard_top_volume(n: int) -> List[str]:
-    """Top-n wallets by allTime volume from the public HL leaderboard.
-
-    The tracked-file set (~10 "consistent durable" winners) is too small
-    and too PnL-selected for the markout-ranking methodology — the toxic-
-    tail concept needs a broader cohort. High-volume wallets maximise
-    fill density per poll regardless of their PnL sign.
-    """
+def _leaderboard_rows() -> List[Dict[str, Any]]:
     try:
         req = urllib.request.Request(
             LEADERBOARD_URL,
@@ -129,19 +122,29 @@ def _leaderboard_top_volume(n: int) -> List[str]:
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
         print(f"wallet_fills: leaderboard fetch failed: {exc}")
         return []
-    rows = data.get("leaderboardRows") or []
+    return data.get("leaderboardRows") or []
+
+
+def _leaderboard_top(rows: List[Dict[str, Any]], metric: str,
+                     window: str, n: int) -> List[str]:
+    """Top-n leaderboard wallets by ``metric`` (vlm/pnl) over ``window``.
+
+    The markout-ranking methodology needs cohort DISPERSION, not a
+    pre-selected winner set: high-volume wallets contribute fill density
+    (and contain the toxic tail), high-PnL wallets contribute the
+    informed-candidate tail. The union of both rankings is the universe.
+    """
     scored = []
     for row in rows:
         try:
             addr = str(row.get("ethAddress") or "").strip().lower()
             if not (addr.startswith("0x") and len(addr) >= 42):
                 continue
-            perfs = row.get("windowPerformances") or []
-            vlm = 0.0
-            for wname, perf in perfs:
-                if wname == "allTime":
-                    vlm = float(perf.get("vlm") or 0.0)
-            scored.append((vlm, addr))
+            val = 0.0
+            for wname, perf in row.get("windowPerformances") or []:
+                if wname == window:
+                    val = float(perf.get(metric) or 0.0)
+            scored.append((val, addr))
         except (TypeError, ValueError):
             continue
     scored.sort(reverse=True)
@@ -151,7 +154,9 @@ def _leaderboard_top_volume(n: int) -> List[str]:
 def _universe(tracked_only: bool) -> List[str]:
     wallets = set(_load_wallets())
     if not tracked_only:
-        wallets.update(_leaderboard_top_volume(60))
+        rows = _leaderboard_rows()
+        wallets.update(_leaderboard_top(rows, "vlm", "allTime", 150))
+        wallets.update(_leaderboard_top(rows, "pnl", "month", 100))
     return sorted(wallets)
 
 

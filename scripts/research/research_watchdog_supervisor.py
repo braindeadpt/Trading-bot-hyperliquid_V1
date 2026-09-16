@@ -23,8 +23,13 @@ Unifies the three auto-rerun evidence gates that previously ran as separate
     p95/p99 and alerts when a feed turns **DEGRADING** (recent median above
     its historical p99 — consistently slower than it used to be) —
     fire-once per episode, re-armed on recovery.
+  * **Bot alive** monitors ``data/live/bot.lock`` + ``logs/bot.log`` and
+    alerts when the trading process died (stale lock PID) or froze (PID
+    alive but log silent > 15min) — the 2026-09-16 incident had the bot
+    down ~16h before anyone noticed because no watchdog watched the
+    process itself. Alert once per episode, re-armed on recovery.
 
-All five are **read-only evidence gates**: they run probes and write decision
+All eight are **read-only evidence gates**: they run probes and write decision
 reports; nothing here trades or touches the OMS.
 
 State is held in ONE gitignored file (``data/research/research_watchdogs_state.json``)
@@ -73,6 +78,7 @@ WATCHDOG_IDS = (
     "feed_cadence",
     "liq_feed_gap",
     "nightly_keepalive",
+    "bot_alive",
 )
 
 # ── helpers reused from the per-gate scripts (single source of truth) ──
@@ -117,6 +123,7 @@ from scripts.research.feed_cadence_diagnostic import (  # noqa: E402
 )
 from src.core.engine import feed_silence_contracts  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
+from src.utils.instance_lock import _pid_alive  # noqa: E402
 
 # Legacy per-watchdog state files (migration source on first run).
 LEGACY_STATE_PATHS: Dict[str, Path] = {
@@ -223,6 +230,11 @@ def fresh_state() -> Dict[str, Dict[str, Any]]:
             "open_gap_start_ms": None,
         },
         "nightly_keepalive": {
+            "triggered": False,
+            "runs": [],
+            "alerted_since_ms": None,
+        },
+        "bot_alive": {
             "triggered": False,
             "runs": [],
             "alerted_since_ms": None,
@@ -817,20 +829,150 @@ def check_nightly_keepalive(
     return False
 
 
+# ── bot process liveness watchdog ─────────────────────────────────────
+#
+# Every other watchdog monitors DATA produced by the bot — none watched the
+# PROCESS. On 2026-09-16 the bot was killed ~02:20 (clean exit, no
+# traceback, likely console close) and stayed down ~16h: bias samples, L2
+# snapshots, liq feed and the dashboard all silently stopped while the
+# nightly keepalive kept reporting "ok" (it watches NIGHTLY_STATUS.json,
+# written by the scheduler, not the bot). This watch closes that gap:
+#
+#   * ``data/live/bot.lock`` exists + PID dead     -> ALERT (died mid-run,
+#     lock leaked — exactly the 09-16 signature)
+#   * lock exists + PID alive + bot.log silent >15min -> ALERT (hung:
+#     process present, event loop not logging)
+#   * lock missing                                 -> bot stopped cleanly
+#     (release_instance_lock ran) -> not our business, no alert
+#
+# Edge-triggered like liq_gap: alert once per episode, re-arm on recovery.
+
+BOT_LOCK_PATH = ROOT / "data" / "live" / "bot.lock"
+BOT_LOG_PATH = ROOT / "logs" / "bot.log"
+BOT_LOG_STALE_MS = 15 * 60_000  # healthy bot logs every few seconds
+
+
+def bot_alive_status() -> Dict[str, Any]:
+    """Process + log-freshness verdict for the trading bot."""
+    now_ms = int(time.time() * 1000)
+    out: Dict[str, Any] = {
+        "lock_present": BOT_LOCK_PATH.exists(),
+        "lock_pid": None,
+        "pid_alive": None,
+        "log_age_ms": None,
+    }
+    if BOT_LOG_PATH.exists():
+        try:
+            out["log_age_ms"] = now_ms - int(BOT_LOG_PATH.stat().st_mtime * 1000)
+        except OSError:
+            pass
+    if not out["lock_present"]:
+        return out
+    try:
+        out["lock_pid"] = int(BOT_LOCK_PATH.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        out["lock_pid"] = None
+    if out["lock_pid"]:
+        out["pid_alive"] = _pid_alive(out["lock_pid"])
+    return out
+
+
+def notify_bot_down(status: Dict[str, Any], reason: str) -> None:
+    notifier = build_alert_notifier()
+    if notifier is None:
+        log("bot_alive: alert skipped — no notifier")
+        return
+    log_h = (status.get("log_age_ms") or 0) / 3_600_000
+    msg = (
+        f"🚨 <b>BOT DOWN — {reason}</b>\n"
+        f"lock PID: {status.get('lock_pid')} (alive={status.get('pid_alive')}) · "
+        f"bot.log silence: {log_h:.2f}h\n"
+        f"Feeds de dados (bias/L2/liq) e o dashboard param com o processo. "
+        f"Relançar: <code>python run_with_recovery.py --mode paper</code>"
+    )
+    try:
+        notifier.send(msg)
+    except Exception as exc:
+        log(f"bot_alive: notify failed: {exc}")
+
+
+def check_bot_alive(
+    shared: Dict[str, Dict[str, Any]],
+    *,
+    force: bool = False,
+) -> bool:
+    """Alert once per bot-down episode; re-arm when the process recovers."""
+    sub = shared["bot_alive"]
+    status = bot_alive_status()
+    alerted = sub.get("alerted_since_ms")
+
+    if not status["lock_present"]:
+        if alerted is not None:
+            sub["alerted_since_ms"] = None
+            save_shared_state(shared)
+        log("bot_alive: sem lock — bot parado limpo (não é episódio)")
+        return False
+
+    pid, alive, log_age = (
+        status["lock_pid"], status["pid_alive"], status["log_age_ms"])
+    reason: Optional[str] = None
+    if pid and alive is False:
+        reason = "processo morto (lock stale)"
+    elif alive and log_age is not None and log_age > BOT_LOG_STALE_MS:
+        reason = f"processo vivo mas log mudo há {log_age / 60_000:.0f}min"
+
+    if reason is not None:
+        if alerted is None or force:
+            sub["alerted_since_ms"] = int(time.time() * 1000)
+            sub["runs"].append({
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "reason": reason,
+                "lock_pid": pid,
+                "log_age_min": round((log_age or 0) / 60_000, 1)
+                if log_age is not None else None,
+            })
+            save_shared_state(shared)
+            notify_bot_down(status, reason)
+            log(f"bot_alive: ALERT — {reason} (pid={pid})")
+            return True
+        log(f"bot_alive: episódio em curso ({reason}) — já alertado")
+        return False
+
+    if alerted is not None:
+        sub["alerted_since_ms"] = None
+        save_shared_state(shared)
+        log("bot_alive: bot recuperou — episódio fechado, re-armado")
+        return False
+    log(f"bot_alive: ok (pid={pid}, log há "
+        f"{(log_age or 0) / 60_000:.1f}min)")
+    return False
+
+
+GATE_FUNCS = {
+    "top_trader_bias": "check_bias",
+    "liquidation_flush": "check_flush",
+    "iv_gate_shadow": "check_iv_gate",
+    "feed_age_creep": "check_creeping_age",
+    "feed_cadence": "check_cadence_degrading",
+    "liq_feed_gap": "check_liq_gap",
+    "nightly_keepalive": "check_nightly_keepalive",
+    "bot_alive": "check_bot_alive",
+}
+
+
 def check_all(
-    shared: Dict[str, Dict[str, Any]], *, force: bool = False
-) -> Tuple[bool, bool, bool, bool, bool, bool, bool]:
-    """Run all six gates once. Returns (bias_ran, flush_ran, iv_ran,
-    creep_ran, cadence_ran, liq_gap_ran)."""
-    bias_ran = check_bias(shared, force=force)
-    flush_ran = check_flush(shared, force=force)
-    iv_ran = check_iv_gate(shared, force=force)
-    creep_ran = check_creeping_age(shared, force=force)
-    cadence_ran = check_cadence_degrading(shared, force=force)
-    liq_gap_ran = check_liq_gap(shared, force=force)
-    keepalive_ran = check_nightly_keepalive(shared, force=force)
-    return (bias_ran, flush_ran, iv_ran, creep_ran, cadence_ran,
-            liq_gap_ran, keepalive_ran)
+    shared: Dict[str, Dict[str, Any]], *, force: bool = False,
+    only: Optional[List[str]] = None,
+) -> Dict[str, bool]:
+    """Run the gates once. ``only`` restricts to a subset (the 15-min
+    bot-alive task runs ``--only bot_alive`` so process death is caught in
+    <=15min while the full 6h sweep stays on its own schedule)."""
+    results: Dict[str, bool] = {}
+    for wd in WATCHDOG_IDS:
+        if only and wd not in only:
+            continue
+        results[wd] = globals()[GATE_FUNCS[wd]](shared, force=force)
+    return results
 
 
 def main() -> int:
@@ -841,7 +983,16 @@ def main() -> int:
                     help="run both probes now regardless of progress (smoke test / manual)")
     ap.add_argument("--hours", type=float, default=CHECK_HOURS,
                     help="check interval hours (daemon mode)")
+    ap.add_argument("--only", default=None,
+                    help="comma-separated watchdog ids to run (e.g. --only bot_alive)")
     args = ap.parse_args()
+    only = [s.strip() for s in args.only.split(",") if s.strip()] if args.only else None
+    if only:
+        unknown = [s for s in only if s not in WATCHDOG_IDS]
+        if unknown:
+            log(f"unknown watchdog ids in --only: {unknown} "
+                f"(known: {list(WATCHDOG_IDS)})")
+            return 2
 
     log("=== research watchdog supervisor "
         f"(bias >= {BIAS_TARGET_DATES} datas, flush >= {FLUSH_TARGET_DAYS}d real, "
@@ -849,16 +1000,17 @@ def main() -> int:
         f"creep >= {CREEP_MIN_DAYS}d de escada no max diário, "
         f"cadence DEGRADING (rec mediana > p99 histórico), "
         f"liq_gap > {LIQ_GAP_ALERT_MS // 3_600_000}h silêncio, "
+        f"bot_alive lock+{BOT_LOG_STALE_MS // 60_000}min log, "
         f"check a cada {args.hours:.0f}h) ===")
     shared = load_shared_state()
     # Always persist the canonical shared file (fresh or migrated) so the
     # dashboard reads the same single source of truth from day one.
     save_shared_state(shared)
     if args.once:
-        check_all(shared, force=args.force)
+        check_all(shared, force=args.force, only=only)
         return 0
     while True:
-        check_all(shared, force=False)
+        check_all(shared, force=False, only=only)
         time.sleep(args.hours * 3600)
 
 

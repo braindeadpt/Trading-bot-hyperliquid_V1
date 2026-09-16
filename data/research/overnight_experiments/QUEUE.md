@@ -383,7 +383,14 @@ An entry becomes READY only after the family is wired and reviewed.
   absent the question is dead — no strategy family gets wired.
   Pilot (recorded, not evidence): first 10-wallet screen gave
   rho=-1.00 on n_wallets~7 — meaningless sample, exactly why Phase A
-  exists.
+  exists. Second run (2026-09-17, 73.5k taker fills / 68 wallets)
+  still NOT MET: n_wallets=5 pass the >=30-fills-per-half filter.
+  **Data-integrity fix applied:** candles_1m had a gap 08-15..09-01 in
+  the research DB (live bot.db had it — backfilled +91k rows); the
+  markout now rejects reference candles older than the fill or far
+  short of the horizon (the stale-close artifact produced a bogus
+  -1905bps outlier pre-fix). Universe widened 69 -> 251 wallets
+  (top-150 allTime vlm union top-100 month pnl).
 - **Phase B — signal family (only if Phase A unlocks):** freeze the
   top-markout decile ("informed") and bottom decile ("toxic") cohorts
   on the scoring window; signal = net aggressive notional of the

@@ -65,8 +65,14 @@ def main() -> int:
         print(f"  candles_1m[{s}]: {len(ts[s])} rows")
 
     def markout(coin: str, t0: int, p0: float, sign: float, h_ms: int) -> float | None:
+        # bisect lands on the last candle close <= t0+h. Two reject cases,
+        # both observed in the data (candles_1m has gaps — e.g. 08-20..08-25):
+        #   * ts[i] <= t0: the "reference" close predates the fill (gap after
+        #     fill) -> the markout would compare against a stale price.
+        #   * ts[i] < t0+h-2min: candle exists but is far short of the
+        #     horizon -> silently measuring a shorter horizon.
         i = bisect.bisect_right(ts[coin], t0 + h_ms) - 1
-        if i < 0:
+        if i < 0 or ts[coin][i] <= t0 or ts[coin][i] < t0 + h_ms - 120_000:
             return None
         return sign * (cl[coin][i] / p0 - 1.0) * 1e4
 
