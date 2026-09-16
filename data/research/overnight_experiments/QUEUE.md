@@ -354,6 +354,59 @@ An entry becomes READY only after the family is wired and reviewed.
   legitimate outcome and the family then CLOSES.
 
 
+## Q13 - wallet_markout_flow ("Public Trader Identity" methodology port) - PHASE A pending (data accumulating)
+
+- **Source:** arXiv 2608.04373 (wallet-level L4 study, 17.1B messages,
+  147k HL wallets) + Research Square rs-10147582 ("Binance Leads, but
+  Some Wallets Anticipate" — signed markouts M_i(h) = d_i x
+  (m(t+h)-m(t))/m(t) x 1e4 at h=2/5/10s, split-sample quintile
+  persistence). Both papers share one primitive we now collect:
+  **signed markouts of taker fills**.
+- **Data:** `wallet_fills` table in research DB (E:) — populated by
+  `scripts/research/wallet_fills_collector.py` (scheduled task
+  `Hyperliquid-Wallet-Fills-Collector`, hourly). Fills carry `crossed`
+  (maker/taker), `side`, `dir`, `sz`, `px`, `time`, `closedPnl`.
+  Universe = 69 leaderboard wallets (durability-selected, not random —
+  the paper used all wallets; ours is conditioned on already-profitable
+  traders, which is FINE for the question "is there an informed
+  sub-cohort" but must be disclosed).
+- **Honest limitation:** the papers score at 2-10s horizons using L4
+  book data; we have 1m candles -> our markout horizons are
+  **5m / 15m / 1h**. Persistence at longer horizons is a different
+  (and weaker) claim than 10s alpha — recorded, not hidden.
+- **Phase A — screening (measurement, zero strategy budget):**
+  per-wallet notional-weighted signed markout over the accumulated
+  fills at h=5m/15m/1h; split the sample in half by time and compute
+  Spearman rank correlation of wallet rankings between halves.
+  **Unlock rule for Phase B:** rho >= 0.30 with >= 20 wallets having
+  >= 30 taker fills in EACH half, at >= 1 horizon. If persistence is
+  absent the question is dead — no strategy family gets wired.
+  Pilot (recorded, not evidence): first 10-wallet screen gave
+  rho=-1.00 on n_wallets~7 — meaningless sample, exactly why Phase A
+  exists.
+- **Phase B — signal family (only if Phase A unlocks):** freeze the
+  top-markout decile ("informed") and bottom decile ("toxic") cohorts
+  on the scoring window; signal = net aggressive notional of the
+  informed cohort over trailing 15m; enter WITH informed flow.
+  Hypothesis (fixed): informed-cohort aggressive flow predicts forward
+  mid moves beyond tier-0 costs on BTC/ETH/SOL/HYPE.
+  Harness: new replay `topwallet_flow_replay.py` (same entry/cost/funding
+  conventions as `toptrader_fade_replay.py`).
+  Window set: 7d splits strictly AFTER the scoring freeze — scoring
+  data is selection, never evidence (Q2 precedent).
+  Grid cap: 5 cells (e.g. cohort decile 10/20%, trail 15m/30m,
+  follow-vs-fade ablation). 5 x K windows <= 20 runs.
+- **Coverage gate:** Phase A needs >= 20d of clean `wallet_fills`
+  (coverage starts ~2026-08-21 -> ALREADY MET ~09-10, but keep
+  accumulating to widen the second half); Phase B needs the freeze
+  + >= 4 post-freeze 7d windows -> earliest realistic evidence session
+  ~2026-10-15 if the collector stays clean.
+- **Kill criteria (pre-registered):** Phase A rho < 0.30 -> dead,
+  wallets carry no persistent informed flow at our horizons; Phase B
+  all-DISCARD -> cohort effect does not survive costs; either way the
+  collector keeps running (data is cheap, markouts feed future work).
+
+
 ## NOT testable tonight — gate status table
 
 | Item | Gate to reopen | Status 2026-09-09 |
@@ -364,6 +417,7 @@ An entry becomes READY only after the family is wired and reviewed.
 | Liq-map veto/fuel (§1.4, §1.6) | Phase 3: dozens of zone events + forward approaches | needs L2 zone data; books stale — requires bot running |
 | ret_lag fade (reversion) | live maker fills beat BE 4.21 bps | maker harness ready (`maker_fill_adverse_selection_l2.py`) but L2 data stale |
 | toptrader_fade (Q10) | 28d continuous `top_trader_bias_samples` | **NOT MET** — 380h hole 08-15→08-31 + 71h 09-01→09-04; clean coverage from ~09-04 → reopen ~2026-10-05 |
+| wallet_markout_flow (Q13) | Phase A: rho>=0.30 on split-half markout ranks; Phase B: 4 post-freeze 7d windows | accumulating — `wallet_fills` ~108k rows from ~08-21, collector hourly (69/69 wallets, 0 errors after backoff fix) → earliest session ~2026-10-15 |
 | CVD / feature screens | — | strategy CLOSED (FDR verdicts); feature pipeline only, never a strategy loop |
 | ORB warm-up fix | — | strategy-code change → NEEDS-CODE, human decision ("when ORB work resumes") |
 | MM feasibility | — | CLOSED definitive (verdict C ×2) |
