@@ -53,9 +53,13 @@ GATE_RECORD = {
 }
 
 REREG_REASON = (
-    "JevJudge EXPERIMENT promotion — owner-requested TypeSafe/Jev paper "
-    "experiment. Verdict EXPERIMENT recorded (no PASS claimed); all other "
-    "strategies stay shadow-only per the 09-17 demotion evidence."
+    "JevJudge EXPERIMENT — min_confidence lowered 0.60 -> 0.50 "
+    "(owner decision, 2026-09-17). Evidence: 0/24 recorded jev_decisions "
+    "reached 0.60 (max observed 0.57) -> 0 signals, 0 trades; at 0.50 "
+    "5/24 (21%) would fire, ~20 signals/day across 4 symbols. Provisional "
+    "floor so the experiment produces observations. Verdict stays "
+    "EXPERIMENT (no PASS claimed, zero evidence); all other strategies "
+    "stay shadow-only per the 09-17 demotion evidence."
 )
 IN_SAMPLE_NOTE = (
     "Experiment, not validated promotion. JevJudge trades paper positions "

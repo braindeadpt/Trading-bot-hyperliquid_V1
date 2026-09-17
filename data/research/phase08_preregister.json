@@ -13,7 +13,7 @@
       "verdict": "EXPERIMENT"
     }
   ],
-  "config_hash": "569b0696f4406540",
+  "config_hash": "24e20ad9b5339c4e",
   "edge_demonstrated": false,
   "execution_scope": {
     "mode": "paper",
@@ -33,10 +33,10 @@
       "JevJudge"
     ]
   },
-  "experiment_id": "26d4475e-5851-43a7-998a-c12ad58bb6ec",
+  "experiment_id": "d98b9562-327f-49bf-9979-6808726a0c63",
   "fidelity_note": "tier_a_hl_ohlc certifies Hyperliquid OHLC data availability only; it does not certify strategy edge.",
   "in_sample_selection_note": "Experiment, not validated promotion. JevJudge trades paper positions so the experiment is dashboard-visible; offline evaluation via jev_decisions + jev_eval.py continues in parallel.",
-  "manifest_hash": "090e647d4be80c8f669b6964b8f676fa840286ed6cfb7aa10a4fab7e8799c533",
+  "manifest_hash": "f1d01b137713a569573d8a19585652378db599d9a7824ebe4da499a744383236",
   "oos_protocol": "phase06-train-val-test-v1",
   "oos_status": "pending",
   "protocol": "phase08-preregister-v2",
@@ -60,8 +60,8 @@
       "low_vol"
     ]
   },
-  "registered_at_ms": 1789656894338,
-  "reregistration_reason": "JevJudge EXPERIMENT promotion \u2014 owner-requested TypeSafe/Jev paper experiment. Verdict EXPERIMENT recorded (no PASS claimed); all other strategies stay shadow-only per the 09-17 demotion evidence.",
+  "registered_at_ms": 1789683777093,
+  "reregistration_reason": "JevJudge EXPERIMENT \u2014 min_confidence lowered 0.60 -> 0.50 (owner decision, 2026-09-17). Evidence: 0/24 recorded jev_decisions reached 0.60 (max observed 0.57) -> 0 signals, 0 trades; at 0.50 5/24 (21%) would fire, ~20 signals/day across 4 symbols. Provisional floor so the experiment produces observations. Verdict stays EXPERIMENT (no PASS claimed, zero evidence); all other strategies stay shadow-only per the 09-17 demotion evidence.",
   "strategies": {
     "ChecklistMeta": {
       "expected_max_signals_per_symbol_per_week": 1344.0,
@@ -146,5 +146,5 @@
       "signal_throttle_ms": 1800000
     }
   },
-  "supersedes_experiment_id": "3d07bf63-072c-4aab-b367-569fa47d9ffe"
+  "supersedes_experiment_id": "26d4475e-5851-43a7-998a-c12ad58bb6ec"
 }

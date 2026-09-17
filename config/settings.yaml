@@ -539,7 +539,12 @@ strategy:
   # ═══════════════════════════════════════════════════════════
   jev_judge:
     enabled: true
-    min_confidence: 0.60            # Jev action confidence floor
+    min_confidence: 0.50            # Jev action confidence floor — lowered 2026-09-17
+                                    # (owner decision): 0/24 recorded decisions reached
+                                    # 0.60 (max observed 0.57) -> 0 signals, 0 trades.
+                                    # At 0.50: 5/24 (21%) would fire (~20 signals/day
+                                    # across 4 symbols). Provisional floor so the
+                                    # experiment produces observations.
     decision_ttl_ms: 5400000        # ignore verdicts older than 90min
     base_size_pct: 0.01             # 1% of capital per experiment trade
     sl_pct_min: 0.01                # SL floor 1%
