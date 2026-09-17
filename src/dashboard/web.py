@@ -23,7 +23,7 @@ from src.dashboard.auth import (
     validate_dashboard_token,
 )
 from src.utils.helpers import safe_float
-from scripts.ops.preflight_feed_check import PREFLIGHT_REPORT_PATH  # noqa: E402
+from scripts.ops.preflight_feed_check import PREFLIGHT_REPORT_PATH, ROOT  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -480,6 +480,7 @@ class DashboardEmitter:
         "strategies",
         "signals",
         "decisions",
+        "jev_verdicts",
         "portfolio",
         "trades",
         "logs",
@@ -954,6 +955,59 @@ class DashboardEmitter:
         """Risk + execution decisions."""
         decisions = getattr(_engine, "_decision_history", [])[:20]
         self._safe_emit("decisions", decisions)
+
+    def _emit_jev_verdicts(self) -> Optional[Dict[str, Any]]:
+        """Latest TypeSafe/Jev hourly verdicts (paper experiment feed).
+
+        Reads ``data/live/jev_latest.json`` written by
+        ``scripts/research/jev_shadow_judge.py`` each hourly call round.
+        ``min_confidence`` comes from the live JevJudge instance so the
+        panel marks which verdicts are tradeable. Missing/corrupt file ->
+        empty verdicts list (panel shows 'waiting'), never raises into the
+        emitter loop.
+        """
+        path = ROOT / "data" / "live" / "jev_latest.json"
+        verdicts: Dict[str, Any] = {}
+        file_age_min: Optional[float] = None
+        try:
+            if path.exists():
+                file_age_min = (time.time() - path.stat().st_mtime) / 60.0
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    verdicts = raw
+        except Exception as exc:  # noqa: BLE001 — panel degrades, loop survives
+            logger.warning("jev_verdicts read failed: %s", exc)
+
+        min_conf = 0.60
+        for s in getattr(_engine, "_strategies", []) or []:
+            if getattr(s, "name", "") == "JevJudge":
+                min_conf = float(getattr(s, "MIN_CONFIDENCE", min_conf))
+                break
+
+        now_ms = int(time.time() * 1000)
+        rows = []
+        for sym in sorted(verdicts):
+            v = verdicts.get(sym) or {}
+            ts = int(v.get("ts_ms") or 0)
+            conf = v.get("confidence")
+            rows.append({
+                "symbol": sym,
+                "action": v.get("action"),
+                "confidence": conf,
+                "regime": v.get("regime"),
+                "atr_pct_15m": v.get("atr_pct_15m"),
+                "verdict_age_min": round((now_ms - ts) / 60000.0, 1) if ts else None,
+                "tradeable": bool(
+                    conf is not None
+                    and float(conf) >= min_conf
+                    and v.get("action") in ("long", "short")
+                ),
+            })
+        return {
+            "min_confidence": min_conf,
+            "file_age_min": round(file_age_min, 1) if file_age_min is not None else None,
+            "verdicts": rows,
+        }
 
     def _emit_portfolio(self) -> Optional[Dict[str, Any]]:
         if _engine is None:

@@ -482,6 +482,12 @@ th { font-size: 10px; }
                 <div id="decisions-list" class="stream-list"><span class="muted">No decisions yet</span></div>
             </div>
         </div>
+        <div class="panel">
+            <div class="panel-header">Jev <span class="dim" id="jev-sub">TypeSafe verdicts · hourly</span></div>
+            <div class="panel-body" style="padding:4px 6px; overflow-y:auto;">
+                <div id="jev-list" class="stream-list"><span class="muted">Waiting for first verdict…</span></div>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -2414,6 +2420,33 @@ socket.on("funding_update", (data) => {
 socket.on("candles", (data) => renderCandles(data));
 socket.on("signals", (data) => renderSignals(data));
 socket.on("decisions", (data) => renderDecisions(data));
+socket.on("jev_verdicts", (data) => renderJevVerdicts(data));
+
+// ── Jev verdicts (TypeSafe experiment) ──
+function renderJevVerdicts(data) {
+    const div = document.getElementById("jev-list");
+    const sub = document.getElementById("jev-sub");
+    const rows = (data && data.verdicts) || [];
+    const minConf = (data && data.min_confidence) || 0.60;
+    if (sub) {
+        const age = data && data.file_age_min != null ? ` · feed ${Math.round(data.file_age_min)}m ago` : "";
+        sub.textContent = `TypeSafe · conf≥${minConf} trades${age}`;
+    }
+    if (!rows.length) { div.innerHTML = '<span class="muted">Waiting for first verdict…</span>'; return; }
+    div.innerHTML = rows.map(v => {
+        const sideCls = v.action === 'long' ? 'up' : v.action === 'short' ? 'down' : '';
+        const confTxt = v.confidence != null ? Number(v.confidence).toFixed(2) : "--";
+        const confCls = v.tradeable ? 'up' : 'muted';
+        const flag = v.tradeable ? ' ▸TRADE' : '';
+        const age = v.verdict_age_min != null ? `${Math.round(v.verdict_age_min)}m` : '';
+        return `<div class="stream-item">
+            <span class="stream-symbol">${v.symbol}</span>
+            <span class="${sideCls}">${(v.action || '--').toUpperCase()}</span>
+            <span class="${confCls}">${confTxt}${flag}</span>
+            <span class="muted tiny">${v.regime || ''} ${age}</span>
+        </div>`;
+    }).join('');
+}
 socket.on("strategies", (data) => renderStrategies(data));
 socket.on("positions", (data) => renderPositions(data));
 socket.on("trades", (data) => renderTrades(data));
