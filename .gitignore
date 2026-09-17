@@ -100,3 +100,6 @@ docs/DISK_AND_CODE_INVENTORY.md
 
 # playwright-mcp scratch artifacts
 .playwright-mcp/
+
+# Local tunnel binary (cloudflared) — 52MB tool, not repo code
+tools/
