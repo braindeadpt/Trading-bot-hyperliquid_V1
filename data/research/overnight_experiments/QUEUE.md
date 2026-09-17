@@ -425,6 +425,7 @@ An entry becomes READY only after the family is wired and reviewed.
 | ret_lag fade (reversion) | live maker fills beat BE 4.21 bps | maker harness ready (`maker_fill_adverse_selection_l2.py`) but L2 data stale |
 | toptrader_fade (Q10) | 28d continuous `top_trader_bias_samples` | **NOT MET** — 380h hole 08-15→08-31 + 71h 09-01→09-04; clean coverage from ~09-04 → reopen ~2026-10-05 |
 | wallet_markout_flow (Q13) | Phase A: rho>=0.30 on split-half markout ranks; Phase B: 4 post-freeze 7d windows | accumulating — `wallet_fills` ~108k rows from ~08-21, collector hourly (69/69 wallets, 0 errors after backoff fix) → earliest session ~2026-10-15 |
+| jev_shadow (TypeSafe experiment) | measurement only — IC(long-short noul vs fwd_ret) + follow-Jev PF via `jev_eval.py`; n>=30 and PF>1 across most weeks required before any real preregistration | collecting — `jev_decisions` hourly via Hyperliquid-Jev-Shadow (state=computed features, fan-out questions, daily cap 96 calls, token budget tracked); **no execution path contact, ever** |
 | CVD / feature screens | — | strategy CLOSED (FDR verdicts); feature pipeline only, never a strategy loop |
 | ORB warm-up fix | — | strategy-code change → NEEDS-CODE, human decision ("when ORB work resumes") |
 | MM feasibility | — | CLOSED definitive (verdict C ×2) |
