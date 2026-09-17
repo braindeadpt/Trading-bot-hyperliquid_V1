@@ -12,5 +12,5 @@ REM exits (crash/kill).
 cd /d "%~dp0"
 :loop
 tools\ngrok.exe http --url=remedial-deception-contact.ngrok-free.dev 5000 >> logs\ngrok_tunnel.log 2>&1
-timeout /t 10 /nobreak >nul
+ping 127.0.0.1 -n 11 >nul
 goto loop
