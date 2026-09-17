@@ -266,6 +266,22 @@ class TestDashboardRateLimit:
         r = self.client.get("/api/status", environ_overrides={"REMOTE_ADDR": "203.0.113.9"})
         assert r.status_code == 200
 
+    def test_forwarded_for_keys_proxied_visitors_separately(self):
+        """Tunneled traffic arrives as loopback; XFF must key each visitor."""
+        for _ in range(5):
+            assert self.client.get(
+                "/api/status", headers={"X-Forwarded-For": "203.0.113.10"}
+            ).status_code == 200
+        # same forwarded IP exhausts its own bucket
+        r = self.client.get("/api/status", headers={"X-Forwarded-For": "203.0.113.10"})
+        assert r.status_code == 429
+        # a different forwarded visitor is unaffected
+        r = self.client.get("/api/status", headers={"X-Forwarded-For": "198.51.100.7"})
+        assert r.status_code == 200
+        # loopback without the header keeps its own bucket too
+        r = self.client.get("/api/status")
+        assert r.status_code == 200
+
     def test_socketio_and_static_exempt_from_limit(self):
         """Socket.IO transport + static assets never consume the budget."""
         for _ in range(6):

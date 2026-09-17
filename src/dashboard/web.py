@@ -1144,12 +1144,23 @@ def create_app(config: Dict[str, Any]) -> tuple:
         _rl_limit = 100
     _rate_limiter = _IPRateLimiter(_rl_limit)
 
+    def _client_key() -> str:
+        # Tunnel/proxy traffic arrives as loopback; the rightmost forwarded
+        # entry is the client IP observed by the proxy, so remote visitors
+        # get individual buckets instead of sharing the loopback one.
+        remote = request.remote_addr or "unknown"
+        if remote in ("127.0.0.1", "::1"):
+            fwd = request.headers.get("X-Forwarded-For", "")
+            if fwd:
+                return fwd.split(",")[-1].strip() or remote
+        return remote
+
     @app.before_request
     def _rate_limit():
         path = request.path
         if path.startswith(("/static/", "/socket.io/")) or path == "/socket.io.min.js":
             return None
-        if not _rate_limiter.allow(request.remote_addr or "unknown"):
+        if not _rate_limiter.allow(_client_key()):
             resp = jsonify({"error": "rate limit exceeded", "retry_after_sec": 60})
             resp.status_code = 429
             resp.headers["Retry-After"] = "60"
