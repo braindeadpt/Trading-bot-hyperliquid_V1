@@ -389,14 +389,16 @@ def _update_latest_verdict(symbol: str, ts_ms: int,
 def one_pass(symbols: List[str], *, dry_run: bool, daily_cap: int,
              max_tokens: int, ask_interval_s: int) -> Dict[str, int]:
     stats = {"asked": 0, "inserted": 0, "skipped": 0, "errors": 0}
-    api_key = (os.environ.get("TYPESAFE_API_KEY") or "").strip()
     usage = _load_usage()
 
     if not LIVE_DB.exists():
         print(f"jev: live DB missing at {LIVE_DB}")
         return stats
     db = sqlite3.connect(f"file:{LIVE_DB}?mode=ro", uri=True)
+    # load_config() runs _load_dotenv — do it before reading the key so a
+    # TYPESAFE_API_KEY line in .env works for the scheduled task too
     rdb = sqlite3.connect(f"file:{_research_db_path()}?mode=ro", uri=True)
+    api_key = (os.environ.get("TYPESAFE_API_KEY") or "").strip()
     wdb = sqlite3.connect(str(_research_db_path()), timeout=30)
     wdb.execute("PRAGMA journal_mode=WAL")
     wdb.execute(CREATE_SQL)
