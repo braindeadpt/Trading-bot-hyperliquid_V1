@@ -414,6 +414,69 @@ An entry becomes READY only after the family is wired and reviewed.
   collector keeps running (data is cheap, markouts feed future work).
 
 
+## Q14 — vwap_fade_oir_liq: order-flow gates on VWAP fades — CLOSED (2026-09-17)
+
+**Result: 4× DISCARD** (artifact `20260917_171810_vwap_fade_oir_liq.json`,
+20 runs, K=4 windows 08-29..09-17 @5d). Baseline over the span was
++135.79 (n=64, PF=1.39) — profitable on this window set, though the last
+window (09-13..17) was −59.89. No variant cleared the preregistered gates:
+
+| Cell | net | n | PF | improved | Verdict |
+|---|---:|---:|---:|---|---|
+| oir_move_0.4 | +128.23 | 25 | 2.44 | 2/4 | DISCARD (n<30, p=0.56) |
+| oir_fade_0.2 | +117.75 | 29 | 1.88 | 2/4 | DISCARD (n<30, p=0.56) |
+| liq<50k_15m | +36.22 | 46 | 1.14 | 1/4 | DISCARD (p=0.81) |
+| oir_fade_0.2+liq | −42.00 | 14 | 0.51 | 1/4 | DISCARD (p=0.94) |
+
+**Reading:** the declared n-risk materialized — the OIR gates cut trades
+64→25-29 while *retaining* most PnL (PF 1.9-2.4 vs baseline 1.39), the
+signature of a filter that removes tail losses, but 2/4 windows + n<30 +
+p≥0.56 cannot KEEP under the noise gate. `oir_move_0.4` (production
+semantics: fade only while the book still pushes the deviation) was the
+least-bad cell — counterintuitive vs the literature hypothesis, which lost
+more the stricter it filtered. Per the kill criteria the family is closed;
+the OIR-filter signature may merit ONE reopen at ~40d contiguous coverage
+(~2026-10-10) with 10d windows for adequate n — anything beyond that is
+grinding a dead family.
+
+**Origin:** live-paper autopsy of VWAPDeviation (41 closed trades, −185.52):
+the reversion mechanic is profitable when it fires (14 `vwap_reverted`
+exits = **+451.28**) while 6 `stop_loss` exits = **−457.82** and 13
+`max_hold` exits = −137.79. Classic mean-reversion tail — the question is
+not "does the fade work" but "can we refuse the fades that run over us".
+The 40-cell refinement program (Q4/Q5/Q6/Q7/thresholds/exit-econ) never
+tested order-flow gates because the light replay carries no L2 feed — the
+gate below reads `l2_snapshots`/`liquidation_events` directly by timestamp
+(harness-local `_OirLiqGate`, never shipped to src/).
+
+**Evidence hint (not proof — n=41, one −204 HYPE outlier):** reverted
+entries averaged raw OIR +0.28 vs stopped entries −0.30; the HYPE −204
+stop sat in an ask-heavy book during an active cascade.
+
+- **Hypothesis (fixed):** fade entries are safer when (a) the book is no
+  longer pushing the deviation (oir_mode="fade": short requires oir ≤ −thr,
+  long requires oir ≥ +thr), and/or (b) no aligned liquidation cascade is
+  active (short fade vetoes when "short" liquidations > threshold in the
+  trailing 15m — forced buying fuels the pump being faded).
+- **Harness:** `python scripts/research/overnight_runner.py --family vwap_fade_oir_liq --start 2026-08-29 --end 2026-09-17 --split-days 5 --symbols BTC,ETH,SOL,HYPE`
+- **Grid (5 cells = 20 runs, session cap):** baseline / oir_move_0.4
+  (production-confirm semantics, never exercised with real L2) /
+  oir_fade_0.2 / liq<50k_15m / oir_fade_0.2+liq<50k_15m.
+- **Window set (dual-coverage bound):** `l2_snapshots` spans 07-10→09-17
+  (~3.1M rows, all 4 symbols) but `liquidation_events` has a zero-event
+  gap 08-19..08-28 — a liq-veto leg in a gap window would silently never
+  fire = fabricated pass, so the span starts 08-29. 5d splits over
+  08-29..09-17 → **K=4**: 08-29..09-03, 09-03..09-08, 09-08..09-13,
+  09-13..09-17. Windows containing the liq gap are excluded a priori.
+- **Evidence bar:** standard KEEP (paired sign-flip + bootstrap + dd gate,
+  Bonferroni over 4 variants) AND aggregate n≥30. **n-risk declared:**
+  ~20d of fades may land under n=30 → verdict honestly caps at
+  INCONCLUSIVE and the family re-opens when coverage extends to ~40d
+  contiguous (~10-10) for 10d windows.
+- **Kill criteria:** all-DISCARD → VWAP-fade order-flow hypothesis dead;
+  the execution path stays empty and the family joins the closed list.
+
+
 ## NOT testable tonight — gate status table
 
 | Item | Gate to reopen | Status 2026-09-09 |

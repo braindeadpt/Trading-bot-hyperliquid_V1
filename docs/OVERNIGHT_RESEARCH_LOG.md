@@ -92,13 +92,53 @@ noise-model commit would add a `noise gate:` line here; this run predates
 it, and its per-trade PnL is not stored in the artifact, so none is shown.)
 
 ---
-## Morning report — 2026-09-15 01:55 UTC — family `cvd_vwap_adx`
+## Morning report — 2026-09-17 17:18 UTC — family `vwap_fade_oir_liq`
 
-- span: 2026-05-18..2026-09-08 (4 non-overlapping windows of 30d) · symbols: BTC, ETH, SOL, HYPE
+- span: 2026-08-29..2026-09-17 (4 non-overlapping windows of 5d) · symbols: BTC, ETH, SOL, HYPE
 - verdicts: 0 KEEP · 0 INCONCLUSIVE · 4 DISCARD
-- artifact: `data\research\overnight_experiments\20260915_015542_cvd_vwap_adx.json`
+- artifact: `data\research\overnight_experiments\20260917_171810_vwap_fade_oir_liq.json`
 
 ---
+### 2026-09-17 17:18 UTC — vwap_fade_oir_liq/oir_move_0.4 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-08-29..2026-09-17 (4 windows of 5d, non-overlapping)
+- baseline (baseline): net=135.79 n=64 PF=1.385
+- variant: net=128.23 n=25 PF=2.441
+- per-window delta: 2026-08(-21.7), 2026-09(+1.5), 2026-09(-50.35), 2026-09(+62.99)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-38.23 (n=5, p=0.875, within sign-flip null); ETH delta=+33.10 (n=10, p=0.125, within sign-flip null); HYPE delta=+61.02 (n=6, p=0.125, within sign-flip null); SOL delta=-63.43 (n=4, p=0.8125, within sign-flip null)
+- reasons: windows improved 2/4 (majority=no); aggregate n=25 (gate >=30); aggregate PF=2.441 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-17 17:18 UTC — vwap_fade_oir_liq/oir_fade_0.2 — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-08-29..2026-09-17 (4 windows of 5d, non-overlapping)
+- baseline (baseline): net=135.79 n=64 PF=1.385
+- variant: net=117.75 n=29 PF=1.877
+- per-window delta: 2026-08(-58.5), 2026-09(-24.15), 2026-09(+25.36), 2026-09(+39.25)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=+7.32 (n=8, p=0.375, within sign-flip null); ETH delta=-30.13 (n=6, p=0.8125, within sign-flip null); HYPE delta=+37.72 (n=7, p=0.125, within sign-flip null); SOL delta=-32.93 (n=8, p=0.6875, within sign-flip null)
+- reasons: windows improved 2/4 (majority=no); aggregate n=29 (gate >=30); aggregate PF=1.877 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-17 17:18 UTC — vwap_fade_oir_liq/liq<50k_15m — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-08-29..2026-09-17 (4 windows of 5d, non-overlapping)
+- baseline (baseline): net=135.79 n=64 PF=1.385
+- variant: net=36.22 n=46 PF=1.137
+- per-window delta: 2026-08(-89.95), 2026-09(-30.15), 2026-09(-25.98), 2026-09(+46.51)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-49.31 (n=10, p=1.0, within sign-flip null); ETH delta=-5.29 (n=11, p=0.625, within sign-flip null); HYPE delta=+15.11 (n=9, p=0.25, within sign-flip null); SOL delta=-60.07 (n=16, p=0.875, within sign-flip null)
+- reasons: windows improved 1/4 (majority=no); aggregate n=46 (gate >=30); aggregate PF=1.137 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
+### 2026-09-17 17:18 UTC — vwap_fade_oir_liq/oir_fade_0.2+liq<50k_15m — DISCARD
+- hypothesis: parameter variant
+- windows: 2026-08-29..2026-09-17 (4 windows of 5d, non-overlapping)
+- baseline (baseline): net=135.79 n=64 PF=1.385
+- variant: net=-42.0 n=14 PF=0.505
+- per-window delta: 2026-08(-38.58), 2026-09(-44.07), 2026-09(-126.39), 2026-09(+31.25)
+- symbol slices (ADVISORY — the cell verdict is the only gate): BTC delta=-52.14 (n=2, p=0.875, within sign-flip null); ETH delta=-50.96 (n=2, p=0.875, within sign-flip null); HYPE delta=-26.95 (n=5, p=0.875, within sign-flip null); SOL delta=-47.75 (n=5, p=0.9375, within sign-flip null)
+- reasons: windows improved 1/4 (majority=no); aggregate n=14 (gate >=30); aggregate PF=0.505 (gate >1.0)
+- audit line: verdict DRAFTED by overnight_runner — advisory; promotion only via shadow + watchdog recheck.
+
 ### 2026-09-15 01:55 UTC — cvd_vwap_adx/roc=2.5% adx>=25 — DISCARD
 - hypothesis: parameter variant
 - windows: 2026-05-18..2026-09-08 (4 windows of 30d, non-overlapping)

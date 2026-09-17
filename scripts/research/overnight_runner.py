@@ -1045,7 +1045,9 @@ def hype_vwap_refine_family() -> Tuple[List[str], Callable[..., Dict[str, Any]],
 # gate classes below are research code living in this file, never in src/.
 # ---------------------------------------------------------------------------
 
+import bisect  # noqa: E402  (module-level: _OirLiqGate snapshot lookup)
 import collections  # noqa: E402  (module-level: gates use deque)
+import sqlite3  # noqa: E402  (module-level: _OirLiqGate reads l2/liq DBs)
 
 
 def _vwap_fade_run_one(fade_section: Dict[str, Any], db_path: str,
@@ -1071,6 +1073,8 @@ def _vwap_fade_run_one(fade_section: Dict[str, Any], db_path: str,
         section["enabled"] = True
         section["require_oir_confirm"] = False
         strat = VWAPDeviation(section)
+        if isinstance(gate_kind, dict) and gate_kind.get("kind") == "oir_liq":
+            return _VWAPEntryVeto(strat, _OirLiqGate(gate_kind))
         if gate_kind in ("decay", "below_mean"):
             return _VWAPEntryVeto(strat, _ExhaustionGate(gate_kind))
         if gate_kind and gate_kind.startswith("retrace_"):
@@ -1271,6 +1275,114 @@ class _DecelGate:
         return abs(z_now) <= extreme - self._retrace
 
 
+class _OirLiqGate:
+    """Q14 book-pressure + liquidation-cascade veto (research only).
+
+    The light replay builds MarketEvents from candles only — no L2 feed —
+    so this gate consults the persisted stores directly by timestamp:
+    ``l2_snapshots`` (research DB: oir per symbol, ~1/min cadence) and
+    ``liquidation_events`` (live bot.db: notional per liquidated side).
+
+    Legs (spec dict keys — every configured leg must pass):
+      - oir_mode="move": production-confirm semantics. Fade-SHORT allowed
+        only when oir >= +thr (book still bid-heavy, i.e. buyers still
+        pushing the pump we fade); fade-LONG only when oir <= -thr.
+      - oir_mode="fade": the literature hypothesis — enter only when the
+        book has STOPPED pushing the deviation: short requires
+        oir <= -thr, long requires oir >= +thr.
+      - liq_veto_usd: veto when liquidations ALIGNED with the deviation
+        exceed the threshold in the trailing liq_lookback_min minutes.
+        Aligned for a short fade = "short" positions liquidated (forced
+        buys fueling the pump); for a long fade = "long" liquidations.
+
+    Missing data vetoes the entry — no-evidence is never a silent pass.
+    """
+
+    _MAX_OIR_AGE_MS = 10 * 60 * 1000  # snapshot staleness bound
+
+    def __init__(self, spec: Dict[str, Any]) -> None:
+        self._mode = spec.get("oir_mode")               # 'move' | 'fade' | None
+        self._thr = float(spec.get("oir_thr") or 0.0)
+        self._liq_veto = spec.get("liq_veto_usd")       # None -> leg off
+        self._liq_min = int(spec.get("liq_lookback_min", 15))
+        self._s_ms = int(spec["_s_ms"])
+        self._e_ms = int(spec["_e_ms"])
+        self._l2_db = str(spec["_l2_db"])
+        self._liq_db = str(spec["_liq_db"])
+        self._l2: Dict[str, Tuple[List[int], List[Any]]] = {}
+        self._liq: Dict[str, List[Tuple[int, float, str]]] = {}
+
+    def update(self, event: Any) -> None:  # stateless per-bar; DBs hold the data
+        return
+
+    def _l2_for(self, sym: str) -> Tuple[List[int], List[Any]]:
+        if sym not in self._l2:
+            db = sqlite3.connect(f"file:{self._l2_db}?mode=ro", uri=True)
+            try:
+                rows = db.execute(
+                    "SELECT timestamp_ms, oir FROM l2_snapshots "
+                    "WHERE symbol=? AND timestamp_ms BETWEEN ? AND ? "
+                    "ORDER BY timestamp_ms",
+                    (sym, self._s_ms - self._MAX_OIR_AGE_MS, self._e_ms),
+                ).fetchall()
+            finally:
+                db.close()
+            self._l2[sym] = ([int(r[0]) for r in rows], [r[1] for r in rows])
+        return self._l2[sym]
+
+    def _liq_for(self, sym: str) -> List[Tuple[int, float, str]]:
+        if sym not in self._liq:
+            db = sqlite3.connect(f"file:{self._liq_db}?mode=ro", uri=True)
+            try:
+                rows = db.execute(
+                    "SELECT timestamp_ms, notional_usd, side FROM liquidation_events "
+                    "WHERE symbol=? AND timestamp_ms BETWEEN ? AND ? "
+                    "ORDER BY timestamp_ms",
+                    (sym, self._s_ms - 3_600_000, self._e_ms),
+                ).fetchall()
+            finally:
+                db.close()
+            self._liq[sym] = [
+                (int(r[0]), float(r[1] or 0.0), str(r[2])) for r in rows
+            ]
+        return self._liq[sym]
+
+    def _oir_at(self, sym: str, ts: int) -> Optional[float]:
+        ts_l, oir_l = self._l2_for(sym)
+        i = bisect.bisect_right(ts_l, ts) - 1
+        if i < 0 or ts - ts_l[i] > self._MAX_OIR_AGE_MS:
+            return None
+        v = oir_l[i]
+        return float(v) if v is not None else None
+
+    def _aligned_liq_usd(self, sym: str, ts: int, fade_side: str) -> float:
+        # Short fade -> the deviation is UP -> liquidated SHORTS are the fuel.
+        want = "short" if fade_side == "short" else "long"
+        lo = ts - self._liq_min * 60_000
+        return sum(
+            n for t, n, s in self._liq_for(sym)
+            if lo < t <= ts and s == want
+        )
+
+    def allow(self, event: Any, sig: Any) -> bool:
+        ts = int(event.timestamp_ms)
+        if self._mode:
+            oir = self._oir_at(event.symbol, ts)
+            if oir is None:
+                return False
+            thr = self._thr
+            if sig.side == "short":
+                ok = oir >= thr if self._mode == "move" else oir <= -thr
+            else:
+                ok = oir <= -thr if self._mode == "move" else oir >= thr
+            if not ok:
+                return False
+        if self._liq_veto is not None:
+            if self._aligned_liq_usd(event.symbol, ts, sig.side) > float(self._liq_veto):
+                return False
+        return True
+
+
 def _vwap_cfg() -> Tuple[Dict[str, Any], Dict[str, Any], str, float, float, float]:
     """Shared config plumbing for the VWAP families (live bot.db only —
     the same source Night 2 used; no per-window seams)."""
@@ -1409,6 +1521,76 @@ def vwap_deceleration_family() -> Tuple[List[str], Callable[..., Dict[str, Any]]
             overrides, gate_kind=cell.get("gate"))
 
     return [tag_for(c) for c in VWAP_DECELERATION_GRID], run_one, cfg
+
+
+# ---------------------------------------------------------------------------
+# Family: vwap_fade_oir_liq — Q14 order-flow gates on VWAP fades.
+#
+# QUEUE.md preregistration (2026-09-17): the live-paper autopsy of
+# VWAPDeviation showed the reversion mechanic itself is profitable
+# (14 vwap_reverted exits: +451 USD) and the damage is concentrated in 6
+# stop-outs (-458) plus max-hold bleed (-138) — the classic mean-reversion
+# tail. Live entry_OIR records hint the stop-outs entered with the book
+# pushing the deviation (reverted avg raw OIR +0.28 vs stopped -0.30),
+# and the biggest loss (HYPE -204) sat in an ask-heavy book during what
+# looks like an active cascade. The 40-cell refinement program never
+# tested order-flow gates because light replay has no OIR feed — this
+# family closes that hole by having the gate read l2_snapshots /
+# liquidation_events directly (harness-local gate, never shipped to src/).
+#
+# Grid (5 cells = 20 runs at K=4, exactly the session cap):
+#   0 baseline            — no gate (production fade as-is)
+#   1 oir_move_0.4        — production confirm semantics, finally exercised
+#                           with real L2 data (short needs oir>=+0.4)
+#   2 oir_fade_0.2        — literature: enter only when the book stopped
+#                           pushing the deviation (short needs oir<=-0.2)
+#   3 liq_50k_15m         — veto fades into an active aligned cascade
+#   4 oir_fade_0.2+liq    — combined
+# ---------------------------------------------------------------------------
+
+VWAP_OIR_LIQ_GRID: Tuple[Dict[str, Any], ...] = (
+    {"gate": None},
+    {"gate": {"kind": "oir_liq", "oir_mode": "move", "oir_thr": 0.4}},
+    {"gate": {"kind": "oir_liq", "oir_mode": "fade", "oir_thr": 0.2}},
+    {"gate": {"kind": "oir_liq", "liq_veto_usd": 50_000.0, "liq_lookback_min": 15}},
+    {"gate": {"kind": "oir_liq", "oir_mode": "fade", "oir_thr": 0.2,
+              "liq_veto_usd": 50_000.0, "liq_lookback_min": 15}},
+)
+
+
+def vwap_fade_oir_liq_family() -> Tuple[List[str], Callable[..., Dict[str, Any]], Callable[..., Any]]:
+    """Wire the Q14 order-flow gate family to the shared VWAP-fade harness."""
+    cfg, fade_section, live_path, initial_capital, commission_pct, slippage_bps = _vwap_cfg()
+    research_path = str(cfg.get("research.database.path", ""))
+    if not research_path:
+        raise ValueError("vwap_fade_oir_liq requires research.database.path "
+                         "(l2_snapshots live there)")
+
+    def tag_for(cell: Dict[str, Any]) -> str:
+        g = cell.get("gate")
+        if not g:
+            return "baseline"
+        parts: List[str] = []
+        if g.get("oir_mode"):
+            parts.append(f"oir_{g['oir_mode']}_{g.get('oir_thr')}")
+        if g.get("liq_veto_usd") is not None:
+            parts.append(f"liq<{int(g['liq_veto_usd'] / 1000)}k_{g.get('liq_lookback_min', 15)}m")
+        return "+".join(parts)
+
+    def run_one(start: str, end: str, symbols: List[str],
+                cell: Dict[str, Any]) -> Dict[str, Any]:
+        s_ms, e_ms = _window_ms(start, end)
+        gate = cell.get("gate")
+        if isinstance(gate, dict):
+            gate = dict(gate)
+            gate["_s_ms"], gate["_e_ms"] = s_ms, e_ms
+            gate["_l2_db"], gate["_liq_db"] = research_path, live_path
+        return _vwap_fade_run_one(
+            fade_section, live_path, symbols, s_ms, e_ms,
+            initial_capital, commission_pct, slippage_bps,
+            dict(cell.get("overrides") or {}), gate_kind=gate)
+
+    return [tag_for(c) for c in VWAP_OIR_LIQ_GRID], run_one, cfg
 
 
 # ---------------------------------------------------------------------------
@@ -2243,6 +2425,7 @@ FAMILIES = {
     "vwap_exit_econ": vwap_exit_econ_family,
     "vwap_exhaustion": vwap_exhaustion_family,
     "vwap_deceleration": vwap_deceleration_family,
+    "vwap_fade_oir_liq": vwap_fade_oir_liq_family,
     "sma_rebalance": sma_rebalance_family,
     "toptrader_fade": toptrader_fade_family,
     "cvd_vwap": cvd_vwap_family,
@@ -2303,6 +2486,8 @@ def sweep(family: str, start: str, end: str, symbols: List[str],
         grid_params = [VWAP_EXHAUSTION_GRID[i] for i in sel]
     elif family == "vwap_deceleration":
         grid_params = [VWAP_DECELERATION_GRID[i] for i in sel]
+    elif family == "vwap_fade_oir_liq":
+        grid_params = [VWAP_OIR_LIQ_GRID[i] for i in sel]
     elif family == "sma_rebalance":
         grid_params = [SMA_REBALANCE_GRID[i] for i in sel]
     elif family == "toptrader_fade":
