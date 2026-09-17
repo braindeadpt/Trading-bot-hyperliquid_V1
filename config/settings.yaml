@@ -733,21 +733,27 @@ strategy:
     multiplier: 2.0                 # double after each loss (30m → 1h → 2h)
 
   # ═══════════════════════════════════════════════════════════
-  # Phase 08 — edge isolation (VWAPDeviation paper execution)
+  # Phase 08 — edge isolation
   # v3.1.48: structural deadlock fix + governor floor for last execution name.
   # ChecklistMeta was temporarily in execution, then demoted to shadow after
   # baseline-signal FAIL (W2/W3). Do not re-promote without a fresh PASS.
+  # 2026-09-17: execution path EMPTIED — cumulative paper evidence says
+  # nothing deserves to execute (strategy_pnl: VWAPDeviation −220USD/44t,
+  # ChecklistMeta −905/184t, VB −454/26t; every VWAPDeviation refinement
+  # family DISCARD'd: Night2, Q4, Q5, Q6, Q7). All surviving names run
+  # shadow-only so signal telemetry keeps accumulating. Retired registry
+  # names (CVDOrderFlow, FundingArbitrage) removed from shadow — they were
+  # dead config the engine skipped anyway. Promotion back to execution
+  # requires a fresh baseline_signal_gate PASS — same bar as always.
   # ═══════════════════════════════════════════════════════════
   phase08:
     enabled: true
     paper_only: true               # tier_a_hl_ohlc = data cert only; paper until Phase06 OOS
-    execution_strategies:
-      - VWAPDeviation
+    execution_strategies: []
     shadow_strategies:
+      - VWAPDeviation
       - VolatilityBreakout
-      - CVDOrderFlow
       - OrderBookScalper
-      - FundingArbitrage
       - FundingMomentum
       - SpotPerpCarry
       - LeadLag

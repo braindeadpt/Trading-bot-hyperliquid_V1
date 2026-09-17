@@ -1,9 +1,7 @@
 {
-  "config_hash": "b208601c78f467af",
-  "execution_strategies": [
-    "VWAPDeviation"
-  ],
-  "experiment_id": "fb1c400b-1eb8-42a8-a3dc-4624e96af3fc",
+  "config_hash": "87245c201ddb3d8e",
+  "execution_strategies": [],
+  "experiment_id": "9e6bc3ae-e033-4901-b5b3-47a524fb46cb",
   "gate_note": "All four criteria must be a real PASS (not merely 'no FAIL yet due to insufficient data') for the frozen window to be considered met. Drift in execution_strategies or config_hash after freeze invalidates the window \u2014 see assert_config_matches_preregister().",
   "gate_thresholds": {
     "expectancy_r_gt": 0.0,
@@ -11,17 +9,17 @@
     "min_profit_factor": 1.2,
     "min_trades": 100
   },
-  "in_sample_selection_note": "Research DB relocation only. VWAPDeviation remains the sole paper execution control (INCONCLUSIVE sample). No promotion; mainnet still blocked. Accumulated OOS evidence intentionally retained.",
-  "manifest_hash": "290bebf256eae3caf39c9618d63cb046e1dfb1ba3a603a436ed9f8d033579ff8",
+  "in_sample_selection_note": "Demotion, not promotion. Zero execution strategies is the honest state given the evidence; shadow telemetry continues. Mainnet remains blocked.",
+  "manifest_hash": "f99ff08dc1525846e518ba024cc80dc51291d38bce6004799c33ed446e2168f0",
   "protocol": "phase10-frozen-window-v1",
-  "registered_at_ms": 1786731051459,
-  "reregistration_reason": "research data-collection change only \u2014 research.database excluded from the config hash BY PATH (a bare `database` key also exists at top level for the operational DB and must stay frozen; research strict_mode / min_coverage_pct / gap_intervals remain hashed). The 3.8 GB research DB moves to the E: HDD per docs/DATA_ARCHITECTURE.md. No strategy, risk, fee or execution_strategies change. OOS window PRESERVED.",
-  "supersedes_experiment_id": "ab03bf10-5b8b-45d5-bd84-0f10609247ad",
+  "registered_at_ms": 1789653517764,
+  "reregistration_reason": "execution-path demotion \u2014 cumulative paper + backtest evidence shows negative expectancy for every registered strategy (VWAPDeviation -220.84USD/44t live paper, 5 refinement families DISCARD'd; ChecklistMeta -905.27/184t already demoted). execution_strategies emptied; all names shadow-only. Promotion requires fresh baseline_signal_gate PASS.",
+  "supersedes_experiment_id": "fb1c400b-1eb8-42a8-a3dc-4624e96af3fc",
   "window": {
-    "max_end_ms": 1793714897421,
+    "max_end_ms": 1796911117164,
     "max_weeks": 12,
-    "min_end_ms": 1791295697421,
+    "min_end_ms": 1794491917164,
     "min_weeks": 8
   },
-  "window_start_ms": 1786457297421
+  "window_start_ms": 1789653517164
 }

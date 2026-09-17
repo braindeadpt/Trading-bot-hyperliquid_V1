@@ -1,7 +1,35 @@
 # Strategy Audit — Backtest Profundo
 
-**Última actualização:** 2026-06-29 19:55 UTC
+**Última actualização:** 2026-09-17 — **execution path esvaziado (ver §0)**
 **Estado:** pós walk-forward optimisation sweep (45 runs, 3 windows, Monte Carlo 1000x)
+
+## §0 — 2026-09-17: demote-tudo (execution_strategies → [])
+
+Decisão: **nenhuma estratégia registada merece executar.** O `execution_strategies`
+foi esvaziado; todos os nomes vivos correm shadow-only (telemetria de sinais
+continua a acumular sem gastar capital paper em expectativa negativa provada).
+Re-registo: `scripts/ops/reregister_phase10_execution_demotion.py`
+(experiment_id `9e6bc3ae-e033-4901-b5b3-47a524fb46cb`).
+
+**Evidência 1 — live paper `strategy_pnl` (execuções reais, fees tier-0):**
+
+| Estratégia | n | Net USD | Win% | Estado após |
+|---|---:|---:|---:|---|
+| ChecklistMeta | 184 | −905.27 | 42% | shadow |
+| VolatilityBreakout | 26 | −454.30 | 31% | shadow |
+| VWAPDeviation | 44 | −220.84 | 57% | shadow |
+| TrendPyramid | 8 | −19.69 | 13% | retired (registry) |
+| SmartMoneyFlow | 12 | −3.54 | 17% | retired (registry) |
+| StrategyEnsemble | 16 | −0.14 | 56% | retired (registry) |
+
+**Evidência 2 — programa de research (janelas preregistadas + custos tier-0):**
+todas as famílias de refinement do VWAPDeviation DISCARD — Night 2 thresholds,
+Q4 exhaustion, Q5 deceleration, Q6 HYPE refine, Q7 exit-econ. ChecklistMeta já
+tinha baseline-signal FAIL (W2/W3). ~40 células totais, zero KEEP.
+
+**O que NÃO muda:** feeds e telemetria continuam (bias samples, L2, wallet
+fills, shadow signals). Promoção futura exige `baseline_signal_gate: PASS`
+fresco — a mesma barra de sempre, não foi relaxada.
 
 ## ⚠️ Nota sobre audits anteriores
 

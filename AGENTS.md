@@ -27,12 +27,17 @@ The bot is built around a **WebSocket-first event architecture**: real-time mark
 
 **Current operational status (check before suggesting live/OOS work):**
 - Live-executing strategies (`strategy.phase08.execution_strategies` in
-  `config/settings.yaml`): VWAPDeviation only — currently
-  **paper-only** (`strategy.phase08.paper_only: true`) pending OOS
-  (out-of-sample / walk-forward) validation.
+  `config/settings.yaml`): **NONE — emptied 2026-09-17.** Cumulative paper
+  evidence (`strategy_pnl`: VWAPDeviation −220.84USD/44t, ChecklistMeta
+  −905.27/184t, VB −454.30/26t) plus every VWAPDeviation refinement family
+  DISCARD'd in the research program (Night2, Q4–Q7) → nothing deserves to
+  execute. Re-registered via
+  `scripts/ops/reregister_phase10_execution_demotion.py`; evidence in
+  `docs/STRATEGY_AUDIT.md` §0. `paper_only` stays true.
 - Shadow-mode strategies (`strategy.phase08.shadow_strategies`, signal-tracked
-  but never executed): ChecklistMeta, VolatilityBreakout, CVDOrderFlow, OrderBookScalper,
-  FundingArbitrage, FundingMomentum, SpotPerpCarry (plus others listed in YAML).
+  but never executed): VWAPDeviation, ChecklistMeta, VolatilityBreakout,
+  OrderBookScalper, FundingMomentum, SpotPerpCarry, LeadLag,
+  LiquidationCatcher, TopTraderFlow.
 - **Fees (2026-08-10):** paper/backtest aligned to HL perps **tier-0** —
   taker **0.045%**/side, maker **0.015%**/side. Phase10 window re-registered
   via `scripts/ops/reregister_phase10_tier0_fees.py`. Protocol:
