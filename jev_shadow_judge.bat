@@ -1,9 +1,13 @@
 @echo off
 chcp 65001 >nul
-title Jev Shadow Judge (hourly)
+title Jev Shadow Judge (5min)
 
-REM TypeSafe/Jev trading-judgment experiment — shadow measurement only,
-REM never executes. Needs TYPESAFE_API_KEY in the user environment:
+REM TypeSafe/Jev trading-judgment experiment — virtual paper trading.
+REM The script asks Jev once/hour per symbol (API cap) and manages virtual
+REM SL/TP exits on every run. Closed virtual trades land in bot.db trades
+REM (strategy='JevJudge') so the dashboard shows them. Open virtual
+REM positions live only in the research DB — the engine never sees them.
+REM Needs TYPESAFE_API_KEY in the user environment:
 REM   setx TYPESAFE_API_KEY "ts-..."
 REM Task: Hyperliquid-Jev-Shadow (registered via rereg_hidden_tasks.ps1 style)
 
