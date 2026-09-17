@@ -474,15 +474,23 @@ def assert_experiment_paper_only(manifest: Dict[str, Any], config: Any) -> None:
     if not experiment:
         return
     try:
-        mode = str(config.get("mode", "paper")).lower()
+        mode = str(config.get("mode", "")).lower()
         paper_only = bool(
             (config.get("strategy.phase08", {}) or {}).get("paper_only", False)
         )
-    except (AttributeError, TypeError):
-        mode, paper_only = "paper", False
-    if mode != "paper" and not paper_only:
+    except (AttributeError, TypeError) as exc:
+        # A safety guard that cannot read the mode must fail CLOSED —
+        # "assume paper" would let an unreadable config boot into live.
         raise PreregisterManifestError(
-            f"EXPERIMENT execution strategies {experiment} are paper-only "
+            f"EXPERIMENT execution strategies {experiment}: unreadable "
+            f"mode/phase08 config ({exc}) — refusing to boot"
+        ) from exc
+    # EXPERIMENT verdicts may execute ONLY in paper mode, and the phase08
+    # paper_only flag is an additional requirement — never a bypass.
+    if mode != "paper" or not paper_only:
+        raise PreregisterManifestError(
+            f"EXPERIMENT execution strategies {experiment} require "
+            f"mode='paper' AND strategy.phase08.paper_only=true "
             f"(mode={mode!r}, phase08.paper_only={paper_only}) — remove them "
             f"from execution_strategies or demote to a PASS gate record"
         )

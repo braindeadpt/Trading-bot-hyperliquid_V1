@@ -34,9 +34,18 @@ The bot is built around a **WebSocket-first event architecture**: real-time mark
   `data/live/jev_latest.json`; the `JevJudge` strategy emits one signal
   per fresh verdict (conf ≥ 0.6) and the engine manages SL/TP/hold like
   any trade. Manifest gate record `verdict: EXPERIMENT` — **zero evidence
-  claimed, this is not a PASS**. Paper-only enforced three ways: manifest
-  `assert_experiment_paper_only`, `JevJudge._mode` guard, `paper_only: true`.
-  Re-registered via `scripts/ops/reregister_jev_experiment.py`.
+  claimed, this is not a PASS**. Paper-only enforced three ways, all
+  fail-closed: (1) `assert_experiment_paper_only` refuses to boot an
+  EXPERIMENT strategy unless `mode == 'paper'` **AND**
+  `strategy.phase08.paper_only` is true — `paper_only` is an additional
+  requirement, never a bypass; (2) `JevJudge._mode` guard — the factory
+  overwrites `_mode` with the effective process mode (a hand-written
+  YAML value cannot override it) and a missing mode disables the
+  strategy; (3) `paper_only: true` in config. The verdict file's
+  freshness is a contracted feed (`jev_verdicts`) on the
+  FeedSilenceMonitor — a stale `jev_latest.json` alerts via the notifier
+  like any other silent feed. Re-registered via
+  `scripts/ops/reregister_jev_experiment.py`.
   All evidence-based strategies remain demoted to shadow (09-17 evidence:
   VWAPDeviation −220.84USD/44t, ChecklistMeta −905.27/184t, VB −454.30/26t;
   every VWAP refinement family DISCARD'd — `docs/STRATEGY_AUDIT.md` §0).

@@ -180,6 +180,12 @@ _ALLOWED_DOMAINS: Tuple[str, ...] = (
     "testnet.binance.vision",
     "api.bybit.com",
     "www.okx.com",
+    # api.typesafe.ai — System One / Jev verdict endpoint called by the
+    # owner-declared paper experiment (scripts/research/jev_shadow_judge.py,
+    # currently OUTSIDE the src/ scan scope — declared here so the
+    # dependency is explicit in the inventory). Auth key comes from the
+    # TYPESAFE_API_KEY environment variable, never from settings.yaml.
+    "api.typesafe.ai",
     "127.0.0.1",
     "localhost",
 )

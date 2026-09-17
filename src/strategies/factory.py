@@ -151,8 +151,10 @@ def _instantiate_from_registry(
 ) -> Optional[Strategy]:
     section = copy.deepcopy(cfg.get(path, {}) or {})
     # Strategies that must know the run mode (e.g. paper-only experiments)
-    # read it as _mode; harmless extra key for everyone else.
-    section.setdefault("_mode", cfg.get("mode", "paper"))
+    # read it as _mode. Direct assignment, NOT setdefault: the effective
+    # process mode must always win — a hand-written `_mode: paper` in a
+    # strategy YAML section must never survive a switch to mainnet.
+    section["_mode"] = cfg.get("mode", "paper")
     if shadow:
         section["_shadow_mode"] = True
         _apply_shadow_section_overrides(section, path)

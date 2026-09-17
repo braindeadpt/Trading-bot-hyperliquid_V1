@@ -55,9 +55,19 @@ class JevJudge(Strategy):
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         cfg = config or {}
-        # Paper-only guard — the factory injects the run mode as _mode.
-        self._mode = str(cfg.get("_mode", "paper")).lower()
+        # Paper-only guard — the factory injects the process run mode as
+        # _mode. Fail CLOSED: no explicit mode means disabled, never an
+        # assumed-paper default — this guard exists to block real-money
+        # order placement, so ambiguity must refuse.
+        raw_mode = cfg.get("_mode")
+        self._mode = str(raw_mode).lower() if raw_mode is not None else ""
         self._enabled = self._mode == "paper"
+        if not self._enabled:
+            logger.warning(
+                "JevJudge disabled — _mode=%r (paper-only experiment requires "
+                "an explicit 'paper' run mode injected by the factory)",
+                raw_mode,
+            )
 
         self.LATEST_PATH = Path(
             cfg.get("latest_path") or _DEFAULT_LATEST_PATH

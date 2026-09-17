@@ -9,11 +9,13 @@ the :class:`RiskManager` before handing approved trades to the
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
 import time
 from dataclasses import replace
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -120,6 +122,15 @@ _FUNDING_COOLDOWN_STRATEGIES = frozenset({
 # evidence at all. Only ``l2_book_recording`` (the bot's own L2 writer) is
 # truly self-produced for boot-gating purposes.
 SELF_PRODUCED_FEEDS: frozenset[str] = frozenset({"l2_book_recording"})
+
+# Feeds produced OUTSIDE this process. ``jev_verdicts`` is written by the
+# scheduled judge task (Hyperliquid-Jev-Shadow) to data/live/jev_latest.json
+# whether the bot is up or not — restarting the bot cannot revive a dead
+# task, so the boot gate reports its evidence but never blocks on it
+# (boot-blocking would only deadlock restarts). The runtime
+# FeedSilenceMonitor still pages on silence while the bot runs, which is
+# the remedy for a dead judge.
+EXTERNAL_PRODUCED_FEEDS: frozenset[str] = frozenset({"jev_verdicts"})
 
 
 def feed_silence_warn_fraction() -> float:
@@ -287,6 +298,25 @@ def feed_silence_contracts(config: Config) -> Dict[str, float]:
     if bool(_l2_rec.get("enabled", True)):
         feeds["l2_book_recording"] = float(
             _silence_cfg.get("l2_book_recording_max_sec", 120)
+        )
+    # jev_verdicts — contracted ONLY while a JevJudge experiment sits in
+    # the execution_strategies list: the scheduled judge task writes
+    # data/live/jev_latest.json hourly; if that task dies the file goes
+    # stale and the only executing strategy silently stops trading.
+    # Threshold = the strategy's own decision TTL (default 90 min) so the
+    # alert fires exactly when verdicts stop being usable.
+    _exec_strats = (
+        (config.get("strategy.phase08", {}) or {}).get("execution_strategies")
+        or []
+    )
+    if "JevJudge" in [str(s) for s in _exec_strats]:
+        _jev_ttl_ms = float(
+            (config.get("strategy.jev_judge", {}) or {}).get(
+                "decision_ttl_ms", 90 * 60_000
+            )
+        )
+        feeds["jev_verdicts"] = float(
+            _silence_cfg.get("jev_verdicts_max_sec", _jev_ttl_ms / 1000.0)
         )
     return feeds
 
@@ -863,6 +893,43 @@ class TradingEngine:
             db.save_feed_silence_alerts([(feed, alert_type, fired_ms, message)])
         except Exception as exc:  # noqa: BLE001
             logger.debug("feed silence alert record failed: %s", exc)
+
+    def _beat_jev_verdict_feed(self) -> None:
+        """Beat the contracted ``jev_verdicts`` feed from the verdict file.
+
+        The scheduled judge task writes ``data/live/jev_latest.json``
+        hourly; a dead task leaves stale verdicts, so the beat timestamp is
+        the newest ``ts_ms`` INSIDE the file — not the read time. Missing/
+        corrupt file simply produces no beat: the feed then ages past its
+        max_silence (the strategy's decision TTL) and the monitor alerts
+        through the same notifier path as any other silent feed.
+
+        The feed is only contracted when JevJudge is in
+        ``execution_strategies`` (see ``feed_silence_contracts``) — an
+        absent file while the experiment is off is normal and stays quiet.
+        """
+        if "jev_verdicts" not in self._feed_silence._enabled_feeds:
+            return
+        try:
+            db_path = Path(str(self._config.get("database.path", "data/live/bot.db")))
+            latest = db_path.parent / "jev_latest.json"
+            if not latest.exists():
+                return
+            raw = json.loads(latest.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return
+            ts_vals = [
+                int(v.get("ts_ms") or 0)
+                for v in raw.values()
+                if isinstance(v, dict)
+            ]
+            newest = max(ts_vals, default=0)
+            if newest > 0:
+                self._feed_silence.beat("jev_verdicts", newest)
+        except Exception as exc:  # noqa: BLE001 — a broken verdict file
+            # means no beat, which IS the signal; the read error itself is
+            # only worth a debug line.
+            logger.debug("jev_verdicts beat skipped: %s", exc)
 
     def _notify(self, coro_factory: Callable[[], "asyncio.Future[Any]"]) -> None:
         """Schedule a notifier coroutine fire-and-forget.
@@ -1452,6 +1519,7 @@ class TradingEngine:
         if overall != "red":
             self._feed_health_ready = True
         if self._feed_silence_enabled:
+            self._beat_jev_verdict_feed()
             for msg in self._feed_silence.check():
                 logger.error("%s", msg)
                 self._notify(

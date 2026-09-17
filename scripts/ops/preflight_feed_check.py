@@ -20,6 +20,12 @@ stopped):
       -> newest file mtime under data/research/l2_books/
   * liquidation_coinalyze_check
       -> verify-only venue: no persisted evidence; reported but never gated.
+  * jev_verdicts
+      -> data/live/jev_latest.json (newest ts_ms), written by the
+         Hyperliquid-Jev-Shadow scheduled task — EXTERNAL to this process,
+         so it is reported (warn past warn-fraction) but NEVER gates boot:
+         restarting the bot cannot revive an external producer. The runtime
+         FeedSilenceMonitor owns the alert while the bot runs.
 
 ``l2_book_recording`` is SELF-PRODUCED — the bot writes it, so its evidence
 only exists while the bot runs. It is reported for visibility but NEVER
@@ -109,6 +115,7 @@ from typing import Optional
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
 from src.core.engine import (  # noqa: E402
+    EXTERNAL_PRODUCED_FEEDS,
     SELF_PRODUCED_FEEDS,
     feed_silence_contracts,
     feed_silence_warn_fraction,
@@ -249,7 +256,25 @@ def _l2_books_mtime(l2_dir: Path) -> int:
     return newest
 
 
-def collect_evidence(db: sqlite3.Connection, *, l2_dir: Path = L2_BOOKS_DIR) -> dict:
+def _jev_verdicts_latest(path: Path) -> int:
+    """Newest ``ts_ms`` inside the Jev verdict file; 0 if absent/corrupt."""
+    try:
+        if not path.exists():
+            return 0
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return 0
+        return max(
+            (int(v.get("ts_ms") or 0) for v in raw.values()
+             if isinstance(v, dict)),
+            default=0,
+        )
+    except (OSError, ValueError, AttributeError):
+        return 0
+
+
+def collect_evidence(db: sqlite3.Connection, *, l2_dir: Path = L2_BOOKS_DIR,
+                     jev_path: Optional[Path] = None) -> dict:
     """Latest delivery timestamp per feed key (ms). Absent keys = no evidence."""
     ev: dict = {}
     ev["liquidation_okx"] = _db_latest(db, "liquidation_events", "timestamp_ms",
@@ -266,6 +291,8 @@ def collect_evidence(db: sqlite3.Connection, *, l2_dir: Path = L2_BOOKS_DIR) -> 
     )
     ev["binance_perp"] = _db_latest(db, "binance_perp_prices", "timestamp_ms")
     ev["l2_book_recording"] = _l2_books_mtime(l2_dir)
+    if jev_path is not None:
+        ev["jev_verdicts"] = _jev_verdicts_latest(jev_path)
     # coinalyze_check: verify-only, no persisted evidence -> key absent
     return ev
 
@@ -320,7 +347,9 @@ def _main() -> int:
 
     now_ms = int(time.time() * 1000)
     l2_dir = Path(args.l2_dir)
-    evidence = collect_evidence(db, l2_dir=l2_dir)
+    evidence = collect_evidence(
+        db, l2_dir=l2_dir, jev_path=db_path.parent / "jev_latest.json"
+    )
 
     # Downtime inference: the newest persisted artifact is the last instant
     # the bot demonstrably wrote anything, so everything older may simply
@@ -358,6 +387,22 @@ def _main() -> int:
                 if latest:
                     age_sec = max(0.0, (now_ms - latest) / 1000.0)
                 status = "self-produced"
+            elif feed in EXTERNAL_PRODUCED_FEEDS:
+                # Written by a producer outside this process (the Jev judge
+                # scheduled task) — restarting the bot cannot revive it, so
+                # boot-gating would only deadlock restarts. Reported with
+                # its real age; past warn-fraction shows as a warning, but
+                # it NEVER fails the boot — the runtime FeedSilenceMonitor
+                # pages on silence while the bot runs.
+                if latest:
+                    age_sec = max(0.0, (now_ms - latest) / 1000.0)
+                    if age_sec >= max_sec * warn_frac:
+                        status = "warn"
+                        warnings += 1
+                    else:
+                        status = "external"
+                else:
+                    status = "external"
             elif latest == 0:
                 if feed == "liquidation_coinalyze_check" and not args.gate_coinalyze:
                     # Verify-only venue: never persisted, never blocks. Reported
