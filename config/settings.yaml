@@ -532,6 +532,23 @@ strategy:
     wallets_path: "data/research/top_traders.json"
 
   # ═══════════════════════════════════════════════════════════
+  # Strategy: JevJudge — TypeSafe/Jev experiment (PAPER ONLY)
+  # Reads data/live/jev_latest.json written by the scheduled judge
+  # (scripts/research/jev_shadow_judge.py); one signal per new decision.
+  # Zero evidence — EXPERIMENT manifest verdict, not PASS.
+  # ═══════════════════════════════════════════════════════════
+  jev_judge:
+    enabled: true
+    min_confidence: 0.60            # Jev action confidence floor
+    decision_ttl_ms: 5400000        # ignore verdicts older than 90min
+    base_size_pct: 0.01             # 1% of capital per experiment trade
+    sl_pct_min: 0.01                # SL floor 1%
+    sl_atr_mult: 2.0                # or 2x ATR% if wider
+    tp_r_mult: 2.0                  # TP at 2R
+    max_hold_hours: 4               # matches the 4h horizon asked of Jev
+    flip_exit: true                 # close early if Jev flips direction
+
+  # ═══════════════════════════════════════════════════════════
   # Strategy: OrderBook Imbalance Scalper
   # ═══════════════════════════════════════════════════════════
   orderbook_scalper:
@@ -749,7 +766,12 @@ strategy:
   phase08:
     enabled: true
     paper_only: true               # tier_a_hl_ohlc = data cert only; paper until Phase06 OOS
-    execution_strategies: []
+    # JevJudge: owner-requested TypeSafe/Jev experiment (2026-09-17) —
+    # manifest gate record verdict=EXPERIMENT (no evidence claimed).
+    # Paper-only by manifest + strategy _mode guard; all other names stay
+    # shadow-only per the 09-17 demotion evidence.
+    execution_strategies:
+      - JevJudge
     shadow_strategies:
       - VWAPDeviation
       - VolatilityBreakout

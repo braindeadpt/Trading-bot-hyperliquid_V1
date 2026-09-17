@@ -1,7 +1,17 @@
 {
-  "config_hash": "87245c201ddb3d8e",
-  "execution_strategies": [],
-  "experiment_id": "9e6bc3ae-e033-4901-b5b3-47a524fb46cb",
+  "baseline_signal_gate": [
+    {
+      "protocol": "experiment-paper-override-v1",
+      "reason": "owner-requested TypeSafe/Jev paper experiment (2026-09-17) \u2014 zero evidence claimed; paper-only enforced by assert_experiment_paper_only + strategy _mode guard",
+      "strategy": "JevJudge",
+      "verdict": "EXPERIMENT"
+    }
+  ],
+  "config_hash": "569b0696f4406540",
+  "execution_strategies": [
+    "JevJudge"
+  ],
+  "experiment_id": "a41661d5-b42e-46ff-9f74-57e3311e4808",
   "gate_note": "All four criteria must be a real PASS (not merely 'no FAIL yet due to insufficient data') for the frozen window to be considered met. Drift in execution_strategies or config_hash after freeze invalidates the window \u2014 see assert_config_matches_preregister().",
   "gate_thresholds": {
     "expectancy_r_gt": 0.0,
@@ -9,17 +19,17 @@
     "min_profit_factor": 1.2,
     "min_trades": 100
   },
-  "in_sample_selection_note": "Demotion, not promotion. Zero execution strategies is the honest state given the evidence; shadow telemetry continues. Mainnet remains blocked.",
-  "manifest_hash": "f99ff08dc1525846e518ba024cc80dc51291d38bce6004799c33ed446e2168f0",
+  "in_sample_selection_note": "Experiment, not validated promotion. JevJudge trades paper positions so the experiment is dashboard-visible; offline evaluation via jev_decisions + jev_eval.py continues in parallel.",
+  "manifest_hash": "fb2a46daf5584f31dd5e7a6ca212152253f1064a40b09b5e1a3d11fdc5cd626a",
   "protocol": "phase10-frozen-window-v1",
-  "registered_at_ms": 1789653517764,
-  "reregistration_reason": "execution-path demotion \u2014 cumulative paper + backtest evidence shows negative expectancy for every registered strategy (VWAPDeviation -220.84USD/44t live paper, 5 refinement families DISCARD'd; ChecklistMeta -905.27/184t already demoted). execution_strategies emptied; all names shadow-only. Promotion requires fresh baseline_signal_gate PASS.",
-  "supersedes_experiment_id": "fb1c400b-1eb8-42a8-a3dc-4624e96af3fc",
+  "registered_at_ms": 1789656894325,
+  "reregistration_reason": "JevJudge EXPERIMENT promotion \u2014 owner-requested TypeSafe/Jev paper experiment. Verdict EXPERIMENT recorded (no PASS claimed); all other strategies stay shadow-only per the 09-17 demotion evidence.",
+  "supersedes_experiment_id": "9e6bc3ae-e033-4901-b5b3-47a524fb46cb",
   "window": {
-    "max_end_ms": 1796911117164,
+    "max_end_ms": 1796914494171,
     "max_weeks": 12,
-    "min_end_ms": 1794491917164,
+    "min_end_ms": 1794495294171,
     "min_weeks": 8
   },
-  "window_start_ms": 1789653517164
+  "window_start_ms": 1789656894171
 }

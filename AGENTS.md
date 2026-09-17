@@ -27,13 +27,19 @@ The bot is built around a **WebSocket-first event architecture**: real-time mark
 
 **Current operational status (check before suggesting live/OOS work):**
 - Live-executing strategies (`strategy.phase08.execution_strategies` in
-  `config/settings.yaml`): **NONE — emptied 2026-09-17.** Cumulative paper
-  evidence (`strategy_pnl`: VWAPDeviation −220.84USD/44t, ChecklistMeta
-  −905.27/184t, VB −454.30/26t) plus every VWAPDeviation refinement family
-  DISCARD'd in the research program (Night2, Q4–Q7) → nothing deserves to
-  execute. Re-registered via
-  `scripts/ops/reregister_phase10_execution_demotion.py`; evidence in
-  `docs/STRATEGY_AUDIT.md` §0. `paper_only` stays true.
+  `config/settings.yaml`): **JevJudge only — EXPERIMENT promotion
+  2026-09-17.** Owner-requested TypeSafe/Jev paper experiment: the
+  scheduled judge (`scripts/research/jev_shadow_judge.py`, task
+  `Hyperliquid-Jev-Shadow` every 5 min) asks Jev 1×/h/symbol and writes
+  `data/live/jev_latest.json`; the `JevJudge` strategy emits one signal
+  per fresh verdict (conf ≥ 0.6) and the engine manages SL/TP/hold like
+  any trade. Manifest gate record `verdict: EXPERIMENT` — **zero evidence
+  claimed, this is not a PASS**. Paper-only enforced three ways: manifest
+  `assert_experiment_paper_only`, `JevJudge._mode` guard, `paper_only: true`.
+  Re-registered via `scripts/ops/reregister_jev_experiment.py`.
+  All evidence-based strategies remain demoted to shadow (09-17 evidence:
+  VWAPDeviation −220.84USD/44t, ChecklistMeta −905.27/184t, VB −454.30/26t;
+  every VWAP refinement family DISCARD'd — `docs/STRATEGY_AUDIT.md` §0).
 - Shadow-mode strategies (`strategy.phase08.shadow_strategies`, signal-tracked
   but never executed): VWAPDeviation, ChecklistMeta, VolatilityBreakout,
   OrderBookScalper, FundingMomentum, SpotPerpCarry, LeadLag,
@@ -49,7 +55,10 @@ The bot is built around a **WebSocket-first event architecture**: real-time mark
   readiness items above.
 - **Baseline-signal gate (required for new execution promotions):** no strategy
   may be *added* to `strategy.phase08.execution_strategies` without a
-  `baseline_signal_gate: PASS` on the preregister manifest. See §12.
+  `baseline_signal_gate: PASS` on the preregister manifest. The only
+  exception class is `verdict: EXPERIMENT` — an explicit owner-declared
+  paper-only promotion with zero evidence claimed, refused outside paper
+  by `assert_experiment_paper_only`. See §12.
 
 ---
 

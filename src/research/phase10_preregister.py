@@ -156,12 +156,16 @@ def persist_preregister_manifest(
     reregistration_reason: Optional[str] = None,
     in_sample_selection_note: Optional[str] = None,
     now_ms: Optional[int] = None,
+    baseline_signal_gate: Optional[Any] = None,
 ) -> Path:
     """Write the immutable Fase 10 pre-registration manifest (first write wins).
 
     When ``overwrite=True``, the previous manifest is archived beside the new
     file (``.superseded.<experiment_id>.json``) before replacement — the assert
     is never disabled; a new window is opened deliberately.
+
+    ``baseline_signal_gate`` may be attached at write time; the bridged
+    gate assert reads it when execution_strategies is non-empty.
     """
     out = path or DEFAULT_PATH
     supersedes: Optional[str] = None
@@ -191,6 +195,9 @@ def persist_preregister_manifest(
         in_sample_selection_note=in_sample_selection_note,
         supersedes_experiment_id=supersedes or None,
     )
+    if baseline_signal_gate is not None:
+        manifest["baseline_signal_gate"] = baseline_signal_gate
+        manifest["manifest_hash"] = _hash_manifest_body(manifest)
     _atomic_write_json(out, manifest)
     logger.info(
         "Phase10 preregister manifest written: %s experiment_id=%s hash=%s",
@@ -273,6 +280,11 @@ def assert_config_matches_preregister(
                 "strategies": list(manifest.get("execution_strategies") or [])
             }
         assert_baseline_signal_gate(bridged, require=False, hard_for_new=True)
+        from src.research.phase08_preregister import (
+            assert_experiment_paper_only,
+        )
+
+        assert_experiment_paper_only(bridged, config)
     except Exception as exc:
         from src.research.phase08_preregister import PreregisterManifestError
 

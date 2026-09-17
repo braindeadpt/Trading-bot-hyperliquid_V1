@@ -72,7 +72,16 @@ def test_preregister_v2_immutable_hash() -> None:
     path = research / f"_test_preregister_{uuid.uuid4().hex}.json"
     try:
         cfg = _phase08_cfg()
-        persist_preregister_manifest(cfg, path)
+        # Live config carries the JevJudge EXPERIMENT promotion — persist
+        # requires the same gate record the ops reregister passes.
+        persist_preregister_manifest(
+            cfg, path,
+            baseline_signal_gate=[{
+                "protocol": "experiment-paper-override-v1",
+                "strategy": "JevJudge",
+                "verdict": "EXPERIMENT",
+            }],
+        )
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["protocol"] == PREREGISTER_PROTOCOL
         assert data.get("experiment_id")

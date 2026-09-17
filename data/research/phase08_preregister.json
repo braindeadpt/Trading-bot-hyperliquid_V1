@@ -5,7 +5,15 @@
     "timeframe": "15m",
     "timeframe_s": 900
   },
-  "config_hash": "87245c201ddb3d8e",
+  "baseline_signal_gate": [
+    {
+      "protocol": "experiment-paper-override-v1",
+      "reason": "owner-requested TypeSafe/Jev paper experiment (2026-09-17) \u2014 zero evidence claimed; paper-only enforced by assert_experiment_paper_only + strategy _mode guard",
+      "strategy": "JevJudge",
+      "verdict": "EXPERIMENT"
+    }
+  ],
+  "config_hash": "569b0696f4406540",
   "edge_demonstrated": false,
   "execution_scope": {
     "mode": "paper",
@@ -21,12 +29,14 @@
       "ChecklistMeta",
       "TopTraderFlow"
     ],
-    "strategies": []
+    "strategies": [
+      "JevJudge"
+    ]
   },
-  "experiment_id": "3d07bf63-072c-4aab-b367-569fa47d9ffe",
+  "experiment_id": "26d4475e-5851-43a7-998a-c12ad58bb6ec",
   "fidelity_note": "tier_a_hl_ohlc certifies Hyperliquid OHLC data availability only; it does not certify strategy edge.",
-  "in_sample_selection_note": "Demotion, not promotion. Zero execution strategies is the honest state given the evidence; shadow telemetry continues. Mainnet remains blocked.",
-  "manifest_hash": "4b00fd21876a036c1e52cc296304dd82791869443347b313b5e25b89240c0bf6",
+  "in_sample_selection_note": "Experiment, not validated promotion. JevJudge trades paper positions so the experiment is dashboard-visible; offline evaluation via jev_decisions + jev_eval.py continues in parallel.",
+  "manifest_hash": "090e647d4be80c8f669b6964b8f676fa840286ed6cfb7aa10a4fab7e8799c533",
   "oos_protocol": "phase06-train-val-test-v1",
   "oos_status": "pending",
   "protocol": "phase08-preregister-v2",
@@ -50,8 +60,8 @@
       "low_vol"
     ]
   },
-  "registered_at_ms": 1789653517798,
-  "reregistration_reason": "execution-path demotion \u2014 cumulative paper + backtest evidence shows negative expectancy for every registered strategy (VWAPDeviation -220.84USD/44t live paper, 5 refinement families DISCARD'd; ChecklistMeta -905.27/184t already demoted). execution_strategies emptied; all names shadow-only. Promotion requires fresh baseline_signal_gate PASS.",
+  "registered_at_ms": 1789656894338,
+  "reregistration_reason": "JevJudge EXPERIMENT promotion \u2014 owner-requested TypeSafe/Jev paper experiment. Verdict EXPERIMENT recorded (no PASS claimed); all other strategies stay shadow-only per the 09-17 demotion evidence.",
   "strategies": {
     "ChecklistMeta": {
       "expected_max_signals_per_symbol_per_week": 1344.0,
@@ -136,5 +146,5 @@
       "signal_throttle_ms": 1800000
     }
   },
-  "supersedes_experiment_id": "868f942d-ece0-496a-99bf-766736d3af29"
+  "supersedes_experiment_id": "3d07bf63-072c-4aab-b367-569fa47d9ffe"
 }

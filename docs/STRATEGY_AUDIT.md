@@ -31,6 +31,19 @@ tinha baseline-signal FAIL (W2/W3). ~40 células totais, zero KEEP.
 fills, shadow signals). Promoção futura exige `baseline_signal_gate: PASS`
 fresco — a mesma barra de sempre, não foi relaxada.
 
+### §0.1 Excepção EXPERIMENT — JevJudge (2026-09-17, mesmo dia)
+
+A pedido do owner, `JevJudge` (experimento TypeSafe/Jev) foi promovido a
+`execution_strategies` com `verdict: EXPERIMENT` no manifest — **não é um
+PASS e não finge ser**: zero evidência, promoção declarada. Limites:
+paper-only por `assert_experiment_paper_only` + guarda `_mode` na
+estratégia + `paper_only: true`; tamanho 1% capital; SL max(1%,2×ATR) /
+TP 2R / max-hold 4h; o Jev é perguntado 1×/h/símbolo pelo task
+`Hyperliquid-Jev-Shadow` (cap 96 calls/dia). Todas as outras estratégias
+permanecem shadow-only — a evidência da demote mantém-se válida e
+inalterada. O PnL do JevJudge no `strategy_pnl` é dados de experiência,
+não evidência de promoção — promoção real continua a exigir PASS.
+
 ## ⚠️ Nota sobre audits anteriores
 
 Os audits `strategy_audit_20260629_122340.csv` e `_132320.csv` correram **antes** do backfill

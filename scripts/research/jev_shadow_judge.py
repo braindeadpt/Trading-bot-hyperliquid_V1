@@ -18,17 +18,11 @@ Design (mirrors wallet_fills_collector — standalone, zero engine contact):
   * persists everything to `jev_decisions` for offline evaluation
     (scripts/research/jev_eval.py)
 
-Virtual paper trading (--paper, default on): when Jev answers long/short
-with action confidence >= ENTRY_CONF_MIN and no virtual position is open
-on that symbol, a virtual position is opened at the NEXT 1m candle open
-(no lookahead — the decision uses data up to ts, the fill uses a bar that
-starts after ts). Exits: SL = max(1%, 2*ATR%) / TP = 2R / max-hold 4h,
-walked against real candles_1m (SL checked before TP on the same bar —
-conservative intrabar rule). Closed virtual trades are written into the
-LIVE bot.db `trades` + `strategy_pnl` tables (strategy='JevJudge',
-status='closed') so the dashboard shows them — OPEN virtual positions
-live only in the research DB so the engine's open-trade restore path
-never touches them. Fees: tier-0 taker 0.045% per side on notional.
+Verdict feed: after each successful call the latest verdict is written
+to ``data/live/jev_latest.json`` — the file the ``JevJudge`` strategy
+(src/strategies/jev_judge.py) reads to emit signals. The engine executes
+those in paper mode (manifest gate record verdict=EXPERIMENT); this
+script itself still never touches the OMS.
 
 Cost discipline: hard daily call cap + cumulative token ledger in
 data/research/jev_usage.json. With $5 of credits the pilot stays bounded;
@@ -37,7 +31,6 @@ data/research/jev_usage.json. With $5 of credits the pilot stays bounded;
 Usage:
     python -X utf8 scripts/research/jev_shadow_judge.py --once        # one pass
     python -X utf8 scripts/research/jev_shadow_judge.py --dry-run     # print request, no call
-    python -X utf8 scripts/research/jev_shadow_judge.py --once --no-paper  # judge only
     TYPESAFE_API_KEY must be set in the environment (never in YAML/git).
 """
 from __future__ import annotations
@@ -92,39 +85,7 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
 );
 """
 
-VPOS_TABLE = "jev_virtual_positions"
-CREATE_VPOS_SQL = f"""
-CREATE TABLE IF NOT EXISTS {VPOS_TABLE} (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    decision_id   INTEGER NOT NULL,
-    symbol        TEXT    NOT NULL,
-    side          TEXT    NOT NULL,
-    entry_price   REAL,
-    entry_time    INTEGER,
-    size          REAL,
-    notional      REAL    NOT NULL,
-    sl_pct        REAL    NOT NULL,
-    sl_price      REAL,
-    tp_price      REAL,
-    max_hold_ms   INTEGER NOT NULL,
-    status        TEXT    NOT NULL DEFAULT 'pending',
-    exit_price    REAL,
-    exit_time     INTEGER,
-    exit_reason   TEXT,
-    pnl_usd       REAL,
-    trade_id      INTEGER,
-    created_ms    INTEGER NOT NULL
-);
-"""
-
-# Virtual-paper constants (isolated experiment — not engine params)
-VIRTUAL_NOTIONAL_USD = 1_000.0
-ENTRY_CONF_MIN = 0.60
-SL_FRACTION_MIN = 0.01          # 1% of price
-SL_ATR_MULT = 2.0               # or 2 x ATR% if wider
-TP_R_MULT = 2.0                 # take-profit at 2R
-MAX_HOLD_MS = 4 * 3_600_000     # matches the 4h horizon in the questions
-TAKER_FEE = 0.00045             # tier-0 taker, per side, on notional
+LATEST_PATH = ROOT / "data" / "live" / "jev_latest.json"
 
 QUESTIONS = {
     "action": {
@@ -393,200 +354,53 @@ def _research_db_path() -> Path:
     return Path(ResearchDatabase.resolve_path(cfg))
 
 
-# ── virtual paper trading (isolated — closed trades only reach bot.db) ──
+# ── verdict feed for the JevJudge strategy ─────────────────────────
 
-def _fill_pending_entries(db: sqlite3.Connection,
-                          wdb: sqlite3.Connection) -> int:
-    """Fill pending virtual positions at the next 1m candle open."""
-    filled = 0
-    pending = wdb.execute(
-        f"select id, symbol, notional, sl_pct, created_ms from {VPOS_TABLE} "
-        "where status='pending'",
-    ).fetchall()
-    for pid, sym, notional, sl_pct, created_ms in pending:
-        row = db.execute(
-            "select timestamp_ms, open from candles_1m where symbol=? "
-            "and timestamp_ms > ? order by timestamp_ms limit 1",
-            (sym, created_ms),
-        ).fetchone()
-        if row is None:
-            continue
-        ts, open_ = row
-        size = notional / open_
-        side = wdb.execute(
-            f"select side from {VPOS_TABLE} where id=?", (pid,),
-        ).fetchone()[0]
-        if side == "long":
-            sl_price = open_ * (1 - sl_pct)
-            tp_price = open_ * (1 + TP_R_MULT * sl_pct)
-        else:
-            sl_price = open_ * (1 + sl_pct)
-            tp_price = open_ * (1 - TP_R_MULT * sl_pct)
-        wdb.execute(
-            f"update {VPOS_TABLE} set status='open', entry_price=?, "
-            "entry_time=?, size=?, sl_price=?, tp_price=? where id=?",
-            (open_, ts, size, sl_price, tp_price, pid),
-        )
-        filled += 1
-        print(f"jev: VIRTUAL {side} {sym} filled @{open_} "
-              f"(sl={sl_price:.4f} tp={tp_price:.4f})")
-    if filled:
-        wdb.commit()
-    return filled
+def _update_latest_verdict(symbol: str, ts_ms: int,
+                           resp: Dict[str, Any],
+                           state: Dict[str, Any]) -> None:
+    """Merge the newest verdict into data/live/jev_latest.json.
 
-
-def _record_virtual_trade(ldb: sqlite3.Connection, sym: str, side: str,
-                          entry: float, exit_: float, entry_t: int,
-                          exit_t: int, size: float, pnl: float,
-                          reason: str, meta: Dict[str, Any]) -> int:
-    """Insert a closed-trade row into live bot.db trades + strategy_pnl."""
-    fee = entry * size * TAKER_FEE + exit_ * size * TAKER_FEE
-    pnl_pct = pnl / (entry * size) if entry and size else 0.0
-    cur = ldb.execute(
-        """INSERT INTO trades
-        (symbol, side, entry_price, exit_price, entry_time, exit_time,
-         size, pnl_usd, pnl_pct, strategy, exit_reason, status,
-         signal_metadata, entry_fee, cumulative_order_fee)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (sym, side, entry, exit_, entry_t, exit_t, size, pnl, pnl_pct,
-         "JevJudge", reason, "closed", json.dumps(meta), fee, fee),
-    )
-    trade_id = cur.lastrowid
-    ldb.execute(
-        """INSERT INTO strategy_pnl
-        (strategy, symbol, side, pnl_usd, pnl_pct, size,
-         entry_time, exit_time, exit_reason, trade_id, is_win)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-        ("JevJudge", sym, side, pnl, pnl_pct, size, entry_t, exit_t,
-         reason, trade_id, 1 if pnl > 0 else 0),
-    )
-    ldb.commit()
-    return int(trade_id)
-
-
-def _check_virtual_exits(db: sqlite3.Connection, wdb: sqlite3.Connection,
-                         ldb: sqlite3.Connection) -> int:
-    """Walk open virtual positions against candles_1m; close on SL/TP/hold.
-
-    Conservative intrabar rule: SL checked before TP within the same bar.
-    Idempotent — if the live-DB insert fails the position stays 'open' and
-    the same exit is rediscovered next run.
+    JevJudge (the engine-side experiment strategy) reads this file; the
+    scheduled judge is the only writer. Atomic via temp + os.replace.
     """
-    closed = 0
-    opens = wdb.execute(
-        f"select id, decision_id, symbol, side, entry_price, entry_time, "
-        f"size, notional, sl_price, tp_price, max_hold_ms from {VPOS_TABLE} "
-        "where status='open'",
-    ).fetchall()
-    for (pid, did, sym, side, entry, entry_t, size, notional,
-         sl, tp, max_hold) in opens:
-        candles = db.execute(
-            "select timestamp_ms, high, low, close from candles_1m "
-            "where symbol=? and timestamp_ms >= ? order by timestamp_ms",
-            (sym, entry_t),
-        ).fetchall()
-        exit_px, exit_t, reason = None, None, None
-        for ts, hi, lo, cl in candles:
-            if side == "long":
-                if lo <= sl:
-                    exit_px, exit_t, reason = sl, ts, "sl"
-                    break
-                if hi >= tp:
-                    exit_px, exit_t, reason = tp, ts, "tp"
-                    break
-            else:
-                if hi >= sl:
-                    exit_px, exit_t, reason = sl, ts, "sl"
-                    break
-                if lo <= tp:
-                    exit_px, exit_t, reason = tp, ts, "tp"
-                    break
-            if ts - entry_t >= max_hold:
-                exit_px, exit_t, reason = cl, ts, "max_hold"
-                break
-        if exit_px is None:
-            continue
-        sign = 1.0 if side == "long" else -1.0
-        gross = (exit_px - entry) * size * sign
-        fees = (entry + exit_px) * size * TAKER_FEE
-        pnl = gross - fees
-        meta = {"virtual": True, "experiment": "jev-shadow",
-                "decision_id": did, "vpos_id": pid}
-        try:
-            tid = _record_virtual_trade(
-                ldb, sym, side, entry, exit_px, entry_t, exit_t,
-                size, pnl, reason, meta,
-            )
-        except sqlite3.Error as exc:
-            print(f"jev: VIRTUAL close {sym} trade insert failed: {exc}")
-            continue
-        wdb.execute(
-            f"update {VPOS_TABLE} set status='closed', exit_price=?, "
-            "exit_time=?, exit_reason=?, pnl_usd=?, trade_id=? where id=?",
-            (exit_px, exit_t, reason, pnl, tid, pid),
-        )
-        closed += 1
-        print(f"jev: VIRTUAL {side} {sym} closed @{exit_px} "
-              f"reason={reason} pnl={pnl:+.2f} -> trades#{tid}")
-    if closed:
-        wdb.commit()
-    return closed
-
-
-def _maybe_open_virtual(wdb: sqlite3.Connection, symbol: str,
-                        decision_id: int, side: str, conf: float,
-                        atr_pct: Optional[float], ts_ms: int) -> bool:
-    """Create a pending virtual position if confidence clears the bar."""
-    if conf < ENTRY_CONF_MIN or side not in ("long", "short"):
-        return False
-    live = wdb.execute(
-        f"select count(*) from {VPOS_TABLE} where symbol=? and "
-        "status in ('pending','open')", (symbol,),
-    ).fetchone()[0]
-    if live:
-        return False
-    atr_frac = (atr_pct or 0.0) / 100.0
-    sl_pct = max(SL_FRACTION_MIN, SL_ATR_MULT * atr_frac)
-    wdb.execute(
-        f"insert into {VPOS_TABLE} (decision_id, symbol, side, notional, "
-        "sl_pct, max_hold_ms, status, created_ms) values (?,?,?,?,?,?,?,?)",
-        (decision_id, symbol, side, VIRTUAL_NOTIONAL_USD, sl_pct,
-         MAX_HOLD_MS, "pending", ts_ms),
-    )
-    wdb.commit()
-    print(f"jev: VIRTUAL {side} {symbol} queued (conf={conf:.2f} "
-          f"sl_pct={sl_pct * 100:.2f}%)")
-    return True
+    ans = (resp or {}).get("answers") or {}
+    act = ans.get("action") or {}
+    reg = ans.get("regime") or {}
+    try:
+        data = json.loads(LATEST_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[symbol] = {
+        "ts_ms": ts_ms,
+        "action": act.get("choice"),
+        "confidence": act.get("confidence"),
+        "regime": reg.get("choice"),
+        "atr_pct_15m": (state.get("volatility") or {}).get("atr_pct_15m"),
+    }
+    LATEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LATEST_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    os.replace(tmp, LATEST_PATH)
 
 
 def one_pass(symbols: List[str], *, dry_run: bool, daily_cap: int,
-             max_tokens: int, ask_interval_s: int,
-             paper: bool) -> Dict[str, int]:
-    stats = {"asked": 0, "inserted": 0, "skipped": 0, "errors": 0,
-             "v_filled": 0, "v_closed": 0, "v_opened": 0}
+             max_tokens: int, ask_interval_s: int) -> Dict[str, int]:
+    stats = {"asked": 0, "inserted": 0, "skipped": 0, "errors": 0}
     api_key = (os.environ.get("TYPESAFE_API_KEY") or "").strip()
     usage = _load_usage()
 
     if not LIVE_DB.exists():
         print(f"jev: live DB missing at {LIVE_DB}")
         return stats
-    db = sqlite3.connect(str(LIVE_DB), timeout=30)
-    db.execute("PRAGMA journal_mode=WAL")
+    db = sqlite3.connect(f"file:{LIVE_DB}?mode=ro", uri=True)
     rdb = sqlite3.connect(f"file:{_research_db_path()}?mode=ro", uri=True)
     wdb = sqlite3.connect(str(_research_db_path()), timeout=30)
     wdb.execute("PRAGMA journal_mode=WAL")
     wdb.execute(CREATE_SQL)
-    wdb.execute(CREATE_VPOS_SQL)
     wdb.commit()
-
-    # Virtual-paper housekeeping runs every pass — cheap local DB work.
-    if paper:
-        try:
-            stats["v_filled"] = _fill_pending_entries(db, wdb)
-            stats["v_closed"] = _check_virtual_exits(db, wdb, db)
-        except sqlite3.Error as exc:
-            print(f"jev: virtual paper housekeeping failed: {exc}")
-            stats["errors"] += 1
 
     if usage.get("input_tokens", 0) + usage.get("output_tokens", 0) >= max_tokens:
         print(f"jev: token budget exhausted ({usage}) — judge skipped")
@@ -606,8 +420,9 @@ def one_pass(symbols: List[str], *, dry_run: bool, daily_cap: int,
     for sym in symbols:
         if done_today + stats["asked"] >= daily_cap:
             break
-        # one Jev question per symbol per ask_interval — extra runs only
-        # manage virtual exits, they do not spend API calls
+        # one Jev question per symbol per ask_interval — the 5-min task
+        # exists so the verdict file refreshes promptly; extra runs skip
+        # here and spend nothing
         last_ask = wdb.execute(
             f"select max(ts_ms) from {TABLE} where symbol=? and error is null",
             (sym,),
@@ -639,10 +454,10 @@ def one_pass(symbols: List[str], *, dry_run: bool, daily_cap: int,
             print(f"jev: call {sym} failed: {exc}")
             continue
         _insert(wdb, sym, ts_ms, state, resp, None)
-        decision_id = wdb.execute(
-            f"select id from {TABLE} where symbol=? and ts_ms=?",
-            (sym, ts_ms),
-        ).fetchone()[0]
+        try:
+            _update_latest_verdict(sym, ts_ms, resp, state)
+        except OSError as exc:
+            print(f"jev: verdict file update {sym} failed: {exc}")
         u = resp.get("usage") or {}
         usage["calls"] = usage.get("calls", 0) + 1
         usage["input_tokens"] = usage.get("input_tokens", 0) + int(u.get("input_tokens") or 0)
@@ -653,12 +468,6 @@ def one_pass(symbols: List[str], *, dry_run: bool, daily_cap: int,
         a = (resp.get("answers") or {}).get("action") or {}
         print(f"jev: {sym} -> action={a.get('choice')} conf={a.get('confidence')} "
               f"tok={u.get('input_tokens')}+{u.get('output_tokens')}")
-        if paper:
-            atr = ((state.get("volatility") or {}).get("atr_pct_15m"))
-            if _maybe_open_virtual(
-                    wdb, sym, decision_id, str(a.get("choice") or ""),
-                    float(a.get("confidence") or 0.0), atr, ts_ms):
-                stats["v_opened"] += 1
     return stats
 
 
@@ -666,8 +475,6 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--no-paper", action="store_true",
-                    help="judge only — no virtual paper trades")
     ap.add_argument("--symbols", default="BTC,ETH,SOL,HYPE")
     ap.add_argument("--daily-cap", type=int, default=96)
     ap.add_argument("--max-tokens", type=int, default=2_000_000)
@@ -675,7 +482,7 @@ def main() -> int:
                     help="min seconds between Jev questions per symbol")
     args = ap.parse_args()
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
-    print(f"jev: pass -> {one_pass(symbols, dry_run=args.dry_run, daily_cap=args.daily_cap, max_tokens=args.max_tokens, ask_interval_s=args.ask_interval_s, paper=not args.no_paper)}")
+    print(f"jev: pass -> {one_pass(symbols, dry_run=args.dry_run, daily_cap=args.daily_cap, max_tokens=args.max_tokens, ask_interval_s=args.ask_interval_s)}")
     return 0
 
 

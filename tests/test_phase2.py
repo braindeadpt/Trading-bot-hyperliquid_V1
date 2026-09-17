@@ -61,7 +61,10 @@ def test_factory_respects_enabled_flags() -> None:
         subs, shadow = build_phase08_strategies(cfg)
         names = {s.name for s in subs}
         shadow_names = {s.name for s in shadow}
-        assert "VWAPDeviation" in names
+        # 2026-09-17: only the owner-requested JevJudge EXPERIMENT executes;
+        # all evidence-based names sit in shadow per the demotion audit.
+        assert "JevJudge" in names
+        assert "VWAPDeviation" in shadow_names
         assert "VolatilityBreakout" in shadow_names
         assert "ChecklistMeta" in shadow_names
         assert "ChecklistMeta" not in names

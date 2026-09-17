@@ -17,6 +17,7 @@ from src.strategies.volatility_breakout import VolatilityBreakout
 from src.strategies.vwap_deviation import VWAPDeviation
 from src.strategies.checklist_meta import ChecklistMeta
 from src.strategies.top_trader_flow import TopTraderFlow
+from src.strategies.jev_judge import JevJudge
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,9 @@ _STRATEGY_REGISTRY = (
     ("strategy.checklist_meta", ChecklistMeta),
     # Top-trader aggregate bias (shadow / research)
     ("strategy.top_trader_flow", TopTraderFlow),
+    # TypeSafe/Jev judgment-model experiment — paper-only by hard guard
+    # inside the strategy + manifest EXPERIMENT verdict (no PASS claimed).
+    ("strategy.jev_judge", JevJudge),
 )
 
 
@@ -146,6 +150,9 @@ def _instantiate_from_registry(
     shadow: bool = False,
 ) -> Optional[Strategy]:
     section = copy.deepcopy(cfg.get(path, {}) or {})
+    # Strategies that must know the run mode (e.g. paper-only experiments)
+    # read it as _mode; harmless extra key for everyone else.
+    section.setdefault("_mode", cfg.get("mode", "paper"))
     if shadow:
         section["_shadow_mode"] = True
         _apply_shadow_section_overrides(section, path)

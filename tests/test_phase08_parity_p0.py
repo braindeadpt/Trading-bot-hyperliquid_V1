@@ -49,7 +49,8 @@ def test_build_backtest_strategy_uses_phase08_execution_set() -> None:
     strat = build_backtest_strategy(cfg)
     assert strat.name == "DirectRouter"
     names = {s.name for s in strat._strategies}
-    assert names == {"VWAPDeviation"}
+    expected = set(cfg.get("strategy.phase08.execution_strategies") or [])
+    assert names == expected
     execution, shadow = build_phase08_strategies(cfg)
     assert {s.name for s in execution} == names
     assert "ChecklistMeta" in {s.name for s in shadow}

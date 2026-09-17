@@ -407,6 +407,11 @@ def assert_baseline_signal_gate(
                 f"(legacy soft-exempt: {sorted(gf)})"
             )
         verdict = str(rec.get("verdict") or "").upper()
+        if verdict == "EXPERIMENT" and not require:
+            # Owner-declared experiment — satisfies record presence but
+            # claims NO evidence. assert_experiment_paper_only() keeps it
+            # out of non-paper modes; require=True refuses it.
+            continue
         if verdict != "PASS":
             raise PreregisterManifestError(
                 f"baseline_signal_gate for {name} is {verdict!r} "
@@ -430,11 +435,56 @@ def assert_can_promote_to_execution(
             f"--strategy {name} --folds W2,W3 --seeds 200 --gate"
         )
     verdict = str(gate_record.get("verdict") or "").upper()
+    if verdict == "EXPERIMENT":
+        # Owner-declared experiment promotion (e.g. JevJudge 2026-09-17):
+        # allowed in execution_strategies with NO evidence claim, gated to
+        # paper by assert_experiment_paper_only() at boot.
+        return
     if verdict != "PASS":
         raise PreregisterManifestError(
             f"cannot promote {name}: baseline_signal_gate verdict={verdict!r} "
             f"(need PASS with B1≥p95, n≥30, expectancy>0 / PF>1); "
             f"reason={gate_record.get('reason')!r}"
+        )
+
+
+def assert_experiment_paper_only(manifest: Dict[str, Any], config: Any) -> None:
+    """Refuse to boot EXPERIMENT-gated execution strategies outside paper.
+
+    An EXPERIMENT verdict is an owner-declared promotion with zero evidence
+    — it must never reach testnet/mainnet. Called from
+    ``assert_config_matches_preregister`` (phase08 + phase10 bridge) where
+    the live config (and thus mode) is available.
+    """
+    exec_strats = [
+        str(s)
+        for s in (manifest.get("execution_scope") or {}).get("strategies", []) or []
+    ] or [str(s) for s in manifest.get("execution_strategies") or []]
+    if not exec_strats:
+        return
+    entries = {
+        str(e.get("strategy") or ""): e
+        for e in _normalize_gate_entries(manifest.get("baseline_signal_gate"))
+        if e.get("strategy")
+    }
+    experiment = [
+        n for n in exec_strats
+        if str((entries.get(n) or {}).get("verdict") or "").upper() == "EXPERIMENT"
+    ]
+    if not experiment:
+        return
+    try:
+        mode = str(config.get("mode", "paper")).lower()
+        paper_only = bool(
+            (config.get("strategy.phase08", {}) or {}).get("paper_only", False)
+        )
+    except (AttributeError, TypeError):
+        mode, paper_only = "paper", False
+    if mode != "paper" and not paper_only:
+        raise PreregisterManifestError(
+            f"EXPERIMENT execution strategies {experiment} are paper-only "
+            f"(mode={mode!r}, phase08.paper_only={paper_only}) — remove them "
+            f"from execution_strategies or demote to a PASS gate record"
         )
 
 
@@ -476,4 +526,6 @@ def assert_config_matches_preregister(
         )
     # Soft for legacy execution names; hard for any non-grandfathered name in scope.
     assert_baseline_signal_gate(manifest, require=False, hard_for_new=True)
+    # EXPERIMENT-verdict promotions may only ever execute in paper mode.
+    assert_experiment_paper_only(manifest, config)
     return manifest
