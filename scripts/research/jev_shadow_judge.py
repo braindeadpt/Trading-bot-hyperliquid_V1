@@ -202,9 +202,72 @@ def _pct(a: float, b: float) -> Optional[float]:
     return (a / b - 1) * 100 if b else None
 
 
+def _btc_context(db: sqlite3.Connection) -> Optional[Dict[str, Any]]:
+    """BTC snapshot for cross-asset context in alt states."""
+    rows = db.execute(
+        "select close from candles_15m where symbol='BTC' "
+        "order by timestamp_ms desc limit 100",
+    ).fetchall()
+    closes = list(reversed([r[0] for r in rows]))
+    if len(closes) < 17:
+        return None
+    price = closes[-1]
+    return {
+        "btc_return_1h_pct": _pct(price, closes[-5]) if len(closes) >= 5 else None,
+        "btc_return_4h_pct": _pct(price, closes[-17]),
+        "btc_return_24h_pct": _pct(price, closes[-97]) if len(closes) >= 97 else None,
+    }
+
+
+def _liquidation_context(db: sqlite3.Connection, symbol: str,
+                         now_ms: int) -> Optional[Dict[str, Any]]:
+    """Recent liquidation pressure from the live events feed (bot.db)."""
+    out: Dict[str, Any] = {}
+    for label, span_ms in (("15m", 900_000), ("1h", 3_600_000)):
+        rows = db.execute(
+            "select side, sum(notional_usd), count(*) from liquidation_events "
+            "where symbol=? and timestamp_ms >= ? group by side",
+            (symbol, now_ms - span_ms),
+        ).fetchall()
+        by_side = {r[0]: (r[1] or 0.0, r[2]) for r in rows}
+        longs = by_side.get("long", (0.0, 0))
+        shorts = by_side.get("short", (0.0, 0))
+        out[f"longs_liquidated_usd_{label}"] = round(longs[0])
+        out[f"shorts_liquidated_usd_{label}"] = round(shorts[0])
+        tot = longs[0] + shorts[0]
+        out[f"liq_imbalance_{label}"] = (
+            round((shorts[0] - longs[0]) / tot, 3) if tot > 0 else None
+        )
+    return out or None
+
+
+def _orderbook_context(rdb: sqlite3.Connection, symbol: str,
+                       now_ms: int) -> Optional[Dict[str, Any]]:
+    """Latest L2 order-book imbalance (proprietary edge — papers' OIR)."""
+    row = rdb.execute(
+        "select oir, bid_depth_usd, ask_depth_usd, spread_bps, timestamp_ms "
+        "from l2_snapshots where symbol=? order by timestamp_ms desc limit 1",
+        (symbol,),
+    ).fetchone()
+    if not row:
+        return None
+    oir, bid_d, ask_d, spread, ts = row
+    age_min = (now_ms - ts) / 60_000
+    if age_min > 15:
+        return None  # stale book is worse than no book
+    return {
+        "oir": oir,
+        "bid_ask_depth_ratio": round(bid_d / ask_d, 3) if ask_d else None,
+        "spread_bps": spread,
+        "sample_age_min": round(age_min, 1),
+    }
+
+
 def build_state(db: sqlite3.Connection, rdb: sqlite3.Connection,
-                symbol: str) -> Optional[Dict[str, Any]]:
+                symbol: str,
+                btc_ctx: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Compact market state for Jev — computed features, not raw candles."""
+    now_ms = int(time.time() * 1000)
     rows15 = db.execute(
         "select timestamp_ms, open, high, low, close, volume from candles_15m "
         "where symbol=? order by timestamp_ms desc limit 300", (symbol,),
@@ -219,10 +282,11 @@ def build_state(db: sqlite3.Connection, rdb: sqlite3.Connection,
     price = closes[-1]
 
     rows1h = db.execute(
-        "select close from candles_1h where symbol=? order by timestamp_ms "
-        "desc limit 200", (symbol,),
+        "select high, low, close from candles_1h where symbol=? order by "
+        "timestamp_ms desc limit 200", (symbol,),
     ).fetchall()
-    closes1h = list(reversed([r[0] for r in rows1h]))
+    c1h = list(reversed(rows1h))
+    closes1h = [r[2] for r in c1h]
 
     ema50 = _ema_series(closes, 50)[-1] if len(closes) >= 50 else None
     ema200 = _ema_series(closes, 200)[-1] if len(closes) >= 200 else None
@@ -231,6 +295,16 @@ def build_state(db: sqlite3.Connection, rdb: sqlite3.Connection,
     hi24 = max(highs[-96:]) if len(highs) >= 24 else None
     lo24 = min(lows[-96:]) if len(lows) >= 24 else None
     range_pos = (price - lo24) / (hi24 - lo24) if hi24 and lo24 and hi24 > lo24 else None
+
+    # Macro context (7d) from 1h candles — 168 bars
+    ret_7d = _pct(price, closes1h[-169]) if len(closes1h) >= 169 else None
+    hi7d = max(r[0] for r in c1h[-168:]) if len(c1h) >= 168 else None
+    lo7d = min(r[1] for r in c1h[-168:]) if len(c1h) >= 168 else None
+
+    # Vol regime: short-window ATR vs long-window ATR (expansion > 1)
+    atr_short = _atr_pct(highs[-30:], lows[-30:], closes[-30:])
+    atr_long = _atr_pct(highs[-110:], lows[-110:], closes[-110:], n=96)
+    atr_ratio = (atr_short / atr_long) if (atr_short and atr_long) else None
 
     funding = db.execute(
         "select funding_rate from candles_1m where symbol=? and "
@@ -242,7 +316,7 @@ def build_state(db: sqlite3.Connection, rdb: sqlite3.Connection,
         "select net_bias, timestamp_ms from top_trader_bias_samples "
         "where symbol=? order by timestamp_ms desc limit 1", (symbol,),
     ).fetchone() if rdb else None
-    bias_age_h = ((time.time() * 1000 - bias[1]) / 3_600_000) if bias else None
+    bias_age_h = ((now_ms - bias[1]) / 3_600_000) if bias else None
 
     state: Dict[str, Any] = {
         "asset": f"{symbol} perpetual futures (Hyperliquid)",
@@ -253,9 +327,12 @@ def build_state(db: sqlite3.Connection, rdb: sqlite3.Connection,
             "last_1h": _pct(price, closes[-5]) if len(closes) >= 5 else None,
             "last_4h": _pct(price, closes[-17]) if len(closes) >= 17 else None,
             "last_24h": _pct(price, closes[-97]) if len(closes) >= 97 else None,
+            "last_7d": ret_7d,
         },
         "volatility": {
-            "atr_pct_15m": _atr_pct(highs, lows, closes),
+            "atr_pct_15m": atr_short,
+            "atr_ratio_short_vs_long": round(atr_ratio, 3) if atr_ratio else None,
+            "interpretation": "ratio>1 = volatility expanding, <1 = contracting",
         },
         "trend": {
             "adx_15m": _adx(highs, lows, closes),
@@ -263,6 +340,8 @@ def build_state(db: sqlite3.Connection, rdb: sqlite3.Connection,
             "price_vs_ema200_pct": _pct(price, ema200) if ema200 else None,
             "ema50_above_ema200": (ema50 > ema200) if (ema50 and ema200) else None,
             "position_in_24h_range": range_pos,
+            "dist_to_7d_high_pct": _pct(price, hi7d) if hi7d else None,
+            "dist_to_7d_low_pct": _pct(price, lo7d) if lo7d else None,
         },
         "mean_reversion": {
             "z_score_vs_vwap_24h": _vwap_z(c15),
@@ -273,6 +352,9 @@ def build_state(db: sqlite3.Connection, rdb: sqlite3.Connection,
         "funding": {
             "last_rate_per_8h": funding[0] if funding else None,
         },
+        "orderbook": _orderbook_context(rdb, symbol, now_ms) if rdb else None,
+        "liquidations": _liquidation_context(db, symbol, now_ms),
+        "btc_context": btc_ctx if symbol != "BTC" else None,
         "top_trader_bias": {
             "net_bias": bias[0] if bias and (bias_age_h or 99) < 2 else None,
             "sample_age_hours": round(bias_age_h, 2) if bias_age_h else None,
@@ -419,6 +501,11 @@ def one_pass(symbols: List[str], *, dry_run: bool, daily_cap: int,
         return stats
 
     now_ms = int(time.time() * 1000)
+    btc_ctx = None
+    try:
+        btc_ctx = _btc_context(db)
+    except Exception as exc:  # noqa: BLE001
+        print(f"jev: btc context build failed: {exc}")
     for sym in symbols:
         if done_today + stats["asked"] >= daily_cap:
             break
@@ -429,11 +516,11 @@ def one_pass(symbols: List[str], *, dry_run: bool, daily_cap: int,
             f"select max(ts_ms) from {TABLE} where symbol=? and error is null",
             (sym,),
         ).fetchone()[0]
-        if last_ask and now_ms - last_ask < ask_interval_s * 1000:
+        if not dry_run and last_ask and now_ms - last_ask < ask_interval_s * 1000:
             continue
         ts_ms = int(time.time() * 1000)
         try:
-            state = build_state(db, rdb, sym)
+            state = build_state(db, rdb, sym, btc_ctx=btc_ctx)
         except Exception as exc:  # noqa: BLE001
             print(f"jev: state build {sym} failed: {exc}")
             stats["errors"] += 1
