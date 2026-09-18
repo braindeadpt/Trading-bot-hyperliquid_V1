@@ -112,6 +112,46 @@ def test_funding_coverage_short_hold_is_one() -> None:
     assert cov == 1.0
 
 
+def test_funding_dedups_per_hour_boundary() -> None:
+    """Live candles stamp the *current* rate on most 1m candles — ~60/h.
+    Funding is only paid at hour boundaries, so a 2h hold must apply at
+    most one rate per boundary, never sum all stamps."""
+    entry = 0
+    exit_ = 2 * 3_600_000  # 2h hold: boundaries at 1h and 2h
+    candles = [
+        _candle(ts=m * 60_000, funding=1e-5)
+        for m in range(1, 121)  # 120 min stamps @ 1e-5
+    ]
+    pnl, cov = _funding_during_hold("long", candles, entry, exit_)
+    assert cov == 1.0
+    # long pays positive funding → negative pnl, 2 boundaries × 1e-5
+    assert abs(pnl - (-2e-5)) < 1e-12
+
+
+def test_funding_samples_fallback_when_candles_lack_stamps() -> None:
+    """Research candles never carry funding_rate; funding_samples fill in."""
+    entry = 0
+    exit_ = 2 * 3_600_000
+    samples = [(30 * 60_000, 1e-5), (90 * 60_000, 2e-5)]
+    pnl, cov = _funding_during_hold(
+        "long", [], entry, exit_, funding_samples=samples
+    )
+    assert cov == 1.0
+    # boundary 1h → last sample <=1h = 1e-5; boundary 2h → last <=2h = 2e-5
+    assert abs(pnl - (-(1e-5 + 2e-5))) < 1e-12
+
+
+def test_funding_short_side_receives_positive() -> None:
+    entry = 0
+    exit_ = 3_600_000
+    samples = [(60_000, 1e-5)]
+    pnl, cov = _funding_during_hold(
+        "short", [], entry, exit_, funding_samples=samples
+    )
+    assert cov == 1.0
+    assert pnl > 0
+
+
 def test_aggregate_exposes_net_fields() -> None:
     model = ShadowCostModel(0.00015, 0.00045, 0.0002, 0.0002, "t")
     d = _decision()

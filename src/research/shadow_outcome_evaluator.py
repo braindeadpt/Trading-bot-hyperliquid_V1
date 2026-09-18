@@ -48,6 +48,7 @@ SpotPerpCarry    24 h         ``max_hold_hours``
 
 from __future__ import annotations
 
+import bisect
 import json
 import logging
 import sqlite3
@@ -215,29 +216,50 @@ def _funding_during_hold(
     candles: Sequence[Candle],
     entry_ts_ms: int,
     exit_ts_ms: int,
+    *,
+    funding_samples: Optional[Sequence[Tuple[int, float]]] = None,
 ) -> Tuple[float, float]:
     """Return (funding_pnl_pct, coverage).
 
-    Positive HL funding => longs pay shorts. Coverage is observed hourly
-    stamps / expected hours in the hold. Holds <30m report coverage 1.0.
+    Positive HL funding => longs pay shorts. HL settles funding at each
+    **hour boundary**, so exactly one rate applies per boundary inside
+    ``(entry, exit]`` — the last observed stamp at or before it. Sources,
+    in preference order: candle ``funding_rate`` stamps, then
+    ``funding_samples`` (``(ts_ms, hourly_rate_frac)`` tuples, e.g. from
+    ``funding_history``).
+
+    Coverage = boundaries with a found rate / total boundaries. Holds
+    <30m or holds containing no boundary report coverage 1.0.
     """
     hold_ms = max(0, exit_ts_ms - entry_ts_ms)
     if hold_ms < 30 * 60_000:
         return 0.0, 1.0
-    rates: List[float] = []
+    hour_ms = 3_600_000
+    first_boundary = (entry_ts_ms // hour_ms + 1) * hour_ms
+    boundaries = list(range(first_boundary, exit_ts_ms + 1, hour_ms))
+    if not boundaries:
+        return 0.0, 1.0
+
+    stamps: List[Tuple[int, float]] = []
     for c in candles:
-        if not (entry_ts_ms < int(c.timestamp_ms) <= exit_ts_ms):
-            continue
         if c.funding_rate is None:
             continue
         fr = safe_float(c.funding_rate, default=float("nan"))
         if fr == fr:  # finite
-            rates.append(float(fr))
-    expected = max(1, int(round(hold_ms / 3_600_000.0)))
-    if not rates:
-        return 0.0, 0.0
-    coverage = min(1.0, len(rates) / float(expected))
-    total = sum(rates)
+            stamps.append((int(c.timestamp_ms), float(fr)))
+    for s in funding_samples or ():
+        stamps.append((int(s[0]), float(s[1])))
+    stamps.sort(key=lambda t: t[0])
+    stamp_ts = [t for t, _ in stamps]
+
+    covered = 0
+    total = 0.0
+    for b in boundaries:
+        idx = bisect.bisect_right(stamp_ts, b) - 1
+        if idx >= 0:
+            total += stamps[idx][1]
+            covered += 1
+    coverage = covered / float(len(boundaries))
     # long pays positive funding
     sign = -1.0 if side.lower() == "long" else 1.0
     return sign * total, coverage
@@ -554,6 +576,49 @@ def _load_live_candles_ro(
     return [_row_candle(r) for r in rows]
 
 
+def _load_funding_samples(
+    db_path: Path,
+    symbol: str,
+    start_ms: int,
+    end_ms: int,
+) -> List[Tuple[int, float]]:
+    """Load ``(ts_ms, hourly_rate_frac)`` from live ``funding_history`` (ro).
+
+    ``funding_history.predicted`` stores the per-8h-period funding rate
+    (fraction). Empirically ``predicted / 8`` matches the hourly
+    ``candles_1m.funding_rate`` stamps (~1e-5..5e-6), so we normalise to an
+    hourly-equivalent rate here.
+    """
+    if not db_path.exists():
+        return []
+    uri = f"file:{db_path.as_posix()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT timestamp, predicted
+            FROM funding_history
+            WHERE symbol = ?
+              AND timestamp > ?
+              AND timestamp <= ?
+            ORDER BY timestamp ASC
+            """,
+            (symbol, int(start_ms), int(end_ms)),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        logger.debug("funding_history read failed (ro): %s", exc)
+        return []
+    finally:
+        conn.close()
+    out: List[Tuple[int, float]] = []
+    for r in rows:
+        pred = safe_float(r["predicted"], default=float("nan"))
+        if pred == pred:  # finite
+            out.append((int(r["timestamp"]), float(pred) / 8.0))
+    return out
+
+
 def _row_candle(row: sqlite3.Row) -> Candle:
     return Candle(
         symbol=str(row["symbol"]),
@@ -580,11 +645,16 @@ def simulate_decision(
     cost_model: Optional[ShadowCostModel] = None,
     bias_samples: Optional[Sequence[Dict[str, Any]]] = None,
     bias_threshold: float = 0.55,
+    funding_samples: Optional[Sequence[Tuple[int, float]]] = None,
 ) -> SimulatedOutcome:
     """Simulate one shadow entry against forward 1m candles.
 
     When *bias_samples* are provided (TopTraderFlow), hybrid exit also fires on
     aggregate bias flip against the position before SL/TP/timeout.
+
+    *funding_samples*: ``(ts_ms, hourly_rate_frac)`` tuples used for funding
+    PnL when candle ``funding_rate`` stamps are absent (research candles
+    never carry them — live ``funding_history`` supplies the fallback).
     """
     base = SimulatedOutcome(
         decision_id=decision.row_id,
@@ -672,6 +742,7 @@ def simulate_decision(
                     EXIT_BIAS_FLIP,
                     candles=candles,
                     cost_model=model,
+                    funding_samples=funding_samples,
                 )
 
         hit = resolve_candle_exit(
@@ -695,6 +766,7 @@ def simulate_decision(
                 reason,
                 candles=candles,
                 cost_model=model,
+                funding_samples=funding_samples,
             )
         if candle.timestamp_ms >= deadline:
             return _finish_outcome(
@@ -709,6 +781,7 @@ def simulate_decision(
                 EXIT_TIMEOUT,
                 candles=candles,
                 cost_model=model,
+                funding_samples=funding_samples,
             )
 
     # Exhausted available candles before SL/TP/timeout → incomplete data
@@ -733,6 +806,7 @@ def simulate_decision(
         EXIT_TIMEOUT,
         candles=candles,
         cost_model=model,
+        funding_samples=funding_samples,
     )
 
 
@@ -755,6 +829,7 @@ def _finish_outcome(
     *,
     candles: Sequence[Candle] = (),
     cost_model: Optional[ShadowCostModel] = None,
+    funding_samples: Optional[Sequence[Tuple[int, float]]] = None,
 ) -> SimulatedOutcome:
     gross = _pnl_pct(side, entry, exit_px)
     r_gross = _r_multiple(gross, stop)
@@ -762,7 +837,10 @@ def _finish_outcome(
     model = cost_model or resolve_shadow_cost_model(decision.strategy)
     fee = model.round_trip_fee_frac
     slip = model.round_trip_slip_frac
-    funding, fund_cov = _funding_during_hold(side, candles, decision.timestamp_ms, exit_ts)
+    funding, fund_cov = _funding_during_hold(
+        side, candles, decision.timestamp_ms, exit_ts,
+        funding_samples=funding_samples,
+    )
     net = gross - fee - slip + funding
     r_net = _r_multiple(net, stop)
     return SimulatedOutcome(
@@ -919,6 +997,7 @@ def evaluate_shadow_decisions(
                     bias_store = False  # type: ignore[assignment]
         outcomes: List[SimulatedOutcome] = []
         sources_seen: List[str] = []
+        funding_cache: Dict[str, List[Tuple[int, float]]] = {}
         for d in group:
             if candle_loader is not None:
                 candles, src = candle_loader(d.symbol, d.timestamp_ms, max_hold)
@@ -938,6 +1017,19 @@ def evaluate_shadow_decisions(
                     start_ms=d.timestamp_ms,
                     end_ms=d.timestamp_ms + max_hold,
                 )
+            # Funding fallback: research candles never carry funding_rate
+            # stamps; pull hourly-equivalent samples from live funding_history.
+            if d.symbol not in funding_cache:
+                funding_cache[d.symbol] = (
+                    _load_funding_samples(
+                        Path(live_db_path),
+                        d.symbol,
+                        min(x.timestamp_ms for x in group),
+                        max(x.timestamp_ms for x in group) + max_hold,
+                    )
+                    if live_db_path
+                    else []
+                )
             outcomes.append(
                 simulate_decision(
                     d,
@@ -946,6 +1038,7 @@ def evaluate_shadow_decisions(
                     cost_model=cost_model,
                     bias_samples=samples,
                     bias_threshold=thr,
+                    funding_samples=funding_cache[d.symbol],
                 )
             )
         source_label = max(set(sources_seen), key=sources_seen.count) if sources_seen else ""
