@@ -1,17 +1,18 @@
 # Feed Cadence Report
 
-Gerado a 2026-09-17T18:58:45+00:00 (UTC) · janela recente 48h · apenas feeds contratados neste deployment
+Gerado a 2026-09-18T00:59:24+00:00 (UTC) · janela recente 48h · apenas feeds contratados neste deployment
 
 ## Estado actual
 
 | Feed | Status | hist p95 | hist p99 | rec med | rec p99 | latest | trend | cross |
 |---|---|---|---|---|---|---|---|---|
-| `funding_cex` | OK | 33s | 38s | 31s | 1.4m | 34s | -0.00 | aligned_ok |
-| `funding_hl` | OK | 33s | 38s | 31s | 1.4m | 34s | -0.00 | aligned_ok |
+| `funding_cex` | OK | 33s | 38s | 32s | 1.7m | 34s | +0.00 | aligned_ok |
+| `funding_hl` | OK | 33s | 38s | 32s | 1.7m | 34s | +0.00 | aligned_ok |
+| `jev_verdicts` | no_data | — | — | — | — | — | — | no_live_data |
 | `l2_book_recording` | no_data | — | — | — | — | — | — | no_live_data |
-| `liquidation_bybit` | OK | 3.7m | 17.7m | 1s | 17.9m | 17.5m | -0.01 | aligned_ok |
+| `liquidation_bybit` | OK | 3.8m | 17.7m | 1s | 18.8m | 17s | +0.00 | aligned_ok |
 | `liquidation_coinalyze_check` | no_data | — | — | — | — | — | — | no_live_data |
-| `liquidation_okx` | OK | 4.9m | 22.3m | 1s | 16.9m | 4.8m | -0.01 | aligned_ok |
+| `liquidation_okx` | OK | 4.9m | 22.3m | 1s | 17.1m | 2.3m | -0.01 | aligned_ok |
 | `taker_split` | OK | 1.0m | 1.0m | 1.0m | 1.0m | 1.0m | +0.00 | aligned_ok |
 
 ## Histórico de tendências por feed
@@ -47,6 +48,7 @@ Gerado a 2026-09-17T18:58:45+00:00 (UTC) · janela recente 48h · apenas feeds c
 | 2026-09-17 06:58 | OK | 32s | 38s | +0.00 | aligned_ok |
 | 2026-09-17 12:58 | WATCH | 32s | 38s | +0.00 | aligned_ok |
 | 2026-09-17 18:58 | OK | 31s | 38s | +0.00 | aligned_ok |
+| 2026-09-18 00:59 | OK | 32s | 38s | +0.00 | aligned_ok |
 
 ### `funding_hl`
 
@@ -79,6 +81,13 @@ Gerado a 2026-09-17T18:58:45+00:00 (UTC) · janela recente 48h · apenas feeds c
 | 2026-09-17 06:58 | OK | 32s | 38s | +0.00 | aligned_ok |
 | 2026-09-17 12:58 | WATCH | 32s | 38s | +0.00 | aligned_ok |
 | 2026-09-17 18:58 | OK | 31s | 38s | +0.00 | aligned_ok |
+| 2026-09-18 00:59 | OK | 32s | 38s | +0.00 | aligned_ok |
+
+### `jev_verdicts`
+
+| Run (UTC) | Status | rec med | hist p99 | trend | cross |
+|---|---|---|---|---|---|
+| 2026-09-18 00:59 | no_data | — | — | +0.00 | no_live_data |
 
 ### `l2_book_recording`
 
@@ -111,6 +120,7 @@ Gerado a 2026-09-17T18:58:45+00:00 (UTC) · janela recente 48h · apenas feeds c
 | 2026-09-17 06:58 | no_data | — | — | +0.00 | no_live_data |
 | 2026-09-17 12:58 | no_data | — | — | +0.00 | no_live_data |
 | 2026-09-17 18:58 | no_data | — | — | +0.00 | no_live_data |
+| 2026-09-18 00:59 | no_data | — | — | +0.00 | no_live_data |
 
 ### `liquidation_bybit`
 
@@ -143,6 +153,7 @@ Gerado a 2026-09-17T18:58:45+00:00 (UTC) · janela recente 48h · apenas feeds c
 | 2026-09-17 06:58 | WATCH | 0s | 19.3m | +0.01 | aligned_ok |
 | 2026-09-17 12:58 | OK | 0s | 19.3m | +0.01 | aligned_ok |
 | 2026-09-17 18:58 | OK | 1s | 17.7m | -0.01 | aligned_ok |
+| 2026-09-18 00:59 | OK | 1s | 17.7m | +0.00 | aligned_ok |
 
 ### `liquidation_coinalyze_check`
 
@@ -175,6 +186,7 @@ Gerado a 2026-09-17T18:58:45+00:00 (UTC) · janela recente 48h · apenas feeds c
 | 2026-09-17 06:58 | no_data | — | — | +0.00 | no_live_data |
 | 2026-09-17 12:58 | no_data | — | — | +0.00 | no_live_data |
 | 2026-09-17 18:58 | no_data | — | — | +0.00 | no_live_data |
+| 2026-09-18 00:59 | no_data | — | — | +0.00 | no_live_data |
 
 ### `liquidation_okx`
 
@@ -207,6 +219,7 @@ Gerado a 2026-09-17T18:58:45+00:00 (UTC) · janela recente 48h · apenas feeds c
 | 2026-09-17 06:58 | WATCH | 1s | 23.1m | +0.01 | aligned_ok |
 | 2026-09-17 12:58 | OK | 1s | 23.2m | +0.01 | aligned_ok |
 | 2026-09-17 18:58 | OK | 1s | 22.3m | -0.01 | aligned_ok |
+| 2026-09-18 00:59 | OK | 1s | 22.3m | -0.01 | aligned_ok |
 
 ### `taker_split`
 
@@ -239,5 +252,6 @@ Gerado a 2026-09-17T18:58:45+00:00 (UTC) · janela recente 48h · apenas feeds c
 | 2026-09-17 06:58 | OK | 1.0m | 1.0m | +0.00 | aligned_ok |
 | 2026-09-17 12:58 | OK | 1.0m | 1.0m | +0.00 | aligned_ok |
 | 2026-09-17 18:58 | OK | 1.0m | 1.0m | +0.00 | aligned_ok |
+| 2026-09-18 00:59 | OK | 1.0m | 1.0m | +0.00 | aligned_ok |
 
 _Gerado por `scripts/research/feed_cadence_diagnostic.py` — read-only, nunca trade._
