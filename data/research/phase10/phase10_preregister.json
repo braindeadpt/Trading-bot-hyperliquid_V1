@@ -7,11 +7,11 @@
       "verdict": "EXPERIMENT"
     }
   ],
-  "config_hash": "24e20ad9b5339c4e",
+  "config_hash": "eb17068f4c87bc86",
   "execution_strategies": [
     "JevJudge"
   ],
-  "experiment_id": "9e41c0dc-3e3f-486a-9e55-b9d4219ed94c",
+  "experiment_id": "66d3472f-3805-482f-99cf-640709e619ef",
   "gate_note": "All four criteria must be a real PASS (not merely 'no FAIL yet due to insufficient data') for the frozen window to be considered met. Drift in execution_strategies or config_hash after freeze invalidates the window \u2014 see assert_config_matches_preregister().",
   "gate_thresholds": {
     "expectancy_r_gt": 0.0,
@@ -19,17 +19,17 @@
     "min_profit_factor": 1.2,
     "min_trades": 100
   },
-  "in_sample_selection_note": "Experiment, not validated promotion. JevJudge trades paper positions so the experiment is dashboard-visible; offline evaluation via jev_decisions + jev_eval.py continues in parallel.",
-  "manifest_hash": "74602581ff9435d445df72febfb334d0240f6f1df6736d407d4d5b57e42bbe6e",
+  "in_sample_selection_note": "JevJudge remains the sole paper execution control (owner-requested EXPERIMENT). LiquidationCatcher stays shadow-only \u2014 sweep was in-sample argmax; fresh decisions under the tuned bracket are the forward OOS confirmation before any baseline_signal_gate candidacy. Mainnet still blocked.",
+  "manifest_hash": "0cf796b1a6441868ad222a4cc9f258fa49610e08f542d671b0f57a4cc17248d5",
   "protocol": "phase10-frozen-window-v1",
-  "registered_at_ms": 1789683777081,
-  "reregistration_reason": "JevJudge EXPERIMENT \u2014 min_confidence lowered 0.60 -> 0.50 (owner decision, 2026-09-17). Evidence: 0/24 recorded jev_decisions reached 0.60 (max observed 0.57) -> 0 signals, 0 trades; at 0.50 5/24 (21%) would fire, ~20 signals/day across 4 symbols. Provisional floor so the experiment produces observations. Verdict stays EXPERIMENT (no PASS claimed, zero evidence); all other strategies stay shadow-only per the 09-17 demotion evidence.",
-  "supersedes_experiment_id": "a41661d5-b42e-46ff-9f74-57e3311e4808",
+  "registered_at_ms": 1789694015784,
+  "reregistration_reason": "research shadow \u2014 LiquidationCatcher bracket retune (TP 2R\u21921.5R, max_hold 30min\u21928h) from offline shadow_decisions sweep n\u2248190: holds <2h net-negative (fees eat the bounce), 24h gives it back, 4\u20138h sweet spot. No execution_strategies change; OOS counter restarts because config_hash includes strategy params.",
+  "supersedes_experiment_id": "6f9ea627-ecf6-4a77-93b5-0004568f0eaa",
   "window": {
-    "max_end_ms": 1796941376914,
+    "max_end_ms": 1796951615461,
     "max_weeks": 12,
-    "min_end_ms": 1794522176914,
+    "min_end_ms": 1794532415461,
     "min_weeks": 8
   },
-  "window_start_ms": 1789683776914
+  "window_start_ms": 1789694015461
 }

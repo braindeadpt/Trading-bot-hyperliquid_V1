@@ -611,8 +611,12 @@ strategy:
     base_size_pct: 0.005            # 0.5% — small size, catching a knife
     max_size_pct: 0.01              # 1% max
     stop_loss_atr_multiplier: 1.0  # tight stop
-    max_hold_minutes: 30            # liquidation cascades resolve quickly
-    take_profit_r: 2.0              # 2R take profit
+    # 2026-09-18 bracket retune from offline shadow_decisions sweep
+    # (scripts/research/shadow_bracket_sweep.py, n≈190, NET tier-0+funding):
+    # holds <2h are net-negative (costs eat the bounce), 24h gives it back —
+    # the 4–8h window is the sweet spot; TP 1.5R beat 2R at every horizon.
+    max_hold_minutes: 480           # 8h — was 30min, net-negative zone
+    take_profit_r: 1.5              # 1.5R — was 2.0R, sweep argmax
     min_confidence: 0.45            # paper: was 0.60 — allow more test entries
     signal_throttle_ms: 3600000     # 1h cooldown
 
@@ -824,7 +828,7 @@ strategy:
     last_strategy_size_multiplier: 0.5  # when protecting last exec, cut size instead of disable
     # Fase 10 frozen-window floor — governor ignores trades entered before
     # this; updated at window re-registration 2026-08-08 (deadlock fix).
-    ignore_trades_before_ms: 1786457297421  # Fase 10 window_start_ms (re-registered 2026-08-11 TopTrader swing panel)
+    ignore_trades_before_ms: 1789694015461  # Fase 10 window_start_ms (re-registered 2026-09-18 LC bracket retune)
 
 # ═══════════════════════════════════════════════════════════
 # Exchange reconciliation & native protection (Phase 03)
