@@ -207,6 +207,7 @@ class Database:
                 return self._local.connection
             self._local.connection = sqlite3.connect(
                 str(self.db_path),
+                timeout=60,  # WAL single-writer: research DB has 4+ writer instances on HDD — 5s default starves into SQLITE_BUSY
                 detect_types=sqlite3.PARSE_DECLTYPES,
                 check_same_thread=False,  # MEDIUM-001: disabled for threading flexibility; ensure all DB access is from the same thread or use proper locking
             )

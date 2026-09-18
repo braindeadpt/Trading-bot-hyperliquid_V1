@@ -103,7 +103,7 @@ class TelegramCommandBot:
         async with self._session.get(
             url,
             params=params,
-            timeout=aiohttp.ClientTimeout(total=35),
+            timeout=aiohttp.ClientTimeout(total=60),
         ) as resp:
             data = await resp.json()
             if resp.status != 200 or not data.get("ok"):
@@ -116,7 +116,7 @@ class TelegramCommandBot:
         async with self._session.post(
             url,
             json=payload,
-            timeout=aiohttp.ClientTimeout(total=15),
+            timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
             data = await resp.json()
             if resp.status != 200 or not data.get("ok"):

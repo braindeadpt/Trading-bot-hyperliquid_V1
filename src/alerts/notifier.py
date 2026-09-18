@@ -77,7 +77,7 @@ class AlertNotifier:
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
             }
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 if resp.status != 200:
                     body = await resp.text()
                     logger.warning("Telegram alert failed: %s %s", resp.status, body)

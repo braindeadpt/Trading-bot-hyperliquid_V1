@@ -13,7 +13,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -56,7 +56,7 @@ if not logger.handlers:
 def analyze_crash(log_path: Path) -> Dict[str, Any]:
     """Read the last N lines of bot.log and extract crash context."""
     result: Dict[str, Any] = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "log_tail": [],
         "traceback": [],
         "error_type": None,
@@ -154,7 +154,7 @@ def main() -> None:
         try:
             with open(fatal_log, "a", encoding="utf-8") as f:
                 f.write(f"\n{'=' * 60}\n")
-                f.write(f"CRASH at {datetime.utcnow().isoformat()}Z\n")
+                f.write(f"CRASH at {datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')}\n")
                 f.write(f"Exit code: {exit_code} | Run time: {run_time:.1f}s\n")
                 f.write(f"Error: {crash_info.get('error_type')}: {crash_info.get('error_message')}\n")
                 f.write(f"Traceback:\n")
