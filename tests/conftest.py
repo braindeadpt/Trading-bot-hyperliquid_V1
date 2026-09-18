@@ -4,6 +4,25 @@ import pytest
 _SUITE_MARKERS = {"unit", "integration_offline", "network", "testnet_live"}
 
 
+@pytest.fixture(autouse=True)
+def _no_real_alert_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Block real alert transports for every test.
+
+    Alert paths (watchdog verdicts, engine alerts) resolve real Telegram /
+    Discord credentials from config + .env — without this guard a CI run
+    fires live notifications carrying synthetic fixture data. Stubbing the
+    two HTTP transports keeps message composition testable via ``send()``
+    while making real sends impossible.
+    """
+    from src.alerts.notifier import AlertNotifier
+
+    async def _noop(self, message):  # noqa: ANN001, ANN202
+        return None
+
+    monkeypatch.setattr(AlertNotifier, "_send_telegram", _noop)
+    monkeypatch.setattr(AlertNotifier, "_send_discord", _noop)
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list) -> None:
     """Fail collection if any test item lacks a required suite marker.
 

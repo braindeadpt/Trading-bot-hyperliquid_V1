@@ -209,6 +209,7 @@ class TestIvGateGate:
             }
             monkeypatch.setattr(sup, "run_iv_comparison", lambda: report)
             monkeypatch.setattr(sup, "write_iv_report", lambda *a, **k: None)
+            monkeypatch.setattr(sup, "notify_iv_verdict", lambda r, v: None)
 
             assert sup.check_iv_gate(shared, force=False) is True
             assert shared["iv_gate_shadow"]["triggered"] is True

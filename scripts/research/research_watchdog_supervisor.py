@@ -721,9 +721,10 @@ def notify_liq_gap(status: Dict[str, Any]) -> None:
         f"Isto mata o flush recheck — verificar liquidation aggregator / bot up."
     )
     try:
-        notifier.send(msg)
-    except Exception as exc:
-        log(f"liq_gap: notify failed: {exc}")
+        asyncio.run(asyncio.wait_for(notifier.send(msg, "warning"), timeout=15))
+        log("liq_gap: alert sent")
+    except Exception as exc:  # noqa: BLE001
+        log(f"liq_gap: notify failed (best-effort): {exc}")
 
 
 def check_liq_gap(
@@ -808,14 +809,14 @@ def check_nightly_keepalive(
             notifier = build_alert_notifier()
             if notifier is not None:
                 try:
-                    notifier.send(
+                    asyncio.run(asyncio.wait_for(notifier.send(
                         "⚠️ <b>NIGHTLY KEEP-ALIVE</b>\n"
                         f"NIGHTLY_STATUS.json tem <b>{age_h:.1f}h</b> "
                         f"(limiar {NIGHTLY_STALE_MS // 3_600_000}h) — a task "
-                        "agendada não correu. Os gates forward estão parados."
-                    )
-                except Exception as exc:
-                    log(f"keepalive: notify failed: {exc}")
+                        "agendada não correu. Os gates forward estão parados.",
+                        "warning"), timeout=15))
+                except Exception as exc:  # noqa: BLE001
+                    log(f"keepalive: notify failed (best-effort): {exc}")
             log(f"keepalive: ALERT — status stale {age_h:.1f}h")
             return True
         log(f"keepalive: episódio em curso — já alertado")
@@ -891,9 +892,10 @@ def notify_bot_down(status: Dict[str, Any], reason: str) -> None:
         f"Relançar: <code>python run_with_recovery.py --mode paper</code>"
     )
     try:
-        notifier.send(msg)
-    except Exception as exc:
-        log(f"bot_alive: notify failed: {exc}")
+        asyncio.run(asyncio.wait_for(notifier.send(msg, "error"), timeout=15))
+        log("bot_alive: alert sent")
+    except Exception as exc:  # noqa: BLE001
+        log(f"bot_alive: notify failed (best-effort): {exc}")
 
 
 def check_bot_alive(
