@@ -129,11 +129,13 @@ class TestDashboardAuthEndpoints:
     def test_health_is_exempt(self):
         assert self.client.get("/health").status_code == 200
 
+    _XFF = {"X-Forwarded-For": "203.0.113.9"}  # simulate proxied/tunnel traffic
+
     def test_api_401_without_token(self):
-        assert self.client.get("/api/status").status_code == 401
+        assert self.client.get("/api/status", headers=self._XFF).status_code == 401
 
     def test_api_401_with_wrong_token(self):
-        r = self.client.get("/api/status", headers={"X-Dashboard-Token": "wrong"})
+        r = self.client.get("/api/status", headers={**self._XFF, "X-Dashboard-Token": "wrong"})
         assert r.status_code == 401
 
     def test_api_200_with_header_token(self):
@@ -151,12 +153,12 @@ class TestDashboardAuthEndpoints:
         assert r.status_code == 200
 
     def test_auth_check_post_valid_token(self):
-        r = self.client.post("/api/auth/check", json={"token": self._token})
+        r = self.client.post("/api/auth/check", json={"token": self._token}, headers=self._XFF)
         assert r.status_code == 200
         assert r.get_json() == {"ok": True, "auth_required": True}
 
     def test_auth_check_post_invalid_token(self):
-        r = self.client.post("/api/auth/check", json={"token": "nope"})
+        r = self.client.post("/api/auth/check", json={"token": "nope"}, headers=self._XFF)
         assert r.status_code == 401
 
     # ── Socket.IO connect gate ──
@@ -188,6 +190,51 @@ class TestDashboardAuthEndpoints:
 
         with self.app.test_request_context(f"/socket.io?token={self._token}"):
             assert _socket_connect_auth(None, True, self._token) is None
+
+    # ── local-loopback bypass (public tunnel still gated) ──
+
+    def test_direct_local_request_bypasses_auth(self):
+        r = self.client.get("/api/status")
+        assert r.status_code == 200  # test client REMOTE_ADDR is loopback, no XFF
+
+    def test_proxied_request_without_token_still_401(self):
+        r = self.client.get(
+            "/api/status",
+            headers={"X-Forwarded-For": "203.0.113.9"},
+        )
+        assert r.status_code == 401
+
+    def test_auth_check_reports_not_required_for_local(self):
+        r = self.client.get("/api/auth/check")
+        assert r.get_json() == {"ok": True, "auth_required": False}
+
+    def test_index_shows_no_gate_for_local(self):
+        r = self.client.get("/")
+        assert r.status_code == 200
+        assert b"const AUTH_REQUIRED = false" in r.data
+
+    def test_index_shows_gate_for_proxied(self):
+        r = self.client.get("/", headers={"X-Forwarded-For": "203.0.113.9"})
+        assert r.status_code == 200
+        assert b"const AUTH_REQUIRED = true" in r.data
+
+    def test_socketio_connect_accepts_direct_local(self):
+        from src.dashboard.web import _socket_connect_auth
+
+        with self.app.test_request_context(
+            "/socket.io", environ_overrides={"REMOTE_ADDR": "127.0.0.1"}
+        ):
+            assert _socket_connect_auth(None, True, self._token) is None
+
+    def test_socketio_connect_proxied_still_rejected(self):
+        from src.dashboard.web import _socket_connect_auth
+
+        with self.app.test_request_context(
+            "/socket.io",
+            environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+            headers={"X-Forwarded-For": "203.0.113.9"},
+        ):
+            assert _socket_connect_auth(None, True, self._token) is False
 
     def test_socketio_connect_gate_not_clobbered_by_later_registration(self):
         """Regression guard: the connect handler registered on the namespace
@@ -308,9 +355,10 @@ class TestDashboardRateLimit:
              "dashboard": {"rate_limit_per_min": 5}}
         )
         client = app.test_client()
+        xff = {"X-Forwarded-For": "203.0.113.9"}  # proxied traffic stays gated
         for _ in range(5):
-            assert client.get("/api/status", headers={"X-Dashboard-Token": "wrong"}).status_code == 401
-        r = client.get("/api/status", headers={"X-Dashboard-Token": "wrong"})
+            assert client.get("/api/status", headers={**xff, "X-Dashboard-Token": "wrong"}).status_code == 401
+        r = client.get("/api/status", headers={**xff, "X-Dashboard-Token": "wrong"})
         assert r.status_code == 429
 
     def test_window_resets_after_minute(self, monkeypatch):
@@ -420,25 +468,28 @@ class TestDashboardSocketIOIntegration:
     def _url(self) -> str:
         return f"http://127.0.0.1:{self._port}"
 
-    def _connect(self, auth=None, token_query: bool = False):
+    def _connect(self, auth=None, token_query: bool = False, headers=None):
         c = self._client_cls(logger=False, engineio_logger=False)
         url = self._url()
         if token_query:
             url += f"?token={self._token}"
-        c.connect(url, auth=auth, wait_timeout=5.0, transports=["polling"])
+        c.connect(url, auth=auth, headers=headers, wait_timeout=5.0, transports=["polling"])
         return c
 
     def test_without_token_is_rejected(self):
         import socketio.exceptions
 
         with pytest.raises(socketio.exceptions.ConnectionError):
-            self._connect(auth=None)
+            self._connect(auth=None, headers={"X-Forwarded-For": "203.0.113.9"})
 
     def test_with_wrong_token_is_rejected(self):
         import socketio.exceptions
 
         with pytest.raises(socketio.exceptions.ConnectionError):
-            self._connect(auth={"token": "wrong-token"})
+            self._connect(
+                auth={"token": "wrong-token"},
+                headers={"X-Forwarded-For": "203.0.113.9"},
+            )
 
     def test_with_valid_token_is_accepted(self):
         c = self._connect(auth={"token": self._token})

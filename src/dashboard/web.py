@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Deque
 
-from flask import Flask, jsonify, request, abort, render_template
+from flask import Flask, jsonify, request, abort, render_template, has_request_context
 from flask_socketio import SocketIO, emit
 
 from src.dashboard.auth import (
@@ -318,6 +318,26 @@ def _feed_silence_imminent(feed_silence: Dict[str, Any]) -> bool:
     )
 
 
+def _is_direct_local_request() -> bool:
+    """True only for direct loopback hits — never for proxied traffic.
+
+    The dashboard binds 127.0.0.1, so a direct loopback peer is the local
+    machine (trusted). Tunnel/proxy traffic also arrives from loopback but
+    always carries X-Forwarded-* headers injected upstream (ngrok), which a
+    remote client cannot suppress — so "loopback AND no X-Forwarded-*"
+    cleanly separates local from public.
+    """
+    if not has_request_context():
+        return False
+    peer = (request.remote_addr or "").strip()
+    if peer not in ("127.0.0.1", "::1", "localhost"):
+        return False
+    h = request.headers
+    return not (
+        h.get("X-Forwarded-For") or h.get("X-Forwarded-Host") or h.get("Forwarded")
+    )
+
+
 def _socket_connect_auth(auth, enabled: bool, token: Optional[str]) -> Optional[bool]:
     """Token gate for the Socket.IO ``connect`` event.
 
@@ -326,6 +346,8 @@ def _socket_connect_auth(auth, enabled: bool, token: Optional[str]) -> Optional[
     (flask-socketio's ``test_client`` cannot run against Flask 3.1).
     """
     if not enabled or not token:
+        return None
+    if _is_direct_local_request():
         return None
     provided = None
     if isinstance(auth, dict):
@@ -1201,6 +1223,8 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 return None
             if request.path.startswith(("/socket.io", "/static/")):
                 return None
+            if _is_direct_local_request():
+                return None
             token = _extract_token()
             if not validate_dashboard_token(token, _dashboard_token):
                 abort(401)
@@ -1223,7 +1247,11 @@ def create_app(config: Dict[str, Any]) -> tuple:
         symbols = sorted(_allowed_symbols()) if _allowed_symbols() else ["BTC", "ETH", "SOL"]
         return render_template(
             "index.html",
-            auth_required=_auth_enabled and bool(_dashboard_token),
+            auth_required=(
+                _auth_enabled
+                and bool(_dashboard_token)
+                and not _is_direct_local_request()
+            ),
             symbols=symbols,
         )
 
@@ -1278,6 +1306,8 @@ def create_app(config: Dict[str, Any]) -> tuple:
     @app.route("/api/auth/check", methods=["GET", "POST"])
     def api_auth_check():
         if not _auth_enabled or not _dashboard_token:
+            return jsonify({"ok": True, "auth_required": False})
+        if _is_direct_local_request():
             return jsonify({"ok": True, "auth_required": False})
         token = _extract_token()
         if request.method == "POST" and request.is_json:
