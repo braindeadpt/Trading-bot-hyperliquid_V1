@@ -1120,6 +1120,14 @@ def create_app(config: Dict[str, Any]) -> tuple:
     allowed_origins = config.get("cors_allowed_origins", ["http://localhost:5000", "http://127.0.0.1:5000"])
     if isinstance(allowed_origins, str):
         allowed_origins = [allowed_origins]
+    else:
+        allowed_origins = list(allowed_origins)
+    # Extra origins per-deployment via env (e.g. a public tunnel domain).
+    # Hash-neutral, same pattern as DASHBOARD_RATE_LIMIT_PER_MIN.
+    for _origin in os.environ.get("DASHBOARD_CORS_ORIGINS", "").split(","):
+        _origin = _origin.strip()
+        if _origin and _origin not in allowed_origins:
+            allowed_origins.append(_origin)
     socketio = SocketIO(app, cors_allowed_origins=allowed_origins, async_mode="threading")
 
     global _socketio

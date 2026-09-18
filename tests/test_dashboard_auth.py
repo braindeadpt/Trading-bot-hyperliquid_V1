@@ -536,6 +536,27 @@ class TestDashboardSocketIOIntegrationAuthDisabled:
         return f"http://127.0.0.1:{self._port}"
 
 
+@pytest.mark.unit
+def test_cors_origins_extended_from_env() -> None:
+    """DASHBOARD_CORS_ORIGINS adds origins (e.g. public tunnel domain) without
+    dropping the localhost defaults. Browsers on the tunnel domain send
+    Origin=<tunnel> — without this, Socket.IO rejects every handshake and the
+    public dashboard stays OFFLINE."""
+    import src.dashboard.web as web
+
+    with patch.dict(
+        os.environ,
+        {"DASHBOARD_CORS_ORIGINS": "https://tunnel.example.dev, https://other.example.dev"},
+        clear=False,
+    ):
+        _app, sio, _emit = web.create_app({"mode": "paper"})
+    origins = sio.server.eio.cors_allowed_origins
+    assert "http://localhost:5000" in origins
+    assert "http://127.0.0.1:5000" in origins
+    assert "https://tunnel.example.dev" in origins
+    assert "https://other.example.dev" in origins
+
+
 if __name__ == "__main__":
     test_normalize_private_key()
     test_resolve_private_key_from_env()
