@@ -758,6 +758,10 @@ async def main() -> None:
     await engine.start()
     logger.info("TradingEngine started")
 
+    from src.utils.mem_profiler import maybe_start as _maybe_start_mem_prof
+
+    _maybe_start_mem_prof()
+
     if _liquidation_aggregator is not None:
         def _cz_silence_beat(ts_ms: int) -> None:
             if getattr(engine, "_feed_silence_enabled", False):
