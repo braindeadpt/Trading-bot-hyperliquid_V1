@@ -2499,10 +2499,11 @@ if (!window.__hlDashTimers) {
     setInterval(pollAll, 5000);
     setInterval(pollResearch, 60000);
     // Full hypothetical evaluation is heavy (can block Flask for minutes on large
-    // shadow DBs). Refresh rarely; light panel already updates via pollResearch.
+    // shadow DBs and churns ~1.3M objects per run). Refresh hourly — this is a
+    // research view; the light panel already updates every minute via pollResearch.
     setInterval(() => {
         authFetch("/api/shadow_panel?evaluate=1").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
-    }, 600000);
+    }, 3600000);
     setInterval(() => {
         if (statusUpdate.uptime_sec != null && statusReceivedAt > 0) {
             const s = statusUpdate.uptime_sec + Math.floor((Date.now() - statusReceivedAt) / 1000);

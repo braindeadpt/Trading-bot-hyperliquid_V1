@@ -54,7 +54,9 @@ _emitter: Optional["DashboardEmitter"] = None
 _shadow_panel_cache: Dict[str, Any] = {}
 _shadow_panel_lock = threading.Lock()
 _SHADOW_CACHE_TTL_LIGHT_S = 60.0
-_SHADOW_CACHE_TTL_EVAL_S = 300.0
+# Must exceed the frontend's evaluate=1 poll interval (3600s) so browser polls
+# hit the cache instead of each triggering a ~1.3M-object full-history rebuild.
+_SHADOW_CACHE_TTL_EVAL_S = 3700.0
 
 # Research REST (IV join, watchdogs, DVOL, top traders) and feed-age
 # sparklines are too heavy to recompute on every dashboard poll.
