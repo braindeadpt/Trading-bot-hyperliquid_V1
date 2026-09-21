@@ -25,10 +25,6 @@ from scripts.research.feed_age_creep_recheck import (  # noqa: E402
     detect_creeping_age,
     resolve_contracts as resolve_creep_contracts,
 )
-from scripts.research.feed_cadence_diagnostic import (  # noqa: E402
-    DEFAULT_DB as CADENCE_DEFAULT_DB,
-    run_cadence_diagnostic,
-)
 from src.core.engine import feed_silence_contracts  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
 from scripts.research.liquidation_flush_recheck import (
@@ -41,6 +37,21 @@ from scripts.research.top_trader_bias_recheck import (
     TARGET_DATES as BIAS_TARGET_DATES,
 )
 from scripts.research.top_trader_bias_recheck import bias_date_count
+
+
+def run_cadence_diagnostic(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Module-level shim over ``scripts.research.feed_cadence_diagnostic``.
+
+    Deferred import: that module's per-feed timestamp scans (~1.4M objects /
+    54MB in the tracemalloc baseline) are only needed when the cadence
+    watchdog actually runs — not at dashboard import time. Kept as a module
+    attribute so tests can ``monkeypatch`` it.
+    """
+    from scripts.research.feed_cadence_diagnostic import (
+        run_cadence_diagnostic as _impl,
+    )
+
+    return _impl(*args, **kwargs)
 
 
 def _progress_pct(current: float, target: int) -> float:
@@ -193,6 +204,14 @@ def _cadence_watchdog() -> Dict[str, Any]:
     and the alert never disagree. ``current`` is the number of feeds
     DEGRADING right now; ``feeds`` carries the comparison detail.
     """
+    # Deferred import: feed_cadence_diagnostic pulls heavy per-feed timestamp
+    # scans (~1.4M objects / 54MB in tracemalloc baseline). Loading it at
+    # module level charged every bot process for a diagnostic only needed
+    # when this panel is actually built. ``run_cadence_diagnostic`` resolves
+    # through the module-level shim above so tests can monkeypatch it.
+    from scripts.research.feed_cadence_diagnostic import (  # noqa: E402
+        DEFAULT_DB as CADENCE_DEFAULT_DB,
+    )
     contracts = feed_silence_contracts(load_config())
     report = run_cadence_diagnostic(CADENCE_DEFAULT_DB, contracts)
     state = load_shared_state()["feed_cadence"]

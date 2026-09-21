@@ -11,6 +11,7 @@ import os
 import random
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
@@ -353,7 +354,7 @@ def test_k_recorder_round_trip_enriched_and_legacy() -> None:
             side="long",
             would_enter=True,
             reason="entry_signal",
-            timestamp_ms=2_000_000,
+            timestamp_ms=int(time.time() * 1000) - 120_000,
             market_snapshot=build_enriched_market_snapshot(
                 price=3500.0,
                 confidence=0.66,
@@ -370,7 +371,7 @@ def test_k_recorder_round_trip_enriched_and_legacy() -> None:
             side="short",
             would_enter=True,
             reason="entry_signal",
-            timestamp_ms=2_100_000,
+            timestamp_ms=int(time.time() * 1000) - 60_000,
             market_snapshot={"price": 3490.0, "confidence": 0.55},
         )
         rec.record(enriched)

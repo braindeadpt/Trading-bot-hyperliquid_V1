@@ -25,6 +25,13 @@ from src.utils.helpers import safe_float
 
 logger = logging.getLogger(__name__)
 
+# Default history bound for ``load_decisions`` — the table is append-only,
+# so an unqualified read grew with it (the tracemalloc baseline parsed
+# ~1.38M objects from snapshot_json alone). 90d covers the panel's
+# quarter bucket and is currently a no-op (oldest row ~68d); callers that
+# need the full table pass ``window_ms=None`` explicitly.
+DEFAULT_WINDOW_MS = 90 * 86_400_000
+
 
 def _json_safe(obj: Any) -> Any:
     """Coerce nested values to JSON-serializable types."""
@@ -187,9 +194,15 @@ class ShadowRecorder:
             self.record(d)
 
     @staticmethod
-    def _row_to_decision(row: sqlite3.Row) -> ShadowDecision:
+    def _row_to_decision(
+        row: sqlite3.Row, *, parse_snapshots: bool = True
+    ) -> ShadowDecision:
         keys = set(row.keys())
-        snap = parse_market_snapshot(row["snapshot_json"] if "snapshot_json" in keys else None)
+        snap = (
+            parse_market_snapshot(row["snapshot_json"])
+            if parse_snapshots and "snapshot_json" in keys
+            else {}
+        )
         return ShadowDecision(
             symbol=str(row["symbol"]),
             strategy=str(row["strategy"]),
@@ -211,8 +224,19 @@ class ShadowRecorder:
         until_ms: Optional[int] = None,
         would_enter_only: bool = True,
         limit: Optional[int] = None,
+        window_ms: Optional[int] = DEFAULT_WINDOW_MS,
+        parse_snapshots: bool = True,
     ) -> List[ShadowDecision]:
-        """Load shadow decisions (read path for the outcome evaluator)."""
+        """Load shadow decisions (read path for the outcome evaluator).
+
+        ``window_ms`` bounds history when ``since_ms`` is not given —
+        default 90d; pass ``window_ms=None`` for the full table.
+        ``parse_snapshots=False`` skips ``snapshot_json`` entirely (the
+        column is not selected), for consumers that only need
+        side/reason/timestamps.
+        """
+        if since_ms is None and window_ms is not None:
+            since_ms = int(time.time() * 1000) - int(window_ms)
         conditions: List[str] = []
         params: List[Any] = []
         if would_enter_only:
@@ -230,8 +254,14 @@ class ShadowRecorder:
             conditions.append("timestamp_ms <= ?")
             params.append(int(until_ms))
         where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        cols = (
+            "id, symbol, strategy, variant, side, would_enter, reason, "
+            "timestamp_ms"
+        )
+        if parse_snapshots:
+            cols += ", snapshot_json"
         sql = (
-            f"SELECT * FROM shadow_decisions{where} "
+            f"SELECT {cols} FROM shadow_decisions{where} "
             "ORDER BY timestamp_ms ASC"
         )
         if limit is not None:
@@ -241,7 +271,10 @@ class ShadowRecorder:
             conn = self._db._conn()
             conn.row_factory = sqlite3.Row
             rows = conn.execute(sql, params).fetchall()
-        return [self._row_to_decision(r) for r in rows]
+        return [
+            self._row_to_decision(r, parse_snapshots=parse_snapshots)
+            for r in rows
+        ]
 
     def count_decisions(
         self,

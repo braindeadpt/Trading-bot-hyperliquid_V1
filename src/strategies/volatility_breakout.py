@@ -49,6 +49,12 @@ class _VolBreakoutState:
     pending_break_confidence: float = 0.0
     pending_break_oi_delta: Optional[float] = None
     pending_break_adx: Optional[float] = None
+    # Candle-only indicator memo: keyed on (len, last_ts) of candles_15m.
+    # _detect_squeeze is O(n x BB) — recomputing it per tick on the shadow
+    # path was the dominant allocation churn. Same pattern as
+    # VWAPDeviation.vwap_key (commit 3c55b58).
+    memo_key: Optional[Tuple[int, int]] = None
+    memo: Dict[str, Any] = field(default_factory=dict)
 
 
 class VolatilityBreakout(Strategy):
@@ -155,9 +161,17 @@ class VolatilityBreakout(Strategy):
         last = candles[-1]
         prev = prior[-1]
 
-        squeeze_ok, bbw_pct, lower, middle, upper = self._detect_squeeze(prior)
+        # Candle-set memo: everything below derives only from closed 15m
+        # bars — recomputing per tick is pure churn on the shadow path.
+        memo = self._candle_memo(state, candles)
+
+        if "squeeze" not in memo:
+            memo["squeeze"] = self._detect_squeeze(prior)
+        squeeze_ok, bbw_pct, lower, middle, upper = memo["squeeze"]
         if lower is None or upper is None:
-            lower, middle, upper = self._bands(prior)
+            if "bands_prior" not in memo:
+                memo["bands_prior"] = self._bands(prior)
+            lower, middle, upper = memo["bands_prior"]
 
         state.squeeze_active = squeeze_ok
         if not squeeze_ok or lower is None or upper is None or middle is None:
@@ -193,9 +207,13 @@ class VolatilityBreakout(Strategy):
         side = "long" if broke_up else "short"
 
         if self.REQUIRE_TREND_ALIGNMENT:
-            closes = [c.close for c in candles]
-            ema_fast = calculate_ema(closes, self.TREND_EMA_FAST)
-            ema_slow = calculate_ema(closes, self.TREND_EMA_SLOW)
+            if "ema_trend" not in memo:
+                closes = [c.close for c in candles]
+                memo["ema_trend"] = (
+                    calculate_ema(closes, self.TREND_EMA_FAST),
+                    calculate_ema(closes, self.TREND_EMA_SLOW),
+                )
+            ema_fast, ema_slow = memo["ema_trend"]
             if ema_fast is None or ema_slow is None:
                 return None
             if side == "long" and not (price > ema_fast and ema_fast > ema_slow):
@@ -234,7 +252,9 @@ class VolatilityBreakout(Strategy):
             )
             return None
 
-        _, vol_ratio = calculate_volume_ratio(candles, lookback=24)
+        if "vol_ratio" not in memo:
+            memo["vol_ratio"] = calculate_volume_ratio(candles, lookback=24)
+        _, vol_ratio = memo["vol_ratio"]
         if vol_ratio is None or vol_ratio < self.VOLUME_SURGE:
             logger.info(
                 "VolatilityBreakout SKIP %s — vol_ratio=%s (need >= %.2f)",
@@ -250,7 +270,9 @@ class VolatilityBreakout(Strategy):
             if side == "short" and event.oi_delta >= 0:
                 return None
 
-        atr = calculate_atr(candles, period=14)
+        if "atr" not in memo:
+            memo["atr"] = calculate_atr(candles, period=14)
+        atr = memo["atr"]
         if atr is None or atr <= 0:
             atr = middle * 0.01
 
@@ -517,6 +539,20 @@ class VolatilityBreakout(Strategy):
                 )
 
         return None
+
+    def _candle_memo(
+        self, state: _VolBreakoutState, candles: List[Candle]
+    ) -> Dict[str, Any]:
+        """Per-candle-set memo — cleared when the 15m set changes.
+
+        The deque is append-only with timestamp dedup, so
+        ``(len, last_ts)`` uniquely identifies its contents.
+        """
+        key = (len(candles), candles[-1].timestamp_ms)
+        if state.memo_key != key:
+            state.memo_key = key
+            state.memo = {}
+        return state.memo
 
     def _detect_squeeze(
         self, candles: List[Candle]

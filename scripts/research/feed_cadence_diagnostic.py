@@ -34,13 +34,14 @@ least one feed DEGRADING.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Deque, NamedTuple, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -77,59 +78,90 @@ def _fmt_dur(sec) -> str:
     return f"{sec / 3600:.1f}h"
 
 
-def _event_timestamps(
+# Per-feed event-timestamp queries (ascending). funding_history holds one
+# row per symbol per poll — the cadence of the *table* is the
+# funding_hl/cex delivery cadence (the same series feeds both contracts,
+# so it is streamed once and shared).
+_FEED_QUERIES = {
+    "liquidation_okx": (
+        "SELECT timestamp_ms FROM liquidation_events "
+        "WHERE source='okx' ORDER BY timestamp_ms ASC"
+    ),
+    "liquidation_bybit": (
+        "SELECT timestamp_ms FROM liquidation_events "
+        "WHERE source='bybit' ORDER BY timestamp_ms ASC"
+    ),
+    "liquidation_binance": (
+        "SELECT timestamp_ms FROM liquidation_events "
+        "WHERE source='binance' ORDER BY timestamp_ms ASC"
+    ),
+    "funding_hl": (
+        "SELECT timestamp FROM funding_history ORDER BY timestamp ASC"
+    ),
+    "funding_cex": (
+        "SELECT timestamp FROM funding_history ORDER BY timestamp ASC"
+    ),
+    "taker_split": (
+        "SELECT timestamp_ms FROM candles_1m "
+        "WHERE (buy_volume > 0 OR sell_volume > 0) ORDER BY timestamp_ms ASC"
+    ),
+    "binance_perp": (
+        "SELECT timestamp_ms FROM binance_perp_prices "
+        "ORDER BY timestamp_ms ASC"
+    ),
+}
+
+
+class _FeedSeries(NamedTuple):
+    """Compact per-feed event series — never holds the raw timestamp list.
+
+    ``gaps`` keeps the sane inter-event gaps ``analyze_feed`` needs;
+    ``raw_tail`` keeps only the last ``gap_history`` raw gaps (g >= 0) the
+    live-snapshot reconstruction needs, matching the monitor's deque cap.
+    """
+    events: int
+    last_ts: Optional[int]
+    gaps: list
+    raw_tail: list
+
+
+def _feed_series(
     db: sqlite3.Connection,
     query: str,
-    params: tuple = (),
-) -> list[int]:
-    rows = db.execute(query, params).fetchall()
-    return [int(r[0]) for r in rows]
+    *,
+    gap_history: int,
+    max_gap_sec: float = 12 * 3600.0,
+    chunk: int = 8192,
+) -> _FeedSeries:
+    """Stream event timestamps pairwise via fetchmany — O(1) row memory.
 
-
-def _feed_timestamps(db: sqlite3.Connection) -> dict:
-    """Sorted event timestamps per feed key (ascending). Absent = no data.
-
-    Best-effort per table: a live DB missing a table (fresh deployment,
-    research-only instance) degrades that feed to no data instead of
-    blowing up the whole diagnostic."""
-    queries = {
-        "liquidation_okx": (
-            "SELECT timestamp_ms FROM liquidation_events "
-            "WHERE source='okx' ORDER BY timestamp_ms ASC"
-        ),
-        "liquidation_bybit": (
-            "SELECT timestamp_ms FROM liquidation_events "
-            "WHERE source='bybit' ORDER BY timestamp_ms ASC"
-        ),
-        "liquidation_binance": (
-            "SELECT timestamp_ms FROM liquidation_events "
-            "WHERE source='binance' ORDER BY timestamp_ms ASC"
-        ),
-        # funding_history holds one row per symbol per poll — the cadence of
-        # the *table* is the funding_hl/cex delivery cadence (same rows feed
-        # both).
-        "funding_hl": (
-            "SELECT timestamp FROM funding_history ORDER BY timestamp ASC"
-        ),
-        "funding_cex": (
-            "SELECT timestamp FROM funding_history ORDER BY timestamp ASC"
-        ),
-        "taker_split": (
-            "SELECT timestamp_ms FROM candles_1m "
-            "WHERE (buy_volume > 0 OR sell_volume > 0) ORDER BY timestamp_ms ASC"
-        ),
-        "binance_perp": (
-            "SELECT timestamp_ms FROM binance_perp_prices "
-            "ORDER BY timestamp_ms ASC"
-        ),
-    }
-    out: dict = {}
-    for feed, query in queries.items():
-        try:
-            out[feed] = _event_timestamps(db, query)
-        except sqlite3.OperationalError:
-            out[feed] = []  # table missing — feed has no persisted events
-    return out
+    The previous ``fetchall`` version materialized every timestamp of every
+    feed at once (~1.9M rows, ~54MB in the tracemalloc baseline); funding_
+    history alone is ~700k rows and fed two contracts. Streaming computes
+    the gap series directly and retains only what the analysis consumes.
+    """
+    gaps: list = []
+    raw_tail: Deque[float] = collections.deque(maxlen=gap_history)
+    prev: Optional[int] = None
+    count = 0
+    last_ts: Optional[int] = None
+    cur = db.execute(query)
+    while True:
+        rows = cur.fetchmany(chunk)
+        if not rows:
+            break
+        for (raw,) in rows:
+            ts = int(raw)
+            count += 1
+            last_ts = ts
+            if prev is not None:
+                g = (ts - prev) / 1000.0
+                if g >= 0:
+                    raw_tail.append(g)
+                if 0 < g <= max_gap_sec:
+                    gaps.append((ts, g))
+            prev = ts
+    return _FeedSeries(count, last_ts, gaps, list(raw_tail))
 
 
 def inter_event_gaps(ts: list[int], max_gap_sec: float = 12 * 3600.0) -> list[tuple[int, float]]:
@@ -175,11 +207,27 @@ def analyze_feed(
     min_history: int = 50,
 ) -> dict:
     """Report per-feed cadence: history p95/p99 vs recent stats + trend."""
-    if len(ts) < 2:
-        return {"status": "no_data", "events": len(ts)}
-    gaps = inter_event_gaps(ts)
+    return _analyze_feed_gaps(
+        name, len(ts), inter_event_gaps(ts),
+        now_ms=now_ms, recent_ms=recent_ms, min_history=min_history,
+    )
+
+
+def _analyze_feed_gaps(
+    name: str,
+    events: int,
+    gaps: list[tuple[int, float]],
+    *,
+    now_ms: int,
+    recent_ms: int,
+    min_history: int = 50,
+) -> dict:
+    """Same verdict as ``analyze_feed`` but from a precomputed gap series
+    (the streaming path never materializes the timestamp list)."""
+    if events < 2:
+        return {"status": "no_data", "events": events}
     if len(gaps) < min_history:
-        return {"status": "insufficient", "events": len(ts), "gaps": len(gaps)}
+        return {"status": "insufficient", "events": events, "gaps": len(gaps)}
 
     cutoff = now_ms - recent_ms
     history = [g for end_ms, g in gaps if end_ms < cutoff]
@@ -212,7 +260,7 @@ def analyze_feed(
 
     return {
         "status": status,
-        "events": len(ts),
+        "events": events,
         "gaps": len(gaps),
         "history_gaps": len(history),
         "recent_gaps": len(recent),
@@ -248,20 +296,32 @@ def live_snapshot_equivalent(
     the escalation precedence is single-source with the live monitor.
     ``None`` when the feed has no events.
     """
-    if len(ts) < 2:
+    # Accepts either the raw timestamp list (tests / external callers) or a
+    # ``_FeedSeries`` from the streaming path (only the capped raw-gap tail
+    # is retained — the monitor never looks further back than gap_history).
+    if isinstance(ts, _FeedSeries):
+        events = ts.events
+        last_ts = ts.last_ts
+        recent = list(ts.raw_tail)
+    else:
+        if len(ts) < 2:
+            return None
+        raw_gaps: list[float] = []
+        for a, b in zip(ts, ts[1:]):
+            g = (b - a) / 1000.0
+            if g >= 0:  # the monitor records only gaps >= 0
+                raw_gaps.append(g)
+        if not raw_gaps:
+            return None
+        recent = raw_gaps[-gap_history:]  # same deque cap as the monitor
+        events = len(ts)
+        last_ts = ts[-1]
+    if events < 2 or last_ts is None or not recent:
         return None
-    raw_gaps: list[float] = []
-    for a, b in zip(ts, ts[1:]):
-        g = (b - a) / 1000.0
-        if g >= 0:  # the monitor records only gaps >= 0
-            raw_gaps.append(g)
-    if not raw_gaps:
-        return None
-    recent = raw_gaps[-gap_history:]  # same deque cap as the monitor
     p50 = cadence_percentile(recent, 0.50, min_samples)
     p95 = cadence_percentile(recent, 0.95, min_samples)
     p99 = cadence_percentile(recent, 0.99, min_samples)
-    age_sec = max(0.0, (now_ms - ts[-1]) / 1000.0)
+    age_sec = max(0.0, (now_ms - last_ts) / 1000.0)
     pct_current: float | None = None
     if recent:
         below = sum(1 for g in recent if g <= age_sec)
@@ -496,8 +556,6 @@ def run_cadence_diagnostic(
     db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     now = now_ms if now_ms is not None else int(time.time() * 1000)
     recent_ms = int(recent_hours * 3600_000)
-    timestamps = _feed_timestamps(db)
-    db.close()
     report: dict = {
         "now_ms": now,
         "recent_hours": recent_hours,
@@ -509,26 +567,45 @@ def run_cadence_diagnostic(
         },
         "feeds": {},
     }
-    for feed in sorted(contracts):
-        st = analyze_feed(
-            feed, timestamps.get(feed, []),
-            now_ms=now, recent_ms=recent_ms,
-            min_history=min_history,
-        )
-        max_sil = contracts.get(feed) or 0.0
-        if max_sil > 0:
-            live = live_snapshot_equivalent(
-                timestamps.get(feed, []),
-                now_ms=now,
-                max_silence_sec=float(max_sil),
-                warn_fraction=warn_fraction,
-                imminent_fraction=imminent_fraction,
-                min_samples=min_samples,
-                gap_history=gap_history,
+    try:
+        # Stream one feed at a time — the shared funding_history series is
+        # computed once and reused by funding_hl + funding_cex.
+        series_cache: dict = {}
+        for feed in sorted(contracts):
+            query = _FEED_QUERIES.get(feed)
+            if query is None:
+                series = _FeedSeries(0, None, [], [])
+            else:
+                if query not in series_cache:
+                    try:
+                        series_cache[query] = _feed_series(
+                            db, query, gap_history=gap_history,
+                        )
+                    except sqlite3.OperationalError:
+                        # table missing — feed has no persisted events
+                        series_cache[query] = _FeedSeries(0, None, [], [])
+                series = series_cache[query]
+            st = _analyze_feed_gaps(
+                feed, series.events, series.gaps,
+                now_ms=now, recent_ms=recent_ms,
+                min_history=min_history,
             )
-            st["live_snapshot"] = live
-            st["cross"] = cross_verdict(st["status"], live)
-        report["feeds"][feed] = st
+            max_sil = contracts.get(feed) or 0.0
+            if max_sil > 0:
+                live = live_snapshot_equivalent(
+                    series,
+                    now_ms=now,
+                    max_silence_sec=float(max_sil),
+                    warn_fraction=warn_fraction,
+                    imminent_fraction=imminent_fraction,
+                    min_samples=min_samples,
+                    gap_history=gap_history,
+                )
+                st["live_snapshot"] = live
+                st["cross"] = cross_verdict(st["status"], live)
+            report["feeds"][feed] = st
+    finally:
+        db.close()
     return report
 
 

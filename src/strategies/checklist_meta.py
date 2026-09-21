@@ -34,7 +34,7 @@ from __future__ import annotations
 import collections
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from src.exchanges.liquidation_event import is_real_liquidation_source
 from src.strategies.base import ExitSignal, MarketEvent, Position, Signal, Strategy
@@ -64,6 +64,12 @@ class _ChecklistState:
     # Anti-whipsaw: last stop-loss on this symbol (opposite side blocked briefly)
     last_stop_ms: int = 0
     last_stop_side: str = ""
+    # Candle-only indicator memo: keyed on (len, last_ts) of candles_15m.
+    # Entries recompute only when the 15m set changes (new closed bar);
+    # tick-price/event-dependent math stays per-event. Same pattern as
+    # VWAPDeviation.vwap_key (commit 3c55b58).
+    memo_key: Optional[Tuple[int, int]] = None
+    memo: Dict[str, Any] = field(default_factory=dict)
 
 
 class ChecklistMeta(Strategy):
@@ -168,18 +174,27 @@ class ChecklistMeta(Strategy):
             return None
         last_closed = prior[-1]
 
+        # Candle-set memo: all values below derive only from `prior`
+        # (closed 15m bars) — recomputing per tick is pure churn on the
+        # shadow path, where on_data runs once per price event.
+        memo = self._candle_memo(state, candles_15m)
+
         # --- Compute components ---
         components: Dict[str, float] = {}
 
         # 1. SFP at swing low/high
-        sfp_side = self._detect_sfp_side(prior)
+        if "sfp_prior" not in memo:
+            memo["sfp_prior"] = self._detect_sfp_side(prior)
+        sfp_side = memo["sfp_prior"]
         if sfp_side == "long":
             components["sfp_long"] = self.W_SFP
         elif sfp_side == "short":
             components["sfp_short"] = self.W_SFP
 
         # 2. VWAP position
-        vwap = self._compute_vwap(prior)
+        if "vwap_prior" not in memo:
+            memo["vwap_prior"] = self._compute_vwap(prior)
+        vwap = memo["vwap_prior"]
         price = event.price
         if vwap is not None:
             if price > vwap:
@@ -188,9 +203,13 @@ class ChecklistMeta(Strategy):
                 components["vwap_below"] = self.W_VWAP
 
         # 3. Trend structure: EMA20 vs EMA50 on 15m closes
-        closes_15m = [c.close for c in prior]
-        ema_fast = calculate_ema(closes_15m, self.EMA_FAST)
-        ema_slow = calculate_ema(closes_15m, self.EMA_SLOW)
+        if "ema_prior" not in memo:
+            closes_15m = [c.close for c in prior]
+            memo["ema_prior"] = (
+                calculate_ema(closes_15m, self.EMA_FAST),
+                calculate_ema(closes_15m, self.EMA_SLOW),
+            )
+        ema_fast, ema_slow = memo["ema_prior"]
         if ema_fast is not None and ema_slow is not None:
             if ema_fast > ema_slow:
                 components["trend_up"] = self.W_TREND_STRUCTURE
@@ -299,7 +318,9 @@ class ChecklistMeta(Strategy):
             return None
 
         # ATR for sizing — TP/SL scale with per-symbol ATR (see take_profit_atr_multiplier).
-        atr = calculate_atr(prior, period=14) or price * 0.01
+        if "atr_prior" not in memo:
+            memo["atr_prior"] = calculate_atr(prior, period=14)
+        atr = memo["atr_prior"] or price * 0.01
         stop_loss_pct = safe_divide(self.STOP_ATR_MULT * atr, price, 0.015)
         take_profit_pct = safe_divide(self.TAKE_PROFIT_ATR_MULT * atr, price, 0.03)
 
@@ -527,6 +548,20 @@ class ChecklistMeta(Strategy):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _candle_memo(
+        self, state: _ChecklistState, candles: List[Candle]
+    ) -> Dict[str, Any]:
+        """Per-candle-set memo — cleared when the 15m set changes.
+
+        The deque is append-only with timestamp dedup, so
+        ``(len, last_ts)`` uniquely identifies its contents.
+        """
+        key = (len(candles), candles[-1].timestamp_ms)
+        if state.memo_key != key:
+            state.memo_key = key
+            state.memo = {}
+        return state.memo
 
     def _effective_sl_to_be_trigger_r(
         self,

@@ -50,6 +50,11 @@ class _LiqCatcherState:
     # entry→stop-out loop the real-feed backtest exposed). Populated by
     # ``on_data`` when ``confirmation_delay_ms > 0``, emitted later.
     pending: Optional[Dict[str, Any]] = None
+    # Candle-only indicator memo: keyed on (len, last_ts) of candles_1h
+    # (fed by on_candle). Recomputes only when the 1h set changes. Same
+    # pattern as VWAPDeviation.vwap_key (commit 3c55b58).
+    memo_key: Optional[Tuple[int, int]] = None
+    memo: Dict[str, Any] = field(default_factory=dict)
 
 
 class LiquidationCatcher(Strategy):
@@ -278,7 +283,12 @@ class LiquidationCatcher(Strategy):
 
         # --- Calculate ATR for stop loss ---
         candles_1h = list(state.candles_1h)
-        atr = calculate_atr(candles_1h[-30:], 14) if len(candles_1h) >= 30 else None
+        memo = self._candle_memo(state, candles_1h)
+        if "atr_1h" not in memo:
+            memo["atr_1h"] = (
+                calculate_atr(candles_1h[-30:], 14) if len(candles_1h) >= 30 else None
+            )
+        atr = memo["atr_1h"]
         if atr is not None and event.price > 0:
             stop_loss_pct = (atr * self.STOP_ATR_MULT) / event.price
         else:
@@ -388,11 +398,23 @@ class LiquidationCatcher(Strategy):
                         reason=f"take_profit_2R_{pnl_pct*100:.2f}%",
                     )
 
-        # VWAP reversion exit
+        # VWAP reversion exit — (vwap, stddev) are candle-only and memoized;
+        # zscore depends on the live price so it stays per-event.
         state = self._get_state(position.symbol)
         candles_1h = list(state.candles_1h)
         if len(candles_1h) >= 24:
-            vwap, _, zscore = calculate_vwap_zscore(candles_1h, current, lookback=24)
+            memo = self._candle_memo(state, candles_1h)
+            if "vwap_stats_1h" not in memo:
+                vwap_m, stddev_m, _ = calculate_vwap_zscore(
+                    candles_1h, current, lookback=24
+                )
+                memo["vwap_stats_1h"] = (vwap_m, stddev_m)
+            vwap, stddev = memo["vwap_stats_1h"]
+            zscore = (
+                (current - vwap) / stddev
+                if vwap is not None and stddev not in (None, 0.0)
+                else None
+            )
             if vwap is not None and zscore is not None:
                 # Price reverted to VWAP (|Z| < 0.5)
                 if abs(zscore) < 0.5:
@@ -409,6 +431,20 @@ class LiquidationCatcher(Strategy):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _candle_memo(
+        self, state: _LiqCatcherState, candles: List[Candle]
+    ) -> Dict[str, Any]:
+        """Per-candle-set memo — cleared when the 1h set changes.
+
+        The deque is append-only with timestamp dedup (see ``on_candle``),
+        so ``(len, last_ts)`` uniquely identifies its contents.
+        """
+        key = (len(candles), candles[-1].timestamp_ms) if candles else None
+        if state.memo_key != key:
+            state.memo_key = key
+            state.memo = {}
+        return state.memo
 
     def _get_state(self, symbol: str) -> _LiqCatcherState:
         if symbol not in self._state:

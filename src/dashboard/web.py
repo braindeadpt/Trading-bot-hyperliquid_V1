@@ -53,7 +53,7 @@ _emitter: Optional["DashboardEmitter"] = None
 # responses so the sync Flask thread does not stall the whole dashboard.
 _shadow_panel_cache: Dict[str, Any] = {}
 _shadow_panel_lock = threading.Lock()
-_SHADOW_CACHE_TTL_LIGHT_S = 15.0
+_SHADOW_CACHE_TTL_LIGHT_S = 60.0
 _SHADOW_CACHE_TTL_EVAL_S = 300.0
 
 # Research REST (IV join, watchdogs, DVOL, top traders) and feed-age
@@ -83,6 +83,24 @@ def _ttl_put(key: str, value: Any, ttl: float) -> Any:
 def _ttl_clear() -> None:
     with _ttl_lock:
         _ttl_store.clear()
+
+
+def _tail_log_lines(log_path: str, keep: int = 50, chunk: int = 65536) -> List[str]:
+    """Last ``keep`` lines of a text file — reads only the tail chunk.
+
+    ``f.readlines()`` materialized the whole (multi-MB) log on every emit /
+    request just to keep 50 lines; this reads at most ``chunk`` bytes.
+    """
+    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        f.seek(max(0, size - chunk))
+        lines = f.read().splitlines()
+    if size > chunk and lines:
+        # First line may be truncated mid-record — drop it; the last
+        # ``keep`` complete lines are unaffected.
+        lines = lines[1:]
+    return lines[-keep:]
 
 
 def _nonzero_px(v: Any) -> bool:
@@ -1085,22 +1103,20 @@ class DashboardEmitter:
         log_path = os.path.abspath(log_path)
         entries = []
         try:
-            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
-                for line in lines[-50:]:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    parts = line.split(" | ")
-                    if len(parts) >= 4:
-                        entries.append({
-                            "time": parts[0],
-                            "level": parts[1].strip(),
-                            "module": parts[2].strip(),
-                            "message": " | ".join(parts[3:]),
-                        })
-                    else:
-                        entries.append({"time": "", "level": "INFO", "module": "", "message": line})
+            for line in _tail_log_lines(log_path):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(" | ")
+                if len(parts) >= 4:
+                    entries.append({
+                        "time": parts[0],
+                        "level": parts[1].strip(),
+                        "module": parts[2].strip(),
+                        "message": " | ".join(parts[3:]),
+                    })
+                else:
+                    entries.append({"time": "", "level": "INFO", "module": "", "message": line})
         except Exception:
             pass
         self._safe_emit("logs", entries)
@@ -2134,20 +2150,18 @@ def create_app(config: Dict[str, Any]) -> tuple:
             abort(403)
         entries = []
         try:
-            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
-                for line in lines[-50:]:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    parts = line.split(" | ")
-                    if len(parts) >= 4:
-                        entries.append({
-                            "time": parts[0],
-                            "level": parts[1].strip(),
-                            "module": parts[2].strip(),
-                            "message": " | ".join(parts[3:]),
-                        })
+            for line in _tail_log_lines(log_path):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(" | ")
+                if len(parts) >= 4:
+                    entries.append({
+                        "time": parts[0],
+                        "level": parts[1].strip(),
+                        "module": parts[2].strip(),
+                        "message": " | ".join(parts[3:]),
+                    })
         except Exception:
             pass
         return jsonify(entries)

@@ -352,3 +352,105 @@ def test_history_cap_per_feed() -> None:
         from scripts.research.feed_cadence_diagnostic import load_cadence_history
         history = load_cadence_history(path=hp)
         assert len([h for h in history if h["feed"] == "liquidation_okx"]) == 3
+
+
+# ── Task 4: streaming reads (no fetchall over unbounded tables) ─────────
+
+def test_run_cadence_streams_without_fetchall(tmp_path, monkeypatch) -> None:
+    """run_cadence_diagnostic must not materialize per-feed timestamp lists.
+
+    Task 4 (memory): the old ``_feed_timestamps`` fetchall'd ~1.9M rows
+    across 7 feeds (funding_history alone ~700k, loaded twice for
+    funding_hl + funding_cex). The streaming path consumes rows pairwise
+    via fetchmany — a cursor whose fetchall raises must still produce the
+    full report.
+    """
+    import sqlite3 as _sq
+
+    from scripts.research import feed_cadence_diagnostic as dg
+
+    db_path = tmp_path / "bot.db"
+    _make_db(str(db_path), okx_gaps_min=[1.0] * 250)
+    real_connect = _sq.connect
+
+    class _CursorProxy:
+        def __init__(self, cur):
+            self._cur = cur
+
+        def fetchall(self):
+            raise AssertionError("fetchall() used — stream rows via fetchmany")
+
+        def fetchmany(self, n):
+            return self._cur.fetchmany(n)
+
+        def fetchone(self):
+            return self._cur.fetchone()
+
+        def __iter__(self):
+            return iter(self._cur)
+
+    class _ConnProxy:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, query, params=()):
+            return _CursorProxy(self._conn.execute(query, params))
+
+        def close(self):
+            self._conn.close()
+
+    monkeypatch.setattr(
+        dg.sqlite3, "connect", lambda *a, **k: _ConnProxy(real_connect(*a, **k))
+    )
+    report = dg.run_cadence_diagnostic(
+        db_path,
+        {"liquidation_okx": 3600.0, "funding_hl": 7200.0},
+        now_ms=NOW,
+        recent_hours=48.0,
+        warn_fraction=0.5,
+        imminent_fraction=0.9,
+        min_samples=10,
+        gap_history=4000,
+    )
+    st = report["feeds"]["liquidation_okx"]
+    assert st["status"] == "OK"
+    assert st["events"] == 250
+
+
+def test_run_cadence_matches_materialized_list_path(tmp_path) -> None:
+    """Streaming output must equal the old list-based computation."""
+    from scripts.research import feed_cadence_diagnostic as dg
+
+    db_path = tmp_path / "bot.db"
+    _make_db(str(db_path), okx_gaps_min=[1.0] * 250)
+    report = dg.run_cadence_diagnostic(
+        db_path,
+        {"liquidation_okx": 3600.0},
+        now_ms=NOW,
+        recent_hours=48.0,
+        warn_fraction=0.5,
+        imminent_fraction=0.9,
+        min_samples=10,
+        gap_history=4000,
+    )
+    conn = sqlite3.connect(str(db_path))
+    ts = [
+        int(r[0])
+        for r in conn.execute(
+            "SELECT timestamp_ms FROM liquidation_events "
+            "WHERE source='okx' ORDER BY timestamp_ms ASC"
+        )
+    ]
+    conn.close()
+    expected = dg.analyze_feed(
+        "liquidation_okx", ts, now_ms=NOW,
+        recent_ms=int(48.0 * 3600_000), min_history=50,
+    )
+    got = report["feeds"]["liquidation_okx"]
+    for key, value in expected.items():
+        assert got[key] == value, f"{key}: {got[key]!r} != {value!r}"
+    expected_live = dg.live_snapshot_equivalent(
+        ts, now_ms=NOW, max_silence_sec=3600.0, warn_fraction=0.5,
+        imminent_fraction=0.9, min_samples=10, gap_history=4000,
+    )
+    assert got["live_snapshot"] == expected_live

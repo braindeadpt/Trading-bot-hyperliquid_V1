@@ -1198,6 +1198,9 @@ def run_evaluation(
         strategy=strategy,
         variant=variant,
         since_ms=since_ms,
+        # Evidence path: ``since_days=None`` must keep the full-history
+        # contract — opt out of the 90d default read bound explicitly.
+        window_ms=None,
     )
     boards = evaluate_shadow_decisions(
         decisions,

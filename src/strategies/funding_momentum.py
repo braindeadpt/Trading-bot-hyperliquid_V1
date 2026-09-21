@@ -62,6 +62,11 @@ class _FundingMomentumState:
     candles_15m: Deque[Candle] = field(default_factory=lambda: deque(maxlen=80))
     candles_1h: Deque[Candle] = field(default_factory=lambda: deque(maxlen=80))
     last_signal_ms: int = 0
+    # Candle-only indicator memo: keyed on (len, last_ts) of candles_1h.
+    # Recomputes only when the 1h set changes. Same pattern as
+    # VWAPDeviation.vwap_key (commit 3c55b58).
+    memo_key: Optional[Tuple[int, int]] = None
+    memo: Dict[str, Any] = field(default_factory=dict)
 
 
 class FundingMomentum(Strategy):
@@ -104,6 +109,21 @@ class FundingMomentum(Strategy):
         if symbol not in self._state:
             self._state[symbol] = _FundingMomentumState()
         return self._state[symbol]
+
+    @staticmethod
+    def _candle_memo(state: _FundingMomentumState) -> Dict[str, Any]:
+        """Per-candle-set memo — cleared when the 1h set changes.
+
+        The deque is append-only with timestamp dedup (see
+        ``_update_history``), so ``(len, last_ts)`` uniquely identifies
+        its contents.
+        """
+        candles = state.candles_1h
+        key = (len(candles), candles[-1].timestamp_ms) if candles else None
+        if state.memo_key != key:
+            state.memo_key = key
+            state.memo = {}
+        return state.memo
 
     @staticmethod
     def _update_history(
@@ -265,9 +285,14 @@ class FundingMomentum(Strategy):
                 )
             return None
 
-        closes_1h = [c.close for c in state.candles_1h]
-        ema_slow = calculate_ema(closes_1h, self.EMA_SLOW)
-        atr = calculate_atr(state.candles_1h, period=self.ATR_PERIOD)
+        memo = self._candle_memo(state)
+        if "ema_atr_1h" not in memo:
+            closes_1h = [c.close for c in state.candles_1h]
+            memo["ema_atr_1h"] = (
+                calculate_ema(closes_1h, self.EMA_SLOW),
+                calculate_atr(list(state.candles_1h), period=self.ATR_PERIOD),
+            )
+        ema_slow, atr = memo["ema_atr_1h"]
         if ema_slow is None or atr is None or atr <= 0 or event.price <= 0:
             return None
 
