@@ -56,7 +56,13 @@ def test_dashboard_flask_auth() -> None:
     client = app.test_client()
 
     assert client.get("/health").status_code == 200
-    assert client.get("/api/status").status_code == 401
+    # Simulate proxied/public traffic (X-Forwarded-For) — direct loopback is
+    # intentionally unauthenticated since the listener is 127.0.0.1-only.
+    assert (
+        client.get("/api/status", headers={"X-Forwarded-For": "203.0.113.9"})
+        .status_code
+        == 401
+    )
 
     ok = client.get(
         "/api/status",
