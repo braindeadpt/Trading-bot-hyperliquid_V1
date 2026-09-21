@@ -546,7 +546,16 @@ strategy:
                                     # across 4 symbols). Provisional floor so the
                                     # experiment produces observations.
     decision_ttl_ms: 5400000        # ignore verdicts older than 90min
-    base_size_pct: 0.01             # 1% of capital per experiment trade
+    base_size_pct: 0.01             # fraction of capital RISKED per trade, not position
+                                    # size: notional = capital*size_pct/stop_distance.
+                                    # In practice risk.max_position_size_pct binds first —
+                                    # measured effective notional ~20% of capital, fixed
+                                    # (~3948-3986 USD over the first 31 trades; a 0.79-conf
+                                    # call gets the same size as a 0.50 one). Confidence-
+                                    # scaled sizing was evaluated and rejected with data
+                                    # (2026-09-20): low-conf half +64.14 vs high-conf half
+                                    # -124.19, Spearman(conf,pnl)=-0.165, n=29 — and variable
+                                    # size would contaminate the directional-accuracy read.
     sl_pct_min: 0.01                # SL floor 1%
     sl_atr_mult: 2.0                # or 2x ATR% if wider
     tp_r_mult: 2.0                  # TP at 2R

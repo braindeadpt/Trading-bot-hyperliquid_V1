@@ -132,6 +132,16 @@ SELF_PRODUCED_FEEDS: frozenset[str] = frozenset({"l2_book_recording"})
 # the remedy for a dead judge.
 EXTERNAL_PRODUCED_FEEDS: frozenset[str] = frozenset({"jev_verdicts"})
 
+# Strategies exempt from the 5-minute liquidation-window stop-out. The
+# mechanism was calibrated for LiquidationCatcher-style scalps; JevJudge
+# carries a 4h horizon with its own >=1% price stop, so aborting a 4h
+# thesis on a 5m flush is a timeframe mismatch — measured: 8/29 Jev trades
+# stopped out for -117.84 USD at moves of 0.05-0.55%, one closed while the
+# price was already in favor. Hash-neutral by design (module constant, not
+# config). Backtest replay applies the same exemption in
+# ``src/backtest/engine.py::_process_exits`` so live/replay stay identical.
+LIQUIDATION_STOPOUT_EXEMPT_STRATEGIES: frozenset[str] = frozenset({"JevJudge"})
+
 
 def feed_silence_warn_fraction() -> float:
     """Early-warning threshold as a fraction of max_silence (default 0.5).
@@ -4038,6 +4048,13 @@ class TradingEngine:
         diverge on window state (real or proxy provenance, same numbers → same
         decision). Returns True when a stop-out fired.
         """
+        strategy = (
+            str(position.metadata.get("strategy") or "")
+            if position.metadata
+            else ""
+        )
+        if strategy in LIQUIDATION_STOPOUT_EXEMPT_STRATEGIES:
+            return False
         try:
             from src.core.liquidation_stopout import (
                 STOPOUT_REASON,

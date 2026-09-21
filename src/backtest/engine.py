@@ -1493,25 +1493,27 @@ class BacktestEngine:
         # window (identical to TradingEngine._maybe_liquidation_stop_out, which
         # calls the same function on the live accumulator). Same numbers from
         # real or proxy provenance → same stop-out, by construction.
+        from src.core.engine import LIQUIDATION_STOPOUT_EXEMPT_STRATEGIES
         from src.core.liquidation_stopout import (
             LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD,
             STOPOUT_REASON,
             liquidation_stopout_decision,
         )
 
-        floor = self.cfg.liquidation_stopout_min_notional_usd
-        if floor is None:
-            floor = LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD
-        if liquidation_stopout_decision(
-            pos.side,
-            event.liquidation_side_5m,
-            event.liquidation_notional_5m,
-            min_notional_usd=floor,
-        ):
-            fill = float(event.price) if event.price and event.price > 0 else float(c1m.close)
-            return self._close_position(
-                pos_id, fill, event.timestamp_ms, STOPOUT_REASON, capital,
-            )
+        if str(pos.strategy or "") not in LIQUIDATION_STOPOUT_EXEMPT_STRATEGIES:
+            floor = self.cfg.liquidation_stopout_min_notional_usd
+            if floor is None:
+                floor = LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD
+            if liquidation_stopout_decision(
+                pos.side,
+                event.liquidation_side_5m,
+                event.liquidation_notional_5m,
+                min_notional_usd=floor,
+            ):
+                fill = float(event.price) if event.price and event.price > 0 else float(c1m.close)
+                return self._close_position(
+                    pos_id, fill, event.timestamp_ms, STOPOUT_REASON, capital,
+                )
 
         # Walk 1m OHLC so ChecklistMeta BE/trailing see wicks (live is tick-level).
         # Hard SL/TP still resolved after via high/low + pessimistic policy.
