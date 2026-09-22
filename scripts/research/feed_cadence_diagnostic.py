@@ -112,17 +112,42 @@ _FEED_QUERIES = {
 }
 
 
+class _GapSeries(NamedTuple):
+    """Compact streaming form of the sane-gap series — what
+    ``_analyze_feed_series`` consumes instead of a materialized gap list.
+
+    Every gap is ``(ts - prev) / 1000.0`` with ``ts``/``prev`` integer
+    milliseconds, i.e. an integer number of milliseconds. A per-ms histogram
+    therefore yields EXACT percentiles (the ms-key ordering is identical to
+    the float-gap ordering) with memory proportional to the number of
+    distinct gap values — not to the event count.
+    """
+    total: int                    # sane gaps: 0 < g <= max_gap_sec
+    hist_ms: collections.Counter  # ms -> count, sane gaps ending before cutoff
+    recent: list                  # float sec, sane gaps ending >= cutoff
+    tail: Deque                   # last min_history sane gaps (float sec)
+
+
 class _FeedSeries(NamedTuple):
     """Compact per-feed event series — never holds the raw timestamp list.
 
-    ``gaps`` keeps the sane inter-event gaps ``analyze_feed`` needs;
-    ``raw_tail`` keeps only the last ``gap_history`` raw gaps (g >= 0) the
-    live-snapshot reconstruction needs, matching the monitor's deque cap.
+    ``gaps`` is the bounded ``_GapSeries`` the analysis needs; ``raw_tail``
+    keeps only the last ``gap_history`` raw gaps (g >= 0) the live-snapshot
+    reconstruction needs, matching the monitor's deque cap.
     """
     events: int
     last_ts: Optional[int]
-    gaps: list
+    gaps: _GapSeries
     raw_tail: list
+
+
+def _empty_series() -> _FeedSeries:
+    """No persisted events (unknown feed or missing table)."""
+    return _FeedSeries(
+        0, None,
+        _GapSeries(0, collections.Counter(), [], collections.deque()),
+        [],
+    )
 
 
 def _feed_series(
@@ -130,20 +155,34 @@ def _feed_series(
     query: str,
     *,
     gap_history: int,
+    cutoff_ms: int,
+    min_history: int,
     max_gap_sec: float = 12 * 3600.0,
     chunk: int = 8192,
 ) -> _FeedSeries:
-    """Stream event timestamps pairwise via fetchmany — O(1) row memory.
+    """Stream event timestamps via fetchmany — O(1) row memory plus
+    O(distinct gap values + recent window + min_history) retained state.
 
-    The previous ``fetchall`` version materialized every timestamp of every
-    feed at once (~1.9M rows, ~54MB in the tracemalloc baseline); funding_
-    history alone is ~700k rows and fed two contracts. Streaming computes
-    the gap series directly and retains only what the analysis consumes.
+    ``cutoff_ms`` is ``now_ms - recent_ms`` and is known before streaming, so
+    each sane gap is folded directly into the bucket the analysis needs:
+
+      * ``hist_ms`` — per-ms histogram of gaps ending before the cutoff
+        (exact historical p95/p99 without the series);
+      * ``recent`` — gap values inside the recent window, in order
+        (time-bounded; feeds the median/p95/p99, the latest gap and the
+        least-squares trend);
+      * ``tail`` — last ``min_history`` sane gaps (the "tail of the series"
+        fallback when the recent window is empty);
+      * ``raw_tail`` — last ``gap_history`` raw gaps for the live-snapshot
+        reconstruction (the monitor's deque cap).
     """
-    gaps: list = []
+    hist_ms: collections.Counter = collections.Counter()
+    recent: list[float] = []
+    tail: Deque[float] = collections.deque(maxlen=min_history)
     raw_tail: Deque[float] = collections.deque(maxlen=gap_history)
     prev: Optional[int] = None
     count = 0
+    total = 0
     last_ts: Optional[int] = None
     cur = db.execute(query)
     while True:
@@ -159,8 +198,14 @@ def _feed_series(
                 if g >= 0:
                     raw_tail.append(g)
                 if 0 < g <= max_gap_sec:
-                    gaps.append((ts, g))
+                    total += 1
+                    tail.append(g)
+                    if ts < cutoff_ms:
+                        hist_ms[ts - prev] += 1
+                    else:
+                        recent.append(g)
             prev = ts
+    gaps = _GapSeries(total, hist_ms, recent, tail)
     return _FeedSeries(count, last_ts, gaps, list(raw_tail))
 
 
@@ -184,6 +229,26 @@ def percentile(values: list[float], p: float) -> float:
     ordered = sorted(values)
     idx = min(len(ordered) - 1, int(p * len(ordered)))
     return ordered[idx]
+
+
+def _percentile_ms(counts: collections.Counter, p: float) -> float:
+    """``percentile()`` over a per-millisecond gap histogram — exact replica.
+
+    Gaps are integer ms by construction, so the sorted ms keys reproduce the
+    sorted float series one-to-one; the ``min(n-1, int(p*n))`` rank lands on
+    the first key whose cumulative count passes it, and ``ms / 1000.0`` is
+    the identical float the list path would have produced.
+    """
+    n = sum(counts.values())
+    if n <= 0:
+        return 0.0
+    idx = min(n - 1, int(p * n))
+    cum = 0
+    for ms in sorted(counts):
+        cum += counts[ms]
+        if cum > idx:
+            return ms / 1000.0
+    return 0.0  # unreachable: cum ends at n > idx
 
 
 def least_squares_slope(xs: list[float], ys: list[float]) -> float:
@@ -237,8 +302,59 @@ def _analyze_feed_gaps(
     if not history:
         history = [g for _, g in gaps[:-len(recent)]] or [g for _, g in gaps]
 
-    h_p95 = percentile(history, 0.95)
-    h_p99 = percentile(history, 0.99)
+    return _feed_verdict(
+        events, len(gaps), len(history),
+        percentile(history, 0.95), percentile(history, 0.99), recent,
+    )
+
+
+def _analyze_feed_series(
+    name: str,
+    events: int,
+    gaps: _GapSeries,
+    *,
+    now_ms: int,
+    recent_ms: int,
+    min_history: int = 50,
+) -> dict:
+    """Streaming twin of ``_analyze_feed_gaps`` — the identical verdict,
+    computed from the histogram + bounded buffers instead of the
+    materialized series. Fallback parity:
+
+      * empty recent window -> the last ``min_history`` sane gaps (``tail``);
+      * empty history -> every sane gap ended inside the recent window, so
+        ``gaps[:-len(recent)]`` is empty and the list path falls back to the
+        whole series — which is exactly the ``recent`` values.
+    """
+    if events < 2:
+        return {"status": "no_data", "events": events}
+    if gaps.total < min_history:
+        return {"status": "insufficient", "events": events, "gaps": gaps.total}
+
+    recent = list(gaps.recent) if gaps.recent else list(gaps.tail)
+    hist_n = sum(gaps.hist_ms.values())
+    if hist_n:
+        history_n = hist_n
+        h_p95 = _percentile_ms(gaps.hist_ms, 0.95)
+        h_p99 = _percentile_ms(gaps.hist_ms, 0.99)
+    else:
+        history_n = gaps.total
+        h_p95 = percentile(recent, 0.95)
+        h_p99 = percentile(recent, 0.99)
+    return _feed_verdict(events, gaps.total, history_n, h_p95, h_p99, recent)
+
+
+def _feed_verdict(
+    events: int,
+    n_gaps: int,
+    history_n: int,
+    h_p95: float,
+    h_p99: float,
+    recent: list[float],
+) -> dict:
+    """Shared verdict math — single source for the list path
+    (``_analyze_feed_gaps``) and the streaming path (``_analyze_feed_series``)
+    so the two can never disagree."""
     r_med = percentile(recent, 0.5)
     r_p95 = percentile(recent, 0.95)
     r_p99 = percentile(recent, 0.99)
@@ -261,8 +377,8 @@ def _analyze_feed_gaps(
     return {
         "status": status,
         "events": events,
-        "gaps": len(gaps),
-        "history_gaps": len(history),
+        "gaps": n_gaps,
+        "history_gaps": history_n,
         "recent_gaps": len(recent),
         "hist_p95_sec": round(h_p95, 1),
         "hist_p99_sec": round(h_p99, 1),
@@ -556,6 +672,7 @@ def run_cadence_diagnostic(
     db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     now = now_ms if now_ms is not None else int(time.time() * 1000)
     recent_ms = int(recent_hours * 3600_000)
+    cutoff_ms = now - recent_ms
     report: dict = {
         "now_ms": now,
         "recent_hours": recent_hours,
@@ -574,18 +691,19 @@ def run_cadence_diagnostic(
         for feed in sorted(contracts):
             query = _FEED_QUERIES.get(feed)
             if query is None:
-                series = _FeedSeries(0, None, [], [])
+                series = _empty_series()
             else:
                 if query not in series_cache:
                     try:
                         series_cache[query] = _feed_series(
                             db, query, gap_history=gap_history,
+                            cutoff_ms=cutoff_ms, min_history=min_history,
                         )
                     except sqlite3.OperationalError:
                         # table missing — feed has no persisted events
-                        series_cache[query] = _FeedSeries(0, None, [], [])
+                        series_cache[query] = _empty_series()
                 series = series_cache[query]
-            st = _analyze_feed_gaps(
+            st = _analyze_feed_series(
                 feed, series.events, series.gaps,
                 now_ms=now, recent_ms=recent_ms,
                 min_history=min_history,

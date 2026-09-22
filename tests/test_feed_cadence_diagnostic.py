@@ -454,3 +454,272 @@ def test_run_cadence_matches_materialized_list_path(tmp_path) -> None:
         imminent_fraction=0.9, min_samples=10, gap_history=4000,
     )
     assert got["live_snapshot"] == expected_live
+
+
+# ── Task 5: true streaming analysis (bounded memory, identical verdict) ──
+#
+# The fetchmany streaming fixed row materialization but still retained one
+# ``(end_ms, gap)`` tuple per sane gap — ~1.9M tuples / ~190MB traced for the
+# real DB, then RSS stayed at ~2GB for hours (arena fragmentation, same
+# mechanism as 81dc3e0). The analysis only needs percentiles of the
+# historical/recent windows plus the recent tail, and every gap is an integer
+# number of milliseconds — a per-ms histogram yields EXACT percentiles with
+# memory proportional to the number of distinct gap values.
+
+REAL_DB = ROOT / "data" / "live" / "bot.db"
+# Bound for the streaming path: the chunk buffer (~0.5MB at 8192 rows), the
+# recent-window list (time-bounded), the per-ms gap histograms and the small
+# report dict. Anything rematerializing the full gap series blows far past
+# this on a populated DB (the list path peaked ~190MB traced per feed).
+PEAK_BYTES_SYNTHETIC = 8 * 1024 * 1024
+PEAK_BYTES_REAL_DB = 32 * 1024 * 1024
+# Whole-panel bound: measured 5.0MB traced on the real DB (2026-09-22,
+# ~1.9M events across feeds) — the bound keeps ~12x headroom for window
+# growth while a regression to materializing the gap series (~78MB
+# standalone, ~400MB inside the bot process) trips it immediately.
+PEAK_BYTES_PAYLOAD = 64 * 1024 * 1024
+
+
+def _copy_db_snapshot(src: Path, dst_dir: Path) -> Path:
+    """Copy a live SQLite DB (main + WAL/SHM sidecars) so the test reads a
+    frozen image while the bot keeps writing. Both implementations under
+    comparison read the same copy, so copy-time skew cannot break parity."""
+    import shutil
+
+    dst = dst_dir / "bot.db"
+    for suffix in ("", "-wal", "-shm"):
+        s = Path(str(src) + suffix)
+        if s.exists():
+            shutil.copy2(s, Path(str(dst) + suffix))
+    return dst
+
+
+def _feed_ts(conn: sqlite3.Connection, query: str) -> list[int]:
+    try:
+        return [int(r[0]) for r in conn.execute(query)]
+    except sqlite3.OperationalError:
+        return []  # table missing — feed has no persisted events
+
+
+def _assert_feed_parity(
+    report: dict,
+    feed: str,
+    ts: list[int],
+    *,
+    now_ms: int,
+    recent_ms: int,
+    min_history: int,
+    max_sil: float,
+    warn_fraction: float,
+    imminent_fraction: float,
+    min_samples: int,
+    gap_history: int,
+) -> None:
+    """Field-by-field equality of the streaming report vs the reference
+    list-based computation (``analyze_feed`` + ``live_snapshot_equivalent``)."""
+    from scripts.research import feed_cadence_diagnostic as dg
+
+    expected = dg.analyze_feed(
+        feed, ts, now_ms=now_ms, recent_ms=recent_ms, min_history=min_history,
+    )
+    got = report["feeds"][feed]
+    for key, value in expected.items():
+        assert got[key] == value, f"{feed}.{key}: {got[key]!r} != {value!r}"
+    exp_live = dg.live_snapshot_equivalent(
+        ts, now_ms=now_ms, max_silence_sec=max_sil,
+        warn_fraction=warn_fraction, imminent_fraction=imminent_fraction,
+        min_samples=min_samples, gap_history=gap_history,
+    )
+    assert got["live_snapshot"] == exp_live
+    assert got["cross"] == dg.cross_verdict(expected["status"], exp_live)
+
+
+def _make_edge_db(path: str) -> None:
+    """DB exercising every window/fallback branch of the gap analysis."""
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE liquidation_events (symbol TEXT, timestamp_ms INTEGER, "
+               "notional_usd REAL, side TEXT, source TEXT)")
+    db.execute("CREATE TABLE funding_history (symbol TEXT, current REAL, "
+               "predicted REAL, timestamp INTEGER)")
+    db.execute("CREATE TABLE candles_1m (symbol TEXT, timestamp_ms INTEGER, "
+               "open REAL, high REAL, low REAL, close REAL, volume REAL, "
+               "funding_rate REAL, oi_total REAL, oi_delta REAL, "
+               "buy_volume REAL, sell_volume REAL, trade_count INTEGER)")
+    db.execute("CREATE TABLE binance_perp_prices (symbol TEXT, timestamp_ms INTEGER, price REAL)")
+
+    def ins(source: str, start: int, step: int, n: int) -> None:
+        t = start
+        for _ in range(n):
+            db.execute(
+                "INSERT INTO liquidation_events VALUES ('BTC', ?, 1e6, 'long', ?)",
+                (t, source),
+            )
+            t += step
+
+    # okx: everything older than the 48h window -> recent falls back to the
+    # min_history tail of the series.
+    ins("okx", NOW - 400 * MIN, MIN, 300)
+    # bybit: every gap inside the recent window -> history falls back to the
+    # whole series.
+    ins("bybit", NOW - 100 * MIN, MIN, 120)
+    # binance: mixed — 200 historical 1m gaps, an outage-sized jump, then 100
+    # recent 30s gaps (also covers the max_gap_sec filter).
+    ins("binance", NOW - 300 * MIN, MIN, 200)
+    ins("binance", NOW - 80 * MIN, 30_000, 100)
+    for i in range(150):
+        db.execute("INSERT INTO funding_history VALUES ('BTC', 0.001, 0.001, ?)",
+                   (NOW - (150 - i) * 10 * MIN,))
+        db.execute("INSERT INTO candles_1m VALUES ('BTC', ?, 1,2,0,1,10,0,100,0,5,5,100)",
+                   (NOW - (150 - i) * MIN,))
+        db.execute("INSERT INTO binance_perp_prices VALUES ('BTC', ?, 50000)",
+                   (NOW - (150 - i) * 2 * MIN,))
+    db.commit()
+    db.close()
+
+
+def test_streaming_parity_all_window_branches(tmp_path) -> None:
+    """Synthetic parity: tail fallback, empty-history fallback, max_gap
+    filter, shared funding series and a missing-table feed — all must produce
+    the identical verdict dict as the list path."""
+    from scripts.research import feed_cadence_diagnostic as dg
+
+    db_path = tmp_path / "bot.db"
+    _make_edge_db(str(db_path))
+    contracts = {f: 3600.0 for f in dg._FEED_QUERIES}
+    contracts["unknown_feed"] = 60.0  # no query -> empty series -> no_data
+    recent_ms = int(48.0 * 3600_000)
+    report = dg.run_cadence_diagnostic(
+        db_path, contracts, now_ms=NOW, recent_hours=48.0,
+        warn_fraction=0.5, imminent_fraction=0.9,
+        min_samples=10, gap_history=4000,
+    )
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for feed, query in dg._FEED_QUERIES.items():
+            ts = _feed_ts(conn, query)
+            _assert_feed_parity(
+                report, feed, ts, now_ms=NOW, recent_ms=recent_ms,
+                min_history=50, max_sil=3600.0, warn_fraction=0.5,
+                imminent_fraction=0.9, min_samples=10, gap_history=4000,
+            )
+    finally:
+        conn.close()
+    uf = report["feeds"]["unknown_feed"]
+    assert uf["status"] == "no_data" and uf["events"] == 0
+    assert uf["live_snapshot"] is None and uf["cross"] == "no_live_data"
+    # sanity: the branch coverage actually happened on this fixture
+    statuses = {f: report["feeds"][f]["status"] for f in dg._FEED_QUERIES}
+    assert "insufficient" not in statuses.values()
+
+
+@pytest.mark.skipif(not REAL_DB.exists(), reason="data/live/bot.db not present")
+def test_streaming_parity_on_real_db(tmp_path) -> None:
+    """Golden test: run the streaming report on a snapshot of the real
+    ``bot.db`` and compare every feed verdict field-by-field against the
+    reference list-based implementation over the materialized timestamps."""
+    from scripts.research import feed_cadence_diagnostic as dg
+
+    db_path = _copy_db_snapshot(REAL_DB, tmp_path)
+    contracts = {f: 3600.0 for f in dg._FEED_QUERIES}
+    contracts["unknown_feed"] = 60.0
+    recent_ms = int(48.0 * 3600_000)
+    report = dg.run_cadence_diagnostic(
+        db_path, contracts, now_ms=NOW, recent_hours=48.0,
+        warn_fraction=0.5, imminent_fraction=0.9,
+        min_samples=10, gap_history=4000,
+    )
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for feed, query in dg._FEED_QUERIES.items():
+            _assert_feed_parity(
+                report, feed, _feed_ts(conn, query),
+                now_ms=NOW, recent_ms=recent_ms, min_history=50,
+                max_sil=3600.0, warn_fraction=0.5, imminent_fraction=0.9,
+                min_samples=10, gap_history=4000,
+            )
+    finally:
+        conn.close()
+
+
+def test_run_cadence_streaming_peak_memory_bounded(tmp_path) -> None:
+    """The analysis must not retain per-event/per-gap structures.
+
+    200k events at 1m spacing: the list-based path allocates ~200k
+    ``(end_ms, gap)`` tuples (~18MB traced); the streaming path must stay
+    under 8MiB (chunk buffer + recent-window list + the per-ms histogram —
+    1m gaps collapse to a single histogram key)."""
+    import tracemalloc
+
+    from scripts.research import feed_cadence_diagnostic as dg
+
+    db_path = tmp_path / "bot.db"
+    db = sqlite3.connect(str(db_path))
+    db.execute("CREATE TABLE liquidation_events (symbol TEXT, timestamp_ms INTEGER, "
+               "notional_usd REAL, side TEXT, source TEXT)")
+    n = 200_000
+    t0 = NOW - n * MIN
+    db.executemany(
+        "INSERT INTO liquidation_events VALUES ('BTC', ?, 1e6, 'long', 'okx')",
+        ((t0 + i * MIN,) for i in range(n)),
+    )
+    db.commit()
+    db.close()
+
+    tracemalloc.start(5)
+    try:
+        report = dg.run_cadence_diagnostic(
+            db_path, {"liquidation_okx": 3600.0}, now_ms=NOW,
+            recent_hours=48.0, warn_fraction=0.5, imminent_fraction=0.9,
+            min_samples=10, gap_history=4000,
+        )
+        _cur, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert report["feeds"]["liquidation_okx"]["events"] == n
+    assert peak < PEAK_BYTES_SYNTHETIC, f"traced peak {peak/1e6:.1f}MB"
+
+
+@pytest.mark.skipif(not REAL_DB.exists(), reason="data/live/bot.db not present")
+def test_run_cadence_peak_memory_bounded_real_db(tmp_path) -> None:
+    """Same bound against the real DB (~1.9M events across feeds): the
+    streaming run must stay under 32MiB traced — vs ~400MB peak measured for
+    the gap-list implementation on this data."""
+    import tracemalloc
+
+    from scripts.research import feed_cadence_diagnostic as dg
+
+    db_path = _copy_db_snapshot(REAL_DB, tmp_path)
+    contracts = {f: 3600.0 for f in dg._FEED_QUERIES}
+    tracemalloc.start(5)
+    try:
+        report = dg.run_cadence_diagnostic(
+            db_path, contracts, now_ms=NOW, recent_hours=48.0,
+            warn_fraction=0.5, imminent_fraction=0.9,
+            min_samples=10, gap_history=4000,
+        )
+        _cur, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert report["feeds"], "expected per-feed verdicts on the real DB"
+    assert peak < PEAK_BYTES_REAL_DB, f"traced peak {peak/1e6:.1f}MB"
+
+
+@pytest.mark.skipif(not REAL_DB.exists(), reason="data/live/bot.db not present")
+def test_research_watchdogs_payload_peak_memory_bounded() -> None:
+    """The dashboard panel build (``/api/research_watchdogs``) runs inside
+    the trading process — its traced peak must stay bounded regardless of
+    history depth."""
+    import tracemalloc
+
+    from src.research.research_watchdog_status import (
+        build_research_watchdogs_payload,
+    )
+
+    tracemalloc.start(5)
+    try:
+        payload = build_research_watchdogs_payload()
+        _cur, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert payload["watchdogs"]
+    assert peak < PEAK_BYTES_PAYLOAD, f"traced peak {peak/1e6:.1f}MB"
