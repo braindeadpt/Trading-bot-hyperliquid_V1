@@ -1,0 +1,42 @@
+[Unit]
+Description=Hyperliquid dashboard (standalone, read-only, loopback only)
+After=network-online.target hyperliquid-bot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyperliquid
+Group=hyperliquid
+WorkingDirectory=/srv/hyperliquid/app
+EnvironmentFile=/etc/hyperliquid/bot.env
+
+# Standalone server — no engine; DB-backed panels (shadow scoreboards,
+# feed health, watchdogs) read the research DB directly. The runner
+# refuses non-loopback binds; remote access is SSH tunnel or Tailscale.
+ExecStart=/srv/hyperliquid/app/.venv/bin/python -u scripts/ops/dashboard_server.py
+
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+MemoryMax=512M
+CPUWeight=50
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/hyperliquid
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hyperliquid-dashboard
+
+[Install]
+WantedBy=multi-user.target

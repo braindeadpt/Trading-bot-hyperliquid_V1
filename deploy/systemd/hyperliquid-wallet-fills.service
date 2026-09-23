@@ -1,0 +1,26 @@
+[Unit]
+Description=Hyperliquid wallet fills collector (markout-ranking research)
+
+[Service]
+Type=oneshot
+User=hyperliquid
+Group=hyperliquid
+WorkingDirectory=/srv/hyperliquid/app
+EnvironmentFile=/etc/hyperliquid/bot.env
+
+ExecStart=/srv/hyperliquid/app/.venv/bin/python -X utf8 scripts/research/wallet_fills_collector.py --once
+
+MemoryMax=512M
+CPUWeight=20
+TimeoutStartSec=1800
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/hyperliquid
+ProtectHome=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hyperliquid-wallet-fills

@@ -1,0 +1,27 @@
+[Unit]
+Description=Hyperliquid overnight research session (queue-driven, K=4-guarded)
+
+[Service]
+Type=oneshot
+User=hyperliquid
+Group=hyperliquid
+WorkingDirectory=/srv/hyperliquid/app
+EnvironmentFile=/etc/hyperliquid/bot.env
+
+ExecStart=/srv/hyperliquid/app/.venv/bin/python -u scripts/research/overnight_nightly.py
+
+MemoryMax=2500M
+CPUWeight=30
+IOWeight=40
+TimeoutStartSec=14400
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/hyperliquid
+ProtectHome=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hyperliquid-overnight

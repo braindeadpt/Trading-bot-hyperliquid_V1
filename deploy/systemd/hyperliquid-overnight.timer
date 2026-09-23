@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly research at 05:00 (was "Hyperliquid Overnight Research")
+
+[Timer]
+OnCalendar=*-*-* 05:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

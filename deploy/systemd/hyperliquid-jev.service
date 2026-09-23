@@ -1,0 +1,26 @@
+[Unit]
+Description=Hyperliquid Jev shadow judge — verdict feeder (paper EXPERIMENT)
+
+[Service]
+Type=oneshot
+User=hyperliquid
+Group=hyperliquid
+WorkingDirectory=/srv/hyperliquid/app
+EnvironmentFile=/etc/hyperliquid/bot.env
+
+ExecStart=/srv/hyperliquid/app/.venv/bin/python -u -X utf8 scripts/research/jev_shadow_judge.py --once
+
+MemoryMax=512M
+CPUWeight=20
+TimeoutStartSec=300
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/hyperliquid
+ProtectHome=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hyperliquid-jev

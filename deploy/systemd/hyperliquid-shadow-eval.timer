@@ -1,0 +1,10 @@
+[Unit]
+Description=Shadow outcome eval every 3h at :20 (was "Hyperliquid Shadow Outcome Eval")
+# :20 offset keeps it clear of the 5-min Jev feed and the 05:00 overnight start.
+
+[Timer]
+OnCalendar=*-*-* 00/3:20:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,27 @@
+[Unit]
+Description=Hyperliquid research watchdog supervisor (read-only evidence gates)
+
+[Service]
+Type=oneshot
+User=hyperliquid
+Group=hyperliquid
+WorkingDirectory=/srv/hyperliquid/app
+EnvironmentFile=/etc/hyperliquid/bot.env
+
+ExecStart=/srv/hyperliquid/app/.venv/bin/python -u scripts/research/research_watchdog_supervisor.py --once
+
+MemoryMax=1G
+CPUWeight=30
+IOWeight=40
+TimeoutStartSec=3600
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/hyperliquid
+ProtectHome=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hyperliquid-watchdogs

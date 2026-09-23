@@ -1,0 +1,28 @@
+[Unit]
+Description=Hyperliquid shadow outcome evaluation (persists scoreboards)
+
+[Service]
+Type=oneshot
+User=hyperliquid
+Group=hyperliquid
+WorkingDirectory=/srv/hyperliquid/app
+EnvironmentFile=/etc/hyperliquid/bot.env
+
+ExecStart=/srv/hyperliquid/app/.venv/bin/python -u -X utf8 scripts/research/evaluate_shadow_outcomes.py --persist --since-days 14
+
+# Full-history eval over ~160k decisions — heaviest of the scheduled jobs.
+MemoryMax=2500M
+CPUWeight=30
+IOWeight=40
+TimeoutStartSec=7200
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/hyperliquid
+ProtectHome=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hyperliquid-shadow-eval

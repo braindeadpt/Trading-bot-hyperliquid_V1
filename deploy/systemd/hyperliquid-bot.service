@@ -1,0 +1,51 @@
+[Unit]
+Description=Hyperliquid trading bot (paper mode; dashboard served separately)
+Documentation=https://github.com/braindeadpt/Trading-bot-hyperliquid_V1
+After=network-online.target
+Wants=network-online.target
+# The dashboard binds 127.0.0.1:5000 and is served by
+# hyperliquid-dashboard.service — this unit must run with --no-dashboard.
+Before=hyperliquid-dashboard.service
+
+[Service]
+Type=simple
+User=hyperliquid
+Group=hyperliquid
+WorkingDirectory=/srv/hyperliquid/app
+EnvironmentFile=/etc/hyperliquid/bot.env
+
+ExecStart=/srv/hyperliquid/app/.venv/bin/python -u main.py --mode paper --no-dashboard
+
+# Crash recovery lives here — replaces run_with_recovery.py AND the
+# Windows Bot-Alive scheduled task.
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# 12 GB box shared with the Meridian bot: hard cap and scheduling weight.
+MemoryMax=3G
+MemoryHigh=2800M
+CPUWeight=200
+IOWeight=100
+
+# Writes only under /srv/hyperliquid (app/data, app/logs, data/*, backups).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/hyperliquid
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hyperliquid-bot
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

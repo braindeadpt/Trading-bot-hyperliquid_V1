@@ -19,3 +19,7 @@
 *.gif binary
 *.webp binary
 *.lz4 binary
+*.service text eol=lf
+*.timer text eol=lf
+*.env.example text eol=lf
+bot.env* text eol=lf

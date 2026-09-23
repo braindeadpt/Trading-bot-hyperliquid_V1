@@ -1,0 +1,9 @@
+[Unit]
+Description=Wallet fills collector hourly (was "Hyperliquid Wallet Fills Collector")
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
