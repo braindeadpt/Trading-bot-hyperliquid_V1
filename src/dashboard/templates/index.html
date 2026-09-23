@@ -502,6 +502,7 @@ th { font-size: 10px; }
             <div class="panel-header">
                 Shadow strategies
                 <span class="dim" id="shadow-disclaimer">Idealized fills — not executable edge</span>
+                <span class="dim" id="shadow-eval-age" title="Idade do lote de avaliação persistido (a análise pesada corre fora do processo, de hora em hora)"></span>
             </div>
             <div class="panel-body" style="padding:6px 8px; max-height:240px; overflow-y:auto;">
                 <div class="muted" style="display:none;" title="INCONCLUSIVE = sample &lt;30 (not tested). FAIL = powered sample lost the baseline gate. WR / E[R] / Hyp.n fill after closed hypothetical trades. tier_b needs L2/tape/funding."></div>
@@ -1249,6 +1250,18 @@ function renderShadowPanel(payload) {
     if (disc && payload && payload.disclaimer) {
         disc.textContent = payload.disclaimer.slice(0, 80) + "…";
         disc.title = payload.disclaimer;
+    }
+    const ageEl = document.getElementById("shadow-eval-age");
+    if (ageEl && payload) {
+        if (payload.evaluation_pending) {
+            ageEl.textContent = " · eval pendente";
+            ageEl.style.color = "var(--yellow)";
+        } else if (payload.eval_age_minutes != null) {
+            ageEl.textContent = " · eval há " + Math.round(payload.eval_age_minutes) + "min";
+            ageEl.style.color = payload.eval_age_minutes > 75 ? "var(--yellow)" : "";
+        } else {
+            ageEl.textContent = "";
+        }
     }
     const rows = (payload && payload.rows) || [];
     if (!rows.length) {

@@ -91,7 +91,7 @@ class TradeTapeRecord:
 class ResearchDatabase(Database):
     """Research-only SQLite store — never pruned, never mixed with live bot.db."""
 
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(self, db_path: Path | str, *, read_only: bool = False) -> None:
         if db_path is None:
             raise TypeError(
                 "ResearchDatabase requires an explicit db_path — use "
@@ -101,7 +101,7 @@ class ResearchDatabase(Database):
         path = Path(db_path)
         if not path.is_absolute():
             path = (_project_root() / path).resolve()
-        super().__init__(path)
+        super().__init__(path, read_only=read_only)
 
     @classmethod
     def open(

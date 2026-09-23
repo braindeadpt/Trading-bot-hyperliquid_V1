@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Optional
 from src.exchanges.liquidation_event import is_real_liquidation_source
 from src.research.shadow_outcome_evaluator import (
     IDEALIZED_FILL_DISCLAIMER,
-    evaluate_shadow_decisions,
-    run_evaluation,
+    VARIANT_PHASE08_SHADOW,
+    scoreboard_key,
 )
 from src.research.shadow_recorder import ShadowRecorder
 from src.data.research_database import ResearchDatabase
@@ -21,6 +21,50 @@ ROOT = Path(__file__).resolve().parents[2]
 GATE_ARTIFACTS = ROOT / "data" / "backtests" / "parity_diag"
 MIN_TRADES_FOR_GATE = 30
 QUARTER_MS = 90 * 86400 * 1000
+
+
+def _load_persisted_boards(
+    cfg: Config,
+) -> Optional[tuple]:
+    """Read the newest persisted scoreboard batch (``shadow_outcome_scoreboards``).
+
+    Returns ``(boards, evaluated_at_ms)`` where ``boards`` is keyed
+    ``strategy::variant`` exactly like ``run_evaluation(...)["strategies"]``,
+    or ``None`` when no batch exists yet (table empty/missing/unreadable —
+    the caller surfaces an explicit "evaluation pending" state instead of
+    ever running the evaluator in-process).
+    """
+    try:
+        rdb = ResearchDatabase(
+            ResearchDatabase.resolve_path(cfg), read_only=True
+        )
+        conn = rdb._conn()
+        try:
+            row = conn.execute(
+                "SELECT MAX(evaluated_at_ms) AS ts "
+                "FROM shadow_outcome_scoreboards"
+            ).fetchone()
+        except Exception:  # noqa: BLE001 — table may not exist yet
+            return None
+        ts = int(row["ts"]) if row and row["ts"] is not None else None
+        if ts is None:
+            return None
+        rows = conn.execute(
+            "SELECT metrics_json FROM shadow_outcome_scoreboards "
+            "WHERE evaluated_at_ms = ?",
+            (ts,),
+        ).fetchall()
+        boards: Dict[str, Any] = {}
+        for r in rows:
+            try:
+                d = json.loads(r["metrics_json"])
+            except Exception:  # noqa: BLE001 — skip a corrupt row, keep rest
+                continue
+            boards[scoreboard_key(str(d.get("strategy")),
+                                  str(d.get("variant") or VARIANT_PHASE08_SHADOW))] = d
+        return (boards, ts) if boards else None
+    except Exception:  # noqa: BLE001 — research DB missing/unreadable
+        return None
 
 
 def _load_gate_verdict(strategy: str) -> Optional[Dict[str, Any]]:
@@ -147,16 +191,15 @@ def build_shadow_panel_payload(
     quarter_ms = now_ms - QUARTER_MS
 
     boards: Dict[str, Any] = {}
+    evaluated_at_ms: Optional[int] = None
     if evaluate:
-        try:
-            result = run_evaluation(
-                since_days=14.0,
-                config=cfg,
-                persist=False,
-            )
-            boards = result.get("strategies") or {}
-        except Exception as exc:  # noqa: BLE001
-            boards = {"_error": str(exc)}
+        # The heavy evaluation runs out-of-process (hourly scheduled CLI with
+        # --persist). The panel only reads the newest persisted batch — never
+        # falls back to an in-process run_evaluation (that path materializes
+        # ~1.3M objects per call inside the trading process).
+        latest = _load_persisted_boards(cfg)
+        if latest is not None:
+            boards, evaluated_at_ms = latest
 
     counts = recorder.count_decisions_by_strategy(
         strategies=shadow_names,
@@ -268,9 +311,17 @@ def build_shadow_panel_payload(
             }
         )
 
+    eval_age_minutes: Optional[float] = None
+    if evaluated_at_ms is not None:
+        eval_age_minutes = round((now_ms - evaluated_at_ms) / 60000.0, 1)
     return {
         "disclaimer": IDEALIZED_FILL_DISCLAIMER,
         "min_trades_for_gate": MIN_TRADES_FOR_GATE,
         "generated_ms": now_ms,
         "rows": rows,
+        # Age of the persisted evaluation batch — the hypothetical columns are
+        # up to ~1h stale by design (scheduled out-of-process evaluation).
+        "evaluated_at_ms": evaluated_at_ms,
+        "eval_age_minutes": eval_age_minutes,
+        "evaluation_pending": bool(evaluate) and evaluated_at_ms is None,
     }
