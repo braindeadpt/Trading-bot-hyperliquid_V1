@@ -3,10 +3,14 @@
 
 Copies (never moves / never deletes sources):
 
-* ``data/research/hyperliquid.db`` — consistent snapshot via ``sqlite3`` backup API
-* ``data/live/bot.db`` — same (paper trade history is irrecoverable)
-* ``data/research/l2_books`` — incremental copy of **closed** daily
-  ``*.jsonl.gz`` only (today's file is still being written)
+* research DB (``research.database.path`` from config) — consistent
+  snapshot via ``sqlite3`` backup API. A ghost/empty source is refused
+  loudly (see ``guard_research_source``) — never again a verified backup
+  of nothing.
+* live bot DB (``database.path``) — same (paper trade history is
+  irrecoverable)
+* L2 books (``market_data.l2_recording.path``) — incremental copy of
+  **closed** daily ``*.jsonl.gz`` only (today's file is still being written)
 
 Verification (fail loudly; never prune a failed run or replace a good prior):
 
@@ -38,6 +42,8 @@ import logging
 import shutil
 import sqlite3
 import sys
+import tempfile
+import time
 import zlib
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
@@ -47,11 +53,18 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 logger = logging.getLogger("backup_research_data")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
-DEFAULT_BACKUP_ROOT = Path("data/backups/hyperliquid")
-DEFAULT_L2_SRC = Path("data/research/l2_books")
-DEFAULT_RESEARCH_DB = PROJECT_ROOT / "data" / "research" / "hyperliquid.db"
+# Destination root is the dedicated backup drive (different physical disk
+# from both the research HDD and the SSD the DB will move to).
+DEFAULT_BACKUP_ROOT = Path("D:/hyperliquid_backup")
 DEFAULT_LIVE_DB = PROJECT_ROOT / "data" / "live" / "bot.db"
+
+# A research DB smaller than this cannot be the evidence store — the real
+# one is ~8 GB while the retired repo-local ghost is ~245 KB with 0
+# shadow_decisions. Both conditions below must pass before any copy runs.
+MIN_RESEARCH_DB_BYTES = 64 * 1024 * 1024
+EVIDENCE_GATE_TABLES = ("shadow_decisions",)
 
 # Tables that must exist and match row counts when present on the source.
 RESEARCH_COUNT_TABLES = (
@@ -62,6 +75,7 @@ RESEARCH_COUNT_TABLES = (
     "candles_15m",
     "candles_1h",
     "shadow_decisions",
+    "jev_decisions",
     "feed_health_snapshots",
 )
 LIVE_COUNT_TABLES = (
@@ -119,11 +133,79 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def open_readonly(db_path: Path) -> sqlite3.Connection:
+def _resolve_path(raw: Any, fallback: Path) -> Path:
+    """Config value → absolute Path (repo-relative values resolved at root)."""
+    if raw is None or str(raw).strip() == "":
+        return fallback
+    p = Path(str(raw))
+    if not p.is_absolute():
+        p = (PROJECT_ROOT / p).resolve()
+    return p
+
+
+def resolve_default_paths() -> Tuple[Path, Path, Path]:
+    """Resolve default sources from config — never hardcoded locations.
+
+    The research DB moved to the E: HDD on 2026-08-14; the old fixed default
+    kept pointing at a 245 KB repo ghost for six weeks. Defaults now follow
+    ``research.database.path`` / ``database.path`` /
+    ``market_data.l2_recording.path``, so a future relocation (e.g. the SSD
+    move) is picked up automatically.
+    """
+    from src.data.research_database import ResearchDatabase
+    from src.utils.config import load_config
+
+    cfg = load_config(PROJECT_ROOT / "config" / "settings.yaml")
+    research_db = ResearchDatabase.resolve_path(cfg)
+    live_db = _resolve_path(cfg.get("database.path"), DEFAULT_LIVE_DB)
+    l2_src = _resolve_path(
+        cfg.get("market_data.l2_recording.path"),
+        PROJECT_ROOT / "data" / "research" / "l2_books",
+    )
+    return research_db, live_db, l2_src
+
+
+def guard_research_source(
+    src: Path, *, min_bytes: int = MIN_RESEARCH_DB_BYTES
+) -> Optional[str]:
+    """Refuse to back up a suspicious research DB. Returns error or None.
+
+    An empty/ghost database must never pass as a successful backup again.
+    """
+    if not src.exists():
+        return f"missing_source:{src}"
+    size = src.stat().st_size
+    if size < min_bytes:
+        return (
+            f"suspicious_source:{src}:"
+            f"size={size}B below min={min_bytes}B"
+        )
+    conn = open_readonly(src)
+    try:
+        counts = count_tables(conn, EVIDENCE_GATE_TABLES)
+    finally:
+        conn.close()
+    for table in EVIDENCE_GATE_TABLES:
+        if counts.get(table, 0) <= 0:
+            return f"suspicious_source:{src}:{table}=0"
+    return None
+
+
+def open_readonly(db_path: Path, *, fast: bool = False) -> sqlite3.Connection:
     if not db_path.exists():
         raise FileNotFoundError(f"DB not found: {db_path}")
     uri = f"file:{db_path.as_posix()}?mode=ro"
-    return sqlite3.connect(uri, uri=True)
+    conn = sqlite3.connect(uri, uri=True)
+    if fast:
+        # Verification-only speedups: identical results, less disk pain.
+        # integrity_check walks every b-tree page — effectively random I/O
+        # that takes ~10h on a mechanical HDD through the default pager.
+        # mmap makes those reads page-cache hits; the page cache avoids
+        # re-reading shared interior pages. Same pragma result either way.
+        conn.execute("PRAGMA mmap_size=12000000000")  # 12GB virtual map
+        conn.execute("PRAGMA cache_size=-1000000")    # ~1GB page cache
+        conn.execute("PRAGMA temp_store=MEMORY")
+    return conn
 
 
 def sha256_file(path: Path, *, chunk: int = 1 << 20) -> str:
@@ -180,12 +262,48 @@ def snapshot_sqlite_consistent(src: Path, dest: Path) -> None:
         src_conn.close()
 
 
+def _stage_for_verify(dest: Path, staging_parent: Optional[Path]) -> Tuple[Optional[Path], Optional[Path]]:
+    """Copy ``dest`` into a fresh dir on a fast drive for verification.
+
+    ``PRAGMA integrity_check`` walks every b-tree page — effectively random
+    I/O that takes ~6h on a mechanical HDD (observed 2026-09-22/23: a verify
+    phase still unfinished after 10.5h). A byte-identical staging copy on the
+    SSD makes the same check finish in minutes. Verification semantics are
+    unchanged: the pragma and count queries run over the exact dest bytes —
+    ``copyfile`` either reproduces them or raises.
+
+    Returns ``(staged_path, staging_dir)``; ``(None, None)`` on failure so the
+    caller can fall back to verifying dest in place.
+    """
+    try:
+        if staging_parent is not None:
+            Path(staging_parent).mkdir(parents=True, exist_ok=True)
+        staging_dir = Path(
+            tempfile.mkdtemp(prefix="bk_verify_", dir=staging_parent)
+        )
+        staged = staging_dir / dest.name
+        t0 = time.monotonic()
+        shutil.copyfile(dest, staged)
+        logger.info(
+            "verify staging copy done in %.0fs (%s -> %s)",
+            time.monotonic() - t0, dest, staged,
+        )
+        return staged, staging_dir
+    except OSError as exc:
+        logger.warning(
+            "verify staging failed (%s) — verifying in place on slow media",
+            exc,
+        )
+        return None, None
+
+
 def verify_sqlite_copy(
     src: Path,
     dest: Path,
     count_names: Sequence[str],
     *,
     counts_before: Optional[Dict[str, int]] = None,
+    staging_parent: Optional[Path] = None,
 ) -> Tuple[bool, str, Dict[str, int], Dict[str, int], Dict[str, int]]:
     """Verify dest integrity; compare counts against a live source safely.
 
@@ -196,10 +314,17 @@ def verify_sqlite_copy(
       * ``PRAGMA integrity_check`` on dest is ``ok``
       * for every counted table: ``before[t] <= dest[t] <= after[t]``
 
+    The integrity check and dest counts run on a staged byte-identical copy
+    under ``staging_parent`` (system temp = SSD by default) — same bytes,
+    same verdict, without hours of random I/O on the backup HDD. Falls back
+    to in-place verification if staging fails.
+
     Returns ``(ok, integrity_msg, before, dest_counts, after)``.
     """
-    src_conn = open_readonly(src)
-    dest_conn = open_readonly(dest)
+    src_conn = open_readonly(src, fast=True)
+    staged, staging_dir = _stage_for_verify(dest, staging_parent)
+    verify_path = staged if staged is not None else dest
+    dest_conn = open_readonly(verify_path, fast=True)
     try:
         msg = integrity_check(dest_conn)
         before = (
@@ -212,6 +337,8 @@ def verify_sqlite_copy(
     finally:
         dest_conn.close()
         src_conn.close()
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
     if msg != "ok":
         return False, msg, before, dest_counts, after
     for table, d_n in dest_counts.items():
@@ -421,17 +548,44 @@ def backup_one_db(
             ),
             None,
         )
-    src_conn = open_readonly(src)
+    t0 = time.monotonic()
+    logger.info(
+        "%s: counts_before start (src=%s, %.1fGB)",
+        label, src, src.stat().st_size / 1e9,
+    )
+    src_conn = open_readonly(src, fast=True)
     try:
         counts_before = count_tables(src_conn, count_names)
     finally:
         src_conn.close()
+    logger.info(
+        "%s: counts_before done in %.0fs (%s)",
+        label, time.monotonic() - t0, counts_before,
+    )
 
+    t0 = time.monotonic()
+    logger.info("%s: snapshot start -> %s", label, dest)
     snapshot_sqlite_consistent(src, dest)
+    logger.info(
+        "%s: snapshot done in %.0fs (dest %.1fGB)",
+        label, time.monotonic() - t0, dest.stat().st_size / 1e9,
+    )
+
+    t0 = time.monotonic()
+    logger.info("%s: verify start (integrity_check + count window)", label)
     ok, msg, before, dest_counts, after = verify_sqlite_copy(
         src, dest, count_names, counts_before=counts_before
     )
+    logger.info(
+        "%s: verify done in %.0fs (integrity=%s, counts_match=%s)",
+        label, time.monotonic() - t0, msg, ok,
+    )
+
+    t0 = time.monotonic()
     digest = sha256_file(dest)
+    logger.info(
+        "%s: sha256 done in %.0fs", label, time.monotonic() - t0,
+    )
     rec = DbRecord(
         name=label,
         dest=str(dest),
@@ -485,7 +639,11 @@ def run_backup(
     tag: str,
     dry_run: bool = False,
     skip_prune: bool = False,
+    min_research_bytes: int = MIN_RESEARCH_DB_BYTES,
+    only: Optional[str] = None,
 ) -> Manifest:
+    """Full or scoped backup run. ``only`` restricts to a single source
+    ("research" | "live" | "l2"); default (None) backs up everything."""
     started = utc_now_iso()
     runs_root = backup_root / "runs"
     l2_dest = backup_root / "l2_books"
@@ -501,16 +659,44 @@ def run_backup(
             "l2_books": str(l2_src),
         },
     )
+    want_research = only in (None, "research")
+    want_live = only in (None, "live")
+    want_l2 = only in (None, "l2")
+    logger.info(
+        "run start tag=%s only=%s run_dir=%s", tag, only or "all", run_dir
+    )
 
     errors: List[str] = []
     if not dry_run:
         run_dir.mkdir(parents=True, exist_ok=True)
 
+    # Ghost-source guard: refuse before copying when the research DB is
+    # implausibly small or has zero evidence rows. The failure is loud
+    # (ok=false, exit != 0) and the ghost file is never propagated into the
+    # backup tree.
+    ghost_err: Optional[str] = None
+    if want_research:
+        t0 = time.monotonic()
+        ghost_err = guard_research_source(
+            research_db, min_bytes=min_research_bytes
+        )
+        logger.info(
+            "guard_research_source done in %.0fs -> %s",
+            time.monotonic() - t0, ghost_err or "ok",
+        )
+        if ghost_err:
+            errors.append(ghost_err)
+            man.notes.append(f"REFUSED research backup: {ghost_err}")
+
     # --- SQLite snapshots (into the dated run dir) ---
-    for label, src, names in (
-        ("hyperliquid.db", research_db, RESEARCH_COUNT_TABLES),
-        ("bot.db", live_db, LIVE_COUNT_TABLES),
-    ):
+    db_specs = []
+    if want_research:
+        db_specs.append(("hyperliquid.db", research_db, RESEARCH_COUNT_TABLES))
+    if want_live:
+        db_specs.append(("bot.db", live_db, LIVE_COUNT_TABLES))
+    for label, src, names in db_specs:
+        if ghost_err and label == "hyperliquid.db":
+            continue
         dest = run_dir / label
         rec, err = backup_one_db(
             label=label, src=src, dest=dest, count_names=names, dry_run=dry_run
@@ -525,9 +711,12 @@ def run_backup(
             errors.append(err)
 
     # --- Incremental L2 (shared mirror under backup_root) ---
-    if not l2_src.is_dir():
+    if not want_l2:
+        man.notes.append(f"l2: skipped (only={only})")
+    elif not l2_src.is_dir():
         man.notes.append(f"l2_src_missing:{l2_src}")
     else:
+        t0 = time.monotonic()
         l2_records, l2_errors = incremental_copy_l2(
             l2_src, l2_dest, dry_run=dry_run
         )
@@ -538,6 +727,29 @@ def run_backup(
         man.notes.append(
             f"l2: copied={man.l2_copied} skipped_exists={man.l2_skipped} "
             f"errors={len(l2_errors)}"
+        )
+        logger.info("l2 done in %.0fs", time.monotonic() - t0)
+
+    # A manifest is only "ok" when the research DB itself is present and
+    # verified (integrity ok + counts matched + sha256). A scoped run
+    # (--only live / --only l2) or a failed research copy must NEVER be
+    # trusted by retention as a successful backup — run 2026-09-23T000131Z
+    # wrote ok:true holding only bot.db, which could have pruned a real
+    # verified run. Evidence-less "success" is worse than a loud failure.
+    research_rec = next(
+        (d for d in man.databases if d.get("name") == "hyperliquid.db"), None
+    )
+    research_verified = bool(
+        research_rec
+        and research_rec.get("integrity_check") == "ok"
+        and research_rec.get("counts_match") is True
+        and research_rec.get("sha256")
+    )
+    if not dry_run and not research_verified:
+        errors.append("research_db_missing_or_unverified")
+        man.notes.append(
+            "research DB absent or unverified — ok forced false; "
+            "a run without verified research is never a successful backup"
         )
 
     man.ok = len(errors) == 0
@@ -552,6 +764,10 @@ def run_backup(
     # Failed runs still get a manifest with ok=false so retention never
     # treats them as successful — and we do NOT prune on failure.
     write_manifest(run_dir / "manifest.json", man)
+    logger.info(
+        "manifest written ok=%s errors=%d path=%s",
+        man.ok, len(errors), run_dir / "manifest.json",
+    )
 
     if man.ok and not skip_prune:
         prune_actions = prune_retention(runs_root, dry_run=False)
@@ -585,20 +801,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--research-db",
         type=Path,
-        default=DEFAULT_RESEARCH_DB,
-        help="Path to hyperliquid.db",
+        default=None,
+        help="Path to hyperliquid.db (default: research.database.path from config)",
     )
     p.add_argument(
         "--live-db",
         type=Path,
-        default=DEFAULT_LIVE_DB,
-        help="Path to bot.db",
+        default=None,
+        help="Path to bot.db (default: database.path from config)",
     )
     p.add_argument(
         "--l2-src",
         type=Path,
-        default=DEFAULT_L2_SRC,
-        help="Source L2 books root",
+        default=None,
+        help="Source L2 books root (default: market_data.l2_recording.path)",
     )
     p.add_argument(
         "--dry-run",
@@ -614,6 +830,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--prune-only",
         action="store_true",
         help="Only run retention prune on existing runs",
+    )
+    p.add_argument(
+        "--only",
+        choices=("research", "live", "l2"),
+        default=None,
+        help="Back up a single source only (default: all three)",
     )
     p.add_argument("-v", "--verbose", action="store_true")
     return p
@@ -634,14 +856,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(a)
         return 0
 
+    # Sources resolve from config unless explicitly overridden — the paths
+    # move with the DB (HDD today, SSD after the migration).
+    research_db, live_db, l2_src = resolve_default_paths()
+    if args.research_db is not None:
+        research_db = args.research_db
+    if args.live_db is not None:
+        live_db = args.live_db
+    if args.l2_src is not None:
+        l2_src = args.l2_src
+
     man = run_backup(
         backup_root=args.backup_root,
-        research_db=args.research_db,
-        live_db=args.live_db,
-        l2_src=args.l2_src,
+        research_db=research_db,
+        live_db=live_db,
+        l2_src=l2_src,
         tag=args.tag,
         dry_run=args.dry_run,
         skip_prune=args.skip_prune,
+        only=args.only,
     )
     print(json.dumps(asdict(man), indent=2, sort_keys=True))
     if not man.ok:
