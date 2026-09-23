@@ -631,4 +631,21 @@ junctions — gitignored, machine-local).
 
 ---
 
-*Last updated: 2026-08-10 (v3.1.48 public alignment — version, README roster, GitHub release).*
+## 14. VPS deployment rules (Oracle A1 / Ubuntu 24.04 ARM64)
+
+The bot migrates to a Linux VPS shared with the Meridian bot. Full runbook:
+`docs/VPS_MIGRATION.md`. Non-negotiable rules for agents:
+
+| Rule | Detail |
+|---|---|
+| **Never work in the live checkout** | Prep happens in the `..\hyperliquid-vps` worktree on `feat/vps`. The checkout the running bot uses (`Documents\trading-bot-hyperliquid`, `main`) is off-limits for VPS changes. |
+| **Deploy only via script, only by human decision** | `deploy/deploy.sh` on the VPS. Never auto-deploy because tests pass; never run install/deploy from CI, hooks, or timers. |
+| **Paths from config/env only** | No `E:\`, `C:\`, `D:\` in code intended for Linux. Runtime paths resolve via `research.database.path`, `database.path`, `market_data.l2_recording.path` + `BOT_*` env overrides (`/etc/hyperliquid/bot.env`). |
+| **Dashboard loopback only** | `127.0.0.1` forever — `dashboard_server.py` refuses other binds. Remote access = SSH tunnel or Tailscale. **No ngrok** anywhere on the VPS. |
+| **Secrets by scp, chmod 600** | `.env`, `vault.enc`, `bot.env` transfer via `scp` to the `hyperliquid` user — never through git, never in commits/logs/PR text. |
+| **Backups leave the machine** | VPS `/srv/hyperliquid/backups` is staging only. The operator PC pulls verified runs over Tailscale/SSH (`scripts/ops/pull_vps_backup.py`) into `D:\hyperliquid_backup` — sha256-verified before remote prune. |
+| **Research DB is evidence** | The ~9 GB `hyperliquid.db` migrates whole (stop → verified copy → sha256 + `integrity_check` on the destination). Never rebuild history — `shadow_outcome_evaluator` reads full history (`window_ms=None`). |
+| **systemd owns liveness** | `Restart=always` replaces `run_with_recovery.py` and the Bot-Alive task. The six Windows scheduled tasks map to `.timer` units (`deploy/systemd/`); `MemoryMax=3G` on the bot, `CPUWeight=200` so it wins contention vs Meridian. |
+| **Python 3.14 via uv** | Ubuntu 24.04's default 3.12 is too old. `install.sh` uses `uv python install 3.14`. Several pinned deps have no cp314 aarch64 wheel and build from source (see runbook §1a) — verify on first VPS install. |
+
+*Last updated: 2026-09-23 (v3.1.48 public alignment + VPS deployment rules).*
