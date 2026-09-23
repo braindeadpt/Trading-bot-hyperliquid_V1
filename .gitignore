@@ -111,3 +111,5 @@ _startup_ngrok.ps1
 _regtask.ps1
 60fps-home.png
 .ref/
+docs/media/
+docs/superpowers/
