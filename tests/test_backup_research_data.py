@@ -506,3 +506,22 @@ def test_ok_requires_verified_research_db(tmp_path: Path) -> None:
     assert man2.ok is True, man2.error
     rec = next(d for d in man2.databases if d["name"] == "hyperliquid.db")
     assert rec["integrity_check"] == "ok" and rec["sha256"]
+
+
+# ── BOT_BACKUP_ROOT env override (VPS: staging dir pulled by operator PC) ──
+
+
+@pytest.mark.unit
+def test_backup_root_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """BOT_BACKUP_ROOT redirects the default destination (VPS staging dir);
+    --backup-root still wins over the env var."""
+    import importlib
+    import scripts.ops.backup_research_data as mod
+
+    monkeypatch.setenv("BOT_BACKUP_ROOT", str(tmp_path / "vps_staging"))
+    reloaded = importlib.reload(mod)
+    try:
+        assert reloaded.DEFAULT_BACKUP_ROOT == tmp_path / "vps_staging"
+    finally:
+        monkeypatch.delenv("BOT_BACKUP_ROOT")
+        importlib.reload(mod)

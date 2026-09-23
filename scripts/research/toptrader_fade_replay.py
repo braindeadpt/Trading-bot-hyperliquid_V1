@@ -25,10 +25,12 @@ from __future__ import annotations
 import argparse
 import bisect
 import sqlite3
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-RESEARCH_DB = r"E:\hyperliquid_research\hyperliquid.db"
-LIVE_DB = "data/live/bot.db"
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 
 TAKER_FEE = 0.00045          # tier-0, per side
 NOTIONAL_USD = 1_000.0
@@ -214,15 +216,32 @@ def _settle(pos: Dict[str, Any], exit_px: float, exit_ms: int,
     return pos
 
 
+def _resolve_db_paths(research_db: Optional[str], live_db: Optional[str]) -> Tuple[str, str]:
+    """CLI override → config (research.database.path / database.path)."""
+    if research_db and live_db:
+        return research_db, live_db
+    from src.data.research_database import ResearchDatabase
+    from src.utils.config import load_config
+
+    cfg = load_config(ROOT / "config" / "settings.yaml")
+    return (
+        research_db or str(ResearchDatabase.resolve_path(cfg)),
+        live_db or str(cfg.get("database.path", "data/live/bot.db")),
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--symbol", default="HYPE")
     ap.add_argument("--start", default="2026-08-12")
     ap.add_argument("--end", default="2026-09-08")
-    ap.add_argument("--research-db", default=RESEARCH_DB)
-    ap.add_argument("--live-db", default=LIVE_DB)
+    ap.add_argument("--research-db", default=None,
+                    help="research DB path (default: research.database.path from config)")
+    ap.add_argument("--live-db", default=None,
+                    help="live DB path (default: database.path from config)")
     ap.add_argument("--bias-threshold", type=float, default=None)
     args = ap.parse_args()
+    research_db, live_db = _resolve_db_paths(args.research_db, args.live_db)
 
     from datetime import datetime, timezone
     s_ms = int(datetime.strptime(args.start, "%Y-%m-%d")
@@ -235,9 +254,9 @@ def main() -> int:
     if args.bias_threshold is not None:
         params["bias_threshold"] = args.bias_threshold
 
-    bias = load_bias(args.research_db, args.symbol, s_ms, e_ms)
-    c_ts, c_ohlc = load_1m(args.research_db, args.symbol, s_ms, e_ms)
-    funding = load_funding(args.live_db, args.symbol)
+    bias = load_bias(research_db, args.symbol, s_ms, e_ms)
+    c_ts, c_ohlc = load_1m(research_db, args.symbol, s_ms, e_ms)
+    funding = load_funding(live_db, args.symbol)
     trades = replay_fade(bias, c_ts, c_ohlc, funding, args.symbol, params)
 
     pnls = [t["pnl_usd"] for t in trades]

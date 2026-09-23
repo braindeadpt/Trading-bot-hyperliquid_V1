@@ -39,6 +39,7 @@ import gzip
 import hashlib
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import sys
@@ -56,8 +57,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Destination root is the dedicated backup drive (different physical disk
-# from both the research HDD and the SSD the DB will move to).
-DEFAULT_BACKUP_ROOT = Path("D:/hyperliquid_backup")
+# from both the research HDD and the SSD the DB will move to). On the VPS
+# BOT_BACKUP_ROOT points it at the staging dir the operator PC pulls from.
+DEFAULT_BACKUP_ROOT = Path(
+    os.environ.get("BOT_BACKUP_ROOT") or "D:/hyperliquid_backup"
+)
 DEFAULT_LIVE_DB = PROJECT_ROOT / "data" / "live" / "bot.db"
 
 # A research DB smaller than this cannot be the evidence store — the real

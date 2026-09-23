@@ -63,8 +63,9 @@ def _load_config() -> Dict[str, Any]:
     if not cfg_path.exists():
         return {}
     try:
-        cfg = load_config(str(cfg_path))
-        return cfg if isinstance(cfg, dict) else {}
+        # load_config returns a Config wrapper (not a dict) — it still
+        # supports .get("dot.path"), which is all resolve_db_paths needs.
+        return load_config(str(cfg_path))
     except Exception:  # noqa: BLE001 — best-effort; CLI flags override anyway
         return {}
 
