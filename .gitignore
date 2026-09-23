@@ -103,3 +103,11 @@ docs/DISK_AND_CODE_INVENTORY.md
 
 # Local tunnel binary (cloudflared) — 52MB tool, not repo code
 tools/
+
+# Local scratch / machine-specific (never commit)
+_record_dashboard.py
+_reg_ngrok_task.ps1
+_startup_ngrok.ps1
+_regtask.ps1
+60fps-home.png
+.ref/
