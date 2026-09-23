@@ -24,9 +24,13 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 
 # 12 GB box shared with the Meridian bot: hard cap and scheduling weight.
+# CPUWeight=1000 is the machine-level decision (Meridian repo
+# docs/VPS-SETUP.md §6a) — this is the only real-time service on the box
+# and holds the top weight: meridian-market-data 600, meridian-lane@ 500,
+# everything else ≤200. Do not tune in isolation.
 MemoryMax=3G
 MemoryHigh=2800M
-CPUWeight=200
+CPUWeight=1000
 IOWeight=100
 
 # Writes only under /srv/hyperliquid (app/data, app/logs, data/*, backups).

@@ -15,7 +15,7 @@ evaluator depends on the full `shadow_decisions`/`candles_1m` history.
 ```
 /srv/hyperliquid/
 ├── app/                 # git checkout (deploy.sh swaps refs; code only)
-│   ├── .venv/           # Python 3.14 venv (uv)
+│   ├── .venv/           # Python 3.13 venv (uv) — see §1a for why not 3.14
 │   ├── data/live/       # bot.db + jev_latest.json (repo-relative, as today)
 │   ├── data/vault.enc   # secret — scp'd, chmod 600
 │   └── logs/
@@ -32,6 +32,23 @@ evaluator depends on the full `shadow_decisions`/`candles_1m` history.
 `BOT_MARKET_DATA_L2_RECORDING_PATH`, `BOT_BACKUP_ROOT` — every runtime path
 resolves from config/env; nothing in the tree depends on `E:\` or `C:\`.
 
+## 0a. Shared-machine contract — owned by the Meridian repo
+
+This box runs BOTH bots. Machine-level setup — users `meridian`,
+`hyperliquid`, `dev`; group membership so `dev` reads logs/stores (but
+never secrets, which stay `chmod 600`); Tailscale; SSH hardening; and the
+**CPU/memory weight table** — is specified in the Meridian repo:
+`docs/VPS-SETUP.md`. This runbook covers only Hyperliquid-specific pieces
+and must stay consistent with it:
+
+- Layout `/srv/hyperliquid/{app,data,backups}` + `/etc/hyperliquid/bot.env`
+  matches VPS-SETUP §2/§7 verbatim.
+- `hyperliquid-bot.service` carries `CPUWeight=1000` — the top weight on
+  the box (meridian-market-data 600, meridian-lane@ 500, rest ≤200); the
+  other `hyperliquid-*` units stay ≤100 per the table.
+- `dev` reads Hyperliquid logs/stores via membership in the `hyperliquid`
+  group — keep app data/logs group-readable, secrets stay 600.
+
 ## 1. Provision (once)
 
 ```bash
@@ -40,37 +57,37 @@ sudo -u hyperliquid git clone -b feat/vps <repo-url> /srv/hyperliquid/app
 sudo bash /srv/hyperliquid/app/deploy/install.sh
 ```
 
-install.sh creates the `hyperliquid` user, installs uv + **Python 3.14**
-(Ubuntu 24.04 ships 3.12 — too old), the build toolchain, the venv, and
-enables (does not start) all units + timers.
+install.sh creates the `hyperliquid` user if missing (canonical user
+setup lives in the machine runbook — see §0a), installs uv +
+**Python 3.13** (Ubuntu 24.04 ships 3.12 — too old), a minimal toolchain
+as safety net, the venv, and enables (does not start) all units + timers.
 
-### 1a. ARM64 dependency audit (2026-09, PyPI-verified)
+### 1a. Python 3.13, not 3.14 — all-binary install (PyPI-verified 2026-09)
 
-| Pin | aarch64 cp314 wheel? | Consequence |
-|---|---|---|
-| aiohttp 3.14.3 | **yes** (cp314, musllinux+aarch64 seen; manylinux expected — verify) | OK |
-| cryptography 50.0.0 | **yes** (cp39-abi3 manylinux aarch64) | OK |
-| websockets 14.2 | pure Python | OK |
-| flask/sockets/requests/attr stack | pure Python | OK |
-| hyperliquid-python-sdk 0.23.0, eth-account 0.13.7 | pure Python wheels | OK |
-| **pandas 2.2.3** | **no** (max cp313) | source build ~15-25 min |
-| **numpy 2.2.5** | **no** (max cp313) | source build ~10-15 min |
-| **scipy 1.15.3** | **no** (max cp313) | source build — heaviest; gfortran+OpenBLAS installed for it |
-| frozenlist 1.6.0, multidict 6.4.4, markupsafe 3.0.2, yarl 1.20.0, propcache 0.5.2 | **no** (max cp313) | small C builds, minutes |
-| cffi 2.1.1 | not seen — verify | small C build if missing |
-| msgpack, ckzg, bitarray, pydantic-core, pycryptodome | resolution-dependent | **first VPS check** |
+3.14 was considered and rejected: numpy 2.2.5, pandas 2.2.3 and scipy
+1.15.3 have **no** cp314 aarch64 wheels (they predate 3.14) — scipy alone
+is a ~1h gfortran+OpenBLAS build on 2 ARM cores. On **cp313 the same pins
+are all wheels**:
 
-**First verification on the VPS** (install.sh already prints it):
+| Pin | cp313 aarch64 wheel on PyPI |
+|---|---|
+| numpy 2.2.5 | `numpy-2.2.5-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl` |
+| pandas 2.2.3 | `pandas-2.2.3-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl` |
+| scipy 1.15.3 | `scipy-1.15.3-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl` |
+| aiohttp 3.14.3, cryptography 50.0.0, frozenlist, multidict, markupsafe, yarl, propcache, cffi | yes — these releases were built while cp313 was current |
+| pure-Python stack (websockets, flask, requests, HL SDK, eth-account) | n/a |
+
+Same pins as the Windows box → identical numeric stack for backtests,
+zero compilation. The full CI suite passed under 3.13.15 (uv-managed):
+`1813 passed, 11 skipped` — no interpreter-specific failures.
+
+**Tripwire still applies on the VPS** (install.sh prints it before
+installing): any dep resolving to `sdist`/source on linux-aarch64 cp313
+means the audit is stale — stop and report rather than compiling.
 ```bash
 sudo -u hyperliquid uv pip install --python /srv/hyperliquid/app/.venv/bin/python \
     --dry-run -r /srv/hyperliquid/app/requirements.txt
 ```
-Packages listed as `sdist`/`building` will compile — the toolchain
-(build-essential, gfortran, libopenblas-dev, meson, ninja, libffi-dev) is
-installed for exactly this. If scipy/numpy/pandas source builds fail or are
-unacceptable, the fallback is bumping those three pins to versions shipping
-cp314 aarch64 wheels (pandas ≥2.3.x, numpy ≥2.3.x, scipy ≥1.16.x) — that is
-a separate decision because it changes the numeric stack used by backtests.
 
 ## 2. Secrets — scp, never git
 

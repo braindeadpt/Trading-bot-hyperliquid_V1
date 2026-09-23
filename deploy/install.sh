@@ -6,12 +6,15 @@
 #
 # What it does:
 #   1. Creates the `hyperliquid` system user and the /srv/hyperliquid layout.
-#   2. Installs build tooling + uv, then Python 3.14 (Ubuntu ships 3.12).
-#   3. Creates the venv and installs requirements.txt.
-#      - Packages without cp314 aarch64 wheels (pandas/numpy/scipy and the
-#        small aiohttp/flask C-exts) build from source — that's why the
-#        toolchain step exists. See docs/VPS_MIGRATION.md §deps for the
-#        audit and the fallback (pin bump vs Python 3.13).
+#   2. Installs a minimal toolchain + uv, then Python 3.13 (Ubuntu ships
+#      3.12). 3.13 is chosen over 3.14 deliberately: every pinned dep —
+#      including numpy 2.2.5 / pandas 2.2.3 / scipy 1.15.3 — ships a cp313
+#      aarch64 wheel, so the install is all-binary (PyPI-verified
+#      2026-09). On cp314 the scientific stack has NO wheels and would
+#      compile for ~an hour on 2 ARM cores. See docs/VPS_MIGRATION.md §1a.
+#   3. Creates the venv and installs requirements.txt. The toolchain is a
+#      safety net only — if the dry-run probe below lists any sdist build,
+#      STOP and report before continuing.
 #   4. Installs the systemd units + timers (enabled, NOT started — the bot
 #      starts only after secrets and the migrated DB are in place).
 #
@@ -32,6 +35,9 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # ── 1. user + layout ──────────────────────────────────────────────────────
+# Canonical user creation (hyperliquid + dev group wiring) lives in the
+# machine runbook — Meridian repo docs/VPS-SETUP.md §1. This is a fallback
+# so install.sh also works standalone: it never modifies an existing user.
 if ! id -u "$SVC_USER" >/dev/null 2>&1; then
     useradd --system --home-dir /srv/hyperliquid --shell /usr/sbin/nologin "$SVC_USER"
 fi
@@ -39,19 +45,21 @@ mkdir -p "$APP" "$DATA/research" "$DATA/l2_books" "$BACKUPS" \
          "$APP/data/live" "$APP/data/research" "$APP/logs" "$ENVDIR"
 chown -R "$SVC_USER:$SVC_USER" /srv/hyperliquid
 
-# ── 2. toolchain + uv + python 3.14 ───────────────────────────────────────
+# ── 2. toolchain + uv + python 3.13 ───────────────────────────────────────
+# Minimal safety-net toolchain only — every pinned dep has a cp313 aarch64
+# wheel (§1a of the runbook). gfortran/openblas/meson/ninja were needed for
+# a scipy source build on 3.14; on 3.13 nothing should compile. If a future
+# dep change introduces a source build, reconsider this list then.
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
     git curl ca-certificates \
-    build-essential pkg-config gfortran \
-    libffi-dev libssl-dev libopenblas-dev \
-    meson ninja-build
+    build-essential pkg-config libffi-dev libssl-dev
 
 if ! command -v uv >/dev/null 2>&1; then
     curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 fi
-uv python install 3.14
+uv python install 3.13
 
 # ── 3. venv + deps ────────────────────────────────────────────────────────
 # The repo must already be at $APP (git clone done by the operator — see
@@ -61,10 +69,11 @@ if [[ ! -f "$APP/requirements.txt" ]]; then
     echo "  sudo -u $SVC_USER git clone -b feat/vps <repo-url> $APP" >&2
     exit 1
 fi
-sudo -u "$SVC_USER" uv venv --python 3.14 "$APP/.venv"
-# Report which pins will build from source (no aarch64 cp314 wheel) before
-# the real install, so a scipy/pandas compile is a conscious event.
-echo "== dependency resolution probe (source builds are listed) =="
+sudo -u "$SVC_USER" uv venv --python 3.13 "$APP/.venv"
+# Tripwire: on cp313 aarch64 every pin should resolve to a wheel. If the
+# dry-run lists an sdist/source build, report it before installing — a
+# compile on 2 ARM cores is a conscious event, never a surprise.
+echo "== dependency resolution probe (expect: zero source builds) =="
 sudo -u "$SVC_USER" uv pip install --python "$APP/.venv/bin/python" \
     --dry-run -r "$APP/requirements.txt" || true
 sudo -u "$SVC_USER" uv pip install --python "$APP/.venv/bin/python" \
