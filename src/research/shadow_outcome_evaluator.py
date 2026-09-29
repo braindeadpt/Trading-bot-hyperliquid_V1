@@ -54,7 +54,7 @@ import logging
 import sqlite3
 import statistics
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -211,6 +211,55 @@ def resolve_shadow_cost_model(
     )
 
 
+def resolve_maker_entry_cost_model(
+    config: Optional[Config] = None,
+) -> ShadowCostModel:
+    """Cost model for the ``phase08_shadow_maker`` research variant.
+
+    Maker entry (limit at signal price, fills at the level or better) +
+    taker exit (SL/TP/timeout market exits). Entry slip is zero — a
+    resting limit never pays worse than its own price.
+    """
+    cfg = config
+    if cfg is None:
+        try:
+            cfg = load_config(Path("config/settings.yaml"))
+        except Exception:  # noqa: BLE001
+            cfg = Config({})
+    taker = safe_float(cfg.get("risk.taker_fee_pct", 0.045), 0.045) / 100.0
+    slip = safe_float(cfg.get("risk.paper_slippage_pct", 0.02), 0.02) / 100.0
+    maker_cfg = cfg.get("execution.maker_orders", {}) or {}
+    maker = safe_float(maker_cfg.get("maker_fee_pct", 0.015), 0.015) / 100.0
+    label = (
+        f"entry=maker exit=taker "
+        f"fee_rt_bps={(maker + taker) * 1e4:.2f} "
+        f"slip_rt_bps={slip * 1e4:.2f} (entry slip=0: fills at limit or better)"
+    )
+    return ShadowCostModel(
+        entry_fee_frac=maker,
+        exit_fee_frac=taker,
+        entry_slip_frac=0.0,
+        exit_slip_frac=slip,
+        label=label,
+    )
+
+
+def resolve_maker_entry_window_ms(config: Optional[Config] = None) -> int:
+    """Maker fill window — mirrors live ``execution.maker_orders.timeout_ms``
+    (unfilled limits cancel after it). 1m candles cannot resolve a 30s
+    window sub-candle, so the probe accepts a touch anywhere inside the
+    first candle covering the window — optimistic on fill timing, and the
+    label says so."""
+    cfg = config
+    if cfg is None:
+        try:
+            cfg = load_config(Path("config/settings.yaml"))
+        except Exception:  # noqa: BLE001
+            cfg = Config({})
+    maker_cfg = cfg.get("execution.maker_orders", {}) or {}
+    return int(safe_float(maker_cfg.get("timeout_ms", 30000), 30000))
+
+
 def _funding_during_hold(
     side: str,
     candles: Sequence[Candle],
@@ -266,7 +315,10 @@ def _funding_during_hold(
 
 
 VARIANT_PHASE08_SHADOW = "phase08_shadow"
+VARIANT_PHASE08_SHADOW_MAKER = "phase08_shadow_maker"
 VARIANT_ROUTER_BLOCKED = "router_blocked"
+
+SKIP_MAKER_NO_FILL = "maker_no_fill"
 
 ROUTER_BLOCKED_SECTION_LABEL = (
     "counterfactual — signals the router blocked; idealized fills"
@@ -465,12 +517,16 @@ def load_forward_candles(
     research_db_path: Path,
     live_db_path: Optional[Path] = None,
     prefer_live_fallback: bool = True,
+    extra_lead_ms: int = 0,
 ) -> Tuple[List[Candle], str]:
     """Load subsequent 1m candles for outcome simulation (read-only paths).
 
+    ``extra_lead_ms`` extends the window when the position can start after
+    the decision (maker-entry variant waits up to the fill window).
+
     Returns ``(candles ASC, source_label)``.
     """
-    end_ms = entry_ts_ms + max_hold_ms + 60_000  # small buffer past timeout
+    end_ms = entry_ts_ms + max_hold_ms + int(extra_lead_ms) + 60_000  # buffer
     research = _load_research_hl_candles(
         research_db_path, symbol, entry_ts_ms, end_ms
     )
@@ -816,6 +872,180 @@ def dataclasses_replace(outcome: SimulatedOutcome, **kwargs: Any) -> SimulatedOu
     return SimulatedOutcome(**data)
 
 
+def _maker_fill_price(candle: Candle, side: str, limit: float) -> Optional[float]:
+    """Fill price if a resting limit at ``limit`` executes inside the candle.
+
+    Long: fills when ``low <= limit``; a gap through (``open <= limit``)
+    fills at the open (better than the posted price). Short mirrored.
+    Returns ``None`` when the level was never touched.
+    """
+    o, h, l = (  # noqa: E741
+        float(candle.open),
+        float(candle.high),
+        float(candle.low),
+    )
+    if side == "long":
+        if o <= limit:
+            return o
+        if l <= limit:
+            return limit
+        return None
+    if side == "short":
+        if o >= limit:
+            return o
+        if h >= limit:
+            return limit
+        return None
+    return None
+
+
+def simulate_decision_maker(
+    decision: ShadowDecision,
+    candles: Sequence[Candle],
+    *,
+    max_hold_ms: int,
+    maker_entry_window_ms: int = 30_000,
+    cost_model: Optional[ShadowCostModel] = None,
+    funding_samples: Optional[Sequence[Tuple[int, float]]] = None,
+) -> SimulatedOutcome:
+    """Maker-entry variant of ``simulate_decision`` (research counterfactual).
+
+    Posts a resting limit at the signal price and waits up to
+    ``maker_entry_window_ms`` (mirrors live ``execution.maker_orders.
+    timeout_ms``) for a candle touch. No touch => ``maker_no_fill`` — the
+    skip count is the data: it measures how often the maker entry would
+    never have happened. After a fill, the SL/TP/timeout exit path is
+    identical to the taker variant (fill candle included, so the
+    conservative dual-touch rule still applies); the hold deadline runs
+    from the fill. Bias-flip exits are not modelled in this variant.
+    """
+    base = SimulatedOutcome(
+        decision_id=decision.row_id,
+        symbol=decision.symbol,
+        strategy=decision.strategy,
+        side=str(decision.side or ""),
+        entry_price=0.0,
+        entry_ts_ms=decision.timestamp_ms,
+        exit_price=0.0,
+        exit_ts_ms=decision.timestamp_ms,
+        exit_reason="",
+        stop_loss_pct=0.0,
+        take_profit_pct=0.0,
+        size_pct=0.0,
+        pnl_pct=0.0,
+        r_multiple=0.0,
+        hold_minutes=0.0,
+        evaluated=False,
+        skip_reason=None,
+    )
+    if not decision.would_enter:
+        return dataclasses_replace(base, skip_reason=SKIP_WOULD_NOT_ENTER)
+    bracket = extract_bracket_params(decision.market_snapshot)
+    if bracket is None:
+        return dataclasses_replace(base, skip_reason=SKIP_MISSING_BRACKET)
+    side = (decision.side or "").lower()
+    if side not in ("long", "short"):
+        return dataclasses_replace(base, skip_reason=SKIP_INVALID_SIDE)
+
+    limit = float(bracket["price"])
+    stop = float(bracket["stop_loss_pct"])
+    take = float(bracket["take_profit_pct"])
+    size = float(bracket["size_pct"])
+    model = cost_model or resolve_maker_entry_cost_model()
+    window_end = decision.timestamp_ms + int(maker_entry_window_ms)
+
+    fill_px: Optional[float] = None
+    fill_ts: Optional[int] = None
+    fill_idx = -1
+    for i, candle in enumerate(candles):
+        if candle.timestamp_ms <= decision.timestamp_ms:
+            continue
+        if candle.timestamp_ms > window_end:
+            break
+        f = _maker_fill_price(candle, side, limit)
+        if f is not None:
+            fill_px, fill_ts, fill_idx = f, candle.timestamp_ms, i
+            break
+    if fill_px is None or fill_ts is None:
+        return dataclasses_replace(
+            base,
+            entry_price=limit,
+            stop_loss_pct=stop,
+            take_profit_pct=take,
+            size_pct=size,
+            skip_reason=SKIP_MAKER_NO_FILL,
+        )
+
+    # Position exists from the fill — hold deadline runs from fill_ts.
+    fill_decision = replace(decision, timestamp_ms=fill_ts)
+    deadline = fill_ts + max_hold_ms
+    last_candle: Optional[Candle] = None
+    for candle in candles[fill_idx:]:
+        last_candle = candle
+        hit = resolve_candle_exit(
+            side=side,
+            entry=fill_px,
+            stop_loss_pct=stop,
+            take_profit_pct=take,
+            candle=candle,
+        )
+        if hit is not None:
+            exit_px, reason = hit
+            return _finish_outcome(
+                fill_decision,
+                fill_px,
+                stop,
+                take,
+                size,
+                side,
+                exit_px,
+                candle.timestamp_ms,
+                reason,
+                candles=candles[fill_idx:],
+                cost_model=model,
+                funding_samples=funding_samples,
+            )
+        if candle.timestamp_ms >= deadline:
+            return _finish_outcome(
+                fill_decision,
+                fill_px,
+                stop,
+                take,
+                size,
+                side,
+                float(candle.close),
+                candle.timestamp_ms,
+                EXIT_TIMEOUT,
+                candles=candles[fill_idx:],
+                cost_model=model,
+                funding_samples=funding_samples,
+            )
+
+    if last_candle is None or last_candle.timestamp_ms < deadline:
+        return dataclasses_replace(
+            base,
+            entry_price=fill_px,
+            stop_loss_pct=stop,
+            take_profit_pct=take,
+            size_pct=size,
+            skip_reason=SKIP_INSUFFICIENT_CANDLES,
+        )
+    return _finish_outcome(
+        fill_decision,
+        fill_px,
+        stop,
+        take,
+        size,
+        side,
+        float(last_candle.close),
+        last_candle.timestamp_ms,
+        EXIT_TIMEOUT,
+        candles=candles[fill_idx:],
+        cost_model=model,
+        funding_samples=funding_samples,
+    )
+
+
 def _finish_outcome(
     decision: ShadowDecision,
     entry: float,
@@ -949,11 +1179,14 @@ def evaluate_shadow_decisions(
     research_db_path: Optional[Path] = None,
     live_db_path: Optional[Path] = LIVE_DB_DEFAULT,
     candle_loader: Optional[Any] = None,
+    include_maker_variant: bool = True,
 ) -> Dict[str, StrategyScoreboard]:
     """Evaluate decisions into scoreboards keyed by ``strategy::variant``.
 
     ``phase08_shadow`` and ``router_blocked`` for the same strategy never share
-    a scoreboard entry.
+    a scoreboard entry. With ``include_maker_variant`` each group also gets a
+    ``phase08_shadow_maker`` counterfactual board (limit-at-signal fill model)
+    answering "do maker economics rescue the gross edge?"
     """
     cfg = config
     if cfg is None:
@@ -996,6 +1229,12 @@ def evaluate_shadow_decisions(
                 except Exception:  # noqa: BLE001
                     bias_store = False  # type: ignore[assignment]
         outcomes: List[SimulatedOutcome] = []
+        maker_outcomes: List[SimulatedOutcome] = []
+        maker_model = resolve_maker_entry_cost_model(cfg)
+        maker_window = resolve_maker_entry_window_ms(cfg)
+        # The maker fill can land up to the fill window after the signal —
+        # candle coverage must reach decision + window + max_hold.
+        lead = maker_window if include_maker_variant else 0
         sources_seen: List[str] = []
         funding_cache: Dict[str, List[Tuple[int, float]]] = {}
         for d in group:
@@ -1008,6 +1247,7 @@ def evaluate_shadow_decisions(
                     max_hold_ms=max_hold,
                     research_db_path=Path(research_db_path),
                     live_db_path=Path(live_db_path) if live_db_path else None,
+                    extra_lead_ms=lead,
                 )
             sources_seen.append(src)
             samples: Optional[List[Dict[str, Any]]] = None
@@ -1041,6 +1281,17 @@ def evaluate_shadow_decisions(
                     funding_samples=funding_cache[d.symbol],
                 )
             )
+            if include_maker_variant:
+                maker_outcomes.append(
+                    simulate_decision_maker(
+                        d,
+                        candles,
+                        max_hold_ms=max_hold,
+                        maker_entry_window_ms=maker_window,
+                        cost_model=maker_model,
+                        funding_samples=funding_cache[d.symbol],
+                    )
+                )
         source_label = max(set(sources_seen), key=sources_seen.count) if sources_seen else ""
         board = aggregate_scoreboard(
             strategy,
@@ -1052,6 +1303,17 @@ def evaluate_shadow_decisions(
             min_funding_coverage=cost_model.min_funding_coverage,
         )
         boards[board.key] = board
+        if include_maker_variant:
+            maker_board = aggregate_scoreboard(
+                strategy,
+                maker_outcomes,
+                max_hold_ms=max_hold,
+                candle_source=source_label,
+                n_decisions=len(group),
+                variant=VARIANT_PHASE08_SHADOW_MAKER,
+                min_funding_coverage=maker_model.min_funding_coverage,
+            )
+            boards[maker_board.key] = maker_board
     return boards
 
 

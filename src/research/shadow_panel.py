@@ -11,6 +11,7 @@ from src.exchanges.liquidation_event import is_real_liquidation_source
 from src.research.shadow_outcome_evaluator import (
     IDEALIZED_FILL_DISCLAIMER,
     VARIANT_PHASE08_SHADOW,
+    VARIANT_PHASE08_SHADOW_MAKER,
     scoreboard_key,
 )
 from src.research.shadow_recorder import ShadowRecorder
@@ -223,8 +224,12 @@ def build_shadow_panel_payload(
         n_quarter = int(bucket["90d"])
 
         board = None
+        maker_board = None
         if isinstance(boards, dict):
             board = boards.get(f"{name}::phase08_shadow")
+            maker_board = boards.get(
+                scoreboard_key(name, VARIANT_PHASE08_SHADOW_MAKER)
+            )
             if board is None:
                 # boards keys may be scoreboard_key already
                 for k, v in boards.items():
@@ -304,6 +309,24 @@ def build_shadow_panel_payload(
                     100.0, 100.0 * progress_n / MIN_TRADES_FOR_GATE
                 ),
                 "frequency_insufficient_90d": freq_insufficient,
+                # Maker-entry research counterfactual (phase08_shadow_maker
+                # boards persisted by the scheduled evaluator). fill_rate =
+                # fraction of signals whose limit would have executed.
+                "maker_n_evaluated": (maker_board or {}).get("n_evaluated"),
+                "maker_fill_rate": (
+                    (maker_board or {}).get("n_evaluated") is not None
+                    and (maker_board or {}).get("n_decisions")
+                    and round(
+                        maker_board["n_evaluated"] / maker_board["n_decisions"],
+                        3,
+                    )
+                    or None
+                ),
+                "maker_net_pf": (maker_board or {}).get("net_profit_factor"),
+                "maker_net_expectancy_r": (maker_board or {}).get(
+                    "net_expectancy_r"
+                ),
+                "maker_skips": (maker_board or {}).get("skip_reasons"),
                 "last_gate": gate,
                 "fidelity_tier": fidelity,
                 "fidelity_note": note,

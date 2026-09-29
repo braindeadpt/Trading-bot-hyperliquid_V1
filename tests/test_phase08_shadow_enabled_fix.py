@@ -199,7 +199,10 @@ def test_phase08_build_shadow_instances_are_enabled() -> None:
     cfg = _live_cfg()
     _execution, shadow = build_phase08_strategies(cfg)
     by_name = {s.name: s for s in shadow}
+    configured = set(cfg.get("strategy.phase08.shadow_strategies") or [])
     for name, _cls in _SHADOW_GATED:
+        if name not in configured:
+            continue  # pruned from shadow (2026-09-29 evidence-based cut)
         inst = by_name[name]
         assert inst.MANUAL_ENABLED is True
         if name == "OrderBookScalper":

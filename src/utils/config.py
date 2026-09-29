@@ -540,7 +540,16 @@ def _sanitize_config_for_hash(data: Dict[str, Any]) -> Dict[str, Any]:
         "dvol_feed", "feed_age_history", "l2_recording",
     }
     # Dotted paths (lowercased) excluded regardless of their key name.
-    skip_paths = {("research", "database")}
+    # ``strategy.phase08.shadow_strategies`` is the shadow-observability
+    # scope (which signal sources get recorded for research) — shadow
+    # strategies never execute, so pruning dead names mid-window cannot
+    # alter live behaviour and must not trip the drift assert
+    # (2026-09-29 evidence-based prune: OrderBookScalper/TopTraderFlow/
+    # ChecklistMeta/VWAPDeviation removed on decisive net-pf evidence).
+    skip_paths = {
+        ("research", "database"),
+        ("strategy", "phase08", "shadow_strategies"),
+    }
 
     def _walk(node: Any, path: tuple = ()) -> Any:
         if isinstance(node, Config) or isinstance(getattr(node, "raw", None), dict):

@@ -644,3 +644,158 @@ def test_e_evaluator_separates_router_blocked_from_shadow_hand_computed() -> Non
     table = format_scoreboard_table(boards)
     assert "router_blocked" in table
     assert "counterfactual" in table.lower()
+
+
+# ── maker-entry variant (research counterfactual) ────────────────────────────
+
+from src.research.shadow_outcome_evaluator import (  # noqa: E402
+    SKIP_MAKER_NO_FILL,
+    VARIANT_PHASE08_SHADOW_MAKER,
+    resolve_maker_entry_cost_model,
+    scoreboard_key,
+    simulate_decision_maker,
+)
+
+
+def test_maker_long_fill_at_limit_then_tp() -> None:
+    # Limit at 100. Candle 1 dips to 99.5 (fills at 100), candle 3 hits 102 TP.
+    entry_ts = 1_000_000
+    d = _decision(side="long", price=100.0, stop=0.01, take=0.02, ts=entry_ts)
+    candles = [
+        _candle(entry_ts + 60_000, 100.5, 100.8, 99.5, 100.1),   # low<=100 → fill@100
+        _candle(entry_ts + 120_000, 100.1, 100.9, 99.9, 100.6),
+        _candle(entry_ts + 180_000, 100.6, 102.3, 100.4, 102.1), # high>=102 → TP
+    ]
+    out = simulate_decision_maker(
+        d, candles, max_hold_ms=6 * 3600_000, maker_entry_window_ms=300_000
+    )
+    assert out.evaluated is True
+    assert out.entry_price == pytest.approx(100.0)
+    assert out.exit_reason == EXIT_TP
+    assert out.exit_price == pytest.approx(102.0)
+    assert out.entry_ts_ms == entry_ts + 60_000  # position starts at fill
+    assert out.hold_minutes == pytest.approx(2.0)
+
+
+def test_maker_no_fill_when_level_never_touched() -> None:
+    entry_ts = 1_000_000
+    d = _decision(side="long", price=100.0, ts=entry_ts)
+    candles = [
+        _candle(entry_ts + 60_000, 100.3, 100.9, 100.2, 100.5),  # low>100 no fill
+        _candle(entry_ts + 120_000, 100.5, 101.0, 100.4, 100.8),
+    ]
+    out = simulate_decision_maker(
+        d, candles, max_hold_ms=6 * 3600_000, maker_entry_window_ms=120_000
+    )
+    assert out.evaluated is False
+    assert out.skip_reason == SKIP_MAKER_NO_FILL
+
+
+def test_maker_window_expires_before_touch() -> None:
+    # Touch arrives on candle 3 but window only covers candle 1.
+    entry_ts = 1_000_000
+    d = _decision(side="long", price=100.0, ts=entry_ts)
+    candles = [
+        _candle(entry_ts + 60_000, 100.3, 100.9, 100.2, 100.5),
+        _candle(entry_ts + 120_000, 100.5, 100.9, 100.1, 100.6),
+        _candle(entry_ts + 180_000, 100.6, 100.7, 99.0, 99.5),  # dip arrives too late
+    ]
+    out = simulate_decision_maker(
+        d, candles, max_hold_ms=6 * 3600_000, maker_entry_window_ms=60_000
+    )
+    assert out.evaluated is False
+    assert out.skip_reason == SKIP_MAKER_NO_FILL
+
+
+def test_maker_gap_through_fills_at_open() -> None:
+    # Limit buy at 100; candle opens at 98 (through the level) → fill at
+    # open=98, so SL moves to 98*0.99=97.02 — next candle dips to 96.9 → SL.
+    entry_ts = 1_000_000
+    d = _decision(side="long", price=100.0, stop=0.01, take=0.02, ts=entry_ts)
+    candles = [
+        _candle(entry_ts + 60_000, 98.0, 99.0, 97.5, 98.8),   # gap fill @98
+        _candle(entry_ts + 120_000, 98.8, 99.0, 96.9, 97.1),  # low 96.9 < 97.02
+    ]
+    out = simulate_decision_maker(
+        d, candles, max_hold_ms=6 * 3600_000, maker_entry_window_ms=300_000
+    )
+    assert out.evaluated is True
+    assert out.entry_price == pytest.approx(98.0)
+    assert out.exit_reason == "stop_loss"
+    assert out.exit_price == pytest.approx(97.02)
+    assert out.r_multiple == pytest.approx(-1.0)
+
+
+def test_maker_short_fill_and_sl() -> None:
+    # Limit sell at 100. Candle touches high 100.2 → fill 100; next candle
+    # rises to 101.1 > SL(101) → SL.
+    entry_ts = 1_000_000
+    d = _decision(side="short", price=100.0, stop=0.01, take=0.02, ts=entry_ts)
+    candles = [
+        _candle(entry_ts + 60_000, 99.5, 100.2, 99.3, 99.9),  # high>=100 → fill
+        _candle(entry_ts + 120_000, 99.9, 101.1, 99.8, 100.9), # high>=101 → SL
+    ]
+    out = simulate_decision_maker(
+        d, candles, max_hold_ms=6 * 3600_000, maker_entry_window_ms=300_000
+    )
+    assert out.evaluated is True
+    assert out.entry_price == pytest.approx(100.0)
+    assert out.exit_price == pytest.approx(101.0)
+    assert out.exit_reason == "stop_loss"
+    assert out.r_multiple == pytest.approx(-1.0)
+
+
+def test_maker_cost_model_fees_and_zero_entry_slip() -> None:
+    cfg = Config({
+        "risk": {"taker_fee_pct": 0.045, "paper_slippage_pct": 0.02},
+        "execution": {"maker_orders": {"maker_fee_pct": 0.015}},
+    })
+    m = resolve_maker_entry_cost_model(cfg)
+    assert m.entry_fee_frac == pytest.approx(0.00015)   # 0.015%
+    assert m.exit_fee_frac == pytest.approx(0.00045)    # 0.045% taker exit
+    assert m.entry_slip_frac == pytest.approx(0.0)
+    assert m.exit_slip_frac == pytest.approx(0.0002)    # taker exit slip
+    # round trip 0.06% vs taker/taker 0.09% + 0.02% less entry slip
+    assert m.round_trip_fee_frac == pytest.approx(0.0006)
+
+
+def test_maker_variant_board_emitted_by_evaluate() -> None:
+    entry_ts = 1_000_000
+    d = _decision(side="long", price=100.0, ts=entry_ts, strategy="TestStrat")
+
+    def loader(symbol: str, ts: int, max_hold: int):
+        return (
+            [_candle(ts + 60_000, 100.5, 103.0, 99.5, 102.5)],  # fill + TP
+            "synthetic",
+        )
+
+    boards = evaluate_shadow_decisions(
+        [d],
+        config=Config({
+            "strategy": {"test_strat": {"max_hold_hours": 4}},
+            # widen the live 30s maker window so the +60s fill candle is in range
+            "execution": {"maker_orders": {"timeout_ms": 300_000}},
+        }),
+        candle_loader=loader,
+    )
+    k_maker = scoreboard_key("TestStrat", VARIANT_PHASE08_SHADOW_MAKER)
+    assert k_maker in boards
+    assert boards[k_maker].n_evaluated == 1
+    assert boards[k_maker].wins == 1
+    assert "entry=maker" in boards[k_maker].cost_model_label
+
+
+def test_maker_variant_disabled() -> None:
+    entry_ts = 1_000_000
+    d = _decision(side="long", price=100.0, ts=entry_ts, strategy="TestStrat")
+
+    def loader(symbol: str, ts: int, max_hold: int):
+        return ([_candle(ts + 60_000, 100.5, 103.0, 99.5, 102.5)], "synthetic")
+
+    boards = evaluate_shadow_decisions(
+        [d],
+        config=Config({"strategy": {"test_strat": {"max_hold_hours": 4}}}),
+        candle_loader=loader,
+        include_maker_variant=False,
+    )
+    assert scoreboard_key("TestStrat", VARIANT_PHASE08_SHADOW_MAKER) not in boards
