@@ -175,7 +175,9 @@ class TestHashNeutral:
         from src.utils.config import compute_config_hash, load_config
 
         cfg = load_config(str(ROOT / "config" / "settings.yaml"))
-        assert compute_config_hash(cfg) == "eb17068f4c87bc86"
+        # 2026-09-29 re-registration: shadow-strategy prune + hash-neutral
+        # shadow_strategies exclusion (OOS window preserved).
+        assert compute_config_hash(cfg) == "65fb4a3f52a945d6"
 
 
 class TestFactory:

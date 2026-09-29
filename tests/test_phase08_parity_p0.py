@@ -53,7 +53,10 @@ def test_build_backtest_strategy_uses_phase08_execution_set() -> None:
     assert names == expected
     execution, shadow = build_phase08_strategies(cfg)
     assert {s.name for s in execution} == names
-    assert "ChecklistMeta" in {s.name for s in shadow}
+    # Shadow factory instantiates exactly the configured shadow set
+    # (2026-09-29 prune: retired names no longer configured).
+    expected_shadow = set(cfg.get("strategy.phase08.shadow_strategies") or [])
+    assert {s.name for s in shadow} == expected_shadow
 
 
 def test_build_backtest_config_enables_phase08_router() -> None:

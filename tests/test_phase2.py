@@ -63,11 +63,16 @@ def test_factory_respects_enabled_flags() -> None:
         shadow_names = {s.name for s in shadow}
         # 2026-09-17: only the owner-requested JevJudge EXPERIMENT executes;
         # all evidence-based names sit in shadow per the demotion audit.
+        # 2026-09-29: dead-name prune — shadow factory instantiates exactly
+        # the configured list; retired names must not appear anywhere.
         assert "JevJudge" in names
-        assert "VWAPDeviation" in shadow_names
+        expected_shadow = set(cfg.get("strategy.phase08.shadow_strategies") or [])
+        assert shadow_names == expected_shadow
         assert "VolatilityBreakout" in shadow_names
-        assert "ChecklistMeta" in shadow_names
-        assert "ChecklistMeta" not in names
+        for retired in ("VWAPDeviation", "ChecklistMeta", "OrderBookScalper",
+                        "TopTraderFlow"):
+            assert retired not in shadow_names
+            assert retired not in names
     else:
         subs = build_sub_strategies(cfg)
         names = {s.name for s in subs}
