@@ -1168,7 +1168,12 @@ def create_app(config: Dict[str, Any]) -> tuple:
         _origin = _origin.strip()
         if _origin and _origin not in allowed_origins:
             allowed_origins.append(_origin)
-    socketio = SocketIO(app, cors_allowed_origins=allowed_origins, async_mode="threading")
+    socketio = SocketIO(
+        app,
+        cors_allowed_origins=allowed_origins,
+        async_mode="threading",
+        ping_timeout=60,
+    )
 
     global _socketio
     _socketio = socketio
