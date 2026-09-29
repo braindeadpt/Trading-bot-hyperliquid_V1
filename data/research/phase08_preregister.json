@@ -13,30 +13,26 @@
       "verdict": "EXPERIMENT"
     }
   ],
-  "config_hash": "eb17068f4c87bc86",
+  "config_hash": "65fb4a3f52a945d6",
   "edge_demonstrated": false,
   "execution_scope": {
     "mode": "paper",
     "paper_only": true,
     "shadow_strategies": [
-      "VWAPDeviation",
       "VolatilityBreakout",
-      "OrderBookScalper",
       "FundingMomentum",
       "SpotPerpCarry",
       "LeadLag",
-      "LiquidationCatcher",
-      "ChecklistMeta",
-      "TopTraderFlow"
+      "LiquidationCatcher"
     ],
     "strategies": [
       "JevJudge"
     ]
   },
-  "experiment_id": "9675a13c-3390-4e24-bdd8-bc30fa87cdb2",
+  "experiment_id": "5b5d9b4c-c8c2-421c-8b01-223ed175fbdb",
   "fidelity_note": "tier_a_hl_ohlc certifies Hyperliquid OHLC data availability only; it does not certify strategy edge.",
-  "in_sample_selection_note": "JevJudge remains the sole paper execution control (owner-requested EXPERIMENT). LiquidationCatcher stays shadow-only \u2014 sweep was in-sample argmax; fresh decisions under the tuned bracket are the forward OOS confirmation before any baseline_signal_gate candidacy. Mainnet still blocked.",
-  "manifest_hash": "8b64527dc206b4efc44f2bb2ac6870950d05c09c03050a2e0957642d980f18a5",
+  "in_sample_selection_note": "Shadow-scope prune + maker-variant evaluator only. JevJudge remains the sole paper execution control (owner-requested EXPERIMENT, zero evidence claimed). No promotion; mainnet still blocked. Accumulated OOS evidence intentionally retained.",
+  "manifest_hash": "0583c837b8c14085006bf3f99d5d8cde2dbda4a300208a62fff8b6c3cba528d6",
   "oos_protocol": "phase06-train-val-test-v1",
   "oos_status": "pending",
   "protocol": "phase08-preregister-v2",
@@ -60,8 +56,8 @@
       "low_vol"
     ]
   },
-  "registered_at_ms": 1789694015798,
-  "reregistration_reason": "research shadow \u2014 LiquidationCatcher bracket retune (TP 2R\u21921.5R, max_hold 30min\u21928h) from offline shadow_decisions sweep n\u2248190: holds <2h net-negative (fees eat the bounce), 24h gives it back, 4\u20138h sweet spot. No execution_strategies change; OOS counter restarts because config_hash includes strategy params.",
+  "registered_at_ms": 1790694375940,
+  "reregistration_reason": "research observability-scope change only \u2014 strategy.phase08.shadow_strategies excluded from the config hash by path (same precedent as research.database / l2_recording: watch-list scope, not trading params). Shadow prune drops OrderBookScalper (net pf 0.21, n=25,002), TopTraderFlow (0.31, n=3,786), ChecklistMeta (0.63, n=157; -905USD/184t live), VWAPDeviation (0.52, n=28; -221USD/44t live) on decisive net-of-tier-0-fee evidence; historical shadow_decisions preserved. No strategy, risk, fee or execution_strategies change. OOS window PRESERVED.",
   "strategies": {
     "ChecklistMeta": {
       "expected_max_signals_per_symbol_per_week": 1344.0,
@@ -146,5 +142,5 @@
       "signal_throttle_ms": 1800000
     }
   },
-  "supersedes_experiment_id": "a3ab9352-c542-4609-98de-8b1f73d73f02"
+  "supersedes_experiment_id": "9675a13c-3390-4e24-bdd8-bc30fa87cdb2"
 }

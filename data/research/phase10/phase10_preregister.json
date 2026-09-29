@@ -7,11 +7,11 @@
       "verdict": "EXPERIMENT"
     }
   ],
-  "config_hash": "eb17068f4c87bc86",
+  "config_hash": "65fb4a3f52a945d6",
   "execution_strategies": [
     "JevJudge"
   ],
-  "experiment_id": "66d3472f-3805-482f-99cf-640709e619ef",
+  "experiment_id": "f3a5554d-042f-4147-a679-4bd22fd35c25",
   "gate_note": "All four criteria must be a real PASS (not merely 'no FAIL yet due to insufficient data') for the frozen window to be considered met. Drift in execution_strategies or config_hash after freeze invalidates the window \u2014 see assert_config_matches_preregister().",
   "gate_thresholds": {
     "expectancy_r_gt": 0.0,
@@ -19,12 +19,12 @@
     "min_profit_factor": 1.2,
     "min_trades": 100
   },
-  "in_sample_selection_note": "JevJudge remains the sole paper execution control (owner-requested EXPERIMENT). LiquidationCatcher stays shadow-only \u2014 sweep was in-sample argmax; fresh decisions under the tuned bracket are the forward OOS confirmation before any baseline_signal_gate candidacy. Mainnet still blocked.",
-  "manifest_hash": "0cf796b1a6441868ad222a4cc9f258fa49610e08f542d671b0f57a4cc17248d5",
+  "in_sample_selection_note": "Shadow-scope prune + maker-variant evaluator only. JevJudge remains the sole paper execution control (owner-requested EXPERIMENT, zero evidence claimed). No promotion; mainnet still blocked. Accumulated OOS evidence intentionally retained.",
+  "manifest_hash": "00f386593456b6175df3a59a8c8496a8f69e479ebf7b3173961e2bc7150f04bc",
   "protocol": "phase10-frozen-window-v1",
-  "registered_at_ms": 1789694015784,
-  "reregistration_reason": "research shadow \u2014 LiquidationCatcher bracket retune (TP 2R\u21921.5R, max_hold 30min\u21928h) from offline shadow_decisions sweep n\u2248190: holds <2h net-negative (fees eat the bounce), 24h gives it back, 4\u20138h sweet spot. No execution_strategies change; OOS counter restarts because config_hash includes strategy params.",
-  "supersedes_experiment_id": "6f9ea627-ecf6-4a77-93b5-0004568f0eaa",
+  "registered_at_ms": 1790694375922,
+  "reregistration_reason": "research observability-scope change only \u2014 strategy.phase08.shadow_strategies excluded from the config hash by path (same precedent as research.database / l2_recording: watch-list scope, not trading params). Shadow prune drops OrderBookScalper (net pf 0.21, n=25,002), TopTraderFlow (0.31, n=3,786), ChecklistMeta (0.63, n=157; -905USD/184t live), VWAPDeviation (0.52, n=28; -221USD/44t live) on decisive net-of-tier-0-fee evidence; historical shadow_decisions preserved. No strategy, risk, fee or execution_strategies change. OOS window PRESERVED.",
+  "supersedes_experiment_id": "66d3472f-3805-482f-99cf-640709e619ef",
   "window": {
     "max_end_ms": 1796951615461,
     "max_weeks": 12,
