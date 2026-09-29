@@ -81,6 +81,30 @@ def test_resolve_external_path_honoured_with_optin(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_resolve_root_refuses_windows_drive_syntax_on_posix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On POSIX an ``X:/…`` config value is a RELATIVE name — even with the
+    external opt-in it must be refused loudly, not silently redirected to a
+    repo-local 'X:' directory (macOS incident 2026-09-29)."""
+    import src.data.l2_book_recorder as rec
+
+    monkeypatch.setattr(
+        rec, "is_windows_absolute_syntax", lambda *_a, **_k: True
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    assert (
+        rec.resolve_l2_recording_root(
+            "E:/hyperliquid_research/l2_books",
+            project,
+            allow_external_path=True,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
 def test_resolve_relative_path_inside_project_still_works(tmp_path: Path) -> None:
     """Repo-contained paths keep working without any opt-in."""
     from src.data.l2_book_recorder import resolve_l2_recording_root

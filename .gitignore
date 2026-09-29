@@ -7,6 +7,15 @@ data/bot.lock
 data/test_health.db
 data/vault.enc
 
+# Safety nets
+# A Windows-absolute path like "E:/..." resolves to a RELATIVE path on
+# POSIX hosts — it once created a literal repo-local "E:" dir containing
+# a live research DB. Never let that directory be committed.
+E:/
+# .env backups carry real secrets; only .env.example is tracked.
+.env
+.env.bak*
+
 # Research artifacts (parity DBs, support packages, sweep outputs)
 # Keep the frozen-window manifests tracked — CI and clones need them.
 data/research/*
@@ -41,9 +50,6 @@ main.py.bak
 venv/
 env/
 .venv/
-
-# Environment variables (secrets)
-.env
 
 # IDE / local agent tooling
 .vscode/

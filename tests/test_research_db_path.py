@@ -26,6 +26,45 @@ def test_research_database_requires_explicit_path() -> None:
         ResearchDatabase(None)  # type: ignore[arg-type]
 
 
+def test_windows_drive_syntax_flagged_only_when_not_absolute() -> None:
+    """``X:/…`` is absolute on Windows but a RELATIVE name on POSIX — the
+    helper must flag the POSIX view and leave the Windows view alone."""
+    from src.utils.helpers import is_windows_absolute_syntax
+
+    flag = is_windows_absolute_syntax
+    # POSIX view (is_absolute=False): drive-letter syntax is a silent-ghost bug
+    assert flag("E:/hyperliquid_research/h.db", is_absolute=False)
+    assert flag("e:\\hyperliquid_research\\h.db", is_absolute=False)
+    # Real absolute paths and plain relatives are fine on any host
+    assert not flag("E:/x/h.db", is_absolute=True)
+    assert not flag("/Users/noder/research/h.db", is_absolute=False)
+    assert not flag("data/research/h.db", is_absolute=False)
+    assert not flag("")
+    # On this host the helper defers to pathlib when not injected
+    p = Path("E:/x/h.db")
+    assert flag("E:/x/h.db") == (not p.is_absolute())
+
+
+def test_resolve_path_fails_loud_on_posix_ghost(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A drive-letter path resolving relative must RAISE — never create a
+    repo-local 'E:' directory again (macOS incident 2026-09-29)."""
+    import src.data.research_database as rdb
+
+    monkeypatch.setattr(
+        rdb, "is_windows_absolute_syntax", lambda *_a, **_k: True
+    )
+    cfg = Config(
+        {"research": {"database": {"path": "E:/hyperliquid_research/h.db"}}}
+    )
+    with pytest.raises(ValueError, match="drive-letter"):
+        rdb.ResearchDatabase.resolve_path(cfg)
+
+
+def test_resolve_path_still_resolves_normal_paths(tmp_path: Path) -> None:
+    cfg = Config({"research": {"database": {"path": str(tmp_path / "ok.db")}}})
+    assert ResearchDatabase.resolve_path(cfg).name == "ok.db"
+
+
 def test_partial_config_falls_back_to_default_config_path() -> None:
     path = ResearchDatabase.resolve_path(Config({}))
     assert path.name == "hyperliquid.db"

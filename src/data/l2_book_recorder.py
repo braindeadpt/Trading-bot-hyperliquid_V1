@@ -29,7 +29,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from src.data.orderbook_metrics import PriceLevel, calculate_metrics
 from src.exchanges.hyperliquid_ws import DataBus
-from src.utils.helpers import safe_write_file, validate_safe_path
+from src.utils.helpers import (
+    is_windows_absolute_syntax,
+    safe_write_file,
+    validate_safe_path,
+)
 
 logger = logging.getLogger(__name__)
 _SAFE_PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -84,6 +88,15 @@ def resolve_l2_recording_root(
     if not raw:
         logger.error(
             "L2BookRecorder path is empty — recording disabled (trading unaffected)"
+        )
+        return None
+    if is_windows_absolute_syntax(raw):
+        logger.error(
+            "L2BookRecorder path %r uses Windows drive-letter syntax but "
+            "resolves as RELATIVE on this platform — recording disabled "
+            "(set BOT_MARKET_DATA_L2_RECORDING_PATH or fix the config; "
+            "trading unaffected)",
+            raw,
         )
         return None
     raw_path = Path(raw)

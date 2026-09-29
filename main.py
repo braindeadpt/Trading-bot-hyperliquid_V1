@@ -53,7 +53,7 @@ from typing import Any, Dict, Optional
 # ---------------------------------------------------------------------------
 from utils.config import Config, ConfigError, get_strategy_section, get_trading_symbols, load_config, phase08_enabled
 from utils.logger import setup_logger
-from utils.helpers import safe_ensure_dir
+from utils.helpers import is_windows_absolute_syntax, safe_ensure_dir
 from utils.instance_lock import acquire_instance_lock, release_instance_lock
 
 from data.database import Database
@@ -123,6 +123,13 @@ def _resolve_telegram_credentials(cfg: Config) -> tuple[Optional[str], list[str]
 
 
 def _resolve_path(path_str: str) -> Path:
+    if is_windows_absolute_syntax(path_str):
+        raise ValueError(
+            f"configured path {path_str!r} uses Windows drive-letter syntax "
+            "but resolves as RELATIVE on this platform — refusing to point "
+            "it at a repo-local 'X:' directory (set the matching BOT_* env "
+            "override or fix the config value)"
+        )
     p = Path(path_str)
     if not p.is_absolute():
         p = PROJECT_ROOT / p

@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.data.database import Candle, Database, FundingRecord, OIRecord
 from src.data.series_metadata import SeriesMetadata
+from src.utils.helpers import is_windows_absolute_syntax
 
 logger = logging.getLogger(__name__)
 
@@ -1012,6 +1013,14 @@ class ResearchDatabase(Database):
             raise ValueError(
                 "research.database.path is missing from config — "
                 "refusing to guess a research DB location"
+            )
+        if is_windows_absolute_syntax(str(raw)):
+            raise ValueError(
+                f"research.database.path {raw!r} uses Windows drive-letter "
+                "syntax but resolves as RELATIVE on this platform — it would "
+                "silently create a repo-local 'X:' directory holding live "
+                "research data. Set BOT_RESEARCH_DATABASE_PATH or fix the "
+                "config value; refusing to guess."
             )
         p = Path(str(raw))
         if not p.is_absolute():

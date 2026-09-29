@@ -655,6 +655,30 @@ def validate_symbol(symbol: Any) -> Optional[str]:
     return None
 
 
+_WINDOWS_DRIVE_RE: re.Pattern[str] = re.compile(r"^[A-Za-z]:[/\\]", re.ASCII)
+
+
+def is_windows_absolute_syntax(path: Any, *, is_absolute: Optional[bool] = None) -> bool:
+    """True when *path* uses Windows drive-letter syntax (``X:/…``) but is
+    NOT absolute on this platform.
+
+    On POSIX hosts a configured ``E:/data`` string resolves as a *relative*
+    path — the bot then silently creates a literal ``E:`` directory inside
+    the repo and writes live data there (incident 2026-09-29). Callers wire
+    their own loud failure mode (raise / disable-with-ERROR); this helper
+    only detects. ``is_absolute`` is injectable so the POSIX view is
+    testable on Windows hosts.
+    """
+    if not isinstance(path, str):
+        return False
+    p = path.strip()
+    if not _WINDOWS_DRIVE_RE.match(p):
+        return False
+    if is_absolute is None:
+        is_absolute = Path(p).is_absolute()
+    return not is_absolute
+
+
 def validate_safe_path(path: Any) -> Optional[Path]:
     """
     Validate a path string for safe characters.
