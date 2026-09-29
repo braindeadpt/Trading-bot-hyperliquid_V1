@@ -68,6 +68,11 @@ The bot is built around a **WebSocket-first event architecture**: real-time mark
   exception class is `verdict: EXPERIMENT` — an explicit owner-declared
   paper-only promotion with zero evidence claimed, refused outside paper
   by `assert_experiment_paper_only`. See §12.
+- **`BOT_MEM_PROF=1` is a bounded diagnostic, not a setting** (incident
+  2026-09-29): tracemalloc at nframes=15 under live feed throughput pegged
+  a full core and starved the event loop — exchange WS handshakes timed
+  out, feeds degraded, dashboard froze. Enable it to hunt a leak, confirm
+  via `logs/mem_trace.log`, then turn it off. Never leave it on.
 
 ---
 

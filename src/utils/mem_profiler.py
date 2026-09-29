@@ -7,8 +7,12 @@ sites (diff vs previous snapshot) plus GC object-count deltas to
 after the bot runs for hours — diffs against the previous snapshot surface
 steady growers regardless of baseline size.
 
-tracemalloc overhead is small (~a few % CPU, bounded frames) and acceptable
-for paper/research runs; keep it disabled on mainnet.
+WARNING — measured cost, not theoretical: with nframes=15 and live feed
+throughput (thousands of msgs/s), tracemalloc pegged a full core (~110%
+CPU) and starved the event loop badly enough to cause exchange-WS
+handshake timeouts, REST connect timeouts and a frozen dashboard
+(2026-09-29, macOS). Enable ONLY for bounded diagnostic windows, never
+permanently, never on mainnet.
 """
 from __future__ import annotations
 
