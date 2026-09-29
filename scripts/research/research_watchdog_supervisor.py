@@ -67,6 +67,7 @@ sys.path.insert(0, str(ROOT))
 
 STATE_DIR = ROOT / "data" / "research"
 STATE_PATH = STATE_DIR / "research_watchdogs_state.json"
+RUN_LOCK_PATH = STATE_DIR / ".watchdog_supervisor.lock"
 
 CHECK_HOURS = 6.0
 
@@ -297,12 +298,41 @@ def load_shared_state(path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
     return state
 
 
+def _run_lock_acquired() -> bool:
+    """Single-instance guard — cron ticks and manual runs must not overlap
+    (two concurrent runs raced on the shared-state tmp file, 2026-09-29)."""
+    try:
+        if RUN_LOCK_PATH.exists():
+            try:
+                pid = int(RUN_LOCK_PATH.read_text(
+                    encoding="utf-8").strip() or 0)
+            except ValueError:
+                pid = 0
+            if pid and pid != os.getpid() and _pid_alive(pid):
+                return False
+        RUN_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        RUN_LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def _run_lock_release() -> None:
+    try:
+        if (RUN_LOCK_PATH.exists()
+                and RUN_LOCK_PATH.read_text(encoding="utf-8").strip()
+                == str(os.getpid())):
+            RUN_LOCK_PATH.unlink()
+    except OSError:
+        pass
+
+
 def save_shared_state(
     state: Dict[str, Dict[str, Any]], path: Optional[Path] = None
 ) -> None:
     state_path = path or STATE_PATH
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = state_path.with_suffix(".tmp")
+    tmp = state_path.with_name(f"{state_path.stem}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
     tmp.replace(state_path)
 
@@ -1004,16 +1034,22 @@ def main() -> int:
         f"liq_gap > {LIQ_GAP_ALERT_MS // 3_600_000}h silêncio, "
         f"bot_alive lock+{BOT_LOG_STALE_MS // 60_000}min log, "
         f"check a cada {args.hours:.0f}h) ===")
-    shared = load_shared_state()
-    # Always persist the canonical shared file (fresh or migrated) so the
-    # dashboard reads the same single source of truth from day one.
-    save_shared_state(shared)
-    if args.once:
-        check_all(shared, force=args.force, only=only)
+    if not _run_lock_acquired():
+        log("watchdog supervisor: another run holds the lock — skipping")
         return 0
-    while True:
-        check_all(shared, force=False, only=only)
-        time.sleep(args.hours * 3600)
+    try:
+        shared = load_shared_state()
+        # Always persist the canonical shared file (fresh or migrated) so
+        # the dashboard reads the same single source of truth from day one.
+        save_shared_state(shared)
+        if args.once:
+            check_all(shared, force=args.force, only=only)
+            return 0
+        while True:
+            check_all(shared, force=False, only=only)
+            time.sleep(args.hours * 3600)
+    finally:
+        _run_lock_release()
 
 
 if __name__ == "__main__":

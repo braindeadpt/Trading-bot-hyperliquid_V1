@@ -43,6 +43,8 @@ LOCK_PATH = ROOT / "data" / "research" / "overnight_experiments" / ".nightly.loc
 LOG_DIR = ROOT / "logs"
 
 RUNNER = ROOT / "scripts" / "research" / "overnight_runner.py"
+
+from src.utils.instance_lock import _pid_alive  # noqa: E402
 K_FLOOR = 4              # paired sign-flip noise gate cannot pass below this
 SUBPROCESS_TIMEOUT_S = 20 * 60       # a hung sweep must not hold the lock forever
 # 20 min, not 2h (2026-09-10): a full preregistered session (Q6 session A,
@@ -147,14 +149,30 @@ def _write_status(payload: Dict[str, Any]) -> None:
     )
 
 
+_STALE_LOCK_AGE_S = 24 * 3600  # no nightly run legitimately holds the lock
+                               # for a day — also guards against PID reuse
+
+
 def _lock_acquired() -> bool:
-    """Best-effort PID lockfile — a missed stale lock only risks overlap."""
+    """Best-effort PID lockfile.
+
+    A lock held by a *live* pid blocks; a stale one (dead pid, unreadable
+    content, or older than a day) is taken over. 2026-09-29: a Sep-13 lock
+    with a dead pid had silently skipped every nightly run for 16 days —
+    ``os.kill`` raising ``ProcessLookupError`` was swallowed by the blanket
+    ``except OSError`` and misreported as "lock held".
+    """
     try:
         if LOCK_PATH.exists():
-            pid = int(LOCK_PATH.read_text(encoding="utf-8").strip() or 0)
-            if pid and pid != os.getpid():
-                os.kill(pid, 0)   # raises if the pid is gone
-                return False
+            try:
+                pid = int(LOCK_PATH.read_text(
+                    encoding="utf-8").strip() or 0)
+            except ValueError:
+                pid = 0
+            if pid and pid != os.getpid() and _pid_alive(pid):
+                if (time.time() - LOCK_PATH.stat().st_mtime
+                        < _STALE_LOCK_AGE_S):
+                    return False    # live holder, fresh lock — real overlap
         LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
         LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
         return True
