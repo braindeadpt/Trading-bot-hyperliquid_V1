@@ -75,8 +75,10 @@ class JevJudge(Strategy):
         self.MIN_CONFIDENCE = float(cfg.get("min_confidence", 0.60))
         self.DECISION_TTL_MS = int(cfg.get("decision_ttl_ms", 90 * 60_000))
         self.BASE_SIZE_PCT = float(cfg.get("base_size_pct", 0.01))
-        # Exit geometry: SL = max(sl_pct_min, atr_mult * ATR%), TP = 2R
-        self.SL_PCT_MIN = float(cfg.get("sl_pct_min", 0.01))
+        # Exit geometry: SL = max(sl_pct_min, atr_mult * ATR%), TP = tp_r_mult x SL.
+        # 2026-10-04: floor 1% -> 0.5% (it won on all symbols — sl_atr_mult was
+        # dead code) and TP 2R -> 1R (2% TP unreachable inside a 4h hold).
+        self.SL_PCT_MIN = float(cfg.get("sl_pct_min", 0.005))
         self.SL_ATR_MULT = float(cfg.get("sl_atr_mult", 2.0))
         self.TP_R_MULT = float(cfg.get("tp_r_mult", 2.0))
         self.MAX_HOLD_MS = int(cfg.get("max_hold_hours", 4) * 3_600_000)

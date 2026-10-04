@@ -27,6 +27,7 @@ from src.research.phase08_preregister import (
     PreregisterManifestError,
     assert_experiment_paper_only,
 )
+from src.strategies.base import MarketEvent
 from src.strategies.factory import _instantiate_from_registry
 from src.strategies.jev_judge import JevJudge
 from src.utils.config import Config
@@ -234,6 +235,106 @@ def test_jev_verdict_feed_beat_uses_newest_file_ts(tmp_path, monkeypatch) -> Non
     TradingEngine._beat_jev_verdict_feed(_StubEngine())
     alerts = mon2.check(now_ms=now)
     assert len(alerts) == 1 and "jev_verdicts" in alerts[0]
+
+
+# ---------------------------------------------------------------------------
+# 4. Exit geometry (2026-10-04 fix) — SL floor must not be dead code, TP = 1R
+# ---------------------------------------------------------------------------
+#
+# Before: sl_pct_min=1% beat 2xATR (0.37-0.82%) on ALL symbols — the ATR
+# scaling never decided anything, and TP=2R was unreachable inside the 4h
+# hold (observed SL:TP exits 27:8). After: floor 0.5% is a fee-distance
+# sanity bound that ATR scaling exceeds on the volatile symbols, and
+# tp_r_mult=1.0 makes the barriers symmetric so the experiment measures
+# Jev's direction, not geometry luck.
+
+def _geometry_strategy(tmp_path, verdicts: dict, **cfg_over):
+    latest = tmp_path / "jev_latest.json"
+    latest.write_text(json.dumps(verdicts))
+    cfg = {
+        "_mode": "paper",
+        "latest_path": str(latest),
+        "min_confidence": 0.5,
+        "decision_ttl_ms": 90 * 60_000,
+        "base_size_pct": 0.01,
+        "sl_pct_min": 0.005,
+        "sl_atr_mult": 2.0,
+        "tp_r_mult": 1.0,
+        "max_hold_hours": 4,
+        **cfg_over,
+    }
+    return JevJudge(cfg)
+
+
+def _signal_for(strat: JevJudge, symbol: str, now_ms: int):
+    return strat.on_data(
+        MarketEvent(symbol=symbol, price=100.0, timestamp_ms=now_ms)
+    )
+
+
+@pytest.mark.unit
+def test_sl_varies_with_atr_not_constant_floor(tmp_path) -> None:
+    """REGRESSION: SL must differ across volatility regimes — a constant
+    value for every symbol means the floor won and sl_atr_mult is dead."""
+    now = int(time.time() * 1000)
+    strat = _geometry_strategy(tmp_path, {
+        "BTC": {"ts_ms": now, "action": "long", "confidence": 0.6,
+                "atr_pct_15m": 0.183},
+        "HYPE": {"ts_ms": now, "action": "long", "confidence": 0.6,
+                 "atr_pct_15m": 0.408},
+    })
+    btc = _signal_for(strat, "BTC", now)
+    hype = _signal_for(strat, "HYPE", now)
+    assert btc is not None and hype is not None
+    assert btc.stop_loss_pct == pytest.approx(0.005)     # floor binds (0.366% < 0.5%)
+    assert hype.stop_loss_pct == pytest.approx(0.00816)  # ATR decides (2x0.408%)
+    assert btc.stop_loss_pct != hype.stop_loss_pct
+
+
+@pytest.mark.unit
+def test_sl_floor_binds_only_below_half_percent(tmp_path) -> None:
+    """The 0.5% floor is a sanity bound, not the universal decider:
+    below it the floor wins, above it ATR scaling wins."""
+    now = int(time.time() * 1000)
+    strat = _geometry_strategy(tmp_path, {
+        "ETH": {"ts_ms": now, "action": "long", "confidence": 0.6,
+                "atr_pct_15m": 0.266},
+        "SOL": {"ts_ms": now, "action": "long", "confidence": 0.6,
+                "atr_pct_15m": 0.271},
+    })
+    eth = _signal_for(strat, "ETH", now)
+    sol = _signal_for(strat, "SOL", now)
+    assert eth.stop_loss_pct == pytest.approx(0.00532)   # 2x0.266% > 0.5%
+    assert sol.stop_loss_pct == pytest.approx(0.00542)   # 2x0.271% > 0.5%
+
+
+@pytest.mark.unit
+def test_tp_equals_sl_symmetric_barriers(tmp_path) -> None:
+    """tp_r_mult=1.0 -> TP == SL: symmetric barriers so the experiment
+    measures directional accuracy, not geometry luck."""
+    now = int(time.time() * 1000)
+    strat = _geometry_strategy(tmp_path, {
+        "BTC": {"ts_ms": now, "action": "short", "confidence": 0.6,
+                "atr_pct_15m": 0.183},
+    })
+    sig = _signal_for(strat, "BTC", now)
+    assert sig is not None
+    assert sig.take_profit_pct == pytest.approx(sig.stop_loss_pct)
+
+
+@pytest.mark.unit
+def test_geometry_regression_2r_would_still_be_configurable(tmp_path) -> None:
+    """Sanity: tp_r_mult is read from config (a future 2R experiment is a
+    config change, not a code change)."""
+    now = int(time.time() * 1000)
+    strat = _geometry_strategy(
+        tmp_path,
+        {"BTC": {"ts_ms": now, "action": "long", "confidence": 0.6,
+                 "atr_pct_15m": 0.183}},
+        tp_r_mult=2.0,
+    )
+    sig = _signal_for(strat, "BTC", now)
+    assert sig.take_profit_pct == pytest.approx(2.0 * sig.stop_loss_pct)
 
 
 @pytest.mark.unit

@@ -556,9 +556,13 @@ strategy:
                                     # (2026-09-20): low-conf half +64.14 vs high-conf half
                                     # -124.19, Spearman(conf,pnl)=-0.165, n=29 — and variable
                                     # size would contaminate the directional-accuracy read.
-    sl_pct_min: 0.01                # SL floor 1%
+    sl_pct_min: 0.005               # SL floor 0.5% — sanity bound on fee distance,
+                                    # not the decider (was 1%: won on ALL symbols,
+                                    # 2xATR 0.37-0.82% -> sl_atr_mult dead code)
     sl_atr_mult: 2.0                # or 2x ATR% if wider
-    tp_r_mult: 2.0                  # TP at 2R
+    tp_r_mult: 1.0                  # TP at 1R — symmetric barriers (2026-10-04
+                                    # geometry fix): 2R was unreachable in 4h,
+                                    # SL:TP observed 27:8 vs symmetric-read goal
     max_hold_hours: 4               # matches the 4h horizon asked of Jev
     flip_exit: true                 # close early if Jev flips direction
 
@@ -897,6 +901,11 @@ execution:
       - DonchianBreakout
       - VolatilityBreakout
       - CVDOrderFlow
+      - JevJudge                    # 4h-horizon hourly verdicts — no entry urgency;
+                                    # passive entry saves ~2/3 of the entry fee.
+                                    # CAVEAT: paper fills instantly at limit (no
+                                    # adverse-selection/missed-fill modelling) —
+                                    # saving is modelled, not measured.
 
 # ═══════════════════════════════════════════════════════════
 # External market data feeds (Phase 2)

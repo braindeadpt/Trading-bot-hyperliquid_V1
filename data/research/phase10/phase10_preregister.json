@@ -7,11 +7,11 @@
       "verdict": "EXPERIMENT"
     }
   ],
-  "config_hash": "65fb4a3f52a945d6",
+  "config_hash": "b5b5d62c50b551da",
   "execution_strategies": [
     "JevJudge"
   ],
-  "experiment_id": "f3a5554d-042f-4147-a679-4bd22fd35c25",
+  "experiment_id": "c826f004-c797-4209-b0f8-6969f40265b2",
   "gate_note": "All four criteria must be a real PASS (not merely 'no FAIL yet due to insufficient data') for the frozen window to be considered met. Drift in execution_strategies or config_hash after freeze invalidates the window \u2014 see assert_config_matches_preregister().",
   "gate_thresholds": {
     "expectancy_r_gt": 0.0,
@@ -19,17 +19,17 @@
     "min_profit_factor": 1.2,
     "min_trades": 100
   },
-  "in_sample_selection_note": "Shadow-scope prune + maker-variant evaluator only. JevJudge remains the sole paper execution control (owner-requested EXPERIMENT, zero evidence claimed). No promotion; mainnet still blocked. Accumulated OOS evidence intentionally retained.",
-  "manifest_hash": "00f386593456b6175df3a59a8c8496a8f69e479ebf7b3173961e2bc7150f04bc",
+  "in_sample_selection_note": "Geometry-fix re-registration. 90-trade geometry-v1 population archived separately (pre-fix window). JevJudge remains the sole paper execution control (EXPERIMENT, zero evidence); no promotion; mainnet blocked.",
+  "manifest_hash": "00eecaa359e5bcbb60633d4417974071c61eececdf614468915b03ddcd0a7885",
   "protocol": "phase10-frozen-window-v1",
-  "registered_at_ms": 1790694375922,
-  "reregistration_reason": "research observability-scope change only \u2014 strategy.phase08.shadow_strategies excluded from the config hash by path (same precedent as research.database / l2_recording: watch-list scope, not trading params). Shadow prune drops OrderBookScalper (net pf 0.21, n=25,002), TopTraderFlow (0.31, n=3,786), ChecklistMeta (0.63, n=157; -905USD/184t live), VWAPDeviation (0.52, n=28; -221USD/44t live) on decisive net-of-tier-0-fee evidence; historical shadow_decisions preserved. No strategy, risk, fee or execution_strategies change. OOS window PRESERVED.",
-  "supersedes_experiment_id": "66d3472f-3805-482f-99cf-640709e619ef",
+  "registered_at_ms": 1791124590903,
+  "reregistration_reason": "JevJudge exit-geometry fix (2026-10-04) \u2014 measurement correction, not a profit claim: sl_pct_min 1%->0.5% (floor beat 2xATR on all symbols; sl_atr_mult was dead code), tp_r_mult 2R->1R (2% TP unreachable in the 4h hold; observed SL:TP 27:8 mirrored the asymmetry), JevJudge added to maker_orders.strategies (passive entry; paper fill model is optimistic \u2014 saving modelled not measured). Directional accuracy ~47% on n=90 \u2014 no edge demonstrated; verdict stays EXPERIMENT. OOS window RESTARTED: trade economics changed, populations not poolable.",
+  "supersedes_experiment_id": "f3a5554d-042f-4147-a679-4bd22fd35c25",
   "window": {
-    "max_end_ms": 1796951615461,
+    "max_end_ms": 1798382190903,
     "max_weeks": 12,
-    "min_end_ms": 1794532415461,
+    "min_end_ms": 1795962990903,
     "min_weeks": 8
   },
-  "window_start_ms": 1789694015461
+  "window_start_ms": 1791124590903
 }

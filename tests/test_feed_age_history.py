@@ -336,9 +336,9 @@ class TestHashNeutral:
         from src.utils.config import compute_config_hash, load_config
 
         cfg = load_config(str(ROOT / "config" / "settings.yaml"))
-        # 2026-09-29 re-registration: shadow-strategy prune + hash-neutral
-        # shadow_strategies exclusion (OOS window preserved).
-        assert compute_config_hash(cfg) == "65fb4a3f52a945d6"
+        # 2026-10-04 re-registration: JevJudge exit-geometry fix (sl floor
+        # 0.5%, TP 1R symmetric, maker entry) — OOS window restarted.
+        assert compute_config_hash(cfg) == "b5b5d62c50b551da"
 
 
 class TestStartFromConfig:
