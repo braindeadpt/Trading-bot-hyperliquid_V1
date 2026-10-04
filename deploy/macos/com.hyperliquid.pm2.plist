@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Boot-time `pm2 resurrect` for the hyperliquid bot.
+
+  Lives in /Library/LaunchDaemons (system domain) so it fires at boot WITHOUT
+  a GUI login — the existing ~/Library/LaunchAgents/pm2.noder.plist only runs
+  when noder logs in.
+
+  UserName=noder deliberately: a LaunchDaemon defaults to root, and root pm2
+  would (a) write root-owned files under ~noder and (b) fight the user's pm2
+  CLI over the same PM2_HOME socket. Root-domain file + noder execution gives
+  boot persistence without either problem.
+
+  No KeepAlive on purpose: `pm2 resurrect` is a one-shot that exits after
+  spawning the daemon; KeepAlive would relaunch it and bounce every process.
+
+  Install (on the Mac, requires sudo — not automated):
+    sudo cp deploy/macos/com.hyperliquid.pm2.plist /Library/LaunchDaemons/
+    sudo chown root:wheel /Library/LaunchDaemons/com.hyperliquid.pm2.plist
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.hyperliquid.pm2.plist
+
+  Verify after install:
+    sudo launchctl print system/com.hyperliquid.pm2
+    pm2 ls                      # as noder — daemon resurrected, apps online
+
+  After the FIRST verified boot, disable the redundant login-time agent so a
+  later login does not resurrect a second time (pm2 tolerates it, but it
+  restarts every process):
+    launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/pm2.noder.plist
+    mv ~/Library/LaunchAgents/pm2.noder.plist{,.disabled}
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hyperliquid.pm2</string>
+    <key>UserName</key>
+    <string>noder</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>/Users/noder/meridian/runtime/node22/lib/node_modules/pm2/bin/pm2 resurrect</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/noder</string>
+        <key>PM2_HOME</key>
+        <string>/Users/noder/.pm2</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/noder/meridian/runtime/node22/bin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>LaunchOnlyOnce</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/com.hyperliquid.pm2.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/com.hyperliquid.pm2.err</string>
+</dict>
+</plist>
