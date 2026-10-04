@@ -5,14 +5,29 @@ from __future__ import annotations
 
 import asyncio
 import aiohttp
+import json
 import logging
 from dataclasses import dataclass
-from typing import Optional
-from datetime import datetime
+from pathlib import Path
+from typing import Optional, Tuple
+from datetime import datetime, timezone
 
 from src.utils.http import make_client_session
 
 logger = logging.getLogger("alerts")
+
+# Retry policy: a single transient failure must not cost an alert. The Mac
+# host's uplink degrades under load (2026-10-04: ~40 TCP resets/day to
+# api.telegram.org while the box was saturated), so every send retries with
+# backoff before being declared lost.
+_TELEGRAM_RETRY_DELAYS_S: Tuple[float, ...] = (0, 5, 15, 45)
+_DISCORD_RETRY_DELAYS_S: Tuple[float, ...] = (0, 5, 15)
+
+# Permanently undeliverable alerts land here — one JSONL record each, so a
+# lost alert is a greppable file entry instead of thin air.
+_DEADLETTER_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "live" / "alert_deadletter.log"
+)
 
 @dataclass
 class AlertConfig:
@@ -66,8 +81,82 @@ class AlertNotifier:
         """Alias for send() — used by engine callers."""
         await self.send(message, level)
 
+    async def _post_once(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        payload: dict,
+        label: str,
+        attempt: int,
+        total: int,
+        timeout_s: float = 30,
+    ) -> bool:
+        """One delivery attempt. Returns True on HTTP 2xx; logs and returns
+        False otherwise so the caller can decide whether to retry."""
+        try:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=timeout_s)) as resp:
+                if 200 <= resp.status < 300:
+                    if attempt > 1:
+                        logger.info("%s alert sent on attempt %d/%d", label, attempt, total)
+                    else:
+                        logger.debug("%s alert sent", label)
+                    return True
+                body = await resp.text()
+                logger.warning(
+                    "%s alert HTTP %s (attempt %d/%d): %s",
+                    label, resp.status, attempt, total, body[:200],
+                )
+        except Exception as exc:
+            logger.warning(
+                "%s alert attempt %d/%d failed: %r", label, attempt, total, exc
+            )
+        return False
+
+    def _deadletter(self, channel: str, message: str) -> None:
+        """Persist an alert that exhausted all retries — best-effort, never
+        raises inside the alert path."""
+        try:
+            _DEADLETTER_PATH.parent.mkdir(parents=True, exist_ok=True)
+            rec = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "channel": channel,
+                "message": message,
+            }
+            with _DEADLETTER_PATH.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec) + "\n")
+        except Exception:
+            logger.exception("deadletter write failed")
+
+    async def _send_with_retries(
+        self,
+        channel: str,
+        url: str,
+        payload: dict,
+        delays,
+        message: str,
+        *,
+        session: Optional[aiohttp.ClientSession] = None,
+        timeout_s: float = 30,
+    ) -> None:
+        """Bounded retry loop shared by the channel senders. `session` is the
+        pooled client (Telegram); when None a fresh session is used per
+        attempt (Discord)."""
+        label = channel.capitalize()
+        for attempt, delay in enumerate(delays, 1):
+            if delay:
+                await asyncio.sleep(delay)
+            if session is not None:
+                if await self._post_once(session, url, payload, label, attempt, len(delays), timeout_s):
+                    return
+            else:
+                async with make_client_session() as s:
+                    if await self._post_once(s, url, payload, label, attempt, len(delays), timeout_s):
+                        return
+        logger.error("%s alert LOST after %d attempts", label, len(delays))
+        self._deadletter(channel, message)
+
     async def _send_telegram(self, message: str) -> None:
-        """Send message via Telegram Bot API."""
+        """Send message via Telegram Bot API, retrying transient failures."""
         try:
             session = await self._get_session()
             url = f"https://api.telegram.org/bot{self.cfg.telegram_bot_token}/sendMessage"
@@ -77,30 +166,20 @@ class AlertNotifier:
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
             }
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    logger.warning("Telegram alert failed: %s %s", resp.status, body)
-                else:
-                    logger.debug("Telegram alert sent")
+            await self._send_with_retries(
+                "telegram", url, payload, _TELEGRAM_RETRY_DELAYS_S, message,
+                session=session,
+            )
         except Exception:
             logger.exception("Telegram alert error")
 
     async def _send_discord(self, message: str) -> None:
-        """Send message via Discord webhook."""
+        """Send message via Discord webhook, retrying transient failures."""
         try:
-            payload = {"content": message}
-            async with make_client_session() as session:
-                async with session.post(
-                    self.cfg.discord_webhook_url,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status not in (200, 204):
-                        body = await resp.text()
-                        logger.warning("Discord alert failed: %s %s", resp.status, body)
-                    else:
-                        logger.debug("Discord alert sent")
+            await self._send_with_retries(
+                "discord", self.cfg.discord_webhook_url, {"content": message},
+                _DISCORD_RETRY_DELAYS_S, message, timeout_s=10,
+            )
         except Exception:
             logger.exception("Discord alert error")
 

@@ -229,5 +229,105 @@ class TestMarketEvent(unittest.TestCase):
         self.assertEqual(e.symbol, "BTC")
 
 
+class TestAlertRetry(unittest.TestCase):
+    """Retry resilience for _send_telegram — a single TCP reset on a
+    congested host must not cost the alert (2026-10-04: ~40 resets/day)."""
+
+    class _FakeResp:
+        def __init__(self, status):
+            self.status = status
+
+        async def text(self):
+            return "err"
+
+    class _FakeCM:
+        def __init__(self, resp=None, exc=None):
+            self.resp = resp
+            self.exc = exc
+
+        async def __aenter__(self):
+            if self.exc:
+                raise self.exc
+            return self.resp
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakeSession:
+        """post() replays the scripted outcomes — an int is an HTTP status,
+        an exception is a connection-level failure."""
+        def __init__(self, outcomes):
+            self.outcomes = list(outcomes)
+            self.calls = 0
+            self.closed = False
+
+        def post(self, *a, **k):
+            outcome = self.outcomes[min(self.calls, len(self.outcomes) - 1)]
+            self.calls += 1
+            if isinstance(outcome, Exception):
+                return TestAlertRetry._FakeCM(exc=outcome)
+            return TestAlertRetry._FakeCM(resp=TestAlertRetry._FakeResp(outcome))
+
+    def _notifier(self, outcomes):
+        import asyncio
+        cfg = AlertConfig(
+            enabled=True,
+            telegram_bot_token="t",
+            telegram_chat_id="c",
+        )
+        notifier = AlertNotifier(cfg)
+        session = self._FakeSession(outcomes)
+        return notifier, session, asyncio
+
+    def _send(self, notifier, session, message):
+        return notifier._send_with_retries(
+            "telegram", "https://example.invalid/send", {"text": message},
+            (0, 0, 0, 0), message, session=session,
+        )
+
+    def test_telegram_retries_after_reset(self):
+        """reset -> reset -> 200: the alert is delivered, not dropped."""
+        notifier, session, asyncio = self._notifier(
+            [ConnectionResetError(54, "reset"), ConnectionResetError(54, "reset"), 200]
+        )
+        asyncio.run(self._send(notifier, session, "test"))
+        self.assertEqual(session.calls, 3)
+
+    def test_telegram_deadletters_after_all_retries_fail(self):
+        """All attempts fail -> alert lands in the deadletter file, not the void."""
+        import json as _json
+        from unittest.mock import patch
+        import tempfile
+        from pathlib import Path
+
+        notifier, session, asyncio = self._notifier(
+            [ConnectionResetError(54, "reset")] * 4
+        )
+        with tempfile.TemporaryDirectory() as td:
+            dl = Path(td) / "dl.log"
+            with patch("src.alerts.notifier._DEADLETTER_PATH", dl):
+                asyncio.run(self._send(notifier, session, "lost-msg"))
+            self.assertEqual(session.calls, 4)
+            lines = dl.read_text().strip().split("\n")
+            self.assertEqual(len(lines), 1)
+            rec = _json.loads(lines[0])
+            self.assertEqual(rec["channel"], "telegram")
+            self.assertIn("lost-msg", rec["message"])
+
+    def test_telegram_first_attempt_success_no_deadletter(self):
+        """Clean path: one call, no deadletter side effects."""
+        from unittest.mock import patch
+        import tempfile
+        from pathlib import Path
+
+        notifier, session, asyncio = self._notifier([200])
+        with tempfile.TemporaryDirectory() as td:
+            dl = Path(td) / "dl.log"
+            with patch("src.alerts.notifier._DEADLETTER_PATH", dl):
+                asyncio.run(self._send(notifier, session, "ok"))
+            self.assertEqual(session.calls, 1)
+            self.assertFalse(dl.exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
