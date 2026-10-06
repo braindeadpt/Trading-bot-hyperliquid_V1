@@ -83,9 +83,15 @@ def _open_db(path: Path) -> sqlite3.Connection:
     conn.execute(
         f"CREATE INDEX IF NOT EXISTS idx_ttf_coin_time ON {TABLE}(coin, time_ms);"
     )
-    conn.execute(
-        f"CREATE INDEX IF NOT EXISTS idx_ttf_wallet_time ON {TABLE}(wallet, time_ms);"
-    )
+    # idx_ttf_wallet_time (wallet, time_ms) is deliberately NOT created. Measured
+    # 2026-10-06 with dbstat on a 14 GB research DB: it weighed 1.33 GB (9.5% of
+    # the file, ~74 MB/day) because every key carries a 42-char wallet address,
+    # versus 0.31 GB for idx_ttf_coin_time. No code reads this table by wallet:
+    # the only consumer (wallet_markout_screen.py) filters on coin, and this
+    # collector only INSERT OR IGNOREs against the UNIQUE(wallet, tid, hash)
+    # autoindex. If a per-wallet reader is ever added, recreate it then.
+    # Leaving the CREATE here would silently rebuild the index on the next
+    # hourly --once run after a DROP.
     conn.commit()
     return conn
 
