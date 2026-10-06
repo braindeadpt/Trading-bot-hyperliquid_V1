@@ -12,10 +12,11 @@
 // wrappers are versioned in deploy/macos/ — copy them to the app dir on a
 // fresh host.
 //
-// Only `hyperliquid` is a long-running service. Everything else is a cron job:
-// autorestart false + cron_restart, so pm2 fires it on schedule and leaves it
-// `stopped` in between — a high restart count on those rows is the number of
-// scheduled fires, not failures.
+// `hyperliquid` and `jev-judge` are long-running services. The rest are cron
+// jobs: autorestart false + cron_restart, so pm2 fires them on schedule and
+// leaves them `stopped` in between — a high restart count on those rows is
+// the number of scheduled fires, not failures. jev-judge was converted to a
+// loop after pm2's cron_restart dropped its timer twice (see its entry).
 
 const CWD = __dirname;
 
@@ -88,9 +89,40 @@ module.exports = {
     // Jev verdict feeder — the macOS equivalent of the Windows scheduled task
     // Hyperliquid-Jev-Shadow. Refreshes data/live/jev_latest.json, a contracted
     // feed (jev_verdicts) on the FeedSilenceMonitor: if this stops, the bot
-    // alerts. The script asks Jev at most 1x/hour/symbol, so most 5-minute
-    // fires are no-ops by design.
-    cron('jev-judge', 'run_jev_judge.sh', '*/5 * * * *'),
+    // alerts.
+    //
+    // LONG-RUNNING LOOP, not a cron job. pm2's cron_restart lost the timer
+    // twice (2026-10-03 23:25, 2026-10-05 16:25): pm2.log shows
+    // "exited with code [1] via signal [SIGINT]" + "stale exit event
+    // ignored" at the fire minute, then the app stayed `stopped` with no
+    // further fires — jev_latest.json froze for 27h before a manual
+    // `pm2 restart`. The wrapper now loops internally (pass -> sleep 300 ->
+    // pass) with a file-lock singleton and a bounded pass; pm2 only needs
+    // to keep the process alive, which is the code path that is actually
+    // reliable.
+    {
+      name: 'jev-judge',
+      script: 'run_jev_judge.sh',
+      cwd: CWD,
+      interpreter: 'bash',
+      exec_mode: 'fork',
+      instances: 1,
+      autorestart: true,
+      merge_logs: true,
+      out_file: `${LOGS}/jev-judge-out.log`,
+      error_file: `${LOGS}/jev-judge-error.log`,
+
+      // Generous on purpose: the pass cadence is 5 min and the Jev ask
+      // interval is 1h/symbol, so even several consecutive crashes heal
+      // long before the feed contract is threatened. A lock-contention
+      // exit (clean 0 while an old copy is still dying) also lands here —
+      // 2 min later it acquires the lock and continues.
+      restart_delay: 120000,
+      kill_timeout: 15000,
+
+      // Same rationale as `hyperliquid`: no max_restarts cap — a silently
+      // capped feeder freezes the only executing strategy's input.
+    },
 
     cron('wallet-fills', 'run_wallet_fills.sh', '7 * * * *'),
     cron('outcome-eval', 'run_outcome_eval.sh', '20 */3 * * *'),
