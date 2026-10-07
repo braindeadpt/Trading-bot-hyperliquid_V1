@@ -413,6 +413,24 @@ An entry becomes READY only after the family is wired and reviewed.
   all-DISCARD -> cohort effect does not survive costs; either way the
   collector keeps running (data is cheap, markouts feed future work).
 
+- **AMENDMENT 2026-10-07 — Phase A closed: FAIL.** The "data is cheap"
+  assumption above was invalidated by measurement: the collector cost
+  ~325 MB/day (`top_trader_fills` table + autoindex + `idx_ttf_coin_time`
+  + the now-dropped `idx_ttf_wallet_time`, dbstat over dated backups;
+  ~305K rows/24h) of the ~444 MB/day total research-DB growth. The
+  `wallet-fills` pm2 app was stopped and deleted (definition preserved
+  in `ecosystem.config.js`). Phase A was then run under a fixed
+  pre-registered methodology (usable window = candle coverage ∩ fill
+  range clipped by the 1h horizon; per-symbol gap audit; 10,000-perm
+  diagnostics) — `docs/Q13_PHASE_A_RESULT_2026-10-07.md`. Result:
+  **rho = +0.055 / −0.070 / −0.255 at 5m/15m/1h, n_wallets = 53/51/53 —
+  rho < 0.30 at every horizon with sufficient n → FAIL.**
+  Q13 is dead; Phase B not unlocked. The collector stays OFF unless the
+  owner explicitly decides otherwise; restart would need a new question,
+  not inertia. Caveat (audit 2026-10-07, see the result doc): the split boundary
+  fell inside the 124.7h migration gap, so scored half 2 spans ~8 days vs ~8.5
+  months for half 1 — reduced power; verdict by the pre-registered rule stands.
+
 
 ## Q14 — vwap_fade_oir_liq: order-flow gates on VWAP fades — CLOSED (2026-09-17)
 
