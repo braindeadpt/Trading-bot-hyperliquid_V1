@@ -1044,7 +1044,7 @@ research:
     path: E:/hyperliquid_research/hyperliquid.db
   strict_mode: true
   continuous_sampling_enabled: true
-  ws_microstructure_enabled: true    # DataBus trade + orderbook → research DB
+  ws_microstructure_enabled: false   # OFF 2026-10-07: tape ~115 MB/day + recorder ~18, no live/backtest consumer (reregister_phase10_tape_off.py)
   rest_sampling_enabled: false       # 60s REST poll — NOT Tier A; do not enable
   dvol_feed:                         # Deribit DVOL daily → research DB (IV gate)
     enabled: true

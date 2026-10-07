@@ -7,11 +7,11 @@
       "verdict": "EXPERIMENT"
     }
   ],
-  "config_hash": "b5b5d62c50b551da",
+  "config_hash": "4077927fec6a880c",
   "execution_strategies": [
     "JevJudge"
   ],
-  "experiment_id": "c826f004-c797-4209-b0f8-6969f40265b2",
+  "experiment_id": "ed6ef269-f0e6-44e8-8b02-4a2a7c7a57de",
   "gate_note": "All four criteria must be a real PASS (not merely 'no FAIL yet due to insufficient data') for the frozen window to be considered met. Drift in execution_strategies or config_hash after freeze invalidates the window \u2014 see assert_config_matches_preregister().",
   "gate_thresholds": {
     "expectancy_r_gt": 0.0,
@@ -19,12 +19,12 @@
     "min_profit_factor": 1.2,
     "min_trades": 100
   },
-  "in_sample_selection_note": "Geometry-fix re-registration. 90-trade geometry-v1 population archived separately (pre-fix window). JevJudge remains the sole paper execution control (EXPERIMENT, zero evidence); no promotion; mainnet blocked.",
-  "manifest_hash": "00eecaa359e5bcbb60633d4417974071c61eececdf614468915b03ddcd0a7885",
+  "in_sample_selection_note": "Tape-off only. JevJudge remains the sole paper execution control (owner-requested EXPERIMENT, zero evidence claimed). No promotion; mainnet still blocked. Accumulated OOS evidence intentionally retained.",
+  "manifest_hash": "b28275490af047e7ce175fcc7cd12933af5002d633dc174e0f19e2a41cea2789",
   "protocol": "phase10-frozen-window-v1",
-  "registered_at_ms": 1791124590903,
-  "reregistration_reason": "JevJudge exit-geometry fix (2026-10-04) \u2014 measurement correction, not a profit claim: sl_pct_min 1%->0.5% (floor beat 2xATR on all symbols; sl_atr_mult was dead code), tp_r_mult 2R->1R (2% TP unreachable in the 4h hold; observed SL:TP 27:8 mirrored the asymmetry), JevJudge added to maker_orders.strategies (passive entry; paper fill model is optimistic \u2014 saving modelled not measured). Directional accuracy ~47% on n=90 \u2014 no edge demonstrated; verdict stays EXPERIMENT. OOS window RESTARTED: trade economics changed, populations not poolable.",
-  "supersedes_experiment_id": "f3a5554d-042f-4147-a679-4bd22fd35c25",
+  "registered_at_ms": 1791370424578,
+  "reregistration_reason": "research cost reduction \u2014 stop WS trade_tape collection (research.ws_microstructure_enabled: false; ~103 MB/day measured, no runtime or backtest consumer since CVDOrderFlow retired 2026-09-10). Collateral: l2_snapshots/microstructure_gaps/feed_health_snapshots stop too (same recorder). market_data.l2_recording untouched. config_hash legitimately drifts \u2014 OOS window PRESERVED.",
+  "supersedes_experiment_id": "c826f004-c797-4209-b0f8-6969f40265b2",
   "window": {
     "max_end_ms": 1798382190903,
     "max_weeks": 12,

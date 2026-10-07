@@ -6,9 +6,10 @@ startup). These tests fail the CI suite the same way the bot would refuse
 to boot:
 
   * ``compute_config_hash`` over the real ``config/settings.yaml`` must be
-    exactly ``b5b5d62c50b551da`` (the frozen Fase 10 hash — re-registered
-    2026-10-04 for the JevJudge exit-geometry fix: sl floor 1%->0.5%,
-    TP 2R->1R symmetric, maker entry; OOS window RESTARTED), and
+    exactly ``4077927fec6a880c`` (the frozen Fase 10 hash — re-registered
+    2026-10-07 for tape-off: research.ws_microstructure_enabled false,
+    OOS window PRESERVED from the 2026-10-04 JevJudge exit-geometry
+    re-registration: sl floor 1%->0.5%, TP 2R->1R symmetric, maker entry), and
   * the Fase 08 / Fase 10 ``assert_config_matches_preregister`` must not
     raise (they check the frozen execution-strategy set and the full
     config hash against the on-disk manifests).
@@ -30,7 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 SETTINGS_PATH = os.path.join(ROOT, "config", "settings.yaml")
 
-FROZEN_FASE10_HASH = "b5b5d62c50b551da"
+FROZEN_FASE10_HASH = "4077927fec6a880c"
 
 pytestmark = pytest.mark.unit
 

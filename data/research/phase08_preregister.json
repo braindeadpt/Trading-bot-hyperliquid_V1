@@ -13,7 +13,7 @@
       "verdict": "EXPERIMENT"
     }
   ],
-  "config_hash": "b5b5d62c50b551da",
+  "config_hash": "4077927fec6a880c",
   "edge_demonstrated": false,
   "execution_scope": {
     "mode": "paper",
@@ -29,10 +29,10 @@
       "JevJudge"
     ]
   },
-  "experiment_id": "d54e4067-4300-4974-adb0-25d11cd0edd9",
+  "experiment_id": "b1c97a45-4567-4a16-9f72-f9d5fe45c340",
   "fidelity_note": "tier_a_hl_ohlc certifies Hyperliquid OHLC data availability only; it does not certify strategy edge.",
-  "in_sample_selection_note": "Geometry-fix re-registration. 90-trade geometry-v1 population archived separately (pre-fix window). JevJudge remains the sole paper execution control (EXPERIMENT, zero evidence); no promotion; mainnet blocked.",
-  "manifest_hash": "3d31a548a27ccfbac4aae0b8b09fe86b920688a006d850d0120f16cfd9c7d5e9",
+  "in_sample_selection_note": "Tape-off only. JevJudge remains the sole paper execution control (owner-requested EXPERIMENT, zero evidence claimed). No promotion; mainnet still blocked. Accumulated OOS evidence intentionally retained.",
+  "manifest_hash": "d00cb7dbcb1708bd02341787125a210aa098fe7bace388ac0b8e957e4471f242",
   "oos_protocol": "phase06-train-val-test-v1",
   "oos_status": "pending",
   "protocol": "phase08-preregister-v2",
@@ -56,8 +56,8 @@
       "low_vol"
     ]
   },
-  "registered_at_ms": 1791124590922,
-  "reregistration_reason": "JevJudge exit-geometry fix (2026-10-04) \u2014 measurement correction, not a profit claim: sl_pct_min 1%->0.5% (floor beat 2xATR on all symbols; sl_atr_mult was dead code), tp_r_mult 2R->1R (2% TP unreachable in the 4h hold; observed SL:TP 27:8 mirrored the asymmetry), JevJudge added to maker_orders.strategies (passive entry; paper fill model is optimistic \u2014 saving modelled not measured). Directional accuracy ~47% on n=90 \u2014 no edge demonstrated; verdict stays EXPERIMENT. OOS window RESTARTED: trade economics changed, populations not poolable.",
+  "registered_at_ms": 1791370424591,
+  "reregistration_reason": "research cost reduction \u2014 stop WS trade_tape collection (research.ws_microstructure_enabled: false; ~103 MB/day measured, no runtime or backtest consumer since CVDOrderFlow retired 2026-09-10). Collateral: l2_snapshots/microstructure_gaps/feed_health_snapshots stop too (same recorder). market_data.l2_recording untouched. config_hash legitimately drifts \u2014 OOS window PRESERVED.",
   "strategies": {
     "ChecklistMeta": {
       "expected_max_signals_per_symbol_per_week": 1344.0,
@@ -142,5 +142,5 @@
       "signal_throttle_ms": 1800000
     }
   },
-  "supersedes_experiment_id": "5b5d9b4c-c8c2-421c-8b01-223ed175fbdb"
+  "supersedes_experiment_id": "d54e4067-4300-4974-adb0-25d11cd0edd9"
 }

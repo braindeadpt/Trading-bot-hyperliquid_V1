@@ -338,7 +338,7 @@ class TestHashNeutral:
         cfg = load_config(str(ROOT / "config" / "settings.yaml"))
         # 2026-10-04 re-registration: JevJudge exit-geometry fix (sl floor
         # 0.5%, TP 1R symmetric, maker entry) — OOS window restarted.
-        assert compute_config_hash(cfg) == "b5b5d62c50b551da"
+        assert compute_config_hash(cfg) == "4077927fec6a880c"
 
 
 class TestStartFromConfig:
