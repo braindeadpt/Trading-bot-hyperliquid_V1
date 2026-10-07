@@ -9,9 +9,13 @@ top tail predicts short-horizon returns. Our existing bias feed only
 stores per-symbol aggregate POSITION snapshots — this collector adds the
 per-fill granularity the markout methodology needs.
 
-Data path: POST /info {"type":"userFills","user":addr} is public and
-returns each wallet's recent fills including the ``crossed`` flag
-(taker/maker) and L1 tx hash. Dedup by (wallet, tid, hash).
+Data path: POST /info {"type":"userFillsByTime","user":addr,
+"startTime":ms} is public and returns each wallet's fills in the window,
+oldest-first, capped at 2000 rows/call. A per-wallet cursor
+(``wallet_fills_cursor.max_time_ms``) pages forward incrementally with a
+60s overlap; the cursor commits in the SAME transaction as the page's
+inserts, so a SIGINT mid-pass loses at most the uncommitted page and the
+next pass resumes — no loss, no duplicates (UNIQUE dedups the overlap).
 
 Runs self-contained: reads the same wallets file the live tracker
 refreshes (data/research/top_traders.json), writes to the configured
@@ -34,7 +38,7 @@ import time
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -46,6 +50,23 @@ from src.utils.config import load_config  # noqa: E402
 INFO_URL = "https://api.hyperliquid.xyz/info"
 WALLETS_PATH = ROOT / "data" / "research" / "top_traders.json"
 TABLE = "top_trader_fills"
+CURSOR_TABLE = "wallet_fills_cursor"
+
+# userFillsByTime returns the OLDEST 2000 fills in [startTime, endTime),
+# ascending (verified against mainnet 2026-10-06). Page forward by
+# re-requesting startTime = last page's max time_ms — the boundary row
+# refetches and dedups.
+PAGE_CAP = 2000
+# Refetch this far behind the cursor — tolerates late-arriving rows and
+# guarantees the page-boundary row is re-checked. UNIQUE dedups.
+OVERLAP_MS = 60_000
+# A wallet mid-backfill must not eat the whole pass: each wallet gets at
+# most this many pages per pass; the cursor makes the rest resumable.
+MAX_PAGES_PER_WALLET = 10
+# Stop serving new wallets this many seconds into a --once pass so the run
+# exits cleanly before the hourly cron's SIGINT instead of dying mid-fetch
+# mid-page. Unserved wallets resume next pass (cursor sort is fair).
+MAX_PASS_SEC = 45 * 60
 
 CREATE_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -69,6 +90,14 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
 );
 """
 
+CURSOR_SQL = f"""
+CREATE TABLE IF NOT EXISTS {CURSOR_TABLE} (
+    wallet        TEXT PRIMARY KEY,
+    max_time_ms   INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+"""
+
 
 def _research_db_path() -> Path:
     cfg = load_config(ROOT / "config" / "settings.yaml")
@@ -80,6 +109,7 @@ def _open_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(CREATE_SQL)
+    conn.execute(CURSOR_SQL)
     conn.execute(
         f"CREATE INDEX IF NOT EXISTS idx_ttf_coin_time ON {TABLE}(coin, time_ms);"
     )
@@ -117,6 +147,25 @@ def _load_wallets() -> List[str]:
     return out
 
 
+def _read_body(r, budget_sec: float) -> bytes:
+    """Read a response body with a TOTAL wall-clock budget. urllib's
+    timeout is per socket recv — a server slow-dripping a multi-MB body
+    (observed: leaderboard GET stalled a whole pass >7 min on the
+    congested Mac host, 2026-10-06) never trips it. Chunked reads let us
+    cut the transfer when the total budget expires."""
+    chunks: List[bytes] = []
+    t0 = time.monotonic()
+    while True:
+        chunk = r.read(1 << 20)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        if time.monotonic() - t0 > budget_sec:
+            raise TimeoutError(
+                f"body read exceeded {budget_sec:.0f}s total budget"
+            )
+
+
 def _leaderboard_rows() -> List[Dict[str, Any]]:
     try:
         req = urllib.request.Request(
@@ -124,7 +173,7 @@ def _leaderboard_rows() -> List[Dict[str, Any]]:
             headers={"User-Agent": "hl-premium-bot/wallet-fills-collector"},
         )
         with urllib.request.urlopen(req, timeout=60) as r:
-            data = json.loads(r.read().decode())
+            data = json.loads(_read_body(r, 120).decode())
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
         print(f"wallet_fills: leaderboard fetch failed: {exc}")
         return []
@@ -166,15 +215,26 @@ def _universe(tracked_only: bool) -> List[str]:
     return sorted(wallets)
 
 
-def _fetch_fills(wallet: str, *, retries: int = 3) -> Optional[List[Dict[str, Any]]]:
-    body = json.dumps({"type": "userFills", "user": wallet}).encode()
+def _fetch_fills_by_time(
+    wallet: str, start_ms: int, *, retries: int = 3
+) -> Optional[List[Dict[str, Any]]]:
+    """One userFillsByTime page: oldest <=2000 fills in [start_ms, now),
+    ascending. None on failure (caller keeps the cursor and retries the
+    same window next pass)."""
+    body = json.dumps(
+        {"type": "userFillsByTime", "user": wallet, "startTime": int(start_ms)}
+    ).encode()
     for attempt in range(retries):
         req = urllib.request.Request(
             INFO_URL, data=body, headers={"Content-Type": "application/json"}
         )
         try:
-            with urllib.request.urlopen(req, timeout=20) as r:
-                data = json.loads(r.read().decode())
+            # Generous TOTAL budget: on the congested Mac host a 2000-row
+            # page slow-drips for 30-70s and still delivers (measured
+            # 2026-10-06). Killing it earlier just restarts the drip; the
+            # socket timeout alone is per-recv and never trips on a drip.
+            with urllib.request.urlopen(req, timeout=90) as r:
+                data = json.loads(_read_body(r, 240).decode())
             return data if isinstance(data, list) else None
         except urllib.error.HTTPError as exc:
             if exc.code == 429 and attempt < retries - 1:
@@ -188,63 +248,164 @@ def _fetch_fills(wallet: str, *, retries: int = 3) -> Optional[List[Dict[str, An
     return None
 
 
-def _insert_fills(conn: sqlite3.Connection, wallet: str,
-                  fills: List[Dict[str, Any]]) -> int:
+def _fill_row(wallet: str, f: Dict[str, Any], ingested: int):
+    try:
+        return (
+            wallet,
+            str(f["coin"]).upper(),
+            str(f["side"]),
+            float(f["px"]),
+            float(f["sz"]),
+            int(f["time"]),
+            1 if f.get("crossed") else 0,
+            str(f.get("dir") or ""),
+            float(f["closedPnl"]) if f.get("closedPnl") not in (None, "") else None,
+            float(f["fee"]) if f.get("fee") not in (None, "") else None,
+            int(f["oid"]) if f.get("oid") is not None else None,
+            int(f["tid"]) if f.get("tid") is not None else None,
+            str(f.get("hash") or ""),
+            int(f["twapId"]) if f.get("twapId") is not None else None,
+            ingested,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _apply_page(
+    conn: sqlite3.Connection, wallet: str, fills: List[Dict[str, Any]]
+) -> Tuple[int, Optional[int]]:
+    """Insert one fetched page AND advance the wallet cursor in the same
+    transaction. A kill between the two is impossible: either the page and
+    the new cursor commit together, or both roll back and the next pass
+    refetches the window (deduped). Returns (inserted, page_max)."""
     ingested = int(time.time() * 1000)
-    rows = []
+    rows = [r for r in (_fill_row(wallet, f, ingested) for f in fills) if r]
+    times = []
     for f in fills:
         try:
-            rows.append((
-                wallet,
-                str(f["coin"]).upper(),
-                str(f["side"]),
-                float(f["px"]),
-                float(f["sz"]),
-                int(f["time"]),
-                1 if f.get("crossed") else 0,
-                str(f.get("dir") or ""),
-                float(f["closedPnl"]) if f.get("closedPnl") not in (None, "") else None,
-                float(f["fee"]) if f.get("fee") not in (None, "") else None,
-                int(f["oid"]) if f.get("oid") is not None else None,
-                int(f["tid"]) if f.get("tid") is not None else None,
-                str(f.get("hash") or ""),
-                int(f["twapId"]) if f.get("twapId") is not None else None,
-                ingested,
-            ))
+            times.append(int(f["time"]))
         except (KeyError, TypeError, ValueError):
             continue
-    if not rows:
-        return 0
-    cur = conn.executemany(
-        f"""INSERT OR IGNORE INTO {TABLE}
-            (wallet, coin, side, px, sz, time_ms, crossed, dir, closed_pnl,
-             fee, oid, tid, hash, twap_id, ingested_at_ms)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        rows,
-    )
-    conn.commit()
-    return cur.rowcount
+    if not times:
+        return 0, None  # unusable page — leave the cursor where it is
+    page_max = max(times)
+    with conn:  # atomic: rows + cursor commit or roll back together
+        inserted = 0
+        if rows:
+            cur = conn.executemany(
+                f"""INSERT OR IGNORE INTO {TABLE}
+                    (wallet, coin, side, px, sz, time_ms, crossed, dir,
+                     closed_pnl, fee, oid, tid, hash, twap_id, ingested_at_ms)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                rows,
+            )
+            inserted = cur.rowcount
+        conn.execute(
+            f"""INSERT INTO {CURSOR_TABLE} (wallet, max_time_ms, updated_at_ms)
+                VALUES (?,?,?)
+                ON CONFLICT(wallet) DO UPDATE SET
+                    max_time_ms = MAX({CURSOR_TABLE}.max_time_ms,
+                                      excluded.max_time_ms),
+                    updated_at_ms = excluded.updated_at_ms""",
+            (wallet, page_max, ingested),
+        )
+    return inserted, page_max
 
 
-def one_pass(conn: sqlite3.Connection, *, tracked_only: bool) -> Dict[str, int]:
-    wallets = _universe(tracked_only)
-    stats = {"wallets": len(wallets), "fetched": 0, "inserted": 0, "errors": 0}
-    for w in wallets:
-        fills = _fetch_fills(w)
+def _load_cursors(conn: sqlite3.Connection) -> Dict[str, int]:
+    return {
+        str(w): int(t)
+        for w, t in conn.execute(
+            f"SELECT wallet, max_time_ms FROM {CURSOR_TABLE}"
+        )
+    }
+
+
+def _collect_wallet(
+    conn: sqlite3.Connection,
+    wallet: str,
+    cursor_ms: int,
+    *,
+    fetch_fn,
+    sleep_fn,
+) -> Dict[str, Any]:
+    """Page forward from the cursor until caught up or page budget spent."""
+    out = {"pages": 0, "fetched": 0, "inserted": 0, "error": False}
+    start = max(0, cursor_ms - OVERLAP_MS)
+    for _ in range(MAX_PAGES_PER_WALLET):
+        fills = fetch_fn(wallet, start)
         if fills is None:
-            stats["errors"] += 1
-            continue
-        stats["fetched"] += 1
+            out["error"] = True
+            return out
+        out["pages"] += 1
+        out["fetched"] += len(fills)
+        if not fills:
+            break
+        inserted, page_max = _apply_page(conn, wallet, fills)
+        out["inserted"] += inserted
+        if page_max is None or len(fills) < PAGE_CAP:
+            break  # unusable page, or short page = caught up to present
+        # Full page: keep walking forward. The boundary row is refetched
+        # (deduped); +1ms only if the page couldn't advance the window.
+        start = page_max if page_max > start else start + 1
+        sleep_fn(0.4)
+    return out
+
+
+def one_pass(
+    conn: sqlite3.Connection,
+    *,
+    tracked_only: bool,
+    fetch_fn=None,
+    sleep_fn=time.sleep,
+) -> Dict[str, int]:
+    wallets = _universe(tracked_only)
+    cursors = _load_cursors(conn)
+    # Oldest cursor first: wallets never fetched (cursor 0) lead, and no
+    # position in the sorted list can be permanently starved by a pass
+    # that dies early — the fairest rotation the cursor table gives us.
+    wallets.sort(key=lambda w: cursors.get(w, 0))
+    stats = {
+        "wallets": len(wallets),
+        "fetched_wallets": 0,
+        "pages": 0,
+        "fetched": 0,
+        "inserted": 0,
+        "errors": 0,
+    }
+    fetch = fetch_fn or _fetch_fills_by_time
+    t0 = time.monotonic()
+    for w in wallets:
+        if time.monotonic() - t0 > MAX_PASS_SEC:
+            print("wallet_fills: pass budget reached; remaining wallets "
+                  "resume next pass")
+            break
         try:
-            stats["inserted"] += _insert_fills(conn, w, fills)
+            r = _collect_wallet(
+                conn, w, cursors.get(w, 0), fetch_fn=fetch, sleep_fn=sleep_fn
+            )
         except sqlite3.Error as exc:
-            stats["errors"] += 1
+            r = {"pages": 0, "fetched": 0, "inserted": 0, "error": True}
             print(f"wallet_fills: insert {w[:10]}.. failed: {exc}")
-        time.sleep(1.0)  # gentle pacing; info endpoint weight-limited
+        stats["pages"] += r["pages"]
+        stats["fetched"] += r["fetched"]
+        stats["inserted"] += r["inserted"]
+        if r["error"]:
+            stats["errors"] += 1
+        else:
+            stats["fetched_wallets"] += 1
+        sleep_fn(1.0)  # gentle pacing; info endpoint weight-limited
     return stats
 
 
 def main() -> int:
+    # urllib's per-request timeout does not cover a stalled DNS lookup or a
+    # hung TLS handshake — on this host a single leaderboard GET blocked a
+    # pass for >7 min (observed 2026-10-06). A global default puts a hard
+    # ceiling on every socket op in this process.
+    import socket
+    socket.setdefaulttimeout(120)
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--interval-sec", type=int, default=60)
