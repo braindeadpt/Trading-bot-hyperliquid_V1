@@ -359,6 +359,14 @@ class ShadowRecorder:
         params_q = [int(day_ms), int(week_ms), int(quarter_ms)] + params
         with self._lock:
             conn = self._db._conn()
+            # Read-only handles run no DDL — a DB whose schema predates the
+            # recorder simply has zero shadow decisions.
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='shadow_decisions'"
+            ).fetchone()
+            if not exists:
+                return dict(empty)
             # Helpful composite index for dashboard aggregates (idempotent).
             # Skipped on read-only handles — a reader must not run DDL.
             if not self._read_only:

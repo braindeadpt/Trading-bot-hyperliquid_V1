@@ -186,7 +186,16 @@ def build_shadow_panel_payload(
 ) -> Dict[str, Any]:
     """Assemble per-shadow strategy stats for ``/api/shadow_panel``."""
     cfg = config or load_config(ROOT / "config" / "settings.yaml")
-    recorder = ShadowRecorder(db=ResearchDatabase.open(cfg, read_only=True))
+    # Read-only research handle — a missing/unresolvable DB (e.g. no
+    # research.database.path on this host) must not 500 the panel. The
+    # connection is lazy, so force it inside the guard.
+    recorder: Optional[ShadowRecorder] = None
+    try:
+        rdb = ResearchDatabase.open(cfg, read_only=True)
+        rdb._conn()
+        recorder = ShadowRecorder(db=rdb)
+    except Exception:  # noqa: BLE001 — counts below degrade to zero
+        recorder = None
     now_ms = int(time.time() * 1000)
     day_ms = now_ms - 86400 * 1000
     week_ms = now_ms - 7 * 86400 * 1000
@@ -203,12 +212,19 @@ def build_shadow_panel_payload(
         if latest is not None:
             boards, evaluated_at_ms = latest
 
-    counts = recorder.count_decisions_by_strategy(
-        strategies=shadow_names,
-        day_ms=day_ms,
-        week_ms=week_ms,
-        quarter_ms=quarter_ms,
-        would_enter_only=True,
+    counts = (
+        recorder.count_decisions_by_strategy(
+            strategies=shadow_names,
+            day_ms=day_ms,
+            week_ms=week_ms,
+            quarter_ms=quarter_ms,
+            would_enter_only=True,
+        )
+        if recorder is not None
+        else {
+            n: {"today": 0, "7d": 0, "90d": 0, "total": 0}
+            for n in shadow_names
+        }
     )
 
     rows: List[Dict[str, Any]] = []

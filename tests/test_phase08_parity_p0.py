@@ -69,8 +69,11 @@ def test_build_backtest_config_enables_phase08_router() -> None:
 
 
 def test_backtest_collect_entry_blocks_vb_in_trend() -> None:
-    """Expansion-only rework: VB is BLOCKED in trend (ADX 30), and with only
-    VB+VWAP eligible nowhere, the batch resolves to no signal."""
+    """Expansion-only rework: VB is BLOCKED in trend (ADX 30). VWAP is also
+    regime-ineligible, but the configured execution fallback is
+    VWAPDeviation — so the batch resolves to the promoted VWAP signal,
+    mirroring the live execution path (the shadow mirror is the only path
+    that disables promotion, to protect the confirmation sample)."""
     vb = _StubStrat("VolatilityBreakout", "long", 0.7)
     vwap = _StubStrat("VWAPDeviation", "short", 0.9)
     engine = BacktestEngine.__new__(BacktestEngine)
@@ -83,7 +86,8 @@ def test_backtest_collect_entry_blocks_vb_in_trend() -> None:
         symbol="BTC", price=100.0, timestamp_ms=1_800_000_000_000, adx_14=30.0,
     )
     sig = BacktestEngine._collect_entry_signal(engine, event)
-    assert sig is None  # VB blocked in trend, VWAP blocked in trend -> no route
+    assert sig is not None
+    assert sig.strategy == "VWAPDeviation"  # promoted fallback, not VB
     assert vb.calls == 1 and vwap.calls == 1
 
 

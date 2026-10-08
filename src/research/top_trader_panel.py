@@ -25,7 +25,13 @@ def build_top_traders_panel_payload(
     if tracker is None and engine is not None:
         tracker = getattr(engine, "_top_trader_tracker", None)
 
-    store = TopTraderStore(read_only=True)
+    # Read-only store — a missing/unresolvable research DB must not 500 the
+    # panel; bias snapshots and closed trades degrade to empty.
+    store: Optional[TopTraderStore] = None
+    try:
+        store = TopTraderStore(read_only=True)
+    except Exception:  # noqa: BLE001
+        store = None
     cfg_section: Dict[str, Any] = {}
     if config is not None:
         try:
@@ -59,7 +65,8 @@ def build_top_traders_panel_payload(
                 }
             )
     else:
-        for sym, row in sorted(store.latest_bias_by_symbol().items()):
+        db_bias = store.latest_bias_by_symbol() if store is not None else {}
+        for sym, row in sorted(db_bias.items()):
             ts = int(row.get("timestamp_ms") or 0)
             snapshots.append(
                 {
@@ -78,7 +85,12 @@ def build_top_traders_panel_payload(
             )
 
     open_positions = book.open_positions() if book is not None else []
-    closed = book.recent_closed(limit=25) if book is not None else store.list_closed_trades(limit=25)
+    if book is not None:
+        closed = book.recent_closed(limit=25)
+    else:
+        closed = (
+            store.list_closed_trades(limit=25) if store is not None else []
+        )
 
     empty_reason = None
     if wallets_n == 0:

@@ -98,11 +98,13 @@ def test_liquidation_provenance_none_when_empty_db():
 
 
 @pytest.mark.unit
-def test_liquidation_provenance_none_when_missing_db():
-    # A missing research DB opens empty (Database creates the schema on first
-    # connect) — no liquidation rows means "none", not an error.
-    cfg = _cfg_with_research_db(os.path.join(tempfile.gettempdir(), "no_such_research.db"))
-    assert _liquidation_provenance(cfg) == "none"
+def test_liquidation_provenance_none_when_missing_db(tmp_path):
+    # Readers open the research DB read-only — a missing file cannot be
+    # created, so the handle is unreadable and provenance degrades to None
+    # (the panel keeps its hardcoded tier fallback). An *existing* empty DB
+    # still yields "none".
+    cfg = _cfg_with_research_db(str(tmp_path / "no_such_research.db"))
+    assert _liquidation_provenance(cfg) is None
 
 
 @pytest.mark.unit
