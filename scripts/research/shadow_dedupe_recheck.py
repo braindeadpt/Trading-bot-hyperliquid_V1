@@ -7,10 +7,10 @@ market episode. This script re-scores each board with ONE position per
 (strategy, symbol) at a time: a decision only counts if it arrives after the
 previous counted trade on that symbol has exited.
 
-READ-ONLY GUARANTEE: every ResearchDatabase is forced to read_only=True
-(SQLite mode=ro URI, no DDL), decisions are read with a raw mode=ro
-connection, and the live DB is only touched by the evaluator's own mode=ro
-loaders. Nothing is persisted; output goes to stdout only.
+READ-ONLY GUARANTEE: decisions are read with a raw mode=ro connection and
+the evaluator now opens its own ResearchDatabase handles read-only
+(bias store + candles/funding loaders are all mode=ro). Nothing is
+persisted; output goes to stdout only.
 
 Usage (run from repo root):
     python scripts/research/shadow_dedupe_recheck.py
@@ -31,17 +31,6 @@ sys.path.insert(0, str(ROOT))
 import sqlite3  # noqa: E402
 
 from src.data.research_database import ResearchDatabase  # noqa: E402
-
-# Force every ResearchDatabase opened in this process to read-only.
-_orig_init = ResearchDatabase.__init__
-
-
-def _ro_init(self, db_path, *, read_only=True):  # noqa: ANN001
-    _orig_init(self, db_path, read_only=True)
-
-
-ResearchDatabase.__init__ = _ro_init  # type: ignore[method-assign]
-
 from src.research.shadow_outcome_evaluator import (  # noqa: E402
     evaluate_shadow_decisions,
     independent_outcomes,

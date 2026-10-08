@@ -55,7 +55,7 @@ def main() -> None:
     args = ap.parse_args()
 
     since_ms = int(time.time() * 1000) - args.days * 86_400_000
-    store = TopTraderStore()
+    store = TopTraderStore(read_only=True)
     events = store.collapse_events(since_ms=since_ms)
     symbols = sorted({e["symbol"] for e in events})
     liq_map = load_liquidation_map(symbols, since_ms - MATCH_WINDOW_MS)

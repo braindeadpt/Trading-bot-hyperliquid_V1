@@ -131,10 +131,22 @@ class ShadowRecorder:
     Shadow mode never affects execution or fidelity tiers — observability only.
     """
 
-    def __init__(self, db: Optional[ResearchDatabase] = None) -> None:
-        self._db = db or ResearchDatabase.open()
+    def __init__(
+        self,
+        db: Optional[ResearchDatabase] = None,
+        *,
+        read_only: bool = False,
+    ) -> None:
+        # read_only: evaluation/panel consumers only read — they must not run
+        # DDL or take write locks on a live research DB. Writes stay on the
+        # engine's recorder instance.
+        self._db = db or ResearchDatabase.open(read_only=read_only)
+        self._read_only = read_only or bool(
+            getattr(self._db, "_read_only", False)
+        )
         self._lock = threading.Lock()
-        self._ensure_table()
+        if not self._read_only:
+            self._ensure_table()
 
     def _ensure_table(self) -> None:
         with self._db._conn():
@@ -348,10 +360,12 @@ class ShadowRecorder:
         with self._lock:
             conn = self._db._conn()
             # Helpful composite index for dashboard aggregates (idempotent).
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_shadow_strategy_enter_ts "
-                "ON shadow_decisions(strategy, would_enter, timestamp_ms)"
-            )
+            # Skipped on read-only handles — a reader must not run DDL.
+            if not self._read_only:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_shadow_strategy_enter_ts "
+                    "ON shadow_decisions(strategy, would_enter, timestamp_ms)"
+                )
             rows = conn.execute(sql, params_q).fetchall()
         out = dict(empty)
         for row in rows:

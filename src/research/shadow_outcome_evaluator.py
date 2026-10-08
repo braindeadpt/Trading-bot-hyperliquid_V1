@@ -333,9 +333,13 @@ ROUTER_BLOCKED_SECTION_LABEL = (
 # 2026-10-08 20:17:36 UTC). Discovery rows (ts <= cutoff) keep the plain
 # variant board; confirmation rows get ``variant#confirm``.
 VARIANT_CONFIRM_SUFFIX = "#confirm"
-PREREGISTERED_CONFIRMATIONS: Dict[Tuple[str, str], Tuple[int, int]] = {
-    # (strategy, variant) -> (cutoff_ms, min_independent_n)
-    ("VWAPDeviation", "iv_gate_shadow"): (1791490656000, 60),
+PREREGISTERED_CONFIRMATIONS: Dict[Tuple[str, str], Tuple[int, int, int]] = {
+    # (strategy, variant) -> (cutoff_ms, min_independent_n, expiry_ms).
+    # expiry = cutoff + 2 × (target / historical independent-signal rate).
+    # VWAP iv_gate: discovery 2026-08-13→09-17 (34.94d) yielded 30 indep →
+    # 0.859/d → E[T60] = 69.9d → expiry = cutoff + 139.9d = 2027-02-25.
+    # Reaching expiry still sealed → final read + verdict C (no retry).
+    ("VWAPDeviation", "iv_gate_shadow"): (1791490656000, 60, 1803564432000),
 }
 
 
@@ -358,6 +362,10 @@ class StrategyScoreboard:
     n_decisions: int = 0
     n_evaluated: int = 0
     n_independent: int = 0
+    # Cross-symbol effective n: independent outcomes whose [entry, exit]
+    # windows overlap across symbols merge into one market episode.
+    # Informational — gates read n_independent.
+    n_clustered: int = 0
     n_overlapped: int = 0
     n_skipped: int = 0
     skip_reasons: Dict[str, int] = field(default_factory=dict)
@@ -391,6 +399,10 @@ class StrategyScoreboard:
     sealed: bool = False
     confirmation_min_indep: int = 0
     confirmation_cutoff_ms: Optional[int] = None
+    # Preregistered expiry: if the sample is still under target past this
+    # date the seal lifts for the final read (verdict C by protocol).
+    confirmation_expiry_ms: Optional[int] = None
+    confirmation_expired: bool = False
 
     @property
     def key(self) -> str:
@@ -403,6 +415,7 @@ class StrategyScoreboard:
             "n_decisions": self.n_decisions,
             "n_evaluated": self.n_evaluated,
             "n_independent": self.n_independent,
+            "n_clustered": self.n_clustered,
             "n_overlapped": self.n_overlapped,
             "n_skipped": self.n_skipped,
             "skip_reasons": dict(self.skip_reasons),
@@ -428,10 +441,12 @@ class StrategyScoreboard:
             "candle_source": self.candle_source,
             "disclaimer": self.disclaimer,
         }
-        if self.sealed:
-            d["sealed"] = True
+        if self.sealed or self.confirmation_min_indep:
+            d["sealed"] = self.sealed
             d["confirmation_min_indep"] = self.confirmation_min_indep
             d["confirmation_cutoff_ms"] = self.confirmation_cutoff_ms
+            d["confirmation_expiry_ms"] = self.confirmation_expiry_ms
+            d["confirmation_expired"] = self.confirmation_expired
         if self.variant == VARIANT_ROUTER_BLOCKED:
             d["section_label"] = ROUTER_BLOCKED_SECTION_LABEL
         if include_outcomes:
@@ -1191,6 +1206,29 @@ def independent_outcomes(
     return kept
 
 
+def clustered_episode_count(outcomes: Sequence[SimulatedOutcome]) -> int:
+    """Merge overlapping ``[entry, exit]`` intervals across all symbols.
+
+    Cross-symbol effective sample size: BTC/ETH/SOL/HYPE positions open at
+    the same time share one market episode and are not independent
+    observations. Same boundary convention as ``independent_outcomes`` — a
+    window starting exactly when another ended does not overlap.
+    Informational only; gates keep reading ``n_independent``.
+    """
+    intervals = sorted(
+        (o.entry_ts_ms, o.exit_ts_ms) for o in outcomes if o.evaluated
+    )
+    n_clusters = 0
+    cur_end = -1
+    for entry_ts, exit_ts in intervals:
+        if entry_ts >= cur_end:
+            n_clusters += 1
+            cur_end = exit_ts
+        else:
+            cur_end = max(cur_end, exit_ts)
+    return n_clusters
+
+
 def aggregate_scoreboard(
     strategy: str,
     outcomes: Sequence[SimulatedOutcome],
@@ -1202,6 +1240,8 @@ def aggregate_scoreboard(
     min_funding_coverage: float = 0.90,
     sealed_min_indep: Optional[int] = None,
     confirmation_cutoff_ms: Optional[int] = None,
+    confirmation_expiry_ms: Optional[int] = None,
+    now_ms: Optional[int] = None,
 ) -> StrategyScoreboard:
     """Build scoreboard metrics. Gross PF uses R; net PF uses net R.
 
@@ -1209,7 +1249,9 @@ def aggregate_scoreboard(
     confirmation samples: while ``n_independent < sealed_min_indep`` the
     board carries counts only — metric fields stay at their defaults so an
     interim read can never inform a stop/continue decision. The seal lifts
-    automatically at the final read.
+    at the final read — either ``n_independent`` reaching the target, or
+    ``confirmation_expiry_ms`` passing (the preregistered deadline: an
+    expired, under-target sample is verdict C by rule).
     """
     disclaimer = IDEALIZED_FILL_DISCLAIMER
     if variant == VARIANT_ROUTER_BLOCKED:
@@ -1233,13 +1275,23 @@ def aggregate_scoreboard(
 
     indep = independent_outcomes(outcomes)
     board.n_independent = len(indep)
+    board.n_clustered = clustered_episode_count(indep)
     board.n_overlapped = len(evaluated) - len(indep)
     board.independent_outcome_rows = indep
 
     if sealed_min_indep is not None:
         board.confirmation_min_indep = sealed_min_indep
         board.confirmation_cutoff_ms = confirmation_cutoff_ms
-        board.sealed = len(indep) < sealed_min_indep
+        board.confirmation_expiry_ms = confirmation_expiry_ms
+        now = now_ms if now_ms is not None else int(time.time() * 1000)
+        board.confirmation_expired = (
+            confirmation_expiry_ms is not None
+            and now > confirmation_expiry_ms
+            and len(indep) < sealed_min_indep
+        )
+        board.sealed = (
+            len(indep) < sealed_min_indep and not board.confirmation_expired
+        )
         if board.sealed:
             return board
 
@@ -1349,7 +1401,7 @@ def evaluate_shadow_decisions(
                     from src.research.top_trader_store import TopTraderStore
 
                     bias_store = TopTraderStore(
-                        ResearchDatabase(Path(research_db_path))
+                        ResearchDatabase(Path(research_db_path), read_only=True)
                     )
                 except Exception:  # noqa: BLE001
                     bias_store = False  # type: ignore[assignment]
@@ -1458,6 +1510,7 @@ def evaluate_shadow_decisions(
             min_funding_coverage=cost_model.min_funding_coverage,
             sealed_min_indep=prereg[1] if prereg is not None else None,
             confirmation_cutoff_ms=prereg[0] if prereg is not None else None,
+            confirmation_expiry_ms=prereg[2] if prereg is not None else None,
         )
         boards[board.key] = board
         if group_maker:
@@ -1547,26 +1600,47 @@ def format_scoreboard_table(boards: Dict[str, StrategyScoreboard]) -> str:
         lines.append(title)
         lines.append(
             "  metrics over INDEPENDENT outcomes (one open position per "
-            "symbol); n_eval = raw evaluated decisions"
+            "symbol); n_eval = raw evaluated decisions; n_clu = cross-symbol "
+            "merged episodes (informational)"
         )
         lines.append(
             f"{'strategy':20} {'variant':16} {'n_eval':>6} {'n_ind':>6} "
+            f"{'n_clu':>6} "
             f"{'WR%':>6} {'PF_g':>6} {'PF_n':>6} {'E[R]_n':>7} {'PnL%_n':>8} "
             f"{'fee_bps':>7} {'fund_cov':>8}"
         )
-        lines.append("-" * 128)
+        lines.append("-" * 136)
         for b in section_boards:
             if b.sealed:
+                expiry = ""
+                if b.confirmation_expiry_ms:
+                    expiry = (
+                        ", deadline "
+                        + time.strftime(
+                            "%Y-%m-%d",
+                            time.gmtime(b.confirmation_expiry_ms / 1000),
+                        )
+                        + " (verdict C if reached under target)"
+                    )
                 lines.append(
                     f"{b.strategy:20} {b.variant:16} {b.n_evaluated:6d} "
-                    f"{b.n_independent:6d}   SEALED — preregistered "
-                    f"confirmation, metrics read once at "
-                    f"indep_n>={b.confirmation_min_indep}"
+                    f"{b.n_independent:6d} {b.n_clustered:6d}   SEALED — "
+                    f"preregistered confirmation, metrics read once at "
+                    f"indep_n>={b.confirmation_min_indep}{expiry}"
                 )
                 continue
+            if b.confirmation_expired:
+                lines.append(
+                    f"  EXPIRED under target — preregistered final read, "
+                    f"verdict C by rule (deadline "
+                    + time.strftime(
+                        "%Y-%m-%d", time.gmtime(b.confirmation_expiry_ms or 0)
+                    )
+                    + ")"
+                )
             lines.append(
                 f"{b.strategy:20} {b.variant:16} {b.n_evaluated:6d} "
-                f"{b.n_independent:6d} "
+                f"{b.n_independent:6d} {b.n_clustered:6d} "
                 f"{100.0 * b.win_rate:6.1f} {b.profit_factor:6.2f} "
                 f"{b.net_profit_factor:6.2f} {b.net_expectancy_r:7.3f} "
                 f"{100.0 * b.net_hypothetical_pnl_pct:8.3f} "
@@ -1629,7 +1703,10 @@ def run_evaluation(
         research_db_path = ResearchDatabase.resolve_path(cfg)
     else:
         research_db_path = Path(research_db_path)
-    db = ResearchDatabase(research_db_path)
+    # Read paths must not run DDL or take write locks on the research DB —
+    # only ``--persist`` writes (the scoreboard snapshot), so the handle is
+    # RW exactly then.
+    db = ResearchDatabase(research_db_path, read_only=not persist)
     recorder = ShadowRecorder(db)
     since_ms: Optional[int] = None
     if since_days is not None:

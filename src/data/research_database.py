@@ -110,6 +110,7 @@ class ResearchDatabase(Database):
         config: Any = None,
         *,
         config_path: Path | str | None = None,
+        read_only: bool = False,
     ) -> ResearchDatabase:
         """Open the research DB at ``research.database.path`` from config."""
         if config is None:
@@ -117,7 +118,7 @@ class ResearchDatabase(Database):
 
             cp = config_path or (_project_root() / "config" / "settings.yaml")
             config = load_config(cp)
-        return cls(cls.resolve_path(config))
+        return cls(cls.resolve_path(config), read_only=read_only)
 
     def _init_db(self) -> None:
         super()._init_db()

@@ -56,7 +56,11 @@ from src.data.research_database import ResearchDatabase  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
 
 API_URL = "https://api.typesafe.ai/v1/systemone"
-MODEL = "jev-latest"
+# Pinned 2026-10-08: jev-latest is a moving alias — an upstream release would
+# silently change the evidence population mid-experiment. Versioned IDs are
+# accepted in `model` (TypeSafe docs /v1/models); jev-1.13.0 is what the alias
+# resolved to for every successful call so far (jev_decisions.model).
+MODEL = "jev-1.13.0"
 LIVE_DB = ROOT / "data" / "live" / "bot.db"
 USAGE_PATH = ROOT / "data" / "research" / "jev_usage.json"
 TABLE = "jev_decisions"
@@ -461,6 +465,9 @@ def _update_latest_verdict(symbol: str, ts_ms: int,
         "confidence": act.get("confidence"),
         "regime": reg.get("choice"),
         "atr_pct_15m": (state.get("volatility") or {}).get("atr_pct_15m"),
+        # resolved versioned model id — the trade that follows this verdict
+        # must be traceable to the model that produced it
+        "model": (resp or {}).get("model") or MODEL,
     }
     LATEST_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = LATEST_PATH.with_suffix(".tmp")

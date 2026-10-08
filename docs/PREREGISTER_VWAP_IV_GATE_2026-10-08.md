@@ -76,3 +76,27 @@ On the confirmation sample:
 
 Tier-0 HL perps (taker 0.045%/side) + slippage + funding — the evaluator's
 existing net-cost model, unchanged.
+
+## Amendment 2026-10-08 — expiry date (added while the board is still sealed)
+
+Every preregistered confirmation must carry an expiry. Added here before any
+confirmation metric has ever been visible (the `iv_gate_shadow#confirm`
+board is sealed — only counts have been exposed).
+
+**Derivation (frozen method):** discovery window 2026-08-13 14:34 UTC →
+2026-09-17 13:01 UTC = 34.94 d yielded 30 independent outcomes
+→ rate 0.859 indep/day → expected time to the n=60 target
+E[T] = 69.9 d → **expiry = commit_ts + 2 × E[T] ≈ 2027-02-25**
+(`confirmation_expiry_ms = 1803564432000`).
+
+**Rule:** if `indep_n < 60` when the expiry passes, the seal lifts for the
+final read and the verdict is **C by rule** (insufficient evidence within
+the preregistered window) — no extension, no second attempt. If `indep_n`
+reaches 60 earlier, the decision criterion above applies at that read.
+
+**Caveat (disclosed, not fixable):** the discovery rate was measured under
+the pre-2026-10-08 emission path (VWAP competing in the execution ensemble)
+and the Aug–Sep regime mix. The shadow-pool path may emit at a different
+rate; the ×2 margin absorbs part of that, and a persistently trending
+market (ADX > 25) can legitimately starve the sample — that outcome is a
+valid negative result, not a malfunction.

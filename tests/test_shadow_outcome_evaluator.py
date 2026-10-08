@@ -31,6 +31,7 @@ from src.research.shadow_outcome_evaluator import (
     SKIP_INSUFFICIENT_CANDLES,
     SKIP_MISSING_BRACKET,
     aggregate_scoreboard,
+    clustered_episode_count,
     independent_outcomes,
     evaluate_shadow_decisions,
     format_scoreboard_table,
@@ -1012,3 +1013,160 @@ def test_m_seal_lifts_at_indep_target() -> None:
     assert board.n_independent == 61
     assert board.profit_factor > 0
     assert board.wins == 61
+
+
+# ── n. read-only evaluation paths (no DDL against a chmod-444 DB) ────────────
+
+
+def _build_fixture_research_db(db_path: Path, ts0: int) -> None:
+    """Writer-side fixture: one shadow decision + candles that hit TP."""
+    db = ResearchDatabase(db_path)
+    rec = ShadowRecorder(db)
+    snap = build_enriched_market_snapshot(
+        price=100.0,
+        confidence=0.7,
+        stop_loss_pct=0.01,
+        take_profit_pct=0.02,
+        size_pct=0.01,
+    )
+    rec.record(
+        ShadowDecision(
+            symbol="BTC",
+            strategy="VWAPDeviation",
+            variant="phase08_shadow",
+            side="long",
+            would_enter=True,
+            reason="fixture",
+            timestamp_ms=ts0,
+            market_snapshot=snap,
+        )
+    )
+    conn = db._conn()
+    for i in range(1, 4):
+        conn.execute(
+            "INSERT INTO candles_1m "
+            "(symbol, timestamp_ms, open, high, low, close, volume, "
+            " funding_rate, oi_total, oi_delta, buy_volume, sell_volume, "
+            " trade_count, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
+            (
+                "BTC",
+                ts0 + i * 60_000,
+                100.0,
+                103.0,
+                100.0,
+                102.5,
+                1.0,
+                "hl_ws_1m_tape_agg",
+            ),
+        )
+    conn.commit()
+    db.close()
+
+
+def test_n_dry_run_evaluation_on_readonly_db(tmp_path) -> None:
+    """run_evaluation without --persist must not touch a chmod-444 DB."""
+    from src.research.shadow_outcome_evaluator import run_evaluation
+
+    db_path = tmp_path / "research.db"
+    _build_fixture_research_db(db_path, ts0=1_760_000_000_000)
+    os.chmod(db_path, 0o444)
+    try:
+        import hashlib
+
+        before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+        summary = run_evaluation(
+            research_db_path=db_path,
+            live_db_path=None,
+            persist=False,
+        )
+        after = hashlib.sha256(db_path.read_bytes()).hexdigest()
+        assert before == after
+        assert summary["n_decisions_loaded"] == 1
+        board = summary["strategies"]["VWAPDeviation::phase08_shadow"]
+        assert board["n_independent"] == 1
+        assert board["net_profit_factor"] > 1.0
+    finally:
+        os.chmod(db_path, 0o644)
+
+
+def test_n_reader_wrappers_skip_ddl_on_ro_handle(tmp_path) -> None:
+    """ShadowRecorder/TopTraderStore over a read-only DB never run DDL.
+
+    A mode=ro connection raises on CREATE TABLE — if __init__ still ran its
+    schema ensure, opening the store would explode here.
+    """
+    from src.research.top_trader_store import TopTraderStore
+
+    db_path = tmp_path / "research.db"
+    _build_fixture_research_db(db_path, ts0=1_760_000_000_000)
+    db = ResearchDatabase(db_path, read_only=True)
+    rec = ShadowRecorder(db)
+    assert rec._read_only is True
+    assert len(rec.load_decisions(window_ms=None)) == 1
+    store = TopTraderStore(db)
+    assert store._read_only is True
+    db.close()
+
+
+# ── o. cross-symbol effective n (n_clustered) ────────────────────────────────
+
+
+def test_o_overlapping_windows_across_symbols_merge() -> None:
+    outs = [
+        _outcome(symbol="BTC", entry=0, exit_=100, r=1.0),
+        _outcome(symbol="ETH", entry=50, exit_=150, r=1.0),
+    ]
+    assert clustered_episode_count(outs) == 1
+
+
+def test_o_disjoint_windows_across_symbols_do_not_merge() -> None:
+    outs = [
+        _outcome(symbol="BTC", entry=0, exit_=100, r=1.0),
+        _outcome(symbol="ETH", entry=200, exit_=300, r=1.0),
+    ]
+    assert clustered_episode_count(outs) == 2
+
+
+def test_o_transitive_overlap_is_one_cluster() -> None:
+    outs = [
+        _outcome(symbol="BTC", entry=0, exit_=100, r=1.0),
+        _outcome(symbol="ETH", entry=80, exit_=180, r=1.0),
+        _outcome(symbol="SOL", entry=150, exit_=250, r=1.0),
+    ]
+    # BTC∩ETH and ETH∩SOL overlap; BTC∩SOL do not — one merged cluster.
+    assert clustered_episode_count(outs) == 1
+
+
+def test_o_boundary_touch_does_not_overlap() -> None:
+    # Same convention as independent_outcomes: entry == previous exit is a
+    # NEW episode (zero shared time).
+    outs = [
+        _outcome(symbol="BTC", entry=0, exit_=100, r=1.0),
+        _outcome(symbol="ETH", entry=100, exit_=200, r=1.0),
+    ]
+    assert clustered_episode_count(outs) == 2
+
+
+def test_o_board_carries_n_clustered_alongside_n_independent() -> None:
+    # Two symbols trading simultaneously: independent per-symbol → 2,
+    # cross-symbol merged episodes → 1. Gates keep reading n_independent.
+    outs = [
+        _outcome(symbol="BTC", entry=0, exit_=100, r=1.0),
+        _outcome(symbol="ETH", entry=50, exit_=150, r=-1.0),
+    ]
+    board = aggregate_scoreboard(
+        "TestStrat",
+        outs,
+        max_hold_ms=1_000,
+        candle_source="synthetic",
+        n_decisions=2,
+    )
+    assert board.n_independent == 2
+    assert board.n_clustered == 1
+    assert board.to_dict()["n_clustered"] == 1
+    # skipped/non-evaluated outcomes never form clusters
+    outs2 = outs + [
+        _outcome(symbol="SOL", entry=10, exit_=90, r=1.0, evaluated=False)
+    ]
+    assert clustered_episode_count(outs2) == 1

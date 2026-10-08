@@ -25,7 +25,7 @@ def build_top_traders_panel_payload(
     if tracker is None and engine is not None:
         tracker = getattr(engine, "_top_trader_tracker", None)
 
-    store = TopTraderStore()
+    store = TopTraderStore(read_only=True)
     cfg_section: Dict[str, Any] = {}
     if config is not None:
         try:

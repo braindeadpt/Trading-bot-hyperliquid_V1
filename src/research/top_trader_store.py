@@ -25,10 +25,22 @@ EXIT_TP = "take_profit"
 class TopTraderStore:
     """Append-only bias samples + virtual trade ledger in the research DB."""
 
-    def __init__(self, db: Optional[ResearchDatabase] = None) -> None:
-        self._db = db or ResearchDatabase.open()
+    def __init__(
+        self,
+        db: Optional[ResearchDatabase] = None,
+        *,
+        read_only: bool = False,
+    ) -> None:
+        # read_only: evaluation/panel consumers only read — no DDL, no write
+        # locks against the live research DB. Writes stay on writer paths
+        # (top_trader_tracker, virtual book).
+        self._db = db or ResearchDatabase.open(read_only=read_only)
+        self._read_only = read_only or bool(
+            getattr(self._db, "_read_only", False)
+        )
         self._lock = threading.Lock()
-        self._ensure_tables()
+        if not self._read_only:
+            self._ensure_tables()
 
     def _ensure_tables(self) -> None:
         with self._lock:

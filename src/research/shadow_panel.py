@@ -163,7 +163,7 @@ def _liquidation_provenance(
     try:
         from src.data.research_database import ResearchDatabase
 
-        db = ResearchDatabase.open(config)
+        db = ResearchDatabase.open(config, read_only=True)
         rows = db.get_liquidation_events(symbol, limit=200)
         if not rows:
             return "none"
@@ -186,7 +186,7 @@ def build_shadow_panel_payload(
 ) -> Dict[str, Any]:
     """Assemble per-shadow strategy stats for ``/api/shadow_panel``."""
     cfg = config or load_config(ROOT / "config" / "settings.yaml")
-    recorder = ShadowRecorder(db=ResearchDatabase.open(cfg))
+    recorder = ShadowRecorder(db=ResearchDatabase.open(cfg, read_only=True))
     now_ms = int(time.time() * 1000)
     day_ms = now_ms - 86400 * 1000
     week_ms = now_ms - 7 * 86400 * 1000
@@ -315,6 +315,10 @@ def build_shadow_panel_payload(
                 "signals_90d": n_quarter,
                 "hypothetical_trades_closed": n_hyp,
                 "n_independent": (board or {}).get("n_independent"),
+                # Cross-symbol effective n — overlapping [entry, exit]
+                # windows merge into one episode. Informational; gates
+                # keep reading n_independent.
+                "n_clustered": (board or {}).get("n_clustered"),
                 "hypothetical_win_rate": (board or {}).get("win_rate"),
                 "hypothetical_expectancy_r": (board or {}).get("expectancy_r"),
                 "hypothetical_pnl_pct": (board or {}).get(
@@ -339,6 +343,7 @@ def build_shadow_panel_payload(
                 # fraction of signals whose limit would have executed.
                 "maker_n_evaluated": (maker_board or {}).get("n_evaluated"),
                 "maker_n_independent": (maker_board or {}).get("n_independent"),
+                "maker_n_clustered": (maker_board or {}).get("n_clustered"),
                 "maker_fill_rate": (
                     (maker_board or {}).get("n_evaluated") is not None
                     and (maker_board or {}).get("n_decisions")
@@ -359,8 +364,15 @@ def build_shadow_panel_payload(
                     {
                         "variant": confirm_board.get("variant"),
                         "n_independent": confirm_board.get("n_independent"),
+                        "n_clustered": confirm_board.get("n_clustered"),
                         "target": confirm_board.get("confirmation_min_indep"),
                         "sealed": bool(confirm_board.get("sealed")),
+                        "expiry_ms": confirm_board.get(
+                            "confirmation_expiry_ms"
+                        ),
+                        "expired": bool(
+                            confirm_board.get("confirmation_expired")
+                        ),
                     }
                     if confirm_board
                     else None

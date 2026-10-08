@@ -72,7 +72,7 @@ def run_sweep(
     live_db_path: Optional[Path],
 ) -> Dict[str, Any]:
     cfg = load_config(Path("config/settings.yaml"))
-    db = ResearchDatabase(research_db_path)
+    db = ResearchDatabase(research_db_path, read_only=True)
     recorder = ShadowRecorder(db)
 
     max_hold_cap_ms = int(max(max_holds_h) * 3_600_000)
