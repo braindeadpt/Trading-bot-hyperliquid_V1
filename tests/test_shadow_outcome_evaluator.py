@@ -31,6 +31,7 @@ from src.research.shadow_outcome_evaluator import (
     SKIP_INSUFFICIENT_CANDLES,
     SKIP_MISSING_BRACKET,
     aggregate_scoreboard,
+    independent_outcomes,
     evaluate_shadow_decisions,
     format_scoreboard_table,
     resolve_candle_exit,
@@ -310,20 +311,23 @@ def test_j_pf_and_expectancy_r_on_six_mixed_outcomes_exact() -> None:
     outcomes = []
     for i, (kind, _) in enumerate(specs):
         stop, take = 0.01, 0.02
+        # Space entries 2 min apart so simulated positions never overlap —
+        # the board's metrics now read the independent (non-overlapping) set.
+        e = entry_ts + i * 120_000
         d = _decision(
             side="long",
             price=100.0,
             stop=stop,
             take=take if kind != "tp_half" else 0.01,
-            ts=entry_ts + i,
+            ts=e,
             row_id=i + 1,
         )
         if kind == "tp":
-            candles = [_candle(entry_ts + i + 60_000, 100.0, 103.0, 100.0, 102.5)]
+            candles = [_candle(e + 60_000, 100.0, 103.0, 100.0, 102.5)]
         elif kind == "tp_half":
-            candles = [_candle(entry_ts + i + 60_000, 100.0, 101.5, 100.0, 101.2)]
+            candles = [_candle(e + 60_000, 100.0, 101.5, 100.0, 101.2)]
         else:
-            candles = [_candle(entry_ts + i + 60_000, 100.0, 100.2, 98.5, 99.0)]
+            candles = [_candle(e + 60_000, 100.0, 100.2, 98.5, 99.0)]
         outcomes.append(simulate_decision(d, candles, max_hold_ms=max_hold))
 
     board = aggregate_scoreboard(
@@ -472,8 +476,10 @@ def test_max_hold_resolves_per_strategy_from_config() -> None:
 def test_evaluate_batch_with_injected_candle_loader() -> None:
     entry_ts = 5_000_000
     d_ok = _decision(side="long", price=100.0, stop=0.01, take=0.02, ts=entry_ts, strategy="OBS")
+    # Non-overlapping (entry >= prior exit ~+60s) so it still reaches
+    # simulation and surfaces the missing-bracket skip.
     d_old = _decision(
-        include_bracket=False, ts=entry_ts + 1, strategy="OBS", row_id=2
+        include_bracket=False, ts=entry_ts + 120_000, strategy="OBS", row_id=2
     )
 
     def loader(symbol: str, ts: int, max_hold: int):
@@ -799,3 +805,118 @@ def test_maker_variant_disabled() -> None:
         include_maker_variant=False,
     )
     assert scoreboard_key("TestStrat", VARIANT_PHASE08_SHADOW_MAKER) not in boards
+
+
+# ── l. independent-outcomes dedup (one open position per symbol) ─────────────
+
+def _outcome(
+    *,
+    symbol: str = "BTC",
+    entry: int,
+    exit_: int,
+    r: float = 1.0,
+    evaluated: bool = True,
+) -> "SimulatedOutcome":
+    from src.research.shadow_outcome_evaluator import SimulatedOutcome
+
+    return SimulatedOutcome(
+        decision_id=None,
+        symbol=symbol,
+        strategy="TestStrat",
+        side="long",
+        entry_price=100.0,
+        entry_ts_ms=entry,
+        exit_price=101.0,
+        exit_ts_ms=exit_,
+        exit_reason=EXIT_TP,
+        stop_loss_pct=0.01,
+        take_profit_pct=0.02,
+        size_pct=0.01,
+        pnl_pct=r * 0.01,
+        r_multiple=r,
+        hold_minutes=(exit_ - entry) / 60_000.0,
+        evaluated=evaluated,
+        skip_reason=None if evaluated else "no_candles",
+        net_r_multiple=r,
+        net_pnl_pct=r * 0.01,
+        cost_model_label="synthetic",
+    )
+
+
+def test_l_overlapping_same_symbol_collapse_to_one_slot() -> None:
+    """TopTraderFlow-style re-emission: 5 overlapping BTC decisions count once."""
+    outs = [
+        _outcome(entry=0, exit_=100),
+        _outcome(entry=10, exit_=110),
+        _outcome(entry=50, exit_=200),
+        _outcome(entry=90, exit_=300),
+        _outcome(entry=99, exit_=400),
+    ]
+    kept = independent_outcomes(outs)
+    assert kept == [outs[0]]
+    board = aggregate_scoreboard(
+        "TestStrat", outs, max_hold_ms=10_000,
+        candle_source="synthetic", n_decisions=5,
+    )
+    assert board.n_evaluated == 5
+    assert board.n_independent == 1
+    assert board.n_overlapped == 4
+
+
+def test_l_non_overlapping_keeps_everything() -> None:
+    outs = [_outcome(entry=i * 100, exit_=i * 100 + 50) for i in range(4)]
+    assert independent_outcomes(outs) == outs
+    board = aggregate_scoreboard(
+        "TestStrat", outs, max_hold_ms=10_000,
+        candle_source="synthetic", n_decisions=4,
+    )
+    assert board.n_independent == board.n_evaluated == 4
+
+
+def test_l_overlap_is_per_symbol_not_global() -> None:
+    outs = [
+        _outcome(symbol="BTC", entry=0, exit_=500),
+        _outcome(symbol="ETH", entry=10, exit_=600),   # overlaps BTC slot only
+        _outcome(symbol="BTC", entry=100, exit_=700),  # dropped (BTC busy)
+        _outcome(symbol="ETH", entry=700, exit_=800),  # kept (ETH free at 600<700)
+    ]
+    kept = independent_outcomes(outs)
+    assert kept == [outs[0], outs[1], outs[3]]
+
+
+def test_l_unevaluated_does_not_hold_the_slot() -> None:
+    outs = [
+        _outcome(entry=0, exit_=0, evaluated=False),   # no exit -> no slot
+        _outcome(entry=10, exit_=100),
+        _outcome(entry=50, exit_=150),                 # dropped (BTC busy)
+    ]
+    kept = independent_outcomes(outs)
+    assert kept == [outs[1]]
+
+
+def test_l_board_metrics_computed_on_independent_set() -> None:
+    """Stats read the kept set: 2 kept (+2R, -1R) of 3 evaluated."""
+    outs = [
+        _outcome(entry=0, exit_=100, r=2.0),
+        _outcome(entry=10, exit_=200, r=-5.0),          # dropped (overlap)
+        _outcome(entry=150, exit_=250, r=-1.0),
+    ]
+    board = aggregate_scoreboard(
+        "TestStrat", outs, max_hold_ms=10_000,
+        candle_source="synthetic", n_decisions=3,
+    )
+    assert board.n_independent == 2
+    assert board.wins == 1 and board.losses == 1
+    assert board.profit_factor == pytest.approx(2.0)    # +2 / -1
+    assert board.expectancy_r == pytest.approx(0.5)     # (2 - 1) / 2
+    d = board.to_dict()
+    assert d["n_independent"] == 2 and d["n_overlapped"] == 1
+
+
+def test_l_empty_board_has_zero_independent() -> None:
+    board = aggregate_scoreboard(
+        "TestStrat", [], max_hold_ms=10_000,
+        candle_source="synthetic", n_decisions=0,
+    )
+    assert board.n_independent == 0
+    assert board.independent_outcome_rows == []

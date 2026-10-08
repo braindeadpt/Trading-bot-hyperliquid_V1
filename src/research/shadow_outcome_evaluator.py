@@ -54,6 +54,7 @@ import logging
 import sqlite3
 import statistics
 import time
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -112,6 +113,7 @@ SKIP_MISSING_BRACKET = "missing_bracket_params"
 SKIP_INSUFFICIENT_CANDLES = "insufficient_candles"
 SKIP_INVALID_SIDE = "invalid_side"
 SKIP_WOULD_NOT_ENTER = "would_not_enter"
+SKIP_OVERLAP_DEDUP = "overlap_dedup"
 
 EXIT_TP = "take_profit"
 EXIT_SL = "stop_loss"
@@ -327,12 +329,24 @@ ROUTER_BLOCKED_SECTION_LABEL = (
 
 @dataclass
 class StrategyScoreboard:
-    """Aggregated outcomes for one (strategy, variant) pair (gross + net)."""
+    """Aggregated outcomes for one (strategy, variant) pair (gross + net).
+
+    Headline metrics (win_rate, profit_factor, expectancy_r, net_*,
+    hold/cost means, wins/losses/timeouts) are computed over the
+    INDEPENDENT outcome set — one open simulated position per symbol at a
+    time (see ``independent_outcomes``). ``n_evaluated`` stays the raw
+    evaluated count; ``n_independent`` is what n>=30-style gates must read.
+    Re-emitting strategies (TopTraderFlow showed 14,066 evaluated ->
+    53 independent) otherwise inflate n and distort PF by letting one
+    market episode count as hundreds of "trades".
+    """
 
     strategy: str
     variant: str = VARIANT_PHASE08_SHADOW
     n_decisions: int = 0
     n_evaluated: int = 0
+    n_independent: int = 0
+    n_overlapped: int = 0
     n_skipped: int = 0
     skip_reasons: Dict[str, int] = field(default_factory=dict)
     wins: int = 0
@@ -357,6 +371,9 @@ class StrategyScoreboard:
     candle_source: str = ""
     disclaimer: str = IDEALIZED_FILL_DISCLAIMER
     outcomes: List[SimulatedOutcome] = field(default_factory=list)
+    independent_outcome_rows: List[SimulatedOutcome] = field(
+        default_factory=list
+    )
 
     @property
     def key(self) -> str:
@@ -368,6 +385,8 @@ class StrategyScoreboard:
             "variant": self.variant,
             "n_decisions": self.n_decisions,
             "n_evaluated": self.n_evaluated,
+            "n_independent": self.n_independent,
+            "n_overlapped": self.n_overlapped,
             "n_skipped": self.n_skipped,
             "skip_reasons": dict(self.skip_reasons),
             "wins": self.wins,
@@ -1101,6 +1120,56 @@ def _finish_outcome(
     )
 
 
+def _overlap_skip_outcome(decision: ShadowDecision) -> SimulatedOutcome:
+    """Placeholder outcome for decisions dropped by the pre-simulation
+    independence filter — never evaluated, never occupies a slot."""
+    return SimulatedOutcome(
+        decision_id=decision.row_id,
+        symbol=decision.symbol,
+        strategy=decision.strategy,
+        side=str(decision.side or ""),
+        entry_price=0.0,
+        entry_ts_ms=decision.timestamp_ms,
+        exit_price=0.0,
+        exit_ts_ms=decision.timestamp_ms,
+        exit_reason="",
+        stop_loss_pct=0.0,
+        take_profit_pct=0.0,
+        size_pct=0.0,
+        pnl_pct=0.0,
+        r_multiple=0.0,
+        hold_minutes=0.0,
+        evaluated=False,
+        skip_reason=SKIP_OVERLAP_DEDUP,
+    )
+
+
+def independent_outcomes(
+    outcomes: Sequence[SimulatedOutcome],
+) -> List[SimulatedOutcome]:
+    """First-come, non-overlapping evaluated outcomes per symbol.
+
+    One open simulated position per (board, symbol) at a time: an outcome
+    counts only if its ``entry_ts_ms >= exit_ts_ms`` of the last kept
+    outcome on that symbol. Non-evaluated outcomes never occupy the slot.
+    Mirrors scripts/research/shadow_dedupe_recheck.py exactly — that
+    script was the external review of this rule.
+    """
+    by_sym: Dict[str, List[SimulatedOutcome]] = defaultdict(list)
+    for o in outcomes:
+        if o.evaluated:
+            by_sym[o.symbol].append(o)
+    kept: List[SimulatedOutcome] = []
+    for outs in by_sym.values():
+        outs.sort(key=lambda o: o.entry_ts_ms)
+        busy_until = -1
+        for o in outs:
+            if o.entry_ts_ms >= busy_until:
+                kept.append(o)
+                busy_until = o.exit_ts_ms
+    return kept
+
+
 def aggregate_scoreboard(
     strategy: str,
     outcomes: Sequence[SimulatedOutcome],
@@ -1132,12 +1201,17 @@ def aggregate_scoreboard(
         reason = o.skip_reason or "unknown"
         board.skip_reasons[reason] = board.skip_reasons.get(reason, 0) + 1
 
+    indep = independent_outcomes(outcomes)
+    board.n_independent = len(indep)
+    board.n_overlapped = len(evaluated) - len(indep)
+    board.independent_outcome_rows = indep
+
     if not evaluated:
         return board
 
     net_wins = 0
     net_losses = 0
-    for o in evaluated:
+    for o in indep:
         if o.exit_reason == EXIT_TIMEOUT:
             board.timeouts += 1
         if o.r_multiple > 0:
@@ -1149,23 +1223,23 @@ def aggregate_scoreboard(
         elif o.net_r_multiple < 0:
             net_losses += 1
 
-    board.win_rate = board.wins / len(evaluated) if evaluated else 0.0
-    pf_trades = [{"pnl_usd": o.r_multiple} for o in evaluated]
+    board.win_rate = board.wins / len(indep) if indep else 0.0
+    pf_trades = [{"pnl_usd": o.r_multiple} for o in indep]
     board.profit_factor = compute_profit_factor(pf_trades)
-    board.expectancy_r = sum(o.r_multiple for o in evaluated) / len(evaluated)
-    holds = [o.hold_minutes for o in evaluated]
+    board.expectancy_r = sum(o.r_multiple for o in indep) / len(indep)
+    holds = [o.hold_minutes for o in indep]
     board.avg_hold_minutes = sum(holds) / len(holds)
     board.median_hold_minutes = float(statistics.median(holds))
-    board.gross_hypothetical_pnl_pct = sum(o.pnl_pct for o in evaluated)
+    board.gross_hypothetical_pnl_pct = sum(o.pnl_pct for o in indep)
 
-    net_pf_trades = [{"pnl_usd": o.net_r_multiple} for o in evaluated]
+    net_pf_trades = [{"pnl_usd": o.net_r_multiple} for o in indep]
     board.net_profit_factor = compute_profit_factor(net_pf_trades)
-    board.net_expectancy_r = sum(o.net_r_multiple for o in evaluated) / len(evaluated)
-    board.net_hypothetical_pnl_pct = sum(o.net_pnl_pct for o in evaluated)
-    board.mean_fee_cost_pct = sum(o.fee_cost_pct for o in evaluated) / len(evaluated)
-    board.mean_slip_cost_pct = sum(o.slip_cost_pct for o in evaluated) / len(evaluated)
-    board.mean_funding_pnl_pct = sum(o.funding_pnl_pct for o in evaluated) / len(evaluated)
-    board.mean_funding_coverage = sum(o.funding_coverage for o in evaluated) / len(evaluated)
+    board.net_expectancy_r = sum(o.net_r_multiple for o in indep) / len(indep)
+    board.net_hypothetical_pnl_pct = sum(o.net_pnl_pct for o in indep)
+    board.mean_fee_cost_pct = sum(o.fee_cost_pct for o in indep) / len(indep)
+    board.mean_slip_cost_pct = sum(o.slip_cost_pct for o in indep) / len(indep)
+    board.mean_funding_pnl_pct = sum(o.funding_pnl_pct for o in indep) / len(indep)
+    board.mean_funding_coverage = sum(o.funding_coverage for o in indep) / len(indep)
     board.funding_coverage_ok = board.mean_funding_coverage >= min_funding_coverage
     board.cost_model_label = evaluated[0].cost_model_label
     _ = (net_wins, net_losses)  # reserved for future net WR column
@@ -1237,7 +1311,29 @@ def evaluate_shadow_decisions(
         lead = maker_window if include_maker_variant else 0
         sources_seen: List[str] = []
         funding_cache: Dict[str, List[Tuple[int, float]]] = {}
-        for d in group:
+        # Pre-simulation independence filter — same rule the scoreboard
+        # applies post-hoc, so overlapped decisions skip the expensive
+        # candle load + simulation entirely (14k signals -> ~53 sims for
+        # TopTraderFlow). Exactness:
+        #   taker — entry_ts == decision ts, so ts < busy_until is decisive;
+        #   maker — entry_ts == fill ts (<= ts + maker_window), so skip only
+        #           when even the latest possible fill is still inside the
+        #           open slot;
+        #   a skip only happens when the outcome could never be counted —
+        #   the slot is armed exclusively by evaluated outcomes, matching
+        #   ``independent_outcomes``.
+        busy_until: Dict[str, int] = {}
+        maker_busy_until: Dict[str, int] = {}
+        for d in sorted(group, key=lambda x: (x.symbol, x.timestamp_ms)):
+            taker_blocked = d.timestamp_ms < busy_until.get(d.symbol, -1)
+            maker_blocked = include_maker_variant and (
+                d.timestamp_ms + maker_window < maker_busy_until.get(d.symbol, -1)
+            )
+            if taker_blocked and (not include_maker_variant or maker_blocked):
+                outcomes.append(_overlap_skip_outcome(d))
+                if include_maker_variant:
+                    maker_outcomes.append(_overlap_skip_outcome(d))
+                continue
             if candle_loader is not None:
                 candles, src = candle_loader(d.symbol, d.timestamp_ms, max_hold)
             else:
@@ -1270,8 +1366,10 @@ def evaluate_shadow_decisions(
                     if live_db_path
                     else []
                 )
-            outcomes.append(
-                simulate_decision(
+            if taker_blocked:
+                outcomes.append(_overlap_skip_outcome(d))
+            else:
+                taker_out = simulate_decision(
                     d,
                     candles,
                     max_hold_ms=max_hold,
@@ -1280,10 +1378,14 @@ def evaluate_shadow_decisions(
                     bias_threshold=thr,
                     funding_samples=funding_cache[d.symbol],
                 )
-            )
+                outcomes.append(taker_out)
+                if taker_out.evaluated:
+                    busy_until[d.symbol] = taker_out.exit_ts_ms
             if include_maker_variant:
-                maker_outcomes.append(
-                    simulate_decision_maker(
+                if maker_blocked:
+                    maker_outcomes.append(_overlap_skip_outcome(d))
+                else:
+                    maker_out = simulate_decision_maker(
                         d,
                         candles,
                         max_hold_ms=max_hold,
@@ -1291,7 +1393,9 @@ def evaluate_shadow_decisions(
                         cost_model=maker_model,
                         funding_samples=funding_cache[d.symbol],
                     )
-                )
+                    maker_outcomes.append(maker_out)
+                    if maker_out.evaluated:
+                        maker_busy_until[d.symbol] = maker_out.exit_ts_ms
         source_label = max(set(sources_seen), key=sources_seen.count) if sources_seen else ""
         board = aggregate_scoreboard(
             strategy,
@@ -1389,20 +1493,33 @@ def format_scoreboard_table(boards: Dict[str, StrategyScoreboard]) -> str:
             return
         lines.append(title)
         lines.append(
-            f"{'strategy':20} {'variant':16} {'n_eval':>6} {'WR%':>6} "
-            f"{'PF_g':>6} {'PF_n':>6} {'E[R]_n':>7} {'PnL%_n':>8} "
+            "  metrics over INDEPENDENT outcomes (one open position per "
+            "symbol); n_eval = raw evaluated decisions"
+        )
+        lines.append(
+            f"{'strategy':20} {'variant':16} {'n_eval':>6} {'n_ind':>6} "
+            f"{'WR%':>6} {'PF_g':>6} {'PF_n':>6} {'E[R]_n':>7} {'PnL%_n':>8} "
             f"{'fee_bps':>7} {'fund_cov':>8}"
         )
-        lines.append("-" * 120)
+        lines.append("-" * 128)
         for b in section_boards:
             lines.append(
                 f"{b.strategy:20} {b.variant:16} {b.n_evaluated:6d} "
+                f"{b.n_independent:6d} "
                 f"{100.0 * b.win_rate:6.1f} {b.profit_factor:6.2f} "
                 f"{b.net_profit_factor:6.2f} {b.net_expectancy_r:7.3f} "
                 f"{100.0 * b.net_hypothetical_pnl_pct:8.3f} "
                 f"{b.mean_fee_cost_pct * 1e4:7.2f} "
                 f"{b.mean_funding_coverage:8.2f}"
             )
+            if b.variant == VARIANT_PHASE08_SHADOW_MAKER:
+                note = "counterfactual maker-entry variant — not evidence about the taker/paper strategy"
+                if b.strategy == "JevJudge":
+                    note = (
+                        "counterfactual 'Jev entraria por maker?' — NOT "
+                        "evidence about the paper-executed JevJudge strategy"
+                    )
+                lines.append(f"  {note}")
             if not b.funding_coverage_ok:
                 lines.append(
                     "  funding_coverage_ok=False — net metrics INCONCLUSIVE for PASS gates"

@@ -238,11 +238,20 @@ def build_shadow_panel_payload(
                             board = v
                             break
 
+        # Independent (non-overlapping) outcomes are the gate-meaningful
+        # count — re-emitted decisions while a position is open are one
+        # market episode, not independent trades. Fall back to the raw
+        # evaluated count for boards persisted before this field existed.
+        n_indep = int(
+            (board or {}).get("n_independent")
+            or (board or {}).get("n_evaluated")
+            or 0
+        )
         n_hyp = int((board or {}).get("n_evaluated") or 0)
         gate = _load_gate_verdict(name)
 
-        # Progress: prefer hypothetical evaluated count; else raw signal count
-        progress_n = n_hyp if n_hyp > 0 else n_quarter
+        # Progress: prefer hypothetical independent count; else raw signal count
+        progress_n = n_indep if n_indep > 0 else n_quarter
         freq_insufficient = n_quarter < MIN_TRADES_FOR_GATE
 
         fidelity = "tier_a_hl_ohlc"
@@ -290,6 +299,7 @@ def build_shadow_panel_payload(
                 "signals_total": n_total,
                 "signals_90d": n_quarter,
                 "hypothetical_trades_closed": n_hyp,
+                "n_independent": (board or {}).get("n_independent"),
                 "hypothetical_win_rate": (board or {}).get("win_rate"),
                 "hypothetical_expectancy_r": (board or {}).get("expectancy_r"),
                 "hypothetical_pnl_pct": (board or {}).get(
@@ -313,6 +323,7 @@ def build_shadow_panel_payload(
                 # boards persisted by the scheduled evaluator). fill_rate =
                 # fraction of signals whose limit would have executed.
                 "maker_n_evaluated": (maker_board or {}).get("n_evaluated"),
+                "maker_n_independent": (maker_board or {}).get("n_independent"),
                 "maker_fill_rate": (
                     (maker_board or {}).get("n_evaluated") is not None
                     and (maker_board or {}).get("n_decisions")

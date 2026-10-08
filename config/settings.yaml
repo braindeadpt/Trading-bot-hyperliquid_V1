@@ -799,6 +799,9 @@ strategy:
       # tier-0 fees): OrderBookScalper 0.21/25k evals, TopTraderFlow 0.31/3.8k,
       # ChecklistMeta 0.63/157 (−905USD/184t live), VWAPDeviation 0.52/28
       # (−221USD/44t live). Historical shadow_decisions rows are preserved.
+      # VWAPDeviation re-added 2026-10-08 for the preregistered iv_gate_shadow
+      # confirmation sample only — see docs/PREREGISTER_VWAP_IV_GATE_2026-10-08.md.
+      - VWAPDeviation
       - VolatilityBreakout
       - FundingMomentum
       - SpotPerpCarry

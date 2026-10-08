@@ -425,6 +425,11 @@ class TradingEngine:
         self._phase08_seq_guard: Optional[SequentialContradictionGuard] = (
             SequentialContradictionGuard(seq_ms) if self._phase08_regime_router else None
         )
+        # Shadow-path routing gets its own sequential guard — it must never
+        # share state with the execution guard (armed on real fills).
+        self._shadow_seq_guard: Optional[SequentialContradictionGuard] = (
+            SequentialContradictionGuard(seq_ms) if self._phase08_regime_router else None
+        )
         adx_cfg = p08.get("adx", {}) or {}
         self._adx_tf_s = int(adx_cfg.get("timeframe_s", 900))
         self._adx_closed_only = bool(adx_cfg.get("closed_candles_only", True))
@@ -2604,6 +2609,7 @@ class TradingEngine:
             build_enriched_market_snapshot,
         )
 
+        shadow_signals: List[Signal] = []
         for strategy in self._shadow_strategies:
             if getattr(strategy, "_shadow_instance", False) is False:
                 logger.warning("Shadow strategy missing _shadow_instance flag: %s", strategy.name)
@@ -2611,6 +2617,7 @@ class TradingEngine:
                 sig = strategy.on_data(event)
                 if sig is None:
                     continue
+                shadow_signals.append(sig)
                 # Observability-only enrichment: bracket params + metadata so
                 # the offline shadow outcome evaluator can simulate SL/TP.
                 # Must never affect trading gates or execution paths.
@@ -2646,6 +2653,66 @@ class TradingEngine:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Shadow strategy %s error on %s: %s", strategy.name, symbol, exc)
+
+        self._route_shadow_signals(shadow_signals, event=event, symbol=symbol)
+
+    def _route_shadow_signals(
+        self,
+        signals: List[Signal],
+        *,
+        event: MarketEvent,
+        symbol: str,
+    ) -> None:
+        """Mirror the routed pipeline over shadow signals — observability only.
+
+        The ``iv_gate_shadow`` variant was originally recorded on the best
+        *routed* signal per event (regime gate + sequential guard + best-of
+        confidence). Since 2026-09-17 the execution pool is JevJudge-only,
+        so a shadow strategy like VWAPDeviation can no longer produce the
+        variant. This applies the same ``route_phase08_signals`` to the
+        shadow signal pool with a dedicated sequential guard (never shared
+        with the execution guard) and records ``router_blocked`` /
+        ``iv_gate_shadow`` exactly as the routed path does.
+        """
+        if not signals or not self._phase08_regime_router:
+            return
+        try:
+            adx_val = self._latest_adx.get(symbol)
+            routed, _reject, regime_blocked = route_phase08_signals(
+                signals,
+                adx_val,
+                adx_range_threshold=self._phase08_adx_range,
+                adx_trend_threshold=self._phase08_adx_trend,
+                symbol=symbol,
+                seq_guard=self._shadow_seq_guard,
+                timestamp_ms=event.timestamp_ms,
+                fallback_strategy=self._phase08_fallback_strategy,
+            )
+            if regime_blocked:
+                regime_name = classify_market_regime(
+                    adx_val,
+                    adx_range_threshold=self._phase08_adx_range,
+                    adx_trend_threshold=self._phase08_adx_trend,
+                )
+                self._record_router_blocked_signals(
+                    regime_blocked,
+                    event=event,
+                    regime=regime_name,
+                    adx=adx_val,
+                )
+            if routed:
+                best_signal = max(routed, key=lambda s: s.confidence)
+                self._record_iv_gate_shadow(
+                    best_signal, symbol=symbol, event=event,
+                )
+                # Arm the shadow sequential guard on the "would-enter" side —
+                # the shadow analog of a real fill arming the exec guard.
+                if self._shadow_seq_guard is not None:
+                    self._shadow_seq_guard.record(
+                        symbol, best_signal.side, event.timestamp_ms,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Shadow routing failed on %s: %s", symbol, exc)
 
     def _build_market_event(self, symbol: str) -> Optional[MarketEvent]:
         """Assemble a MarketEvent from the latest cached data for *symbol*."""
