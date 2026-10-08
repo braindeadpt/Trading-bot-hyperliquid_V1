@@ -271,14 +271,12 @@ def build_shadow_panel_payload(
 
         fidelity = "tier_a_hl_ohlc"
         if name in (
-            "OrderBookScalper",
             "CVDOrderFlow",
             "LeadLag",
             "LiquidationCatcher",
             "FundingArbitrage",
             "FundingMomentum",
             "SpotPerpCarry",
-            "TopTraderFlow",
         ):
             fidelity = "tier_b_missing_or_proxy"
         # Liquidation provenance (only for strategies whose Tier-A feed map
@@ -295,16 +293,6 @@ def build_shadow_panel_payload(
                 fidelity = "tier_b_missing_liquidation"
             # None (research DB unreadable) keeps the hardcoded tier_b fallback
         note = None
-        if name == "OrderBookScalper":
-            note = (
-                "L2 not in historical replay — live shadow signals OK; "
-                "baseline gate in candle replay remains non-validatable."
-            )
-        if name == "TopTraderFlow":
-            note = (
-                "Hybrid swing: bias flip OR max hold OR SL/TP. "
-                "Offline flip needs persisted bias samples; cold start falls back to SL/TP/timeout."
-            )
 
         rows.append(
             {

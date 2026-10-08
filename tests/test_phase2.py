@@ -14,7 +14,6 @@ from src.strategies.factory import build_ensemble, build_sub_strategies, build_p
 from src.strategies.funding_arbitrage import FundingArbitrage
 from src.strategies.liquidation_catcher import LiquidationCatcher
 from src.strategies.mean_reversion import MeanReversion
-from src.strategies.orderbook_scalper import OrderBookScalper
 from src.utils.config import load_config
 import pytest
 
@@ -69,7 +68,7 @@ def test_factory_respects_enabled_flags() -> None:
         expected_shadow = set(cfg.get("strategy.phase08.shadow_strategies") or [])
         assert shadow_names == expected_shadow
         assert "VolatilityBreakout" in shadow_names
-        for retired in ("VWAPDeviation", "ChecklistMeta", "OrderBookScalper",
+        for retired in ("ChecklistMeta", "OrderBookScalper",
                         "TopTraderFlow"):
             assert retired not in shadow_names
             assert retired not in names
@@ -78,7 +77,6 @@ def test_factory_respects_enabled_flags() -> None:
         names = {s.name for s in subs}
         assert "VolatilityBreakout" in names
         assert "VWAPDeviation" in names
-        assert "ChecklistMeta" in names
     # Killed / dormant: enabled=false and auto_enable=false → not loaded by factory
     assert "OrderBookScalper" not in names
     assert "FundingArbitrage" not in names
@@ -92,10 +90,6 @@ def test_factory_respects_enabled_flags() -> None:
         assert "FundingExtreme" not in names
 
     # auto_enable lifecycle still works when explicitly configured (see tests below)
-    ob = OrderBookScalper({"enabled": False, "auto_enable": True})
-    assert ob.AUTO_ENABLE is True
-    assert ob.is_active() is False
-
     arb = FundingArbitrage({"enabled": False, "auto_enable": True})
     assert arb.AUTO_ENABLE is True
     assert arb.is_active() is False
@@ -125,58 +119,8 @@ def test_mean_reversion_prefers_binance_oi_ratio() -> None:
     assert is_real is True
 
 
-def test_orderbook_scalper_auto_enables_on_tight_book() -> None:
-    strat = OrderBookScalper({
-        "enabled": False,
-        "auto_enable": True,
-        "take_profit_pct": 0.0025,
-        "auto_enable_taker_fee_pct": 0.00035,
-        "auto_enable_slippage_pct": 0.0005,
-        "auto_enable_min_edge_buffer_pct": 0.0005,
-        "auto_enable_max_book_spread_pct": 0.0004,
-        "auto_disable_max_book_spread_pct": 0.0008,
-        "viability_check_interval_ms": 0,
-    })
-    assert not strat.is_active()
-
-    wide = MarketEvent(
-        symbol="BTC", price=100_000.0, timestamp_ms=1,
-        orderbook_spread_pct=0.0010,
-        orderbook_bid_ask_ratio=1.6,
-    )
-    assert strat.on_data(wide) is None
-    assert not strat.is_active()
-
-    tight = MarketEvent(
-        symbol="BTC", price=100_000.0, timestamp_ms=2,
-        orderbook_spread_pct=0.0002,
-        orderbook_bid_ask_ratio=1.6,
-    )
-    sig = strat.on_data(tight)
-    assert sig is not None
-    assert sig.side == "long"
-    assert strat.is_active()
-
-
-def test_orderbook_scalper_auto_disables_on_wide_book() -> None:
-    strat = OrderBookScalper({
-        "enabled": False,
-        "auto_enable": True,
-        "take_profit_pct": 0.0025,
-        "auto_enable_max_book_spread_pct": 0.0004,
-        "auto_disable_max_book_spread_pct": 0.0008,
-        "viability_check_interval_ms": 0,
-    })
-    strat._auto_active = True
-    strat._latest_book_spread = {"BTC": 0.0002}
-
-    wide = MarketEvent(
-        symbol="BTC", price=100_000.0, timestamp_ms=1,
-        orderbook_spread_pct=0.0010,
-        orderbook_bid_ask_ratio=1.0,
-    )
-    assert strat.on_data(wide) is None
-    assert not strat.is_active()
+# OrderBookScalper auto_enable tests removed 2026-10-08 with the strategy
+# module (refuted, deleted — see factory note).
 
 
 def test_funding_arbitrage_auto_enables_on_spread() -> None:

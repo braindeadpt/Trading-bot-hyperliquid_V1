@@ -19,7 +19,6 @@ from src.exchanges.hyperliquid_ws import DataBus
 from src.core.execution import ExecutionEngine
 from src.core.portfolio import PortfolioState
 from src.strategies.base import MarketEvent, Position, Signal
-from src.strategies.checklist_meta import ChecklistMeta
 from src.strategies.indicators import Candle
 from src.utils.config import Config
 import pytest
@@ -88,65 +87,8 @@ def _make_engine(config_overrides: dict | None = None) -> TradingEngine:
     return TradingEngine(config, db, bus, [], risk, executor)
 
 
-# (i) SL-to-BE arms at 0.6R
-def test_sl_to_be_triggers_at_06r() -> None:
-    strat = ChecklistMeta({
-        "use_sl_to_be_after_1r": True,
-        "sl_to_be_trigger_r": 0.6,
-        "signal_throttle_ms": 0,
-    })
-    entry = 100.0
-    sl = 98.0  # 2% stop → 1R = $2
-    pos = Position(
-        symbol="SOL",
-        side="long",
-        entry_price=entry,
-        size=1.0,
-        entry_time_ms=1_700_000_000_000,
-        stop_loss_price=sl,
-    )
-    candles = _make_candles(100.0, 100.0, n=10)  # <15 bars → fixed 0.6R trigger
-    state = strat._get_state("SOL")
-    state.candles_15m = candles
-
-    # 0.5R — not yet
-    ev_half = MarketEvent(symbol="SOL", price=101.0, timestamp_ms=1_700_000_100_000)
-    assert strat.on_position(pos, ev_half) is None
-    assert state.sl_moved_to_be is False
-
-    # 0.6R — arms BE (profit = 1.2 = 0.6 × 2)
-    ev_be = MarketEvent(symbol="SOL", price=101.2, timestamp_ms=1_700_000_200_000)
-    assert strat.on_position(pos, ev_be) is None
-    assert state.sl_moved_to_be is True
-
-
-# (ii) Counter-trend gate
-def test_counter_trend_blocks_long() -> None:
-    strat = ChecklistMeta({"counter_trend_adx_block": 30.0})
-    reason = strat._counter_trend_block_reason(
-        "long", adx=35.0, ema_fast=99.0, ema_slow=101.0,
-    )
-    assert reason is not None and reason.startswith("counter_trend_gate")
-
-
-def test_counter_trend_allows_with_trend() -> None:
-    strat = ChecklistMeta({"counter_trend_adx_block": 30.0})
-    assert strat._counter_trend_block_reason(
-        "long", adx=35.0, ema_fast=102.0, ema_slow=100.0,
-    ) is None
-
-
-# (iii) OIR gate
-def test_oir_blocks_short_with_positive_oir() -> None:
-    strat = ChecklistMeta({"require_oir_alignment": True, "oir_min_alignment": 0.10})
-    reason = strat._oir_block_reason("short", oir=0.30)
-    assert reason is not None and reason.startswith("oir_gate")
-
-
-def test_oir_none_passes() -> None:
-    strat = ChecklistMeta({"require_oir_alignment": True, "oir_min_alignment": 0.10})
-    assert strat._oir_block_reason("long", oir=None) is None
-
+# (i-iii) ChecklistMeta SL-to-BE / counter-trend / OIR gate tests removed
+# 2026-10-08 with the strategy module (refuted, deleted — see factory note).
 
 # (iv) Chase filter
 def test_chase_rejects_extended_runup() -> None:

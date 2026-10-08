@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from src.strategies.base import MarketEvent
-from src.strategies.checklist_meta import ChecklistMeta
 from src.strategies.cvd_orderflow import CVDOrderFlow
 from src.strategies.factory import (
     _REGISTRY_BY_NAME,
@@ -17,7 +16,6 @@ from src.strategies.factory import (
 )
 from src.strategies.funding_momentum import FundingMomentum
 from src.strategies.indicators import Candle
-from src.strategies.orderbook_scalper import OrderBookScalper
 from src.strategies.spot_perp_carry import SpotPerpCarry
 from src.strategies.volatility_breakout import VolatilityBreakout
 from src.strategies.vwap_deviation import VWAPDeviation
@@ -29,7 +27,6 @@ pytestmark = pytest.mark.unit
 # (CVDOrderFlow / FundingArbitrage retired from the registry 2026-09-10 —
 # their shadow-gate coverage moved to the surviving names below).
 _SHADOW_GATED = (
-    ("OrderBookScalper", OrderBookScalper),
     ("FundingMomentum", FundingMomentum),
     ("SpotPerpCarry", SpotPerpCarry),
 )
@@ -109,23 +106,9 @@ def test_shadow_force_bypasses_enabled_dormancy(name: str, cls: type) -> None:
     assert active is not None
     assert getattr(active, "_shadow_instance", False) is True
     assert active.MANUAL_ENABLED is True
-    if path == "strategy.orderbook_scalper":
-        assert active.AUTO_ENABLE is True
-    else:
-        assert not hasattr(active, "AUTO_ENABLE")
+    assert not hasattr(active, "AUTO_ENABLE")
 
-    if name == "CVDOrderFlow":
-        ev = _event(candle_1m=_candle(1_800_000_000_000))
-        assert active.on_data(ev) is None  # warm-up, but past enabled gate
-        st = active._get_state("BTC")
-        assert len(st.bars_1m) == 1
-    elif name == "OrderBookScalper":
-        assert active.is_active() is True
-        ev = _event(orderbook_bid_ask_ratio=2.5, orderbook_spread_pct=0.0001)
-        sig = active.on_data(ev)
-        assert sig is not None
-        assert sig.strategy == "OrderBookScalper"
-    elif name == "FundingMomentum":
+    if name == "FundingMomentum":
         # Past enabled gate: funding history updates
         ev1 = _event(timestamp_ms=1_800_000_000_000, predicted_funding=-0.001)
         ev2 = _event(timestamp_ms=1_800_000_060_000, predicted_funding=0.001)
@@ -145,13 +128,13 @@ def test_shadow_force_bypasses_enabled_dormancy(name: str, cls: type) -> None:
         assert len(dormant._get_state("BTC").funding_history) == 0
 
 
-def test_checklist_meta_unchanged_no_enabled_gate() -> None:
+def test_volatility_breakout_unchanged_no_enabled_gate() -> None:
+    """A strategy without an enabled gate still ingests in shadow mode."""
     cfg = _live_cfg()
-    path, cls = _REGISTRY_BY_NAME["ChecklistMeta"]
+    path, cls = _REGISTRY_BY_NAME["VolatilityBreakout"]
     shadow = _instantiate_from_registry(cfg, path, cls, force=True, shadow=True)
     assert shadow is not None
-    assert isinstance(shadow, ChecklistMeta)
-    assert not hasattr(shadow, "MANUAL_ENABLED")
+    assert isinstance(shadow, VolatilityBreakout)
     ts = 1_800_000_000_000
     c15 = Candle(100, 101, 99, 100.5, 10.0, ts)
     ev = _event(candle_15m=c15, timestamp_ms=ts, adx_14=25.0)
@@ -205,8 +188,6 @@ def test_phase08_build_shadow_instances_are_enabled() -> None:
             continue  # pruned from shadow (2026-09-29 evidence-based cut)
         inst = by_name[name]
         assert inst.MANUAL_ENABLED is True
-        if name == "OrderBookScalper":
-            assert inst.AUTO_ENABLE is True
 
 
 def test_shadow_factory_does_not_mutate_config_or_hash() -> None:

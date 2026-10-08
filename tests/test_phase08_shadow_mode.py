@@ -70,10 +70,11 @@ def test_phase08_factory_splits_execution_and_shadow() -> None:
     exec_names = {s.name for s in execution}
     shadow_names = {s.name for s in shadow}
     assert exec_names == set(PHASE08_DEFAULT_EXECUTION)
-    assert "ChecklistMeta" in exec_names
+    assert "VWAPDeviation" in exec_names
     assert "VolatilityBreakout" in shadow_names
-    assert "OrderBookScalper" in shadow_names
+    assert "FundingMomentum" in shadow_names
     assert "ChecklistMeta" not in shadow_names
+    assert "OrderBookScalper" not in shadow_names
     assert execution[0] is not shadow[0]
 
 
@@ -99,7 +100,10 @@ def test_regime_router_vb_trend_vwap_range() -> None:
     )
     # Expansion-only rework: VB is BLOCKED in trend (ADX 30); VWAP is also
     # not eligible in trend -> the batch resolves to no allowed strategy.
-    trend_only, trend_reason, _ = route_phase08_signals([vb_sig, vwap_sig], adx=30.0, symbol="BTC")
+    # fallback disabled explicitly — the gate alone is under test.
+    trend_only, trend_reason, _ = route_phase08_signals(
+        [vb_sig, vwap_sig], adx=30.0, symbol="BTC", fallback_strategy="",
+    )
     assert trend_only == []
     assert trend_reason == "regime_trend_no_allowed_strategies"
     assert classify_market_regime(30.0) == "trend"
@@ -219,8 +223,8 @@ def test_raw_trade_tap_bypasses_databus() -> None:
 def test_build_live_strategies_returns_shadow_when_phase08() -> None:
     cfg = _cfg_with_phase08(True)
     execution, shadow = build_live_strategies(cfg)
-    assert len(execution) == 2
-    assert len(shadow) >= 4
+    assert len(execution) == 1
+    assert len(shadow) >= 3
 
 
 def test_evaluate_shadow_strategies_persists_bracket_fields() -> None:
@@ -391,6 +395,7 @@ def test_a_router_blocked_recorded_with_brackets_and_still_blocked() -> None:
     routed, reason, blocked = route_phase08_signals(
         [sig], 22.0, symbol="BTC",
         adx_range_threshold=20.0, adx_trend_threshold=25.0,
+        fallback_strategy="",
     )
     assert routed == []
     assert blocked == [sig]

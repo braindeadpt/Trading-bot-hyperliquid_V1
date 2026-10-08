@@ -1,4 +1,8 @@
-"""v3.1.48 — structural deadlock fix (ChecklistMeta exec + governor floor + 2% sizing)."""
+"""v3.1.48 — structural deadlock fix (regime-router fallback + governor floor + 2% sizing).
+
+2026-10-08: router fallback tests re-pointed from ChecklistMeta (module
+deleted — refuted) to VWAPDeviation, the configured fallback_strategy.
+"""
 
 from __future__ import annotations
 
@@ -37,39 +41,41 @@ def _sig(strategy: str, side: str = "long", symbol: str = "BTC") -> Signal:
     )
 
 
-def test_checklist_allowed_in_expansion_regime() -> None:
-    cm = _sig("ChecklistMeta", "long")
-    allowed, reason, blocked = route_phase08_signals([cm], adx=22.0, symbol="BTC")
+def test_unlisted_strategy_allowed_in_expansion_regime() -> None:
+    """Strategies not in the regime map pass in any classified regime."""
+    jev = _sig("JevJudge", "long")
+    allowed, reason, blocked = route_phase08_signals([jev], adx=22.0, symbol="BTC")
     assert classify_market_regime(22.0) == "expansion"
     assert reason is None
     assert len(allowed) == 1
-    assert allowed[0].strategy == "ChecklistMeta"
+    assert allowed[0].strategy == "JevJudge"
     assert blocked == []
 
 
-def test_regime_fallback_promotes_checklist_when_unknown() -> None:
-    """Unknown ADX blocks primary gates; fallback still promotes ChecklistMeta."""
-    cm = _sig("ChecklistMeta", "long")
+def test_regime_fallback_promotes_vwap_when_unknown() -> None:
+    """Unknown ADX blocks primary gates; fallback still promotes VWAPDeviation."""
+    vwap = _sig("VWAPDeviation", "long")
     vb = _sig("VolatilityBreakout", "long")
     allowed, reason, _ = route_phase08_signals(
-        [vb, cm],
+        [vb, vwap],
         adx=None,
         symbol="BTC",
-        fallback_strategy="ChecklistMeta",
+        fallback_strategy="VWAPDeviation",
     )
     assert reason is None
     assert len(allowed) == 1
-    assert allowed[0].strategy == "ChecklistMeta"
+    assert allowed[0].strategy == "VWAPDeviation"
 
 
-def test_expansion_no_allowed_without_checklist_still_reports_dead_zone() -> None:
-    """VWAP-only in expansion still yields no_allowed (fallback needs ChecklistMeta)."""
+def test_expansion_no_allowed_without_fallback_signal_reports_dead_zone() -> None:
+    """VWAP-only in expansion still yields no_allowed when the fallback name
+    is not present in the signal batch."""
     vwap = _sig("VWAPDeviation", "long")
     allowed, reason, blocked = route_phase08_signals(
         [vwap],
         adx=22.0,
         symbol="BTC",
-        fallback_strategy="ChecklistMeta",
+        fallback_strategy="ChecklistMeta",  # not in batch → dead zone stands
     )
     assert allowed == []
     assert reason == "regime_expansion_no_allowed_strategies"

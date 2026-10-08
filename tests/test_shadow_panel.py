@@ -9,6 +9,7 @@ import pytest
 
 from src.data.database import LiquidationRecord
 from src.data.research_database import ResearchDatabase
+from src.research.shadow_recorder import ShadowRecorder
 from src.research.shadow_panel import (
     _liquidation_provenance,
     build_shadow_panel_payload,
@@ -20,16 +21,16 @@ from src.utils.config import Config
 @pytest.mark.unit
 def test_shadow_panel_payload_smoke():
     payload = build_shadow_panel_payload(
-        shadow_names=["OrderBookScalper", "ChecklistMeta"],
+        shadow_names=["FundingMomentum", "VolatilityBreakout"],
         evaluate=False,
     )
     assert "rows" in payload
     assert len(payload["rows"]) == 2
     assert payload["min_trades_for_gate"] == 30
     assert "disclaimer" in payload
-    obs = next(r for r in payload["rows"] if r["strategy"] == "OrderBookScalper")
-    assert obs["fidelity_tier"].startswith("tier_b")
-    assert obs["gate_progress_target"] == 30
+    fm = next(r for r in payload["rows"] if r["strategy"] == "FundingMomentum")
+    assert fm["fidelity_tier"].startswith("tier_b")
+    assert fm["gate_progress_target"] == 30
 
 
 @pytest.mark.unit
@@ -48,6 +49,9 @@ def _research_db_with_liq(sources: list[str]) -> ResearchDatabase:
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     db = ResearchDatabase(path)
+    # Readers open the research DB read-only — the fixture must own the
+    # shadow_decisions schema (a writer-side ShadowRecorder creates it).
+    ShadowRecorder(db)
     for i, src in enumerate(sources):
         db.save_liquidation(LiquidationRecord(
             symbol="BTC",

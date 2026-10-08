@@ -15,7 +15,6 @@ from src.exchanges.liquidation_event import (
     is_proxy_liquidation_source,
     is_real_liquidation_source,
 )
-from src.strategies.checklist_meta import ChecklistMeta
 from src.strategies.liquidation_catcher import LiquidationCatcher
 
 pytestmark = pytest.mark.unit

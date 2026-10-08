@@ -11,12 +11,9 @@ from src.strategies.ensemble import StrategyEnsemble, StrategyWeight
 from src.strategies.funding_momentum import FundingMomentum
 from src.strategies.lead_lag import LeadLag
 from src.strategies.liquidation_catcher import LiquidationCatcher
-from src.strategies.orderbook_scalper import OrderBookScalper
 from src.strategies.spot_perp_carry import SpotPerpCarry
 from src.strategies.volatility_breakout import VolatilityBreakout
 from src.strategies.vwap_deviation import VWAPDeviation
-from src.strategies.checklist_meta import ChecklistMeta
-from src.strategies.top_trader_flow import TopTraderFlow
 from src.strategies.jev_judge import JevJudge
 
 logger = logging.getLogger(__name__)
@@ -31,12 +28,18 @@ logger = logging.getLogger(__name__)
 #   RangeGrid                   — KILL (PF 0.49, Sharpe -4.3)
 #   TrendPyramid                — candle trend; family closed (24m structure screen)
 #   SFPReversion / VARejection  — 24m structure screen CLOSED
+# Removed 2026-10-08 (modules deleted — decisive refuted evidence, see
+# docs/STRATEGY_AUDIT.md and the shadow dedupe recheck):
+#   OrderBookScalper — indep PF 0.18 taker / 0.43 maker over ~35k episodes
+#   TopTraderFlow    — indep n=53, PF 0.40 (Q13 Phase A FAIL closed the family)
+#   ChecklistMeta    — maker PF 0.997, edge zero
 # YAML sections for these names are untouched (frozen Phase-10 config_hash);
 # phase08 lists referencing them now resolve to "unknown" and are skipped.
-PHASE08_DEFAULT_EXECUTION = ("ChecklistMeta", "VWAPDeviation")
+# Historical shadow_decisions rows for them keep evaluating — the outcome
+# evaluator's per-strategy maps are kept for that recomputation.
+PHASE08_DEFAULT_EXECUTION = ("VWAPDeviation",)
 PHASE08_DEFAULT_SHADOW = (
     "VolatilityBreakout",
-    "OrderBookScalper",
     "FundingMomentum",
     "SpotPerpCarry",
 )
@@ -45,14 +48,9 @@ _STRATEGY_REGISTRY = (
     ("strategy.volatility_breakout", VolatilityBreakout),
     ("strategy.vwap_deviation", VWAPDeviation),
     ("strategy.liquidation_catcher", LiquidationCatcher),
-    ("strategy.orderbook_scalper", OrderBookScalper),
     ("strategy.lead_lag", LeadLag),
     ("strategy.spot_perp_carry", SpotPerpCarry),
     ("strategy.funding_momentum", FundingMomentum),
-    # v3.1.37: Checklist meta-signal (replaces ensemble with weighted bull/bear)
-    ("strategy.checklist_meta", ChecklistMeta),
-    # Top-trader aggregate bias (shadow / research)
-    ("strategy.top_trader_flow", TopTraderFlow),
     # TypeSafe/Jev judgment-model experiment — paper-only by hard guard
     # inside the strategy + manifest EXPERIMENT verdict (no PASS claimed).
     ("strategy.jev_judge", JevJudge),
@@ -103,13 +101,6 @@ def _should_load_strategy(section: dict) -> bool:
     return False
 
 
-# Strategies whose on_data / operational gate also consults ``auto_enable``
-# (OrderBookScalper). Others only read ``enabled``.
-_SHADOW_AUTO_ENABLE_PATHS = frozenset({
-    "strategy.orderbook_scalper",
-})
-
-
 def _apply_shadow_section_overrides(section: dict, path: str) -> None:
     """Force in-memory section flags so Phase08 shadow instances evaluate.
 
@@ -118,8 +109,6 @@ def _apply_shadow_section_overrides(section: dict, path: str) -> None:
     (pre-Phase08) stay dormant even when force-instantiated into shadow.
     """
     section["enabled"] = True
-    if path in _SHADOW_AUTO_ENABLE_PATHS:
-        section["auto_enable"] = True
 
 
 def _strategy_display_name(cls: type) -> str:

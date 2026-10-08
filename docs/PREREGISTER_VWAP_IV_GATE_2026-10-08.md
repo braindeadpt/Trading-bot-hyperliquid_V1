@@ -133,3 +133,8 @@ contamination).
 **Provenance:** from the activating restart, every `iv_gate_shadow` row
 records `metadata.router_regime` and `metadata.router_adx` at routing time
 so exclusion requires no ADX reconstruction.
+
+**Activation:** fix deployed to the production host and the trading
+process restarted at **2026-10-08 23:35:59 UTC**
+(`restart_ts_ms = 1791502559498`, pm2 `hyperliquid` restart 3, pid 59216).
+Commit `d12af34`.

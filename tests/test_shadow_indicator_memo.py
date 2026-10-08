@@ -27,7 +27,6 @@ sys.path.insert(0, str(ROOT))
 
 from src.strategies.base import MarketEvent  # noqa: E402
 from src.strategies.indicators import Candle  # noqa: E402
-from src.strategies.checklist_meta import ChecklistMeta  # noqa: E402
 from src.strategies.volatility_breakout import VolatilityBreakout  # noqa: E402
 from src.strategies.liquidation_catcher import LiquidationCatcher  # noqa: E402
 from src.strategies.funding_momentum import FundingMomentum  # noqa: E402
@@ -83,62 +82,8 @@ def _assert_stream(stream, digest, n_events, n_signals):
 # Event-sequence builders — MUST stay identical to _mem_capture.py
 # --------------------------------------------------------------------------
 
-def _checklist_events():
-    candles = _uptrend(120, T0, MS_15M, base=100.0, drift=0.4)
-    events = []
-    for c in candles:
-        base_ts = c.timestamp_ms + MS_15M
-        for j, dp in enumerate((0.0, -2.0, +3.0, -0.5)):
-            events.append(
-                MarketEvent(
-                    symbol="BTC",
-                    price=c.close + dp,
-                    timestamp_ms=base_ts + j * 30_000,
-                    candle_15m=c,
-                    adx_14=25.0,
-                    rsi_14=50.0 + (j * 7) % 30,
-                    oi_delta=10.0,
-                    orderbook_oir=0.4,
-                    liquidation_data_source="real",
-                    liquidation_side_5m="short",
-                )
-            )
-    return events
-
-
-CHECKLIST_CFG = {
-    "signal_throttle_ms": 60_000,
-    "min_adx_gate": 0.0,
-    "adx_trend_min": 20.0,
-    "score_threshold": 1.5,
-    "dominance_margin": 0.5,
-    "require_oir_alignment": False,
-    "sfp_lookback": 30,
-    "sfp_max_age_bars": 20,
-}
-CHECKLIST_GOLDEN_SHA = "2be16c045c5cdf02"
-
-
-def test_checklist_signal_stream_unchanged() -> None:
-    s = ChecklistMeta(CHECKLIST_CFG)
-    stream = [_sig_tuple(s.on_data(e)) for e in _checklist_events()]
-    _assert_stream(stream, CHECKLIST_GOLDEN_SHA, n_events=480, n_signals=136)
-
-
-def test_checklist_memo_reuses_candle_metrics() -> None:
-    """Same 15m candle set across ticks -> indicator math runs once."""
-    s = ChecklistMeta({**CHECKLIST_CFG, "signal_throttle_ms": 0})
-    events = _checklist_events()
-    for e in events[:208]:  # warm up through candle 51 (unpatched)
-        s.on_data(e)
-    warm = events[208:212]  # 4 ticks sharing candle_15m #52
-    with patch.object(s, "_detect_sfp_side", wraps=s._detect_sfp_side) as spy:
-        for e in warm:
-            s.on_data(e)
-    assert spy.call_count == 1, f"SFP ran {spy.call_count}x on unchanged candle set"
-    with patch.object(s, "_detect_sfp_side", wraps=s._detect_sfp_side) as spy2:
-        s.on_data(events[212])  # first tick of candle #53 -> key changes
-    assert spy2.call_count == 1, "SFP must recompute on new candle"
+# ChecklistMeta event builder, golden stream, and memo tests removed
+# 2026-10-08 with the strategy module (refuted, deleted — see factory note).
 
 
 # ---------------------------------------------------------- volatility

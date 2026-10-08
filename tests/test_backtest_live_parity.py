@@ -37,7 +37,7 @@ from src.exchanges.liquidation_event import (
     is_real_liquidation_source,
 )
 from src.strategies.base import ExitSignal, MarketEvent, Position, Signal, Strategy
-from src.strategies.checklist_meta import ChecklistMeta
+from src.strategies.volatility_breakout import VolatilityBreakout
 from src.strategies.indicators import Candle
 from src.strategies.liquidation_catcher import LiquidationCatcher
 from src.utils.config import Config, load_config, resolve_kelly_enabled
@@ -1059,7 +1059,7 @@ class TestExitPathParityLiveVsBacktest:
 
     # -- strategy-level trailing (EMA9) -------------------------------------
 
-    def _cm_config(self) -> Dict[str, Any]:
+    def _trail_config(self) -> Dict[str, Any]:
         return {
             "use_trailing_stop": True,
             "trailing_method": "ema9",
@@ -1079,21 +1079,23 @@ class TestExitPathParityLiveVsBacktest:
         signal (``trailing_stop_ema9_*``) must be identical — the strategy
         code is the single source of truth for both.
         """
-        cm = ChecklistMeta(self._cm_config())
+        vb = VolatilityBreakout(self._trail_config())
         # 15m candle history rising far enough to arm the trail (> 1R) and
         # keep the EMA9 trail ABOVE the 1R level, so a pullback below the
         # trail still satisfies profit_r >= TRAILING_START_R (= 1.0).
         # R = |entry - SL| = 1,000 (50,000 -> 49,000); 1R = +1,000.
+        # VolatilityBreakout needs BB_PERIOD+2 candles before on_position
+        # reaches the trailing block — feed 30.
         candles: List[Candle] = []
         ts = 1_700_000_000_000
-        for i in range(20):
-            px = 50_000.0 + i * 100.0  # 50,000 -> 51,900 (profit_r = 1.9)
+        for i in range(30):
+            px = 50_000.0 + i * 100.0  # 50,000 -> 52,900
             candles.append(
                 Candle(px - 10, px + 10, px - 10, px, 100.0, ts + i * 900_000)
             )
         entry_ms = ts  # the position entry time is fixed for its whole life
         for i, c in enumerate(candles):
-            cm.on_position(
+            vb.on_position(
                 _cm_position(entry=50_000.0, sl=49_000.0, ts=entry_ms),
                 _cm_event(price=c.close, ts=ts + i * 900_000, c15=c),
             )
@@ -1101,12 +1103,12 @@ class TestExitPathParityLiveVsBacktest:
         # Live side: a tick below the trail must emit trailing_stop_ema9.
         # (profit_r >= 1.0 armed the trail at the last 15m close; a pullback
         # below the EMA9 trail level now fires the exit.)
-        trail_level = cm._compute_trail(list(candles), "long")
+        trail_level = vb._compute_trail(list(candles), "long")
         assert trail_level is not None and trail_level > 51_000.0  # above 1R
-        assert trail_level < 51_900.0
-        live_exit = cm.on_position(
+        assert trail_level < 52_900.0
+        live_exit = vb.on_position(
             _cm_position(entry=50_000.0, sl=49_000.0, ts=entry_ms),
-            _cm_event(price=trail_level - 5.0, ts=ts + 20 * 900_000, c15=candles[-1]),
+            _cm_event(price=trail_level - 5.0, ts=ts + 30 * 900_000, c15=candles[-1]),
         )
         assert live_exit is not None
         assert live_exit.reason.startswith("trailing_stop_ema9")
@@ -1114,7 +1116,7 @@ class TestExitPathParityLiveVsBacktest:
         # Backtest side: the same position through _process_exits walking the
         # 1m path must fire the same signal when the path touches the trail.
         bt = self._bt_engine()
-        bt.strategy = ChecklistMeta(self._cm_config())
+        bt.strategy = VolatilityBreakout(self._trail_config())
         # seed identical candle history into the backtest strategy instance
         for i, c in enumerate(candles):
             bt.strategy.on_position(
@@ -1634,7 +1636,7 @@ class TestLiquidationStopoutParity:
         )}
         bt.positions_by_symbol = {"BTC": 1}
         bt.cfg = BacktestConfig()
-        bt.strategy = ChecklistMeta({})  # unused — stop-out fires before on_position
+        bt.strategy = VolatilityBreakout({})  # unused — stop-out fires before on_position
         bt._daily_pnl = 0.0
         bt._capital = 100_000.0
         bt._excursion_trackers = {}

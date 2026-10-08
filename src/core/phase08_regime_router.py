@@ -1,4 +1,4 @@
-"""Phase 08 hard regime router — mutual exclusion by ADX regime + ChecklistMeta fallback."""
+"""Phase 08 hard regime router — mutual exclusion by ADX regime + fallback promotion."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ MarketRegime = Literal["unknown", "range", "low_vol", "expansion", "trend"]
 
 VB_STRATEGY = "VolatilityBreakout"
 VWAP_STRATEGY = "VWAPDeviation"
-CHECKLIST_STRATEGY = "ChecklistMeta"
 
 # Rework 2026-08-13 (expansion-only, hash-neutral): VB forensics over the
 # full 80d window showed the trend slice is structurally negative
@@ -25,10 +24,8 @@ CHECKLIST_STRATEGY = "ChecklistMeta"
 # hash-neutral change). Evidence: data/backtests/vb_forensics_*.csv.
 VB_REGIMES = frozenset({"expansion"})
 VWAP_REGIMES = frozenset({"range", "low_vol"})
-# ChecklistMeta is eligible in every classified regime (fills expansion dead-zone).
-CHECKLIST_REGIMES = frozenset({"trend", "expansion", "range", "low_vol"})
 
-DEFAULT_FALLBACK_STRATEGY = CHECKLIST_STRATEGY
+DEFAULT_FALLBACK_STRATEGY = VWAP_STRATEGY
 
 
 def classify_market_regime(
@@ -48,15 +45,13 @@ def classify_market_regime(
 
 
 def regime_allows_strategy(strategy_name: str, regime: MarketRegime) -> bool:
-    """Hard gate: VB in expansion only; VWAP in range/low_vol; ChecklistMeta all."""
+    """Hard gate: VB in expansion only; VWAP in range/low_vol; others all."""
     if regime == "unknown":
         return False
     if strategy_name == VB_STRATEGY:
         return regime in VB_REGIMES
     if strategy_name == VWAP_STRATEGY:
         return regime in VWAP_REGIMES
-    if strategy_name == CHECKLIST_STRATEGY:
-        return regime in CHECKLIST_REGIMES
     return True
 
 

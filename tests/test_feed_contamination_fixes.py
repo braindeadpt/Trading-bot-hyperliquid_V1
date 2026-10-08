@@ -2,21 +2,12 @@
 
 from __future__ import annotations
 
-import inspect
 import time
 
 import pytest
 
 from src.data.market_data_health import FeedSilenceMonitor
-from src.strategies.checklist_meta import ChecklistMeta
-
 pytestmark = pytest.mark.unit
-
-
-def test_checklist_meta_requires_real_provenance_in_source() -> None:
-    src = inspect.getsource(ChecklistMeta.on_data)
-    assert "is_real_liquidation_source" in src
-    assert "liq_long_squeeze" in src
 
 
 def test_feed_silence_monitor_alerts_after_threshold() -> None:

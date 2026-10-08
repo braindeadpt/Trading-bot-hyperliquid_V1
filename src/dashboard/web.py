@@ -1884,16 +1884,13 @@ def create_app(config: Dict[str, Any]) -> tuple:
             # Map class names → settings.yaml keys
             name_to_section = {
                 "VWAPDeviation": "vwap_deviation",
-                "ChecklistMeta": "checklist_meta",
                 "VolatilityBreakout": "volatility_breakout",
-                "OrderBookScalper": "orderbook_scalper",
                 "CVDOrderFlow": "cvd_orderflow",
                 "FundingArbitrage": "funding_arbitrage",
                 "FundingMomentum": "funding_momentum",
                 "SpotPerpCarry": "spot_perp_carry",
                 "LeadLag": "lead_lag",
                 "LiquidationCatcher": "liquidation_catcher",
-                "TopTraderFlow": "top_trader_flow",
             }
             section_key = name_to_section.get(name)
             if cfg_obj is not None and section_key and hasattr(cfg_obj, "get"):

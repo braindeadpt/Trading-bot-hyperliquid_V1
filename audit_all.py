@@ -96,7 +96,6 @@ strats = [
     ("VolatilityBreakout", "src.strategies.volatility_breakout", "VolatilityBreakout"),
     ("LiquidationCatcher", "src.strategies.liquidation_catcher", "LiquidationCatcher"),
     ("DonchianBreakout", "src.strategies.donchian_breakout", "DonchianBreakout"),
-    ("OrderBookScalper", "src.strategies.orderbook_scalper", "OrderBookScalper"),
     ("CVDOrderFlow", "src.strategies.cvd_orderflow", "CVDOrderFlow"),
     ("LeadLag", "src.strategies.lead_lag", "LeadLag"),
     # v3.1.20

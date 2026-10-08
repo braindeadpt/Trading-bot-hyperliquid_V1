@@ -419,7 +419,7 @@ class TradingEngine:
         )
         self._phase08_paper_only = bool(p08.get("paper_only", True))
         self._phase08_fallback_strategy = str(
-            router_cfg.get("fallback_strategy", "ChecklistMeta")
+            router_cfg.get("fallback_strategy", "VWAPDeviation")
         )
         seq_ms = int(router_cfg.get("sequential_contradiction_block_ms", 3_600_000))
         self._phase08_seq_guard: Optional[SequentialContradictionGuard] = (
@@ -1133,7 +1133,7 @@ class TradingEngine:
         self._funding_poll_task = asyncio.create_task(self._poll_funding_loop())
         logger.info("FundingAggregator polling started (interval=30s)")
 
-        # Top-trader aggregate tracker (shadow TopTraderFlow)
+        # Top-trader aggregate tracker (bias samples + virtual book feeds)
         await self._start_top_trader_tracker()
 
         # 6. Start periodic summary loop
@@ -3055,7 +3055,7 @@ class TradingEngine:
                             liq_side = "short"  # shorts liquidated, price pumps
 
                         acc["events"].append((now, est_notional, liq_side, "proxy"))
-                        # Provenance must be explicit — ChecklistMeta and other
+                        # Provenance must be explicit — strategy and research
                         # consumers must be able to ignore proxy vs real venues.
                         acc["source"] = "proxy"
                         acc.setdefault("sources", set()).add("proxy")

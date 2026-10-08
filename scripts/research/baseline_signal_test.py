@@ -35,7 +35,9 @@ sys.path.insert(0, str(ROOT))
 
 from src.backtest.engine import BacktestEngine, build_backtest_config_from_yaml  # noqa: E402
 from src.data.database import Database  # noqa: E402
-from src.strategies.checklist_meta import ChecklistMeta  # noqa: E402
+# Note (2026-10-08): the ChecklistMeta module was deleted (refuted). This
+# harness keeps its shared baseline machinery for baseline_signal_gate;
+# the CM reference runner now raises "Unknown strategy" via the registry.
 from src.strategies.factory import DirectStrategyRouter  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
 from src.utils.helpers import safe_divide, safe_float  # noqa: E402
