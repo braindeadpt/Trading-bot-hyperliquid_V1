@@ -100,3 +100,36 @@ and the Aug–Sep regime mix. The shadow-pool path may emit at a different
 rate; the ×2 margin absorbs part of that, and a persistently trending
 market (ADX > 25) can legitimately starve the sample — that outcome is a
 valid negative result, not a malfunction.
+
+**Amendment 2, 2026-10-08 — no fallback promotion on the shadow mirror
+(added while the board is still sealed):** the discovery-era router had
+`fallback_strategy: ChecklistMeta`, so a VWAPDeviation signal could only
+enter `iv_gate_shadow` by being regime-eligible. The frozen config now
+names VWAPDeviation itself as fallback — promoting it would admit
+regime-ineligible signals (expansion/trend/unknown) into the confirmation
+sample, diverging from the frozen criterion. `_route_shadow_signals`
+therefore calls the router with `fallback_strategy=""` (promotion
+disabled): a VWAP signal in an ineligible regime is recorded
+`router_blocked`, never `iv_gate_shadow`. Execution routing is untouched —
+the engine's own call still uses the configured fallback.
+
+**Contamination audit (run before the activating restart, read-only query
+against `data/research/hyperliquid.db`):** `0` — zero
+`VWAPDeviation::iv_gate_shadow` rows exist with `timestamp_ms >
+1791490656000` (the variant only began recording after the cutoff), so the
+fallback-promotion contamination count is **0**. Per protocol, only the
+count is reported; no metrics were read.
+
+**Exclusion rule (fixed now, applies forever):** any post-cutoff
+`iv_gate_shadow` row stamped with `metadata.router_regime` outside
+`{range, low_vol}` — or explicitly flagged `metadata.fallback_promoted` —
+is excluded from the `#confirm` board by flag. Rows are **never deleted**
+and remain visible on the raw `shadow_decisions` table; the exclusion
+count is surfaced as `n_regime_excluded` on the confirm board. Rows
+recorded before the `router_regime` stamp existed carry no regime and are
+not retroactively excluded (absence of evidence is not evidence of
+contamination).
+
+**Provenance:** from the activating restart, every `iv_gate_shadow` row
+records `metadata.router_regime` and `metadata.router_adx` at routing time
+so exclusion requires no ADX reconstruction.

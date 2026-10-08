@@ -6,6 +6,7 @@ use a fixed seed. Promotion decisions will eventually depend on these numbers.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import random
@@ -14,7 +15,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pytest
 
@@ -1170,3 +1171,48 @@ def test_o_board_carries_n_clustered_alongside_n_independent() -> None:
         _outcome(symbol="SOL", entry=10, exit_=90, r=1.0, evaluated=False)
     ]
     assert clustered_episode_count(outs2) == 1
+
+
+def _vwap_iv_decision_regime(ts: int, row_id: int, regime: Optional[str]) -> ShadowDecision:
+    d = _vwap_iv_decision(ts, row_id)
+    snap = dict(d.market_snapshot or {})
+    meta = dict(snap.get("metadata") or {})
+    meta["router_regime"] = regime
+    snap["metadata"] = meta
+    return dataclasses.replace(d, market_snapshot=snap)
+
+
+def test_n_confirm_excludes_fallback_promoted_rows_by_flag() -> None:
+    """Post-cutoff VWAP rows stamped with an ineligible router_regime — or
+    flagged fallback_promoted — are excluded from the sealed #confirm board.
+    Rows are never deleted or simulated; the count is surfaced."""
+    good = _vwap_iv_decision_regime(PREREG_CUTOFF_MS + 3_600_000, 1, "low_vol")
+    bad_regime = _vwap_iv_decision_regime(PREREG_CUTOFF_MS + 7_200_000, 2, "expansion")
+    bad_trend = _vwap_iv_decision_regime(PREREG_CUTOFF_MS + 10_800_000, 3, "trend")
+    flagged = _vwap_iv_decision(PREREG_CUTOFF_MS + 14_400_000, 4)
+    snap = dict(flagged.market_snapshot or {})
+    meta = dict(snap.get("metadata") or {})
+    meta["fallback_promoted"] = True
+    snap["metadata"] = meta
+    flagged = dataclasses.replace(flagged, market_snapshot=snap)
+
+    excluded: Dict[str, int] = {}
+    boards = evaluate_shadow_decisions(
+        [good, bad_regime, bad_trend, flagged],
+        config=Config({}), candle_loader=_tp_loader,
+        include_maker_variant=False, excluded_counts=excluded,
+    )
+    key = "VWAPDeviation::iv_gate_shadow#confirm"
+    confirm = boards[key]
+    assert confirm.n_independent == 1          # only the regime-eligible row
+    assert confirm.sealed is True
+    assert confirm.n_regime_excluded == 3
+    assert excluded == {key: 3}
+    # Legacy rows without router_regime (pre-stamp) still count —
+    # retroactive detection is impossible without the stamp.
+    legacy = _vwap_iv_decision(PREREG_CUTOFF_MS + 18_000_000, 5)
+    boards2 = evaluate_shadow_decisions(
+        [legacy], config=Config({}), candle_loader=_tp_loader,
+        include_maker_variant=False,
+    )
+    assert boards2[key].n_independent == 1

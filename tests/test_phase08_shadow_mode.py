@@ -569,6 +569,70 @@ def test_g_shadow_routing_mirror_never_touches_execution(monkeypatch) -> None:
     ) == "low_iv"
 
 
+def test_h_shadow_mirror_no_fallback_promotion_vwap(monkeypatch) -> None:
+    """Contamination guard (Amendment 2): fallback promotion is disabled on
+    the shadow mirror.
+
+    With ``fallback_strategy = "VWAPDeviation"`` (the frozen config value)
+    a VWAP shadow signal in an ineligible regime must land as
+    ``router_blocked`` — never promoted into ``iv_gate_shadow``, which would
+    admit regime-ineligible rows into the sealed confirmation sample.
+    """
+    from src.data import dvol_feed
+
+    monkeypatch.setattr(
+        dvol_feed, "current_dvol_percentile", lambda *a, **k: 50.0
+    )
+    engine, stub, cap, _Boom, MarketEvent, Signal = _make_router_engine(
+        dvol_enabled=True
+    )
+
+    class _ShadowVWAP:
+        name = "VWAPDeviation"
+        _shadow_instance = True
+
+        def on_data(self, event: MarketEvent) -> Signal:
+            return Signal(
+                strategy="VWAPDeviation",
+                symbol=event.symbol,
+                side="long",
+                confidence=0.8,
+                size_pct=0.01,
+                stop_loss_pct=0.01,
+                take_profit_pct=0.02,
+            )
+
+    engine._shadow_strategies = [_ShadowVWAP()]
+    # Frozen config names VWAPDeviation itself as the router fallback.
+    engine._phase08_fallback_strategy = "VWAPDeviation"
+
+    # trend (ADX 30): VWAP ineligible — under fallback promotion this would
+    # have been re-admitted and recorded as iv_gate_shadow.
+    engine._latest_adx["BTC"] = 30.0
+    engine._evaluate_shadow_strategies(
+        MarketEvent(symbol="BTC", price=100.0, timestamp_ms=60_000_000), "BTC"
+    )
+
+    iv_rows = [r for r in cap.rows if r.variant == "iv_gate_shadow"]
+    assert iv_rows == []                       # no promotion into the sample
+    blocked = [r for r in cap.rows if r.variant == "router_blocked"]
+    assert len(blocked) == 1
+    bmeta = (blocked[0].market_snapshot or {}).get("metadata", {})
+    assert bmeta.get("router_regime") == "trend"
+
+    # low_vol (ADX 15): eligible regime still routes and is stamped with
+    # router provenance for downstream exclusion-by-flag.
+    engine._latest_adx["BTC"] = 15.0
+    engine._evaluate_shadow_strategies(
+        MarketEvent(symbol="BTC", price=100.0, timestamp_ms=60_060_000), "BTC"
+    )
+    iv_rows = [r for r in cap.rows if r.variant == "iv_gate_shadow"]
+    assert len(iv_rows) == 1
+    meta = (iv_rows[0].market_snapshot or {}).get("metadata", {})
+    assert meta.get("router_regime") == "low_vol"
+    assert meta.get("router_adx") == 15.0
+
+
 def test_f_router_block_no_recorder_no_crash() -> None:
     engine, stub, cap, _Boom, MarketEvent, Signal = _make_router_engine()
     engine._shadow_recorder = None

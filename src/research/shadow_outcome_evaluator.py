@@ -343,6 +343,25 @@ PREREGISTERED_CONFIRMATIONS: Dict[Tuple[str, str], Tuple[int, int, int]] = {
 }
 
 
+# Regimes under which a preregistered variant could legitimately enter the
+# confirmation sample (mirrors the discovery-era router eligibility). A
+# post-cutoff row stamped with another ``router_regime`` — or explicitly
+# flagged ``fallback_promoted`` — could only have arrived via fallback
+# promotion and is excluded by flag; rows are never deleted.
+_CONFIRM_REGIME_ALLOW: Dict[Tuple[str, str], frozenset] = {
+    ("VWAPDeviation", "iv_gate_shadow"): frozenset({"range", "low_vol"}),
+}
+
+
+def _confirm_row_excluded(decision: "ShadowDecision") -> bool:
+    meta = (decision.market_snapshot or {}).get("metadata") or {}
+    if meta.get("fallback_promoted"):
+        return True
+    allowed = _CONFIRM_REGIME_ALLOW.get((decision.strategy, decision.variant or ""))
+    regime = meta.get("router_regime")
+    return allowed is not None and regime is not None and regime not in allowed
+
+
 @dataclass
 class StrategyScoreboard:
     """Aggregated outcomes for one (strategy, variant) pair (gross + net).
@@ -403,6 +422,9 @@ class StrategyScoreboard:
     # date the seal lifts for the final read (verdict C by protocol).
     confirmation_expiry_ms: Optional[int] = None
     confirmation_expired: bool = False
+    # Post-cutoff rows excluded by flag (fallback promotion / ineligible
+    # recorded regime) — audit trail, rows stay in the DB untouched.
+    n_regime_excluded: int = 0
 
     @property
     def key(self) -> str:
@@ -447,6 +469,8 @@ class StrategyScoreboard:
             d["confirmation_cutoff_ms"] = self.confirmation_cutoff_ms
             d["confirmation_expiry_ms"] = self.confirmation_expiry_ms
             d["confirmation_expired"] = self.confirmation_expired
+        if self.n_regime_excluded:
+            d["n_regime_excluded"] = self.n_regime_excluded
         if self.variant == VARIANT_ROUTER_BLOCKED:
             d["section_label"] = ROUTER_BLOCKED_SECTION_LABEL
         if include_outcomes:
@@ -1343,6 +1367,7 @@ def evaluate_shadow_decisions(
     live_db_path: Optional[Path] = LIVE_DB_DEFAULT,
     candle_loader: Optional[Any] = None,
     include_maker_variant: bool = True,
+    excluded_counts: Optional[Dict[str, int]] = None,
 ) -> Dict[str, StrategyScoreboard]:
     """Evaluate decisions into scoreboards keyed by ``strategy::variant``.
 
@@ -1364,14 +1389,22 @@ def evaluate_shadow_decisions(
         research_db_path = Path(research_db_path)
 
     by_key: Dict[Tuple[str, str], List[ShadowDecision]] = {}
+    regime_excluded: Dict[str, int] = {}
     for d in decisions:
         variant = d.variant or VARIANT_PHASE08_SHADOW
         prereg = PREREGISTERED_CONFIRMATIONS.get((d.strategy, variant))
         if prereg is not None and d.timestamp_ms > prereg[0]:
             # Post-cutoff rows belong to the sealed confirmation sample —
-            # they never mix into the discovery board.
+            # they never mix into the discovery board. Rows that could only
+            # have entered via fallback promotion are excluded by flag.
+            if _confirm_row_excluded(d):
+                key = scoreboard_key(d.strategy, variant + VARIANT_CONFIRM_SUFFIX)
+                regime_excluded[key] = regime_excluded.get(key, 0) + 1
+                continue
             variant = variant + VARIANT_CONFIRM_SUFFIX
         by_key.setdefault((d.strategy, variant), []).append(d)
+    if excluded_counts is not None:
+        excluded_counts.update(regime_excluded)
 
     boards: Dict[str, StrategyScoreboard] = {}
     bias_store = None
@@ -1524,6 +1557,19 @@ def evaluate_shadow_decisions(
                 min_funding_coverage=maker_model.min_funding_coverage,
             )
             boards[maker_board.key] = maker_board
+    for key, n in regime_excluded.items():
+        board = boards.get(key)
+        if board is None:
+            # Every confirm row was excluded — surface a sealed empty board
+            # so the count is visible instead of silently absent.
+            strategy, variant = key.split("::", 1)
+            board = StrategyScoreboard(
+                strategy=strategy,
+                variant=variant,
+                sealed=True,
+            )
+            boards[key] = board
+        board.n_regime_excluded = n
     return boards
 
 

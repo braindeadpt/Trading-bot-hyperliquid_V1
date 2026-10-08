@@ -2296,12 +2296,12 @@ class TradingEngine:
                         timestamp_ms=event.timestamp_ms,
                         fallback_strategy=self._phase08_fallback_strategy,
                     )
+                    regime_name = classify_market_regime(
+                        adx_val,
+                        adx_range_threshold=self._phase08_adx_range,
+                        adx_trend_threshold=self._phase08_adx_trend,
+                    )
                     if regime_blocked:
-                        regime_name = classify_market_regime(
-                            adx_val,
-                            adx_range_threshold=self._phase08_adx_range,
-                            adx_trend_threshold=self._phase08_adx_trend,
-                        )
                         self._record_router_blocked_signals(
                             regime_blocked,
                             event=event,
@@ -2325,6 +2325,7 @@ class TradingEngine:
                         best_signal = max(routed, key=lambda s: s.confidence)
                         self._record_iv_gate_shadow(
                             best_signal, symbol=symbol, event=event,
+                            regime=regime_name, adx=adx_val,
                         )
                         await self._process_entry_signal(best_signal, event)
                 else:
@@ -2518,6 +2519,8 @@ class TradingEngine:
         *,
         symbol: str,
         event: MarketEvent,
+        regime: Optional[str] = None,
+        adx: Optional[float] = None,
     ) -> None:
         """Shadow-only IV gate: record the high/low-IV decision per routed trade.
 
@@ -2561,6 +2564,11 @@ class TradingEngine:
             meta["iv_class"] = iv_class
             meta["iv_threshold"] = IV_HIGH_PCT
             meta["iv_currency"] = currency
+            # Router context at record time — provenance for the sealed
+            # confirmation sample (a row under an ineligible regime can be
+            # audited/excluded downstream without reconstructing ADX).
+            meta["router_regime"] = regime
+            meta["router_adx"] = None if adx is None else round(float(adx), 2)
 
             recorder.record(
                 ShadowDecision(
@@ -2678,6 +2686,12 @@ class TradingEngine:
             return
         try:
             adx_val = self._latest_adx.get(symbol)
+            # No fallback promotion on the shadow path: during the discovery
+            # era fallback_strategy was ChecklistMeta, so a VWAPDeviation
+            # signal could NEVER enter iv_gate_shadow via promotion — only
+            # by being regime-eligible. Promoting it now (config fallback is
+            # VWAPDeviation) would contaminate the sealed confirmation sample
+            # with regime-ineligible rows.
             routed, _reject, regime_blocked = route_phase08_signals(
                 signals,
                 adx_val,
@@ -2686,14 +2700,14 @@ class TradingEngine:
                 symbol=symbol,
                 seq_guard=self._shadow_seq_guard,
                 timestamp_ms=event.timestamp_ms,
-                fallback_strategy=self._phase08_fallback_strategy,
+                fallback_strategy="",
+            )
+            regime_name = classify_market_regime(
+                adx_val,
+                adx_range_threshold=self._phase08_adx_range,
+                adx_trend_threshold=self._phase08_adx_trend,
             )
             if regime_blocked:
-                regime_name = classify_market_regime(
-                    adx_val,
-                    adx_range_threshold=self._phase08_adx_range,
-                    adx_trend_threshold=self._phase08_adx_trend,
-                )
                 self._record_router_blocked_signals(
                     regime_blocked,
                     event=event,
@@ -2704,6 +2718,7 @@ class TradingEngine:
                 best_signal = max(routed, key=lambda s: s.confidence)
                 self._record_iv_gate_shadow(
                     best_signal, symbol=symbol, event=event,
+                    regime=regime_name, adx=adx_val,
                 )
                 # Arm the shadow sequential guard on the "would-enter" side —
                 # the shadow analog of a real fill arming the exec guard.
