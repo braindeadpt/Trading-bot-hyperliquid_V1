@@ -14,9 +14,7 @@ one boot/shutdown cycle.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -61,15 +59,20 @@ class FakePortfolio:
         }
 
 
+@pytest.fixture(autouse=True)
+def _research_db_scratch(tmp_path, monkeypatch):
+    """The frozen settings.yaml pins a Windows research path (E:/...) that
+    the resolver rightly refuses on POSIX — the BOT_* env override is the
+    designed escape hatch and also reaches components that load config
+    themselves (e.g. TopTraderStore → ResearchDatabase.open())."""
+    monkeypatch.setenv(
+        "BOT_RESEARCH_DATABASE_PATH", str(tmp_path / "research.db")
+    )
+
+
 def _build_testnet_engine(cfg):
     """Build a fully-stubbed testnet engine wiring feeds + OMS + reconciliation mocks."""
     from src.core.engine import TradingEngine
-
-    # The frozen settings.yaml pins a Windows research path (E:/...) that the
-    # resolver rightly refuses on POSIX — point tests at a scratch file.
-    cfg._data.setdefault("research", {}).setdefault("database", {})[  # type: ignore[attr-defined]
-        "path"
-    ] = os.path.join(tempfile.gettempdir(), "boot_test_research.db")
 
     engine = TradingEngine.__new__(TradingEngine)
     engine._running = False

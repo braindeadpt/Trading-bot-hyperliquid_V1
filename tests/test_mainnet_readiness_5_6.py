@@ -9,9 +9,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -71,15 +69,20 @@ def test_settings_yaml_testnet_override_preserves() -> None:
 # ── WS health task is started in start() ─────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _research_db_scratch(tmp_path, monkeypatch):
+    """The frozen settings.yaml pins a Windows research path (E:/...) that
+    the resolver rightly refuses on POSIX — the BOT_* env override is the
+    designed escape hatch and also reaches components that load config
+    themselves (e.g. TopTraderStore → ResearchDatabase.open())."""
+    monkeypatch.setenv(
+        "BOT_RESEARCH_DATABASE_PATH", str(tmp_path / "research.db")
+    )
+
+
 def _build_paper_engine(cfg, *, with_ws: bool) -> "TradingEngine":
     """Build a fully-stubbed engine for start() unit tests."""
     from src.core.engine import TradingEngine
-
-    # The frozen settings.yaml pins a Windows research path (E:/...) that the
-    # resolver rightly refuses on POSIX — point tests at a scratch file.
-    cfg._data.setdefault("research", {}).setdefault("database", {})[  # type: ignore[attr-defined]
-        "path"
-    ] = os.path.join(tempfile.gettempdir(), "paper_boot_test_research.db")
 
     engine = TradingEngine.__new__(TradingEngine)
     engine._running = False
