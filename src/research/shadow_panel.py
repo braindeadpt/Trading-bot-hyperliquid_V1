@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from src.exchanges.liquidation_event import is_real_liquidation_source
 from src.research.shadow_outcome_evaluator import (
     IDEALIZED_FILL_DISCLAIMER,
+    VARIANT_CONFIRM_SUFFIX,
     VARIANT_PHASE08_SHADOW,
     VARIANT_PHASE08_SHADOW_MAKER,
     scoreboard_key,
@@ -225,11 +226,25 @@ def build_shadow_panel_payload(
 
         board = None
         maker_board = None
+        confirm_board = None
         if isinstance(boards, dict):
             board = boards.get(f"{name}::phase08_shadow")
             maker_board = boards.get(
                 scoreboard_key(name, VARIANT_PHASE08_SHADOW_MAKER)
             )
+            # Preregistered confirmation samples (e.g. VWAPDeviation
+            # iv_gate_shadow) surface as ``<variant>#confirm`` boards —
+            # counts only while sealed (no-peeking rule).
+            for k, v in boards.items():
+                if (
+                    isinstance(v, dict)
+                    and v.get("strategy") == name
+                    and str(v.get("variant") or "").endswith(
+                        VARIANT_CONFIRM_SUFFIX
+                    )
+                ):
+                    confirm_board = v
+                    break
             if board is None:
                 # boards keys may be scoreboard_key already
                 for k, v in boards.items():
@@ -336,6 +351,19 @@ def build_shadow_panel_payload(
                 "maker_net_pf": (maker_board or {}).get("net_profit_factor"),
                 "maker_net_expectancy_r": (maker_board or {}).get(
                     "net_expectancy_r"
+                ),
+                # Preregistered confirmation sample — deliberately exposes
+                # ONLY the independent count while sealed; metrics exist
+                # nowhere in this payload until the final read.
+                "confirmation": (
+                    {
+                        "variant": confirm_board.get("variant"),
+                        "n_independent": confirm_board.get("n_independent"),
+                        "target": confirm_board.get("confirmation_min_indep"),
+                        "sealed": bool(confirm_board.get("sealed")),
+                    }
+                    if confirm_board
+                    else None
                 ),
                 "maker_skips": (maker_board or {}).get("skip_reasons"),
                 "last_gate": gate,

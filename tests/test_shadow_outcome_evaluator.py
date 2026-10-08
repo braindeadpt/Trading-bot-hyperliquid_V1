@@ -920,3 +920,95 @@ def test_l_empty_board_has_zero_independent() -> None:
     )
     assert board.n_independent == 0
     assert board.independent_outcome_rows == []
+
+
+# ── m. preregistered confirmation seal (no peeking) ──────────────────────────
+
+PREREG_CUTOFF_MS = 1791490656000  # commit a70b3cb — PREREGISTER_VWAP_IV_GATE
+
+
+def _vwap_iv_decision(ts: int, row_id: int, side: str = "long") -> ShadowDecision:
+    snap = build_enriched_market_snapshot(
+        price=100.0,
+        confidence=0.7,
+        stop_loss_pct=0.01,
+        take_profit_pct=0.02,
+        size_pct=0.01,
+        metadata={"iv_class": "low_iv"},
+    )
+    return ShadowDecision(
+        symbol="BTC",
+        strategy="VWAPDeviation",
+        variant="iv_gate_shadow",
+        side=side,
+        would_enter=True,
+        reason="iv_gate:low_iv",
+        timestamp_ms=ts,
+        market_snapshot=snap,
+        row_id=row_id,
+    )
+
+
+def _tp_loader(symbol: str, ts: int, max_hold: int):
+    return ([_candle(ts + 60_000, 100.0, 103.0, 100.0, 102.5)], "synthetic")
+
+
+def test_m_confirm_board_sealed_until_target() -> None:
+    """Post-cutoff VWAP iv_gate rows form a sealed board: counts only."""
+    decisions = [
+        _vwap_iv_decision(PREREG_CUTOFF_MS + 1 + i * 3_600_000, i + 1)
+        for i in range(5)
+    ]
+    boards = evaluate_shadow_decisions(
+        decisions, config=Config({}), candle_loader=_tp_loader,
+        include_maker_variant=False,
+    )
+    confirm = boards["VWAPDeviation::iv_gate_shadow#confirm"]
+    assert confirm.sealed is True
+    assert confirm.n_independent == 5
+    assert confirm.confirmation_min_indep == 60
+    assert confirm.confirmation_cutoff_ms == PREREG_CUTOFF_MS
+    # No peeking: metrics were never computed
+    assert confirm.net_profit_factor == 0.0
+    assert confirm.win_rate == 0.0
+    assert confirm.wins == 0
+    # no discovery board — all rows were post-cutoff
+    assert "VWAPDeviation::iv_gate_shadow" not in boards
+    # and no maker board for a confirmation group
+    assert "VWAPDeviation::phase08_shadow_maker" not in boards
+
+
+def test_m_cutoff_partitions_discovery_from_confirmation() -> None:
+    decisions = [
+        _vwap_iv_decision(PREREG_CUTOFF_MS - 10_000, 1),   # discovery (n=30 era)
+        _vwap_iv_decision(PREREG_CUTOFF_MS + 10_000, 2),   # confirmation
+    ]
+    boards = evaluate_shadow_decisions(
+        decisions, config=Config({}), candle_loader=_tp_loader,
+        include_maker_variant=False,
+    )
+    disc = boards["VWAPDeviation::iv_gate_shadow"]
+    conf = boards["VWAPDeviation::iv_gate_shadow#confirm"]
+    assert disc.sealed is False
+    assert disc.n_independent == 1
+    assert disc.net_profit_factor != 0.0        # discovery metrics visible
+    assert conf.sealed is True
+    assert conf.n_independent == 1
+
+
+def test_m_seal_lifts_at_indep_target() -> None:
+    outs = [_outcome(entry=i * 200, exit_=i * 200 + 100, r=1.0) for i in range(61)]
+    board = aggregate_scoreboard(
+        "VWAPDeviation",
+        outs,
+        max_hold_ms=1_000,
+        candle_source="synthetic",
+        n_decisions=61,
+        variant="iv_gate_shadow#confirm",
+        sealed_min_indep=60,
+        confirmation_cutoff_ms=PREREG_CUTOFF_MS,
+    )
+    assert board.sealed is False
+    assert board.n_independent == 61
+    assert board.profit_factor > 0
+    assert board.wins == 61

@@ -91,3 +91,13 @@ Do **not** decide on mid-window snapshots. Formal verdict only at day 90
 - Manifest: `data/research/paper_oos_90d/manifest.json` (written at re-register)
 - Weekly reports: `data/research/paper_oos_90d/weekly/`
 - Protocol (this file): `docs/PAPER_OOS_90D_PROTOCOL.md`
+
+## Code-change log (mid-window, hash-neutral)
+
+The config hash cannot see code changes, so every code change touching the
+live process during the frozen window is logged here.
+
+| Date | Commit | Change | Why hash-neutral / isolation |
+|------|--------|--------|------------------------------|
+| 2026-10-08 | `a70b3cb` | `TradingEngine._route_shadow_signals` — the shadow signal pool now passes through `route_phase08_signals` (own `SequentialContradictionGuard`, never shared with the execution guard) and emits `router_blocked` / `iv_gate_shadow` rows exactly like the routed path. Needed because `iv_gate_shadow` was previously emitted only on the best routed *execution* signal — pruned strategies could never accumulate it, which would silently kill the VWAP iv_gate preregistration. | Observability-only: writes shadow_decisions rows only. Isolation asserted by `test_g_shadow_routing_mirror_never_touches_execution` — identical events produce zero `_process_entry_signal`/`_persist_decision` calls and leave the execution seq-guard state untouched. |
+| 2026-10-08 | `a70b3cb` | `shadow_outcome_evaluator` — `independent_outcomes` (one open position per symbol), `n_independent`/`n_overlapped` on boards, metrics + gates read the independent set, pre-simulation overlap dedup, preregistered-confirmation seal (`<variant>#confirm` boards expose counts only until target). | Read path only — computes and persists scoreboards; never feeds execution. `shadow_strategies` membership verified hash-neutral (4077927fec6a880c → 4077927fec6a880c). |

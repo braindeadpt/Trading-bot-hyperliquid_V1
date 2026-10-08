@@ -301,7 +301,7 @@ def test_evaluate_shadow_strategies_persists_bracket_fields() -> None:
     assert boom.last is not None  # invoked; exception swallowed
 
 
-def _make_router_engine(*, throttle_ms: int = 300_000):
+def _make_router_engine(*, throttle_ms: int = 300_000, dvol_enabled: bool = False):
     """Minimal engine with Phase08 regime router on and a VWAP-like stub."""
     from src.core.engine import TradingEngine
     from src.core.execution import ExecutionEngine
@@ -350,6 +350,7 @@ def _make_router_engine(*, throttle_ms: int = 300_000):
                 },
             },
             "risk": {"max_position_size_pct": 5.0, "leverage_max": 5.0},
+            "research": {"dvol_feed": {"enabled": dvol_enabled}},
         }
     )
     stub = _VWAPStub()
@@ -488,6 +489,84 @@ def test_d_router_block_recorder_exception_does_not_break_loop() -> None:
         adx=22.0,
     )
     assert len(boom.rows) == 1
+
+
+def test_g_shadow_routing_mirror_never_touches_execution(monkeypatch) -> None:
+    """Phase10 code-change guard: shadow-path routing is observability-only.
+
+    Feeds a VWAPDeviation shadow signal through _route_shadow_signals in a
+    regime where it is eligible (low_vol → routed → iv_gate_shadow) and one
+    where it is not (expansion → router_blocked). Asserts the execution
+    surface is bit-identical: no _process_entry_signal / _persist_decision
+    calls and the EXECUTION sequential guard state is unchanged — the shadow
+    mirror runs on its own guard.
+    """
+    from src.data import dvol_feed
+
+    monkeypatch.setattr(
+        dvol_feed, "current_dvol_percentile", lambda *a, **k: 50.0
+    )
+    engine, stub, cap, _Boom, MarketEvent, Signal = _make_router_engine(
+        dvol_enabled=True
+    )
+
+    class _ShadowVWAP:
+        name = "VWAPDeviation"
+        _shadow_instance = True
+
+        def on_data(self, event: MarketEvent) -> Signal:
+            return Signal(
+                strategy="VWAPDeviation",
+                symbol=event.symbol,
+                side="long",
+                confidence=0.8,
+                size_pct=0.01,
+                stop_loss_pct=0.01,
+                take_profit_pct=0.02,
+            )
+
+    engine._shadow_strategies = [_ShadowVWAP()]
+    assert engine._shadow_seq_guard is not None
+
+    entry_calls: list = []
+    persist_calls: list = []
+
+    async def _entry_spy(*a, **k):
+        entry_calls.append(a)
+
+    engine._process_entry_signal = _entry_spy  # type: ignore[method-assign]
+    engine._persist_decision = lambda *a, **k: persist_calls.append(a)  # type: ignore[method-assign]
+
+    exec_sides = dict(engine._phase08_seq_guard._last_side)
+    exec_ts = dict(engine._phase08_seq_guard._last_ts)
+
+    # low_vol (ADX 15): VWAP routed → iv_gate_shadow row on the shadow path
+    engine._latest_adx["BTC"] = 15.0
+    engine._evaluate_shadow_strategies(
+        MarketEvent(symbol="BTC", price=100.0, timestamp_ms=50_000_000), "BTC"
+    )
+    # expansion (ADX 22): VWAP regime-blocked → router_blocked row
+    engine._latest_adx["BTC"] = 22.0
+    engine._evaluate_shadow_strategies(
+        MarketEvent(symbol="BTC", price=100.0, timestamp_ms=50_060_000), "BTC"
+    )
+
+    assert entry_calls == []
+    assert persist_calls == []
+    assert dict(engine._phase08_seq_guard._last_side) == exec_sides
+    assert dict(engine._phase08_seq_guard._last_ts) == exec_ts
+    # shadow guard armed on the would-enter side — its own state only
+    assert engine._shadow_seq_guard._last_side.get("BTC") == "long"
+
+    variants = [r.variant for r in cap.rows]
+    assert "phase08_shadow" in variants          # every shadow signal recorded
+    assert "iv_gate_shadow" in variants          # routed + DVOL-classified
+    assert "router_blocked" in variants          # regime-blocked row preserved
+    iv_rows = [r for r in cap.rows if r.variant == "iv_gate_shadow"]
+    assert iv_rows[0].strategy == "VWAPDeviation"
+    assert (iv_rows[0].market_snapshot or {}).get("metadata", {}).get(
+        "iv_class"
+    ) == "low_iv"
 
 
 def test_f_router_block_no_recorder_no_crash() -> None:

@@ -326,6 +326,18 @@ ROUTER_BLOCKED_SECTION_LABEL = (
     "counterfactual — signals the router blocked; idealized fills"
 )
 
+# Preregistered confirmation samples — the board for post-cutoff decisions
+# is SEALED: only counts are exposed until indep_n reaches the target, so an
+# interim read can never drive a stop/continue decision (no peeking rule in
+# docs/PREREGISTER_VWAP_IV_GATE_2026-10-08.md — commit a70b3cb,
+# 2026-10-08 20:17:36 UTC). Discovery rows (ts <= cutoff) keep the plain
+# variant board; confirmation rows get ``variant#confirm``.
+VARIANT_CONFIRM_SUFFIX = "#confirm"
+PREREGISTERED_CONFIRMATIONS: Dict[Tuple[str, str], Tuple[int, int]] = {
+    # (strategy, variant) -> (cutoff_ms, min_independent_n)
+    ("VWAPDeviation", "iv_gate_shadow"): (1791490656000, 60),
+}
+
 
 @dataclass
 class StrategyScoreboard:
@@ -374,6 +386,11 @@ class StrategyScoreboard:
     independent_outcome_rows: List[SimulatedOutcome] = field(
         default_factory=list
     )
+    # Preregistered-confirmation seal: when True the metric fields below are
+    # intentionally NOT computed — the sample is read once, at the end.
+    sealed: bool = False
+    confirmation_min_indep: int = 0
+    confirmation_cutoff_ms: Optional[int] = None
 
     @property
     def key(self) -> str:
@@ -411,6 +428,10 @@ class StrategyScoreboard:
             "candle_source": self.candle_source,
             "disclaimer": self.disclaimer,
         }
+        if self.sealed:
+            d["sealed"] = True
+            d["confirmation_min_indep"] = self.confirmation_min_indep
+            d["confirmation_cutoff_ms"] = self.confirmation_cutoff_ms
         if self.variant == VARIANT_ROUTER_BLOCKED:
             d["section_label"] = ROUTER_BLOCKED_SECTION_LABEL
         if include_outcomes:
@@ -1179,8 +1200,17 @@ def aggregate_scoreboard(
     n_decisions: int,
     variant: str = VARIANT_PHASE08_SHADOW,
     min_funding_coverage: float = 0.90,
+    sealed_min_indep: Optional[int] = None,
+    confirmation_cutoff_ms: Optional[int] = None,
 ) -> StrategyScoreboard:
-    """Build scoreboard metrics. Gross PF uses R; net PF uses net R."""
+    """Build scoreboard metrics. Gross PF uses R; net PF uses net R.
+
+    ``sealed_min_indep`` implements the no-peeking rule for preregistered
+    confirmation samples: while ``n_independent < sealed_min_indep`` the
+    board carries counts only — metric fields stay at their defaults so an
+    interim read can never inform a stop/continue decision. The seal lifts
+    automatically at the final read.
+    """
     disclaimer = IDEALIZED_FILL_DISCLAIMER
     if variant == VARIANT_ROUTER_BLOCKED:
         disclaimer = f"{ROUTER_BLOCKED_SECTION_LABEL}. {IDEALIZED_FILL_DISCLAIMER}"
@@ -1205,6 +1235,13 @@ def aggregate_scoreboard(
     board.n_independent = len(indep)
     board.n_overlapped = len(evaluated) - len(indep)
     board.independent_outcome_rows = indep
+
+    if sealed_min_indep is not None:
+        board.confirmation_min_indep = sealed_min_indep
+        board.confirmation_cutoff_ms = confirmation_cutoff_ms
+        board.sealed = len(indep) < sealed_min_indep
+        if board.sealed:
+            return board
 
     if not evaluated:
         return board
@@ -1277,11 +1314,25 @@ def evaluate_shadow_decisions(
     by_key: Dict[Tuple[str, str], List[ShadowDecision]] = {}
     for d in decisions:
         variant = d.variant or VARIANT_PHASE08_SHADOW
+        prereg = PREREGISTERED_CONFIRMATIONS.get((d.strategy, variant))
+        if prereg is not None and d.timestamp_ms > prereg[0]:
+            # Post-cutoff rows belong to the sealed confirmation sample —
+            # they never mix into the discovery board.
+            variant = variant + VARIANT_CONFIRM_SUFFIX
         by_key.setdefault((d.strategy, variant), []).append(d)
 
     boards: Dict[str, StrategyScoreboard] = {}
     bias_store = None
     for (strategy, variant), group in by_key.items():
+        is_confirm = variant.endswith(VARIANT_CONFIRM_SUFFIX)
+        prereg = (
+            PREREGISTERED_CONFIRMATIONS.get(
+                (strategy, variant[: -len(VARIANT_CONFIRM_SUFFIX)])
+            )
+            if is_confirm
+            else None
+        )
+        group_maker = include_maker_variant and not is_confirm
         max_hold = resolve_max_hold_ms(strategy, cfg)
         cost_model = resolve_shadow_cost_model(strategy, cfg)
         thr = 0.55
@@ -1308,7 +1359,7 @@ def evaluate_shadow_decisions(
         maker_window = resolve_maker_entry_window_ms(cfg)
         # The maker fill can land up to the fill window after the signal —
         # candle coverage must reach decision + window + max_hold.
-        lead = maker_window if include_maker_variant else 0
+        lead = maker_window if group_maker else 0
         sources_seen: List[str] = []
         funding_cache: Dict[str, List[Tuple[int, float]]] = {}
         # Pre-simulation independence filter — same rule the scoreboard
@@ -1326,12 +1377,12 @@ def evaluate_shadow_decisions(
         maker_busy_until: Dict[str, int] = {}
         for d in sorted(group, key=lambda x: (x.symbol, x.timestamp_ms)):
             taker_blocked = d.timestamp_ms < busy_until.get(d.symbol, -1)
-            maker_blocked = include_maker_variant and (
+            maker_blocked = group_maker and (
                 d.timestamp_ms + maker_window < maker_busy_until.get(d.symbol, -1)
             )
-            if taker_blocked and (not include_maker_variant or maker_blocked):
+            if taker_blocked and (not group_maker or maker_blocked):
                 outcomes.append(_overlap_skip_outcome(d))
-                if include_maker_variant:
+                if group_maker:
                     maker_outcomes.append(_overlap_skip_outcome(d))
                 continue
             if candle_loader is not None:
@@ -1381,7 +1432,7 @@ def evaluate_shadow_decisions(
                 outcomes.append(taker_out)
                 if taker_out.evaluated:
                     busy_until[d.symbol] = taker_out.exit_ts_ms
-            if include_maker_variant:
+            if group_maker:
                 if maker_blocked:
                     maker_outcomes.append(_overlap_skip_outcome(d))
                 else:
@@ -1405,9 +1456,11 @@ def evaluate_shadow_decisions(
             n_decisions=len(group),
             variant=variant,
             min_funding_coverage=cost_model.min_funding_coverage,
+            sealed_min_indep=prereg[1] if prereg is not None else None,
+            confirmation_cutoff_ms=prereg[0] if prereg is not None else None,
         )
         boards[board.key] = board
-        if include_maker_variant:
+        if group_maker:
             maker_board = aggregate_scoreboard(
                 strategy,
                 maker_outcomes,
@@ -1503,6 +1556,14 @@ def format_scoreboard_table(boards: Dict[str, StrategyScoreboard]) -> str:
         )
         lines.append("-" * 128)
         for b in section_boards:
+            if b.sealed:
+                lines.append(
+                    f"{b.strategy:20} {b.variant:16} {b.n_evaluated:6d} "
+                    f"{b.n_independent:6d}   SEALED — preregistered "
+                    f"confirmation, metrics read once at "
+                    f"indep_n>={b.confirmation_min_indep}"
+                )
+                continue
             lines.append(
                 f"{b.strategy:20} {b.variant:16} {b.n_evaluated:6d} "
                 f"{b.n_independent:6d} "
