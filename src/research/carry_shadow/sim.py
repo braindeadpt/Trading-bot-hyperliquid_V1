@@ -104,10 +104,13 @@ class Episode:
     unlegged_since_ms: int = 0    # set when exactly one leg filled
     max_unlegged_s: float = 0.0   # longest naked exposure observed
     # unlegged-risk instrumentation (measurement only, 2026-10-09):
-    # which leg is still pending, the filled leg's price as reference, and
-    # the worst adverse excursion of the MISSING leg's mid vs that ref
+    # which leg is still pending, the MISSING leg's mid at first fill as
+    # the excursion reference (basis-free), the spot–perp basis at first
+    # fill for context, and the worst adverse excursion of the missing
+    # leg's mid vs that ref
     unlegged_missing_leg: Optional[str] = None
     unlegged_ref_price: float = 0.0
+    unlegged_basis_bps: Optional[float] = None
     unlegged_max_adverse_bps: float = 0.0
     close_reason: str = ""
 
@@ -149,7 +152,7 @@ class Episode:
         self.legs["perp"].check(ts_ms, perp)
         after = self._n_filled(self.legs)
         if before == 0 and after == 1:
-            self._open_unlegged(ts_ms)
+            self._open_unlegged(ts_ms, spot, perp)
         if self.unlegged_since_ms and after == 1:
             self._track_unlegged(spot, perp, self.legs)
         if after == 2:
@@ -253,7 +256,7 @@ class Episode:
         self.exit_legs["perp"].check(ts_ms, perp)
         after = self._n_filled(self.exit_legs)
         if before == 0 and after == 1:
-            self._open_unlegged(ts_ms)
+            self._open_unlegged(ts_ms, spot, perp)
         if self.unlegged_since_ms and after == 1:
             self._track_unlegged(spot, perp, self.exit_legs)
         if after == 2:
@@ -289,23 +292,31 @@ class Episode:
     def _n_filled(legs: dict) -> int:
         return sum(1 for leg in legs.values() if leg.filled)
 
-    def _open_unlegged(self, ts_ms: int) -> None:
-        """First leg just filled — record which leg is pending and the
-        filled leg's price as the excursion reference."""
+    def _open_unlegged(self, ts_ms: int, spot: BookSnap,
+                       perp: BookSnap) -> None:
+        """First leg just filled — record which leg is pending, that leg's
+        own mid as the excursion reference (so the measurement isolates
+        movement during the unlegged window, basis-free), and the
+        spot–perp mid basis for context."""
         legs = self.legs if self.state in ("pending_entry",) else self.exit_legs
         missing = [k for k, l in legs.items() if not l.filled]
         filled = [k for k, l in legs.items() if l.filled]
         if len(missing) == 1 and len(filled) == 1:
             self.unlegged_since_ms = ts_ms
             self.unlegged_missing_leg = missing[0]
-            self.unlegged_ref_price = legs[filled[0]].price
+            ref = (spot if missing[0] == "spot" else perp).mid
+            self.unlegged_ref_price = ref if ref > 0 else 0.0
+            if spot.mid > 0 and perp.mid > 0:
+                self.unlegged_basis_bps = (
+                    (perp.mid - spot.mid) / spot.mid * 1e4)
 
     def _track_unlegged(self, spot: BookSnap, perp: BookSnap,
                         legs: dict) -> None:
         """Worst adverse excursion (bps) of the MISSING leg's mid against
-        the filled leg's entry price. Adverse = the missing leg would now
-        cost more to complete: a pending BUY suffers when mid rises, a
-        pending SELL when it falls."""
+        that leg's own mid at first-fill time (basis-free reference).
+        Adverse = the missing leg would now cost more to complete: a
+        pending BUY suffers when mid rises, a pending SELL when it
+        falls."""
         if not self.unlegged_missing_leg or self.unlegged_ref_price <= 0:
             return
         book = spot if self.unlegged_missing_leg == "spot" else perp

@@ -202,9 +202,14 @@ unwind cost, with no mid-path data). Added:
   `fill` events (same snapshot format).
 - **`unlegged_max_adverse_bps`** (episode column): while exactly one leg
   is filled, the worst adverse excursion of the *missing* leg's mid,
-  measured in bps against the filled leg's entry price. For a pending
-  sell leg, adverse = `ref − mid`; for a pending buy leg, adverse =
-  `mid − ref`. Latched (max) across the whole unlegged window.
+  measured in bps against that leg's **own mid at first-fill time** —
+  the reference is basis-free, so the metric isolates price movement
+  *during* the unlegged window. For a pending sell leg, adverse =
+  `ref − mid`; for a pending buy leg, adverse = `mid − ref`. Latched
+  (max) across the whole unlegged window.
+- **`unlegged_basis_bps`** (episode column + `leg_fill` events): the
+  spot–perp mid basis `(perp_mid − spot_mid)/spot_mid` at first-fill
+  time — context only, kept separate from the excursion metric.
 - **`unlegged_s`** (episode column): total seconds spent unlegged,
   persisted on the episode row at `fill`/`aborted` (previously only in
   the event payload).
@@ -213,7 +218,8 @@ unwind cost, with no mid-path data). Added:
   `unlegged_max_adverse_bps` and duration).
 
 **Backfill policy:** episodes 1–4 (pre-instrumentation) keep `NULL` in
-`unlegged_max_adverse_bps`/`unlegged_s` — no backfill, the columns
+`unlegged_s`/`unlegged_max_adverse_bps`/`unlegged_basis_bps` — no
+backfill, the columns
 distinguish "measured" from "pre-instrumentation" rather than rewriting
 history. Status aggregation excludes NULLs.
 

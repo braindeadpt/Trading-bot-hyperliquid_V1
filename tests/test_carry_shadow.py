@@ -474,41 +474,45 @@ def test_ledger_fill_rate_and_reload(tmp_path) -> None:
 # ── unlegged-risk instrumentation (amendment 2026-10-09, measurement only) ──
 
 def test_unlegged_adverse_excursion_tracked_and_latched() -> None:
-    """Spot leg fills; perp (the missing SELL leg) mid falls below the spot
-    fill price, then recovers: worst adverse excursion must latch the max."""
+    """Spot leg fills; the reference is the MISSING leg's (perp) own mid at
+    that instant, so adverse excursion is basis-free. Perp mid then falls
+    and recovers: worst excursion must latch the max."""
     ep = _ep()
     ep.place_entry(BookSnap(99.0, 100.0), BookSnap(99.0, 100.0))
-    # spot fills at 99.0 bid; perp still pending
+    # spot fills at 99.0 bid; perp still pending, perp mid = 99.5 -> ref
     ep.on_book_entry(1_000, BookSnap(98.5, 98.9), BookSnap(99.0, 100.0))
     assert ep.unlegged_missing_leg == "perp"
-    assert ep.unlegged_ref_price == 99.0
-    # perp mid drops to 98.0 (bid 97.5/ask 98.5): adverse for a pending SELL
-    # = (99.0 - 98.0)/99.0 * 1e4 ~= 101 bps
+    assert ep.unlegged_ref_price == 99.5
+    # basis context: (perp_mid - spot_mid)/spot_mid at first fill
+    assert ep.unlegged_basis_bps == pytest.approx(
+        (99.5 - 98.7) / 98.7 * 1e4, rel=0.01)
+    # perp mid drops to 98.0 (bid 97.5/ask 98.5): adverse for a pending
+    # SELL = (99.5 - 98.0)/99.5 * 1e4 ~= 150.8 bps
     ep.on_book_entry(2_000, BookSnap(98.5, 98.9), BookSnap(97.5, 98.5))
-    assert ep.unlegged_max_adverse_bps == pytest.approx(101.01, rel=0.01)
+    assert ep.unlegged_max_adverse_bps == pytest.approx(150.75, rel=0.01)
     # smaller adverse move doesn't lower the latch; favourable move ignored
     ep.on_book_entry(3_000, BookSnap(98.5, 98.9), BookSnap(98.0, 98.8))
     ep.on_book_entry(4_000, BookSnap(98.5, 98.9), BookSnap(99.5, 100.5))
-    assert ep.unlegged_max_adverse_bps == pytest.approx(101.01, rel=0.01)
+    assert ep.unlegged_max_adverse_bps == pytest.approx(150.75, rel=0.01)
     # perp fills -> unlegged closed, duration + excursion kept
     ev = ep.on_book_entry(5_000, BookSnap(98.5, 98.9), BookSnap(100.1, 100.2))
     assert ev == "fill"
     assert ep.max_unlegged_s == 4.0
-    assert ep.unlegged_max_adverse_bps == pytest.approx(101.01, rel=0.01)
+    assert ep.unlegged_max_adverse_bps == pytest.approx(150.75, rel=0.01)
 
 
 def test_unlegged_adverse_pending_buy_leg() -> None:
     """Mirror image: perp sells first; the missing spot BUY leg suffers
-    when the spot mid rises above the perp fill price."""
+    when the spot mid rises above its first-fill mid reference."""
     ep = _ep()
     ep.place_entry(BookSnap(99.0, 100.0), BookSnap(99.0, 100.0))
-    # perp fills first (bid crosses our 100.0 ask); spot pending
+    # perp fills first (bid crosses our 100.0 ask); spot pending, ref = 99.5
     ep.on_book_entry(1_000, BookSnap(99.0, 100.0), BookSnap(100.1, 100.5))
     assert ep.unlegged_missing_leg == "spot"
-    assert ep.unlegged_ref_price == 100.0
-    # spot mid rises to 101.0: adverse for pending BUY = +101 bps
+    assert ep.unlegged_ref_price == 99.5
+    # spot mid rises to 101.0: adverse for pending BUY ~= 150.8 bps
     ep.on_book_entry(2_000, BookSnap(100.5, 101.5), BookSnap(100.1, 100.5))
-    assert ep.unlegged_max_adverse_bps == pytest.approx(100.0, rel=0.01)
+    assert ep.unlegged_max_adverse_bps == pytest.approx(150.75, rel=0.01)
 
 
 def test_no_unlegged_means_no_instrumentation() -> None:
@@ -522,15 +526,18 @@ def test_ledger_persists_unlegged_columns(tmp_path) -> None:
     """New columns land on the episode row at open/abort; NULL pre-existed."""
     led = Ledger(str(tmp_path / "cs.db"))
     cols = {r[1] for r in led._con.execute("PRAGMA table_info(episodes)")}
-    assert {"unlegged_s", "unlegged_max_adverse_bps"} <= cols
+    assert {"unlegged_s", "unlegged_max_adverse_bps",
+            "unlegged_basis_bps"} <= cols
     ep = _ep()
     ep.state = "pending_entry"
     ep.id = led.episode_open(ep.row())
-    led.episode_update(ep.id, unlegged_s=12.5, unlegged_max_adverse_bps=33.3)
+    led.episode_update(ep.id, unlegged_s=12.5,
+                       unlegged_max_adverse_bps=33.3,
+                       unlegged_basis_bps=81.0)
     row = led._con.execute(
-        "SELECT unlegged_s, unlegged_max_adverse_bps FROM episodes WHERE id=?",
-        (ep.id,)).fetchone()
-    assert row == (12.5, pytest.approx(33.3))
+        "SELECT unlegged_s, unlegged_max_adverse_bps, unlegged_basis_bps"
+        " FROM episodes WHERE id=?", (ep.id,)).fetchone()
+    assert row == (12.5, pytest.approx(33.3), pytest.approx(81.0))
     led.close()
 
 
@@ -559,6 +566,8 @@ def test_daemon_emits_leg_fill_and_bbo(tmp_path) -> None:
     assert len(evs) == 1 and evs[0]["leg"] == "spot"
     assert evs[0]["bbo"]["spot"]["mid"] == pytest.approx(98.7)
     assert evs[0]["bbo"]["perp"]["mid"] == pytest.approx(99.5)
+    assert evs[0]["unlegged_basis_bps"] == pytest.approx(
+        (99.5 - 98.7) / 98.7 * 1e4, rel=0.01)
     # unwind past the window -> event carries bbo + unlegged metrics
     d._handle_entry_event(
         ep, ep.on_book_entry(now + 901_000 + 60_000,

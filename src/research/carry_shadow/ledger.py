@@ -87,6 +87,8 @@ class Ledger:
             ("unlegged_s", "ALTER TABLE episodes ADD COLUMN unlegged_s REAL"),
             ("unlegged_max_adverse_bps",
              "ALTER TABLE episodes ADD COLUMN unlegged_max_adverse_bps REAL"),
+            ("unlegged_basis_bps",
+             "ALTER TABLE episodes ADD COLUMN unlegged_basis_bps REAL"),
         ):
             if col not in ecols:
                 self._con.execute(ddl)

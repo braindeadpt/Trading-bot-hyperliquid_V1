@@ -59,17 +59,19 @@ def main() -> None:
               f"  trades:{trd.get(coin, 0):>7d}  book_missing:{miss.get(coin, 0)}")
 
     ecols = {r[1] for r in con.execute("PRAGMA table_info(episodes)")}
-    has_unleg = {"unlegged_s", "unlegged_max_adverse_bps"} <= ecols
+    has_unleg = {"unlegged_s", "unlegged_max_adverse_bps",
+                 "unlegged_basis_bps"} <= ecols
     eps = con.execute(
         "SELECT pair, perp, state, close_reason, gap_unverified, cost_bps"
-        + (", unlegged_s, unlegged_max_adverse_bps" if has_unleg
-           else ", NULL, NULL")
+        + (", unlegged_s, unlegged_max_adverse_bps, unlegged_basis_bps"
+           if has_unleg else ", NULL, NULL, NULL")
         + " FROM episodes ORDER BY entry_decision_ms").fetchall()
     print(f"\nepisodes ({len(eps)}):")
-    for p, perp, st, cr, gu, cb, us, ua in eps:
+    for p, perp, st, cr, gu, cb, us, ua, ub in eps:
         print(f"  {perp:10s} {st:14s} {cr or '-':18s} gap_unverified={gu} "
               f"cost={cb:.1f}bps unlegged_s={us if us is not None else '-'} "
-              f"adverse_bps={f'{ua:.2f}' if ua is not None else '-'}")
+              f"adverse_bps={f'{ua:.2f}' if ua is not None else '-'} "
+              f"basis_bps={f'{ub:.2f}' if ub is not None else '-'}")
 
     # per-coin: attempts / aborts / accumulated unwind cost / unlegged risk
     att = Counter()
@@ -77,7 +79,7 @@ def main() -> None:
             "SELECT data FROM events WHERE kind='entry_attempt'"):
         att[json.loads(blob)["perp"]] += 1
     by_coin: dict = {}
-    for p, perp, st, cr, gu, cb, us, ua in eps:
+    for p, perp, st, cr, gu, cb, us, ua, ub in eps:
         d = by_coin.setdefault(perp, {"aborts": 0, "unwind_bps": 0.0,
                                       "unleg": []})
         if st == "aborted":

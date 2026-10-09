@@ -439,6 +439,7 @@ class CarryShadowDaemon:
                 self._emit("leg_fill", {
                     "pair": ep.pair, "leg": leg, "price": l.price,
                     "filled_at_ms": l.filled_at_ms,
+                    "unlegged_basis_bps": ep.unlegged_basis_bps,
                     "bbo": self._bbo(c) if c else None},
                     ep.id, ts)
 
@@ -481,6 +482,7 @@ class CarryShadowDaemon:
                                 "unlegged_s": ep.max_unlegged_s,
                                 "unlegged_max_adverse_bps":
                                     ep.unlegged_max_adverse_bps or None,
+                                "unlegged_basis_bps": ep.unlegged_basis_bps,
                                 "bbo": self._bbo(
                                     self.pair_by_coin.get(ep.perp) or {})},
                        ep.id, ts)
@@ -501,6 +503,7 @@ class CarryShadowDaemon:
                             "unlegged_s": ep.max_unlegged_s or None,
                             "unlegged_max_adverse_bps":
                                 ep.unlegged_max_adverse_bps or None,
+                            "unlegged_basis_bps": ep.unlegged_basis_bps,
                             "bbo": self._bbo(
                                 self.pair_by_coin.get(ep.perp) or {})},
                        ep.id, ts)
@@ -651,12 +654,14 @@ class CarryShadowDaemon:
 
     def _persist_unlegged(self, ep: Episode) -> None:
         """Write unlegged metrics only when the episode actually went
-        unlegged under this build — older episodes keep NULL (no backfill)."""
-        if not (ep.max_unlegged_s > 0 or ep.unlegged_max_adverse_bps > 0):
+        unlegged under this build (basis was captured at first fill) —
+        older episodes keep NULL (no backfill)."""
+        if ep.unlegged_basis_bps is None:
             return
         self.ledger.episode_update(
             ep.id, unlegged_s=ep.max_unlegged_s,
-            unlegged_max_adverse_bps=ep.unlegged_max_adverse_bps)
+            unlegged_max_adverse_bps=ep.unlegged_max_adverse_bps,
+            unlegged_basis_bps=ep.unlegged_basis_bps)
 
     def _close_episode(self, ep: Episode, ev: str, ts: int, kind: str) -> None:
         self._persist_unlegged(ep)
@@ -679,6 +684,7 @@ class CarryShadowDaemon:
             "deleverages": ep.deleverages,
             "max_unlegged_s": ep.max_unlegged_s,
             "unlegged_max_adverse_bps": ep.unlegged_max_adverse_bps or None,
+            "unlegged_basis_bps": ep.unlegged_basis_bps,
             "bbo": self._bbo(self.pair_by_coin.get(ep.perp) or {}),
             "reason": ep.close_reason or kind}, ep.id, ts)
         self.pool.remove(ep.pair)
