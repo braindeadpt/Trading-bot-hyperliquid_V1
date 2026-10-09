@@ -221,6 +221,16 @@ invented here.*
 
 ## 7. Do NOT do this
 
+- **Never `pkill`/`kill` by name or pattern on the Mac host.** A pattern
+  that matches a pm2-managed child (e.g. `pkill -f carry_shadow`) kills the
+  supervised process outside pm2's control path — observed 2026-10-09 when
+  a stray SIGTERM hit the pm2-managed carry-shadow while a manual duplicate
+  was being cleaned up. Rules:
+  - pm2-managed processes are touched **only** via `pm2 <cmd> <name>`
+    (`restart`, `stop`, `delete`, `start --only <name>`).
+  - Manual/duplicate instances are killed **only by explicit pid**, and
+    only after confirming `ps -p <pid> -o command` shows the expected
+    command line.
 - **Never manually edit `data/live/bot.db` while the bot is running.** The
   bot holds this SQLite file open (WAL mode); a concurrent external write
   can corrupt state or silently be overwritten by the bot's next write.

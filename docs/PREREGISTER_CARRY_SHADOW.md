@@ -183,3 +183,40 @@ equivalent to a hypothetical liquidation (§5.4).
   jev ecosystem entry — decided at implementation).
 - Raw L2/funding observations persisted in `data/research/carry_shadow.db`
   (append-only) — the full episode ledger is auditable offline.
+
+## 10. Instrumentation amendment — unlegged-risk measurement (2026-10-09)
+
+**Scope: measurement only.** No entry rules, exit rules, fill windows,
+gates, or kill criteria change. Approved by the owner; constrained to
+`src/research/carry_shadow/` plus its status script and tests.
+
+Section 5 already requires "unlegged-event frequency + duration" — the
+original schema recorded duration and leg flags but **not** the price
+excursion during the naked window, so the loose-leg risk this study exists
+to measure was invisible (observed live: ENA 306 s unlegged, MON 4.5 bps
+unwind cost, with no mid-path data). Added:
+
+- **`leg_fill` event** per leg fill: which leg, fill price, and a BBO+mid
+  snapshot of **both** legs at fill time.
+- **BBO+mid snapshot of both legs** on `unlegged_unwind` and on completed
+  `fill` events (same snapshot format).
+- **`unlegged_max_adverse_bps`** (episode column): while exactly one leg
+  is filled, the worst adverse excursion of the *missing* leg's mid,
+  measured in bps against the filled leg's entry price. For a pending
+  sell leg, adverse = `ref − mid`; for a pending buy leg, adverse =
+  `mid − ref`. Latched (max) across the whole unlegged window.
+- **`unlegged_s`** (episode column): total seconds spent unlegged,
+  persisted on the episode row at `fill`/`aborted` (previously only in
+  the event payload).
+- **Status report**: per coin — entry attempts, aborts, accumulated
+  unwind cost, and unlegged stats (avg / p90 / max of
+  `unlegged_max_adverse_bps` and duration).
+
+**Backfill policy:** episodes 1–4 (pre-instrumentation) keep `NULL` in
+`unlegged_max_adverse_bps`/`unlegged_s` — no backfill, the columns
+distinguish "measured" from "pre-instrumentation" rather than rewriting
+history. Status aggregation excludes NULLs.
+
+Migration: `ALTER TABLE episodes ADD COLUMN` guarded by a `PRAGMA
+table_info` check — existing ledgers migrate on next daemon open; the
+status script tolerates pre-migration schemas.

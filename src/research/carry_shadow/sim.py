@@ -103,6 +103,12 @@ class Episode:
     deleverages: int = 0
     unlegged_since_ms: int = 0    # set when exactly one leg filled
     max_unlegged_s: float = 0.0   # longest naked exposure observed
+    # unlegged-risk instrumentation (measurement only, 2026-10-09):
+    # which leg is still pending, the filled leg's price as reference, and
+    # the worst adverse excursion of the MISSING leg's mid vs that ref
+    unlegged_missing_leg: Optional[str] = None
+    unlegged_ref_price: float = 0.0
+    unlegged_max_adverse_bps: float = 0.0
     close_reason: str = ""
 
     # ─── equity / margin zones ───────────────────────────────────────────
@@ -143,7 +149,9 @@ class Episode:
         self.legs["perp"].check(ts_ms, perp)
         after = self._n_filled(self.legs)
         if before == 0 and after == 1:
-            self.unlegged_since_ms = ts_ms
+            self._open_unlegged(ts_ms)
+        if self.unlegged_since_ms and after == 1:
+            self._track_unlegged(spot, perp, self.legs)
         if after == 2:
             self._close_unlegged(ts_ms)
             self.state = "open"
@@ -245,7 +253,9 @@ class Episode:
         self.exit_legs["perp"].check(ts_ms, perp)
         after = self._n_filled(self.exit_legs)
         if before == 0 and after == 1:
-            self.unlegged_since_ms = ts_ms
+            self._open_unlegged(ts_ms)
+        if self.unlegged_since_ms and after == 1:
+            self._track_unlegged(spot, perp, self.exit_legs)
         if after == 2:
             self._close_unlegged(ts_ms)
             self._settle(spot.mid, perp.mid)
@@ -279,12 +289,44 @@ class Episode:
     def _n_filled(legs: dict) -> int:
         return sum(1 for leg in legs.values() if leg.filled)
 
+    def _open_unlegged(self, ts_ms: int) -> None:
+        """First leg just filled — record which leg is pending and the
+        filled leg's price as the excursion reference."""
+        legs = self.legs if self.state in ("pending_entry",) else self.exit_legs
+        missing = [k for k, l in legs.items() if not l.filled]
+        filled = [k for k, l in legs.items() if l.filled]
+        if len(missing) == 1 and len(filled) == 1:
+            self.unlegged_since_ms = ts_ms
+            self.unlegged_missing_leg = missing[0]
+            self.unlegged_ref_price = legs[filled[0]].price
+
+    def _track_unlegged(self, spot: BookSnap, perp: BookSnap,
+                        legs: dict) -> None:
+        """Worst adverse excursion (bps) of the MISSING leg's mid against
+        the filled leg's entry price. Adverse = the missing leg would now
+        cost more to complete: a pending BUY suffers when mid rises, a
+        pending SELL when it falls."""
+        if not self.unlegged_missing_leg or self.unlegged_ref_price <= 0:
+            return
+        book = spot if self.unlegged_missing_leg == "spot" else perp
+        mid = book.mid
+        if mid <= 0:
+            return
+        side = legs[self.unlegged_missing_leg].side
+        diff = (mid - self.unlegged_ref_price) if side == "buy" \
+            else (self.unlegged_ref_price - mid)
+        bps = diff / self.unlegged_ref_price * 1e4
+        if bps > self.unlegged_max_adverse_bps:
+            self.unlegged_max_adverse_bps = bps
+
     def _close_unlegged(self, ts_ms: int) -> None:
         if self.unlegged_since_ms:
             self.max_unlegged_s = max(
                 self.max_unlegged_s,
                 (ts_ms - self.unlegged_since_ms) / 1000.0)
             self.unlegged_since_ms = 0
+            self.unlegged_missing_leg = None
+            self.unlegged_ref_price = 0.0
 
     def wealth(self, perp_mid: float, spot_mid: float) -> float:
         """Total episode wealth = open spot value + freed cash + margin equity."""

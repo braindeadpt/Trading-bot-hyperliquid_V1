@@ -58,12 +58,53 @@ def main() -> None:
         print(f"  {coin:14s} book:{('%6.0fs' % b_age) if b_age is not None else '   none':>8s}"
               f"  trades:{trd.get(coin, 0):>7d}  book_missing:{miss.get(coin, 0)}")
 
+    ecols = {r[1] for r in con.execute("PRAGMA table_info(episodes)")}
+    has_unleg = {"unlegged_s", "unlegged_max_adverse_bps"} <= ecols
     eps = con.execute(
-        "SELECT pair, state, close_reason, gap_unverified, cost_bps"
-        " FROM episodes ORDER BY entry_decision_ms").fetchall()
+        "SELECT pair, perp, state, close_reason, gap_unverified, cost_bps"
+        + (", unlegged_s, unlegged_max_adverse_bps" if has_unleg
+           else ", NULL, NULL")
+        + " FROM episodes ORDER BY entry_decision_ms").fetchall()
     print(f"\nepisodes ({len(eps)}):")
-    for p, st, cr, gu, cb in eps:
-        print(f"  {p:14s} {st:14s} {cr or '-':18s} gap_unverified={gu} cost={cb:.1f}bps")
+    for p, perp, st, cr, gu, cb, us, ua in eps:
+        print(f"  {perp:10s} {st:14s} {cr or '-':18s} gap_unverified={gu} "
+              f"cost={cb:.1f}bps unlegged_s={us if us is not None else '-'} "
+              f"adverse_bps={f'{ua:.2f}' if ua is not None else '-'}")
+
+    # per-coin: attempts / aborts / accumulated unwind cost / unlegged risk
+    att = Counter()
+    for (blob,) in con.execute(
+            "SELECT data FROM events WHERE kind='entry_attempt'"):
+        att[json.loads(blob)["perp"]] += 1
+    by_coin: dict = {}
+    for p, perp, st, cr, gu, cb, us, ua in eps:
+        d = by_coin.setdefault(perp, {"aborts": 0, "unwind_bps": 0.0,
+                                      "unleg": []})
+        if st == "aborted":
+            d["aborts"] += 1
+            d["unwind_bps"] += cb or 0.0
+        if ua is not None or us is not None:
+            d["unleg"].append((us or 0.0, ua or 0.0))
+
+    def _p90(xs: list) -> float:
+        xs = sorted(xs)
+        return xs[min(len(xs) - 1, int(0.9 * len(xs)))] if xs else 0.0
+
+    print("\nper-coin entry/aborts/unlegged risk:")
+    for coin in sorted(set(att) | set(by_coin)):
+        d = by_coin.get(coin, {"aborts": 0, "unwind_bps": 0.0, "unleg": []})
+        un = d["unleg"]
+        if un:
+            advs = [x[1] for x in un]
+            durs = [x[0] for x in un]
+            unleg_txt = (f"unlegged n={len(un)} dur_s mean={sum(durs)/len(durs):.0f} "
+                         f"max={max(durs):.0f} | adverse_bps mean="
+                         f"{sum(advs)/len(advs):.2f} p90={_p90(advs):.2f} "
+                         f"max={max(advs):.2f}")
+        else:
+            unleg_txt = "unlegged: none recorded"
+        print(f"  {coin:10s} attempts={att.get(coin, 0)} aborts={d['aborts']} "
+              f"unwind_cost={d['unwind_bps']:.1f}bps | {unleg_txt}")
     n, rate = (0, 0.0)
     row = con.execute(
         "SELECT COUNT(*), COALESCE(SUM(filled),0) FROM fill_stats").fetchone()

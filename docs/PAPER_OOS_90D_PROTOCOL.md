@@ -85,6 +85,12 @@ Do **not** decide on mid-window snapshots. Formal verdict only at day 90
 - Treating shadow gross scoreboards as edge
 - Restarting GoldRush-backed OOS
 - Mainnet enablement
+- **`pkill`/`kill` by name or pattern on the Mac host** (ops rule, added
+  2026-10-09): pm2-managed processes are touched only via
+  `pm2 <cmd> <name>`; manual/duplicate instances only by explicit pid after
+  `ps -p <pid> -o command` confirmation. Rationale: a pattern SIGTERM hit
+  the supervised `carry-shadow` while cleaning a manual duplicate
+  (`docs/INCIDENT_RUNBOOK.md` §7).
 
 ## Artifacts
 

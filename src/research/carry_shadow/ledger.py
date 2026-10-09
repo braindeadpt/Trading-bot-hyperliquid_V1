@@ -81,6 +81,15 @@ class Ledger:
         if "gap_unverified" not in ecols:
             self._con.execute(
                 "ALTER TABLE episodes ADD COLUMN gap_unverified INTEGER DEFAULT 0")
+        # unlegged-risk instrumentation (2026-10-09, measurement only):
+        # NULL on episodes that predate the columns — never backfilled
+        for col, ddl in (
+            ("unlegged_s", "ALTER TABLE episodes ADD COLUMN unlegged_s REAL"),
+            ("unlegged_max_adverse_bps",
+             "ALTER TABLE episodes ADD COLUMN unlegged_max_adverse_bps REAL"),
+        ):
+            if col not in ecols:
+                self._con.execute(ddl)
 
     def event(self, kind: str, data: Dict[str, Any],
               episode_id: Optional[int] = None, ts_ms: Optional[int] = None) -> None:

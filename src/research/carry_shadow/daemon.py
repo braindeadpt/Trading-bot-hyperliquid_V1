@@ -419,6 +419,29 @@ class CarryShadowDaemon:
             return acc["vol_usd"] >= acc["need_usd"], acc["vol_usd"]
         return acc["vol_usd"] >= acc["need_usd"], acc["vol_usd"]
 
+    def _bbo(self, c: Dict[str, Any]) -> Dict[str, Any]:
+        """BBO+mid snapshot of both legs — measurement only (prereg
+        instrumentation amendment 2026-10-09)."""
+        out: Dict[str, Any] = {}
+        for leg, coin in (("spot", c.get("pair_name")), ("perp", c.get("perp"))):
+            b = self.books.get(coin) if coin else None
+            out[leg] = ({"bid": b.bid, "ask": b.ask, "mid": b.mid}
+                        if b and b.bid > 0 and b.ask > 0 else None)
+        return out
+
+    def _emit_leg_fills(self, ep: Episode, before: Dict[str, bool],
+                        legs: dict, ts: int) -> None:
+        """Emit a `leg_fill` event (with both legs' BBO) for every leg that
+        transitioned to filled on this tick."""
+        c = self.pair_by_coin.get(ep.perp)
+        for leg, l in legs.items():
+            if l.filled and not before.get(leg):
+                self._emit("leg_fill", {
+                    "pair": ep.pair, "leg": leg, "price": l.price,
+                    "filled_at_ms": l.filled_at_ms,
+                    "bbo": self._bbo(c) if c else None},
+                    ep.id, ts)
+
     def _on_pair_book(self, c: Dict[str, Any], ts: int) -> None:
         ep = self.pool.get(c["pair_name"])
         if not ep:
@@ -428,10 +451,14 @@ class CarryShadowDaemon:
         if not spot or not perp:
             return
         if ep.state == "pending_entry":
+            before = {k: l.filled for k, l in ep.legs.items()}
             ev = ep.on_book_entry(ts, spot, perp)
+            self._emit_leg_fills(ep, before, ep.legs, ts)
             self._handle_entry_event(ep, ev, ts)
         elif ep.state == "pending_exit":
+            before = {k: l.filled for k, l in ep.exit_legs.items()}
             ev = ep.on_book_exit(ts, spot, perp)
+            self._emit_leg_fills(ep, before, ep.exit_legs, ts)
             if ev:
                 self._close_episode(ep, ev, ts, "exit")
 
@@ -446,11 +473,17 @@ class CarryShadowDaemon:
                     leg, True,
                     (l.filled_at_ms - ep.entry_decision_ms) / 1000.0,
                     l.filled_at_ms or ts, proxy_filled=pf, proxy_vol_usd=pvol)
+            self._persist_unlegged(ep)
             self.ledger.episode_update(
                 ep.id, state="open", opened_ms=ep.opened_ms,
                 p0=ep.p0, s0=ep.s0, cost_bps=ep.cost_bps)
             self._emit("fill", {"pair": ep.pair,
-                                "unlegged_s": ep.max_unlegged_s}, ep.id, ts)
+                                "unlegged_s": ep.max_unlegged_s,
+                                "unlegged_max_adverse_bps":
+                                    ep.unlegged_max_adverse_bps or None,
+                                "bbo": self._bbo(
+                                    self.pair_by_coin.get(ep.perp) or {})},
+                       ep.id, ts)
         else:
             for leg in ("spot", "perp"):
                 l = ep.legs[leg]
@@ -458,12 +491,18 @@ class CarryShadowDaemon:
                 self.ledger.record_fill(leg, bool(l.filled_at_ms),
                                         None, ts, proxy_filled=pf,
                                         proxy_vol_usd=pvol)
+            self._persist_unlegged(ep)
             self.ledger.episode_update(
                 ep.id, state="aborted", close_reason=ep.close_reason,
                 cost_bps=ep.cost_bps)
             self._emit(ev, {"pair": ep.pair, "reason": ep.close_reason,
                             "spot_filled": bool(ep.legs["spot"].filled_at_ms),
-                            "perp_filled": bool(ep.legs["perp"].filled_at_ms)},
+                            "perp_filled": bool(ep.legs["perp"].filled_at_ms),
+                            "unlegged_s": ep.max_unlegged_s or None,
+                            "unlegged_max_adverse_bps":
+                                ep.unlegged_max_adverse_bps or None,
+                            "bbo": self._bbo(
+                                self.pair_by_coin.get(ep.perp) or {})},
                        ep.id, ts)
             self.pool.remove(ep.pair)
             self._check_interim_gates()
@@ -610,7 +649,17 @@ class CarryShadowDaemon:
     async def _heartbeat_async(self) -> None:
         self._heartbeat()
 
+    def _persist_unlegged(self, ep: Episode) -> None:
+        """Write unlegged metrics only when the episode actually went
+        unlegged under this build — older episodes keep NULL (no backfill)."""
+        if not (ep.max_unlegged_s > 0 or ep.unlegged_max_adverse_bps > 0):
+            return
+        self.ledger.episode_update(
+            ep.id, unlegged_s=ep.max_unlegged_s,
+            unlegged_max_adverse_bps=ep.unlegged_max_adverse_bps)
+
     def _close_episode(self, ep: Episode, ev: str, ts: int, kind: str) -> None:
+        self._persist_unlegged(ep)
         self.ledger.episode_update(
             ep.id, state=ep.state, closed_ms=ts,
             close_reason=ep.close_reason or kind,
@@ -629,6 +678,8 @@ class CarryShadowDaemon:
                 (self.books.get(ep.pair) or BookSnap()).mid),
             "deleverages": ep.deleverages,
             "max_unlegged_s": ep.max_unlegged_s,
+            "unlegged_max_adverse_bps": ep.unlegged_max_adverse_bps or None,
+            "bbo": self._bbo(self.pair_by_coin.get(ep.perp) or {}),
             "reason": ep.close_reason or kind}, ep.id, ts)
         self.pool.remove(ep.pair)
         self._check_interim_gates()

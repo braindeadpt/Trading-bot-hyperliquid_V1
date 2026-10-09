@@ -9,6 +9,7 @@ fetchers proving all evidence lands in its own ledger.
 from __future__ import annotations
 
 import ast
+import json
 import time
 from pathlib import Path
 
@@ -467,4 +468,109 @@ def test_ledger_fill_rate_and_reload(tmp_path) -> None:
                           fetch=_stub_fetch(int(time.time() * 1000)))
     d._reload_episodes()
     assert d.pool.get("PURR/USDC") is not None
+    d.shutdown()
+
+
+# ── unlegged-risk instrumentation (amendment 2026-10-09, measurement only) ──
+
+def test_unlegged_adverse_excursion_tracked_and_latched() -> None:
+    """Spot leg fills; perp (the missing SELL leg) mid falls below the spot
+    fill price, then recovers: worst adverse excursion must latch the max."""
+    ep = _ep()
+    ep.place_entry(BookSnap(99.0, 100.0), BookSnap(99.0, 100.0))
+    # spot fills at 99.0 bid; perp still pending
+    ep.on_book_entry(1_000, BookSnap(98.5, 98.9), BookSnap(99.0, 100.0))
+    assert ep.unlegged_missing_leg == "perp"
+    assert ep.unlegged_ref_price == 99.0
+    # perp mid drops to 98.0 (bid 97.5/ask 98.5): adverse for a pending SELL
+    # = (99.0 - 98.0)/99.0 * 1e4 ~= 101 bps
+    ep.on_book_entry(2_000, BookSnap(98.5, 98.9), BookSnap(97.5, 98.5))
+    assert ep.unlegged_max_adverse_bps == pytest.approx(101.01, rel=0.01)
+    # smaller adverse move doesn't lower the latch; favourable move ignored
+    ep.on_book_entry(3_000, BookSnap(98.5, 98.9), BookSnap(98.0, 98.8))
+    ep.on_book_entry(4_000, BookSnap(98.5, 98.9), BookSnap(99.5, 100.5))
+    assert ep.unlegged_max_adverse_bps == pytest.approx(101.01, rel=0.01)
+    # perp fills -> unlegged closed, duration + excursion kept
+    ev = ep.on_book_entry(5_000, BookSnap(98.5, 98.9), BookSnap(100.1, 100.2))
+    assert ev == "fill"
+    assert ep.max_unlegged_s == 4.0
+    assert ep.unlegged_max_adverse_bps == pytest.approx(101.01, rel=0.01)
+
+
+def test_unlegged_adverse_pending_buy_leg() -> None:
+    """Mirror image: perp sells first; the missing spot BUY leg suffers
+    when the spot mid rises above the perp fill price."""
+    ep = _ep()
+    ep.place_entry(BookSnap(99.0, 100.0), BookSnap(99.0, 100.0))
+    # perp fills first (bid crosses our 100.0 ask); spot pending
+    ep.on_book_entry(1_000, BookSnap(99.0, 100.0), BookSnap(100.1, 100.5))
+    assert ep.unlegged_missing_leg == "spot"
+    assert ep.unlegged_ref_price == 100.0
+    # spot mid rises to 101.0: adverse for pending BUY = +101 bps
+    ep.on_book_entry(2_000, BookSnap(100.5, 101.5), BookSnap(100.1, 100.5))
+    assert ep.unlegged_max_adverse_bps == pytest.approx(100.0, rel=0.01)
+
+
+def test_no_unlegged_means_no_instrumentation() -> None:
+    """Both legs fill in one tick — never unlegged, metrics stay zero."""
+    ep = _open_ep()
+    assert ep.max_unlegged_s == 0.0
+    assert ep.unlegged_max_adverse_bps == 0.0
+
+
+def test_ledger_persists_unlegged_columns(tmp_path) -> None:
+    """New columns land on the episode row at open/abort; NULL pre-existed."""
+    led = Ledger(str(tmp_path / "cs.db"))
+    cols = {r[1] for r in led._con.execute("PRAGMA table_info(episodes)")}
+    assert {"unlegged_s", "unlegged_max_adverse_bps"} <= cols
+    ep = _ep()
+    ep.state = "pending_entry"
+    ep.id = led.episode_open(ep.row())
+    led.episode_update(ep.id, unlegged_s=12.5, unlegged_max_adverse_bps=33.3)
+    row = led._con.execute(
+        "SELECT unlegged_s, unlegged_max_adverse_bps FROM episodes WHERE id=?",
+        (ep.id,)).fetchone()
+    assert row == (12.5, pytest.approx(33.3))
+    led.close()
+
+
+def test_daemon_emits_leg_fill_and_bbo(tmp_path) -> None:
+    """Each leg fill emits a `leg_fill` event carrying both legs' BBO."""
+    now = int(time.time() * 1000)
+    d = CarryShadowDaemon(db_path=str(tmp_path / "cs.db"),
+                          fetch=_stub_fetch(now))
+    d.cands = [{"pair_name": "PURR/USDC", "base": "PURR", "perp": "PURR",
+                "max_lev": 5.0, "maint": 0.1, "m": 0.45, "m0": 0.6,
+                "pm": True}]
+    for c in d.cands:
+        d._register_candidate(c)
+    d.in_universe["PURR/USDC"] = True
+    d.books["PURR/USDC"] = BookSnap(99.0, 100.0)
+    d.books["PURR"] = BookSnap(99.0, 100.0)
+    import asyncio as _a
+    _a.run(d._maybe_entry(d.cands[0], 0.20, now))
+    ep = d.pool.get("PURR/USDC")
+    assert ep is not None and ep.state == "pending_entry"
+    # tick: spot fills only -> leg_fill event with bbo
+    d.books["PURR/USDC"] = BookSnap(98.5, 98.9)
+    d._on_pair_book(d.cands[0], now + 1_000)
+    evs = [json.loads(r[0]) for r in d.ledger._con.execute(
+        "SELECT data FROM events WHERE kind='leg_fill'")]
+    assert len(evs) == 1 and evs[0]["leg"] == "spot"
+    assert evs[0]["bbo"]["spot"]["mid"] == pytest.approx(98.7)
+    assert evs[0]["bbo"]["perp"]["mid"] == pytest.approx(99.5)
+    # unwind past the window -> event carries bbo + unlegged metrics
+    d._handle_entry_event(
+        ep, ep.on_book_entry(now + 901_000 + 60_000,
+                             d.books["PURR/USDC"], d.books["PURR"]),
+        now + 901_000 + 60_000)
+    row = d.ledger._con.execute(
+        "SELECT data FROM events WHERE kind='unlegged_unwind'").fetchone()
+    assert row is not None
+    blob = json.loads(row[0])
+    assert blob["bbo"]["spot"] is not None
+    assert blob["unlegged_s"] is not None
+    erow = d.ledger._con.execute(
+        "SELECT unlegged_s, unlegged_max_adverse_bps FROM episodes").fetchone()
+    assert erow[0] is not None
     d.shutdown()
