@@ -15,6 +15,7 @@ so heartbeat panels see a stable cadence instead of drift.
 
 from __future__ import annotations
 
+import calendar
 import sys
 import time
 from typing import Callable
@@ -39,26 +40,42 @@ def sleep_to_next_boundary(
     interval_s: float,
     offset_s: float = 0.0,
     *,
+    local: bool = False,
     _sleep: Callable[[float], None] = time.sleep,
     _now: Callable[[], float] = time.time,
 ) -> float:
-    """Sleep until the next wall-clock multiple of ``interval_s`` + ``offset_s``.
+    """Sleep until the next multiple of ``interval_s`` + ``offset_s``.
+
+    ``local=True`` aligns to multiples of *local* wall-clock time — the
+    same semantics as a cron schedule (pm2's cron_restart fired on server
+    local time), so the phase survives DST changes like cron's did.
+    Default (False) aligns to UTC.
 
     Returns the seconds slept (injectable clock/sleep for tests).
     """
     interval_ms = int(interval_s * 1000)
     offset_ms = int(offset_s * 1000)
-    wait_s = ms_to_next_boundary(int(_now() * 1000), interval_ms, offset_ms) / 1000.0
+    if local:
+        # timegm(localtime()) = local wall-clock read as an epoch ("local
+        # epoch") — multiples land on the same local slots a cron
+        # expression would hit, and the phase follows DST automatically
+        now_ms = calendar.timegm(time.localtime()) * 1000
+    else:
+        now_ms = int(_now() * 1000)
+    wait_s = ms_to_next_boundary(now_ms, interval_ms, offset_ms) / 1000.0
     _sleep(wait_s)
     return wait_s
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (2, 3):
-        print("usage: python -m src.utils.cron_loop <interval_s> [offset_s]",
+    argv = [a for a in sys.argv[1:] if a != "--local"]
+    local = len(argv) != len(sys.argv) - 1
+    if len(argv) not in (1, 2):
+        print("usage: python -m src.utils.cron_loop <interval_s> [offset_s] [--local]",
               file=sys.stderr)
         raise SystemExit(2)
-    iv = float(sys.argv[1])
-    off = float(sys.argv[2]) if len(sys.argv) == 3 else 0.0
-    waited = sleep_to_next_boundary(iv, off)
-    print(f"aligned to {iv:g}s boundary +{off:g}s (slept {waited:.1f}s)")
+    iv = float(argv[0])
+    off = float(argv[1]) if len(argv) == 2 else 0.0
+    waited = sleep_to_next_boundary(iv, off, local=local)
+    print(f"aligned to {iv:g}s boundary +{off:g}s"
+          f"{' (local)' if local else ''} (slept {waited:.1f}s)")

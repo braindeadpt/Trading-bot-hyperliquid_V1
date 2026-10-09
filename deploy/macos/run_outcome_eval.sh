@@ -23,6 +23,9 @@ mkdir -p logs data/research
 
 INTERVAL_S="${EVAL_LOOP_INTERVAL_S:-10800}"    # 3h
 OFFSET_S="${EVAL_LOOP_OFFSET_S:-1200}"         # :20 phase — matches old cron "20 */3 * * *"
+# old cron fired on SERVER LOCAL time (pm2 cron semantics) — --local keeps
+# the :20-local phase incl. across DST, instead of pinning a UTC offset
+LOCAL_FLAG="--local"
 PASS_TIMEOUT_S="${EVAL_PASS_TIMEOUT_S:-1200}"  # 20min hard kill per run
 LOCK="data/research/.outcome_eval_loop.lock"
 
@@ -64,7 +67,7 @@ while :; do
     CHILD_PID=""
     kill "$WATCHER" 2>/dev/null || true; wait "$WATCHER" 2>/dev/null || true
     echo "outcome-eval: run done $(date -u +%FT%TZ); sleeping to next ${INTERVAL_S}s boundary +${OFFSET_S}s"
-    ( ./.venv/bin/python -u -m src.utils.cron_loop "$INTERVAL_S" "$OFFSET_S" \
+    ( ./.venv/bin/python -u -m src.utils.cron_loop "$INTERVAL_S" "$OFFSET_S" $LOCAL_FLAG \
         >> logs/outcome_eval_loop.log 2>&1 || sleep 300 ) &
     CHILD_PID=$!
     wait "$CHILD_PID" || true

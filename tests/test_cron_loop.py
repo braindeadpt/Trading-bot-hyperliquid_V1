@@ -58,3 +58,32 @@ def test_offset_phase_replicates_cron_20_every_3h() -> None:
     assert ms_to_next_boundary(base + iv - 1, iv, off) == 1
     # zero offset keeps old behaviour
     assert ms_to_next_boundary(90_000, 300_000, 0) == 210_000
+
+
+def test_local_alignment_uses_wall_clock(monkeypatch) -> None:
+    """local=True aligns to local wall-clock multiples (cron semantics),
+    not UTC — under TZ=X+2, a 1200s offset hits :20 local not :20 UTC."""
+    import calendar
+    import time as _t
+    if not hasattr(_t, "tzset"):
+        pytest.skip("tzset unavailable on this platform")
+    monkeypatch.setenv("TZ", "UTC-2")  # POSIX sign: UTC-2 = UTC+2 wall clock
+    _t.tzset()
+    try:
+        slept: list[float] = []
+        # 12:53:16 UTC = 14:53:16 local(+2); next :20 local 3h = 15:20 local
+        now_utc = int(datetime.datetime(
+            2026, 10, 9, 12, 53, 16, tzinfo=datetime.timezone.utc
+        ).timestamp())
+        wait = sleep_to_next_boundary(
+            10800, 1200, local=True, _sleep=slept.append, _now=lambda: now_utc
+        )
+        wake_utc = datetime.datetime.fromtimestamp(
+            now_utc + slept[0], tz=datetime.timezone.utc)
+        assert (wake_utc.hour, wake_utc.minute, wake_utc.second) == (13, 20, 0)
+        assert wait == pytest.approx(slept[0])
+        # sanity: local epoch really is UTC+2 ahead
+        assert calendar.timegm(_t.localtime(now_utc)) == now_utc + 7200
+    finally:
+        monkeypatch.undo()
+        _t.tzset()
