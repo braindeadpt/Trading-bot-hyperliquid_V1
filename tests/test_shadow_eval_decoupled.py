@@ -258,15 +258,15 @@ def test_lock_takeover_when_holder_pid_is_dead(tmp_path: Path, monkeypatch) -> N
     lock = tmp_path / ".shadow_eval.lock"
     monkeypatch.setattr(cli, "LOCK_PATH", lock)
 
-    # Spawn + reap a child so its pid is provably dead. On Windows the
-    # Popen object keeps a process handle — OpenProcess would still open
-    # the dead pid — so release it before probing liveness.
-    holder = subprocess.Popen([sys.executable, "-c", "pass"])
-    holder.wait()
-    if sys.platform == "win32" and getattr(holder, "_handle", None):
-        holder._handle.Close()  # subprocess Handle — idempotent close
-        holder._handle = None
-    lock.write_text(str(holder.pid), encoding="utf-8")
+    # Find a pid that is provably dead right now — spawning+reaping a child
+    # is flaky on Windows because pids get reused between probes.
+    from src.utils.instance_lock import _pid_alive
+
+    dead_pid = next(
+        p for p in range(os.getpid() + 4096, os.getpid() + 4_000_000)
+        if not _pid_alive(p)
+    )
+    lock.write_text(str(dead_pid), encoding="utf-8")
 
     assert cli._lock_acquired() is True  # stale lock taken over
     assert lock.read_text(encoding="utf-8") == str(os.getpid())
@@ -281,6 +281,32 @@ def test_lock_unreadable_content_treated_as_stale(tmp_path: Path, monkeypatch) -
     lock.write_text("garbage-not-a-pid", encoding="utf-8")
     assert cli._lock_acquired() is True
     cli._lock_release()
+
+
+def test_signal_handler_releases_lock_before_exit(tmp_path: Path, monkeypatch) -> None:
+    """SIGTERM raises no Python exception — without a handler the lock
+    would orphan (pm2 stop escalation). The installed handler must free
+    the lock and exit with 128+signum."""
+    import signal as _signal
+
+    import scripts.research.evaluate_shadow_outcomes as cli
+
+    lock = tmp_path / ".shadow_eval.lock"
+    monkeypatch.setattr(cli, "LOCK_PATH", lock)
+    assert cli._lock_acquired() is True
+
+    prev = _signal.getsignal(_signal.SIGTERM)
+    try:
+        cli._install_signal_release()
+        handler = _signal.getsignal(_signal.SIGTERM)
+        assert callable(handler) and handler is not _signal.SIG_DFL
+        with pytest.raises(SystemExit) as exc:
+            handler(_signal.SIGTERM, None)
+        assert exc.value.code == 128 + _signal.SIGTERM
+        assert not lock.exists()  # lock freed even though finally never ran
+    finally:
+        _signal.signal(_signal.SIGTERM, prev)
+        _signal.signal(_signal.SIGINT, _signal.default_int_handler)
 
 
 # ── 5. Age metadata surfaces in the payload ──────────────────────────────────

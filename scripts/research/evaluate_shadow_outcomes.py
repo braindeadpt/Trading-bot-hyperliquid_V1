@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -74,6 +75,24 @@ def _lock_release() -> None:
             LOCK_PATH.unlink()
     except OSError:
         pass
+
+
+def _install_signal_release() -> None:
+    """Release the lock on SIGINT/SIGTERM so a supervisor stop never
+    orphans it. SIGTERM raises no Python exception, so the ``finally``
+    alone would not run (2026-10-09: pm2 SIGKILL escalation left a dead
+    holder). SIGKILL stays uncatchable — the dead-pid takeover in
+    ``_lock_acquired`` remains the second line of defence."""
+
+    def _handler(signum: int, _frame: object) -> None:
+        _lock_release()
+        raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _handler)
+        except (OSError, ValueError):
+            pass  # non-main thread or platform without the signal
 
 
 def main() -> int:
@@ -136,6 +155,8 @@ def main() -> int:
     if persist and not _lock_acquired():
         logger.info("Another evaluation is still running — exiting without work")
         return 0
+    if persist:
+        _install_signal_release()
 
     plan = {
         "mode": "persist" if persist else "dry-run",

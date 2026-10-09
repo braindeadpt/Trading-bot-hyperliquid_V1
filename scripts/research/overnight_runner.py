@@ -78,6 +78,10 @@ evidence only; promotion runs through shadow + watchdog recheck with a human
 reading the dashboard (research_program.md: the agent proposes, the gates
 judge, the human enforces).
 
+**Everything that leaves QUEUE.md is discovery.** Nothing graduates to the
+shadow list or to execution without its own preregistration and fresh data
+(owner rule 2026-10-09).
+
 This preamble is the reference for the loop's two contracts (queue format
 and verdict schema) plus one worked example from a real session. It is
 rewritten verbatim on every session by the runner — edit it in
