@@ -8,13 +8,14 @@ cd "$(dirname "$0")/../.."
 
 mkdir -p logs
 # pm2 start/resurrect runs the script immediately — real work only inside the
-# cron window (day 1, 04:00 local ±10min). FORCE_RUN=1 bypasses for manual
-# runs. CRON_GUARD_NOW (HH:MM) / CRON_GUARD_DOM (DD) are test-only overrides.
+# cron window (day 1, 04:00-04:10 local). Same pm2 early-fire rationale as
+# run_overnight.sh. FORCE_RUN=1 bypasses for manual runs.
+# CRON_GUARD_NOW (HH:MM) / CRON_GUARD_DOM (DD) are test-only overrides.
 if [ "${FORCE_RUN:-0}" != "1" ]; then
   _now="${CRON_GUARD_NOW:-$(date '+%H:%M')}"
   _dom="${CRON_GUARD_DOM:-$(date '+%d')}"
   case "$_dom:$_now" in
-    01:03:5*|01:04:0[0-9]|01:04:10) ;;
+    01:04:0[0-9]|01:04:10) ;;
     *) echo "[$(date '+%F %T')] skip: fora da janela cron (dom=$_dom now=$_now)" \
          >> logs/backup_monthly_out.log; exit 0 ;;
   esac
