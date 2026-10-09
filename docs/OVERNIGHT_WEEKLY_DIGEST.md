@@ -67,3 +67,9 @@ Auto-generated weekly rollup of experiment artifacts. Append-only — entries ar
 - liq feed (flush recheck, needs 30d): 32.3d collected — READY
 - l2_snapshots: no data
 - dvol_daily (iv_thresholds K=4, needs ~115d): 88.0d — 27d remaining
+## 2026-W40 — digest 2026-09-30 03:59 UTC
+
+No experiment artifacts this week.
+## 2026-W41 — digest 2026-10-05 03:59 UTC
+
+No experiment artifacts this week.
