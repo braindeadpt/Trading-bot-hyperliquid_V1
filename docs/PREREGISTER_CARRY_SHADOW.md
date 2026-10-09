@@ -226,3 +226,77 @@ history. Status aggregation excludes NULLs.
 Migration: `ALTER TABLE episodes ADD COLUMN` guarded by a `PRAGMA
 table_info` check — existing ledgers migrate on next daemon open; the
 status script tolerates pre-migration schemas.
+
+## 11. Gap semantics for non-margin state (approved 2026-10-09)
+
+**Status: approved — measurement only.** Applies **forward-only from its
+deploy commit** (visible in the code-change log): no recomputation of
+earlier attempts or gaps, no backfill.
+
+`gap_unverified=0` means "open-episode margin was replayed through the
+gap via candles" — it does **not** mean "nothing was lost": the catchup
+does not cover pending entry legs or entry decisions. From this
+amendment on:
+
+- `gap_unverified=1` on the episode when a **gap > 5 s** overlaps a
+  pending entry leg; a `gap_entry_unverified` event is emitted when a
+  gap > 5 s overlaps an eligible entry window for a pair with no episode
+  (there is no row to mark — the event is the record).
+- Conservative fill rule inside a gap: a pending maker leg **does not**
+  fill during the gap (aligned with the strict-cross rule — no tape
+  evidence, no fill). If the leg's window expires inside the gap, the
+  attempt counts as an abort at gap end (`expire_entry_window`), with
+  the loose leg unwound at taker as usual.
+- `gap_s:<YYYYMMDD>:<pair>` counters in meta accumulate gap seconds per
+  pair per day; the status report shows them and the final readout
+  mentions any pair over **1% gap time**.
+
+Rationale: distinguishes "margin verified" from "tape coverage" — a
+long flap could silently skip entries under today's flagging.
+
+## 12. Strict-fill size sensitivity (approved 2026-10-09)
+
+**Status: approved — measurement only.** Applies **forward-only from its
+deploy commit**, in the same daemon restart as §11. The strict
+quote-crossing gate is unchanged; this amendment only measures *how
+much* size plausibly executed when a fill occurred.
+
+Motivation (observed 2026-10-09, first 4 episodes): strict filled 7/8
+legs while the trade-volume proxy filled 1/8. The two are not ordered —
+strict measures quote crossing, the proxy measures aggressor volume —
+and ZEC-spot / MON₄-spot strict fills with **zero** at-or-better tape
+show the gap is quote repricing through the level (cancellations), not
+fills-with-known-size. On a real CLOB those crosses would have hit our
+order, but with unknown size.
+
+Per strict fill:
+
+- **`crossed_visible_usd`** (leg attr + `leg_fill` event): USD resting
+  on opposing levels that **strictly** cross our price at the fill tick
+  — for a resting buy, ask levels `px < price`; sell, bids `px > price`
+  (same strictness as the gate). `NULL` when the snapshot carried no
+  depth: unmeasured ≠ zero.
+- **`crossing_size_usd`** (fill_stats): `crossed_visible_usd` +
+  at-or-better aggressor tape volume accumulated over the maker window
+  (same accumulator as the proxy context).
+- **`fill_frac_est`** (fill_stats per leg; episode column = min of leg
+  fracs, written only when both legs strict-filled):
+  `min(1, crossing_size_usd / need_usd)` with
+  `need_usd = SHADOW_NOTIONAL_USD * q`.
+
+**Predeclared secondary analysis** at the final readout — never alters
+the primary verdict:
+
+- `weighted_fill_rate` = Σ `fill_frac_est` / n attempts (same
+  denominator as the strict rate).
+- `ann_ret_committed_weighted`: episode PnL weighted by the episode's
+  `fill_frac_est`, over measured episodes only (`measured_eps`
+  reported; NULLs are counted, not guessed).
+- `weighted_below_hurdle`: if the weighted annualized return falls
+  below 8%/yr the readout says so explicitly (`note` field).
+
+**Backfill policy:** episodes 1–4 keep `NULL` in
+`crossing_size_usd`/`fill_frac_est` — no retroactive size claims.
+
+Migration: `ALTER TABLE` guarded by `PRAGMA table_info`, same pattern
+as §10.

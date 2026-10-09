@@ -272,11 +272,11 @@ async def test_daemon_lifecycle_end_to_end(tmp_path) -> None:
     assert ep is not None and ep.state == "pending_entry"
     # books cross → open; margin sweep healthy
     d._on_ws_message('{"channel":"l2Book","data":{"coin":"PURR/USDC","time":'
-                     + str(now + 5_000) + ',"levels":[[{"px":"98.5"}],'
-                     '[{"px":"98.9"}]]}}')
+                     + str(now + 5_000) + ',"levels":[[{"px":"98.5","sz":"10"}],'
+                     '[{"px":"98.9","sz":"10"}]]}}')
     d._on_ws_message('{"channel":"l2Book","data":{"coin":"PURR","time":'
-                     + str(now + 6_000) + ',"levels":[[{"px":"100.2"}],'
-                     '[{"px":"100.3"}]]}}')
+                     + str(now + 6_000) + ',"levels":[[{"px":"100.2","sz":"10"}],'
+                     '[{"px":"100.3","sz":"10"}]]}}')
     assert ep.state == "open"
     d.margin_sweep(now + 60_000)
     assert not d.pool.dead
@@ -582,4 +582,305 @@ def test_daemon_emits_leg_fill_and_bbo(tmp_path) -> None:
     erow = d.ledger._con.execute(
         "SELECT unlegged_s, unlegged_max_adverse_bps FROM episodes").fetchone()
     assert erow[0] is not None
+    d.shutdown()
+
+
+# ── freshness telemetry (heartbeat) + /ops degradation ──────────────────
+
+def test_heartbeat_writes_freshness_metrics(tmp_path) -> None:
+    d = CarryShadowDaemon(db_path=str(tmp_path / "cs.db"),
+                          fetch=_stub_fetch(int(time.time() * 1000)))
+    d._book_seen_ms = {"ENA": 1000, "@206": 1000, "SOL": 2000}
+    d._subs_active = 76
+    d._subs_expected = 76
+    d._connect_ms.append(int(time.time() * 1000))
+    d._ws_down_since = 9000
+    d._loop_lag.extend([1, 2, 5, 40])
+    d._heartbeat()
+    meta = dict(d.ledger._con.execute("SELECT key, value FROM meta"))
+    assert meta["subs_expected"] == "76"
+    assert meta["ws_connected"] == "0"
+    assert int(meta["book_age_ms"]) > 0          # global max age
+    assert int(meta["book_age_med_ms"]) > 0      # median age
+    assert int(meta["ws_down_ms"]) > 0
+    assert meta["reconnects_1h"] == "1"
+    assert meta["loop_lag_max_ms"] == "40"
+    assert meta["loop_lag_p99_ms"] == "40"
+    d.shutdown()
+
+
+# ── §11: gap semantics for non-margin state ─────────────────────────────
+
+def test_expire_entry_window_aborts_unfilled() -> None:
+    ep = _ep()
+    ep.place_entry(BookSnap(99.0, 100.0), BookSnap(99.0, 100.0))
+    w = spec.MAKER_FILL_WINDOW_S * 1000
+    assert ep.expire_entry_window(1) is None            # window not expired
+    ev = ep.expire_entry_window(w + 1)
+    assert ev == "abort_unfilled" and ep.state == "aborted"
+    # loose leg -> unwind branch, taker cost charged
+    ep2 = _ep()
+    ep2.place_entry(BookSnap(99.0, 100.0), BookSnap(99.0, 100.0))
+    ep2.on_book_entry(1_000, BookSnap(98.5, 98.9), BookSnap(99.0, 100.0))
+    ev = ep2.expire_entry_window(w + 1)
+    assert ev == "unlegged_unwind" and ep2.cost_bps == spec.TAKER_FEE_BPS
+
+
+def _daemon_with_pending_ep(tmp_path, now: int):
+    """Daemon with one pending_entry episode on PURR/USDC."""
+    import asyncio as _a
+    d = CarryShadowDaemon(db_path=str(tmp_path / "cs.db"),
+                          fetch=_stub_fetch(now))
+    d.cands = [{"pair_name": "PURR/USDC", "base": "PURR", "perp": "PURR",
+                "max_lev": 5.0, "maint": 0.1, "m": 0.45, "m0": 0.6,
+                "pm": True}]
+    for c in d.cands:
+        d._register_candidate(c)
+    d.in_universe["PURR/USDC"] = True
+    d.books["PURR/USDC"] = BookSnap(99.0, 100.0)
+    d.books["PURR"] = BookSnap(99.0, 100.0)
+    _a.run(d._maybe_entry(d.cands[0], 0.20, now))
+    return d
+
+
+def test_gap_over_5s_flags_pending_episode(tmp_path) -> None:
+    import asyncio as _a
+    now = int(time.time() * 1000)
+    d = _daemon_with_pending_ep(tmp_path, now)
+    ep = d.pool.get("PURR/USDC")
+    assert ep is not None and ep.state == "pending_entry"
+    _a.run(d._catchup_gap(now + 100, now + 6_000))      # 5.9s gap
+    assert d.ledger._con.execute(
+        "SELECT gap_unverified FROM episodes WHERE id=?", (ep.id,)
+    ).fetchone()[0] == 1
+    evs = [json.loads(r[0]) for r in d.ledger._con.execute(
+        "SELECT data FROM events WHERE kind='gap_catchup_pending'")]
+    assert evs and evs[0]["gap_ms"] == 5_900
+    d.shutdown()
+
+
+def test_gap_under_5s_does_not_flag(tmp_path) -> None:
+    import asyncio as _a
+    now = int(time.time() * 1000)
+    d = _daemon_with_pending_ep(tmp_path, now)
+    ep = d.pool.get("PURR/USDC")
+    _a.run(d._catchup_gap(now + 100, now + 5_000))      # exactly 5s — no flag
+    _a.run(d._catchup_gap(now + 5_000, now + 5_001))    # tiny
+    assert d.ledger._con.execute(
+        "SELECT gap_unverified FROM episodes WHERE id=?", (ep.id,)
+    ).fetchone()[0] == 0
+    d.shutdown()
+
+
+def test_pending_window_expiring_inside_gap_aborts(tmp_path) -> None:
+    """Leg window lapsing inside the gap resolves as abort at gap end —
+    the pending maker leg never got a fill inside the gap."""
+    import asyncio as _a
+    now = int(time.time() * 1000)
+    d = _daemon_with_pending_ep(tmp_path, now)
+    ep = d.pool.get("PURR/USDC")
+    gap_end = ep.entry_decision_ms + spec.MAKER_FILL_WINDOW_S * 1000 + 60_000
+    _a.run(d._catchup_gap(gap_end - 10_000, gap_end))   # 10s gap over expiry
+    assert ep.state == "aborted" and ep.close_reason == "abort_unfilled"
+    assert d.ledger._con.execute(
+        "SELECT gap_unverified FROM episodes WHERE id=?", (ep.id,)
+    ).fetchone()[0] == 1
+    d.shutdown()
+
+
+def test_gap_seconds_accumulate_per_pair_per_day(tmp_path) -> None:
+    import asyncio as _a
+    now = int(time.time() * 1000)
+    d = _daemon_with_pending_ep(tmp_path, now)
+    _a.run(d._catchup_gap(now, now + 8_000))
+    _a.run(d._catchup_gap(now + 8_000, now + 20_000))
+    day = time.strftime("%Y%m%d", time.gmtime((now + 20_000) / 1000))
+    v = float(d.ledger.meta_get(f"gap_s:{day}:PURR/USDC") or 0)
+    assert v == pytest.approx(8.0 + 12.0)
+    d.shutdown()
+
+
+def test_gap_entry_unverified_for_eligible_idle_pair(tmp_path) -> None:
+    """Gap >5s while a pair is entry-eligible but no episode exists ->
+    gap_entry_unverified event (nothing else to mark)."""
+    import asyncio as _a
+    now = int(time.time() * 1000)
+    d = CarryShadowDaemon(db_path=str(tmp_path / "cs.db"),
+                          fetch=_stub_fetch(now))
+    d.cands = [{"pair_name": "PURR/USDC", "base": "PURR", "perp": "PURR",
+                "max_lev": 5.0, "maint": 0.1, "m": 0.45, "m0": 0.6,
+                "pm": True}]
+    for c in d.cands:
+        d._register_candidate(c)
+    d.in_universe["PURR/USDC"] = True
+    d.funding_tail["PURR"].extend(
+        (now - i * 3_600_000, 0.001) for i in range(24))  # f_ann >> 15%
+    _a.run(d._catchup_gap(now, now + 7_000))
+    evs = [json.loads(r[0]) for r in d.ledger._con.execute(
+        "SELECT data FROM events WHERE kind='gap_entry_unverified'")]
+    assert len(evs) == 1 and evs[0]["pair"] == "PURR/USDC"
+    d.shutdown()
+
+
+# ── §12: strict-fill size sensitivity (measurement only) ────────────────
+
+def test_strict_fill_captures_crossed_visible_usd() -> None:
+    """At the strict-crossing tick the leg records the USD resting on
+    opposing levels that strictly cross our price. Strict inequality —
+    a level exactly at our price does not count (it never crossed)."""
+    buy = PendingLeg("buy", 100.0)
+    book = BookSnap(bid=99.0, ask=99.9,
+                    asks=((99.9, 10.0), (99.5, 5.0), (100.0, 3.0)))
+    assert buy.check(1, book)
+    assert buy.crossed_visible_usd == pytest.approx(99.9 * 10 + 99.5 * 5)
+    sell = PendingLeg("sell", 100.0)
+    book2 = BookSnap(bid=100.1, ask=100.5,
+                     bids=((100.1, 8.0), (100.2, 2.0), (100.0, 9.0)))
+    assert sell.check(1, book2)
+    assert sell.crossed_visible_usd == pytest.approx(100.1 * 8 + 100.2 * 2)
+
+
+def test_crossed_visible_none_without_depth_or_fill() -> None:
+    """No depth in the snapshot -> unmeasured (None), not zero. Same for a
+    leg that never crossed."""
+    leg = PendingLeg("buy", 100.0)
+    assert leg.check(1, BookSnap(bid=99.0, ask=99.9))
+    assert leg.crossed_visible_usd is None
+    leg2 = PendingLeg("buy", 100.0)
+    assert not leg2.check(1, BookSnap(bid=99.0, ask=100.5,
+                                      asks=((100.5, 10.0),)))
+    assert leg2.crossed_visible_usd is None
+
+
+def test_fill_frac_est_written_on_fill_and_episode(tmp_path) -> None:
+    """fill_stats gets crossing_size_usd = crossed-visible + tape vol, and
+    fill_frac_est = min(1, crossing/need); the episode row takes the min
+    of the two legs. Strict verdict untouched (filled=1 regardless)."""
+    import asyncio as _a
+    now = int(time.time() * 1000)
+    d = _daemon_with_pending_ep(tmp_path, now)
+    ep = d.pool.get("PURR/USDC")
+    need = spec.SHADOW_NOTIONAL_USD * ep.q
+    # tape: 2 sell-aggressor prints at-or-below our 99.0 spot bid
+    for _ in range(2):
+        d._on_trade({"coin": "PURR/USDC", "px": "98.9", "sz": "20",
+                     "side": "A", "time": now + 500})
+    # spot crosses: ask ladder visible size 98.9 * 20
+    d.books["PURR/USDC"] = BookSnap(98.5, 98.9, asks=((98.9, 20.0),))
+    d._on_pair_book(d.cands[0], now + 1_000)
+    lfs = [json.loads(r[0]) for r in d.ledger._con.execute(
+        "SELECT data FROM events WHERE kind='leg_fill'")]
+    assert lfs[0]["crossed_visible_usd"] == pytest.approx(98.9 * 20.0)
+    # perp crosses: bid ladder 100.1 * 80; no perp-side tape
+    d.books["PURR"] = BookSnap(100.1, 100.5, bids=((100.1, 80.0),))
+    d._on_pair_book(d.cands[0], now + 2_000)
+    assert ep.state == "open"
+    rows = {r[0]: r for r in d.ledger._con.execute(
+        "SELECT leg, filled, crossing_size_usd, fill_frac_est"
+        " FROM fill_stats")}
+    spot_cross = 98.9 * 20.0 + 2 * 98.9 * 20.0
+    assert rows["spot"][1] == 1
+    assert rows["spot"][2] == pytest.approx(spot_cross)
+    assert rows["spot"][3] == pytest.approx(min(1.0, spot_cross / need))
+    assert rows["perp"][2] == pytest.approx(100.1 * 80.0)
+    assert rows["perp"][3] == pytest.approx(100.1 * 80.0 / need)
+    assert d.ledger._con.execute(
+        "SELECT fill_frac_est FROM episodes WHERE id=?", (ep.id,)
+    ).fetchone()[0] == pytest.approx(min(spot_cross / need,
+                                         100.1 * 80.0 / need))
+    d.shutdown()
+
+
+def test_fill_frac_null_when_unfilled_or_unmeasured(tmp_path) -> None:
+    """Episodes 1-4 semantics: abort leaves NULLs (no fill measured); a
+    strict fill on a depth-less snapshot is 'unmeasured' -> NULL, not 0.
+    The strict fill verdict is unaffected either way."""
+    import asyncio as _a
+    now = int(time.time() * 1000)
+    d = _daemon_with_pending_ep(tmp_path, now)
+    ep = d.pool.get("PURR/USDC")
+    # unfilled abort at window end
+    ev = ep.on_book_entry(now + 901_000,
+                          BookSnap(99.0, 100.5), BookSnap(98.0, 100.5))
+    d._handle_entry_event(ep, ev, now + 901_000)
+    rows = d.ledger._con.execute(
+        "SELECT filled, crossing_size_usd, fill_frac_est FROM fill_stats"
+    ).fetchall()
+    assert len(rows) == 2
+    assert all(r[0] == 0 and r[1] is None and r[2] is None for r in rows)
+    assert d.ledger._con.execute(
+        "SELECT fill_frac_est FROM episodes WHERE id=?", (ep.id,)
+    ).fetchone()[0] is None
+    # depth-less fill -> measured fill verdict, unmeasured fraction
+    ep2 = _ep()
+    ep2.id = d.ledger.episode_open({**ep2.row(), "state": "pending_entry"})
+    ep2.place_entry(BookSnap(99.0, 100.0), BookSnap(99.0, 100.0))
+    assert ep2.on_book_entry(1, BookSnap(98.5, 98.9),
+                             BookSnap(100.1, 100.2)) == "fill"
+    assert all(l.crossed_visible_usd is None for l in ep2.legs.values())
+    d.shutdown()
+
+
+def test_final_readout_sensitivity_block(tmp_path) -> None:
+    """The readout exposes the §12 secondary block: frac-weighted fill
+    rate, weighted annualized return, explicit <8%/yr flag — plus the §11
+    >1%-gap-pair flag. NULL fracs are counted, not guessed."""
+    now = int(time.time() * 1000)
+    d = CarryShadowDaemon(db_path=str(tmp_path / "cs.db"),
+                          fetch=_stub_fetch(now))
+    d.ledger.episode_open({"pair": "PURR/USDC", "perp": "PURR",
+                           "pm_branch": 1, "state": "closed",
+                           "entry_decision_ms": now, "opened_ms": now,
+                           "closed_ms": now, "realized_pnl": 0.0001,
+                           "cost_bps": 1.0, "m0": 0.6,
+                           "fill_frac_est": 0.5})
+    d.ledger.episode_open({"pair": "ENA/USDC", "perp": "ENA",
+                           "pm_branch": 1, "state": "closed",
+                           "entry_decision_ms": now + 1, "opened_ms": now,
+                           "closed_ms": now, "realized_pnl": 0.0002,
+                           "cost_bps": 1.0, "m0": 0.6})  # fill_frac NULL
+    for i, (leg, filled, frac) in enumerate(
+            (("spot", True, 1.0), ("perp", True, 0.4),
+             ("spot", True, None), ("perp", False, None))):
+        d.ledger.record_fill(leg, filled, 60.0 if filled else None,
+                             now + i, fill_frac_est=frac)
+    day = time.strftime("%Y%m%d", time.gmtime(now / 1000))
+    d.ledger.meta_set(f"gap_s:{day}:ENA", "1200.0")   # >1% of the day
+    d._final_readout()
+    out = json.loads(d.ledger.meta_get("final_readout"))
+    s = out["sensitivity_fill_frac"]
+    assert s["weighted_fill_rate"] == pytest.approx((1.0 + 0.4) / 4)
+    assert s["measured_frac_fills"] == 2
+    assert s["unmeasured_strict_fills"] == 1
+    assert s["measured_eps"] == 1
+    assert s["ann_ret_committed_weighted"] is not None
+    assert s["weighted_below_hurdle"] is True
+    assert "8%/yr" in s["note"]
+    assert out["gap_over_1pct"] == [f"{day}:ENA:1200s"]
+    d.shutdown()
+
+
+def test_gap_expired_unwind_charged_at_worst_candle_price(tmp_path) -> None:
+    """§11: when the leg window expires inside a gap with one leg filled,
+    the unwind cost = taker fee + adverse move at the worst 1m candle
+    extreme of the FILLED leg — never the gap-end mid. Stub candles have
+    perp high=101.0: perp short filled at 100.0 unwinds at worst 101.0 ->
+    adverse 100bps on top of the taker fee."""
+    import asyncio as _a
+    now = int(time.time() * 1000)
+    d = _daemon_with_pending_ep(tmp_path, now)
+    ep = d.pool.get("PURR/USDC")
+    # perp SELL fills at 100.0; spot stays pending -> unlegged
+    ep.on_book_entry(now + 1_000,
+                     BookSnap(99.0, 100.5), BookSnap(100.1, 100.5))
+    assert ep.legs["perp"].filled and not ep.legs["spot"].filled
+    gap_end = ep.entry_decision_ms + spec.MAKER_FILL_WINDOW_S * 1000 + 60_000
+    _a.run(d._catchup_gap(gap_end - 10_000, gap_end))
+    assert ep.state == "aborted" and ep.close_reason == "unlegged_unwind"
+    expected = spec.TAKER_FEE_BPS + (101.0 - 100.0) / 100.0 * 1e4
+    assert ep.cost_bps == pytest.approx(expected)
+    row = d.ledger._con.execute(
+        "SELECT cost_bps, gap_unverified FROM episodes WHERE id=?",
+        (ep.id,)).fetchone()
+    assert row[0] == pytest.approx(expected) and row[1] == 1
     d.shutdown()

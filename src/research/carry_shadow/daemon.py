@@ -59,6 +59,14 @@ class CarryShadowDaemon:
         self._book_seen_ms: Dict[str, int] = {}
         self._last_ws_ms = 0
         self._subs_active = 0
+        self._subs_expected = 0
+        # freshness telemetry (measurement only, 2026-10-09):
+        # heartbeat reports data freshness + reconnect rate + loop drift so
+        # /ops can degrade on stale books, not just process liveness
+        self._connect_ms: Deque[int] = deque(maxlen=512)
+        self._ws_down_since: int = 0          # 0 = connected (or pre-boot)
+        self._loop_lag: Deque[int] = deque(maxlen=spec.LOOP_LAG_WINDOW)
+        self._last_hb_ms = 0
         self._shutdown = False
         self._ws: Any = None
         # Injectable fetchers keep the daemon testable without network.
@@ -331,9 +339,12 @@ class CarryShadowDaemon:
                         close_timeout=5, open_timeout=10) as ws:
                     self._ws = ws
                     backoff = 2.0
+                    self._connect_ms.append(_now_ms())
+                    self._ws_down_since = 0
                     self._subs_active = 0
                     for c in self.cands:
                         await self._subscribe_coin(ws, c)
+                    self._subs_expected = self._subs_active
                     if self._last_ws_ms:
                         await self._catchup_gap(self._last_ws_ms, _now_ms())
                     async for raw in ws:
@@ -344,6 +355,8 @@ class CarryShadowDaemon:
             except Exception as exc:  # noqa: BLE001 — reconnect is the contract
                 logger.warning("carry-shadow WS error: %s", exc)
             self._ws = None
+            if not self._ws_down_since:
+                self._ws_down_since = _now_ms()
             if not self._shutdown:
                 await asyncio.sleep(backoff)
                 backoff = min(60.0, backoff * 2)
@@ -363,8 +376,13 @@ class CarryShadowDaemon:
             if not levels[0] or not levels[1]:
                 return
             coin = str(data["coin"])
-            self.books[coin] = BookSnap(bid=float(levels[0][0]["px"]),
-                                        ask=float(levels[1][0]["px"]))
+            self.books[coin] = BookSnap(
+                bid=float(levels[0][0]["px"]),
+                ask=float(levels[1][0]["px"]),
+                bids=tuple((float(l["px"]), float(l["sz"]))
+                           for l in levels[0]),
+                asks=tuple((float(l["px"]), float(l["sz"]))
+                           for l in levels[1]))
             self._book_seen_ms[coin] = int(data.get("time") or _now_ms())
             ts = int(data.get("time") or _now_ms())
             c = self.pair_by_coin.get(coin)
@@ -410,14 +428,26 @@ class CarryShadowDaemon:
         }
 
     def _proxy_result(self, ep_id: int, leg_key: str,
-                      leg: Any) -> Tuple[bool, float]:
+                      leg: Any) -> Tuple[bool, float, Optional[float]]:
         acc = self._proxy.pop((ep_id, leg_key), None)
-        if acc is None or leg.filled_at_ms is None:
-            # unfilled leg: proxy still measured over the full window
-            if acc is None:
-                return False, 0.0
-            return acc["vol_usd"] >= acc["need_usd"], acc["vol_usd"]
-        return acc["vol_usd"] >= acc["need_usd"], acc["vol_usd"]
+        if acc is None:
+            return False, 0.0, None
+        return acc["vol_usd"] >= acc["need_usd"], acc["vol_usd"], \
+            acc["need_usd"]
+
+    @staticmethod
+    def _frac(leg: Any, pvol: float,
+              need: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
+        """§12 sensitivity fields. crossing_size_usd = size visible on the
+        opposing levels that strictly crossed our price at the fill tick +
+        tape volume at-or-better in the window; fill_frac_est =
+        min(1, crossing/need). NULL unless the leg strict-filled AND depth
+        was captured — unmeasured is not zero."""
+        if leg.filled_at_ms is None or leg.crossed_visible_usd is None \
+                or not need:
+            return None, None
+        crossing = leg.crossed_visible_usd + pvol
+        return crossing, min(1.0, crossing / need)
 
     def _bbo(self, c: Dict[str, Any]) -> Dict[str, Any]:
         """BBO+mid snapshot of both legs — measurement only (prereg
@@ -439,6 +469,7 @@ class CarryShadowDaemon:
                 self._emit("leg_fill", {
                     "pair": ep.pair, "leg": leg, "price": l.price,
                     "filled_at_ms": l.filled_at_ms,
+                    "crossed_visible_usd": l.crossed_visible_usd,
                     "unlegged_basis_bps": ep.unlegged_basis_bps,
                     "bbo": self._bbo(c) if c else None},
                     ep.id, ts)
@@ -467,32 +498,44 @@ class CarryShadowDaemon:
         if ev is None:
             return
         if ev == "fill":
+            fracs = []
             for leg in ("spot", "perp"):
                 l = ep.legs[leg]
-                pf, pvol = self._proxy_result(ep.id, leg, l)
+                pf, pvol, need = self._proxy_result(ep.id, leg, l)
+                crossing, frac = self._frac(l, pvol, need)
+                fracs.append(frac)
                 self.ledger.record_fill(
                     leg, True,
                     (l.filled_at_ms - ep.entry_decision_ms) / 1000.0,
-                    l.filled_at_ms or ts, proxy_filled=pf, proxy_vol_usd=pvol)
+                    l.filled_at_ms or ts, proxy_filled=pf, proxy_vol_usd=pvol,
+                    crossing_size_usd=crossing, fill_frac_est=frac)
             self._persist_unlegged(ep)
+            # §12: episode frac = min(leg fracs); NULL if any leg unmeasured
+            ep_frac = (min(fracs)
+                       if all(f is not None for f in fracs) else None)
             self.ledger.episode_update(
                 ep.id, state="open", opened_ms=ep.opened_ms,
-                p0=ep.p0, s0=ep.s0, cost_bps=ep.cost_bps)
+                p0=ep.p0, s0=ep.s0, cost_bps=ep.cost_bps,
+                fill_frac_est=ep_frac)
             self._emit("fill", {"pair": ep.pair,
                                 "unlegged_s": ep.max_unlegged_s,
                                 "unlegged_max_adverse_bps":
                                     ep.unlegged_max_adverse_bps or None,
                                 "unlegged_basis_bps": ep.unlegged_basis_bps,
+                                "fill_frac_est": ep_frac,
                                 "bbo": self._bbo(
                                     self.pair_by_coin.get(ep.perp) or {})},
                        ep.id, ts)
         else:
             for leg in ("spot", "perp"):
                 l = ep.legs[leg]
-                pf, pvol = self._proxy_result(ep.id, leg, l)
+                pf, pvol, need = self._proxy_result(ep.id, leg, l)
+                crossing, frac = self._frac(l, pvol, need)
                 self.ledger.record_fill(leg, bool(l.filled_at_ms),
                                         None, ts, proxy_filled=pf,
-                                        proxy_vol_usd=pvol)
+                                        proxy_vol_usd=pvol,
+                                        crossing_size_usd=crossing,
+                                        fill_frac_est=frac)
             self._persist_unlegged(ep)
             self.ledger.episode_update(
                 ep.id, state="aborted", close_reason=ep.close_reason,
@@ -616,6 +659,75 @@ class CarryShadowDaemon:
                     "source": "catchup", "worst_px": perp_hi},
                     ep.id, gap_end_ms)
 
+        # §11 (2026-10-09): gap coverage for non-margin state. A pending
+        # maker leg never fills inside a gap (no tape, no fill — strict
+        # rule); if its window expired inside the gap the attempt aborts
+        # here. Gaps > GAP_UNVERIFIED_MS flag the episode; gaps during an
+        # eligible entry window emit gap_entry_unverified (no episode to
+        # mark — the event IS the record). Daily gap_seconds per pair in
+        # meta for the status report.
+        gap_ms = gap_end_ms - gap_start_ms
+        big_gap = gap_ms > spec.GAP_UNVERIFIED_MS
+        for ep in list(self.pool.live()):
+            if ep.state != "pending_entry":
+                continue
+            if big_gap:
+                self.ledger.episode_update(ep.id, gap_unverified=1)
+                self._emit("gap_catchup_pending",
+                           {"pair": ep.pair, "gap_ms": gap_ms},
+                           ep.id, gap_end_ms)
+            ev = ep.expire_entry_window(gap_end_ms)
+            if ev:
+                if ev == "unlegged_unwind":
+                    # §11: unwind price = worst 1m candle extreme of the
+                    # loose leg over the gap (spot low for a sell-back,
+                    # perp high for a buy-back) + taker fee — never the
+                    # gap-end mid.
+                    adverse = await self._gap_unwind_adverse_bps(
+                        ep, gap_start_ms, gap_end_ms)
+                    if adverse is not None:
+                        ep.cost_bps += adverse
+                self._handle_entry_event(ep, ev, gap_end_ms)
+        if big_gap:
+            day = time.strftime("%Y%m%d", time.gmtime(gap_end_ms / 1000))
+            for c in self.cands:
+                pair = c["pair_name"]
+                key = f"gap_s:{day}:{pair}"
+                self.ledger.meta_set(
+                    key, str(float(self.ledger.meta_get(key) or 0.0)
+                             + gap_ms / 1000.0))
+                if (not self.pool.get(pair)
+                        and self.in_universe.get(pair)
+                        and (self._f_ann(c["perp"]) or 0.0)
+                            >= spec.ENTRY_F_ANN):
+                    self._emit("gap_entry_unverified",
+                               {"pair": pair, "perp": c["perp"],
+                                "gap_ms": gap_ms}, None, gap_end_ms)
+
+    async def _gap_unwind_adverse_bps(self, ep: Episode, gap_start_ms: int,
+                                      gap_end_ms: int) -> Optional[float]:
+        """Adverse unwind cost (bps of fill price) for a gap-expired
+        unlegged attempt: the filled leg is unwound at the worst 1m candle
+        extreme inside the gap — spot low if selling the spot leg back,
+        perp high if buying the perp short back. None if candles are
+        unavailable (taker fee alone is kept, episode stays flagged)."""
+        c = self.pair_by_coin.get(ep.perp)
+        if not c:
+            return None
+        filled = [k for k, l in ep.legs.items() if l.filled]
+        if len(filled) != 1:
+            return None
+        leg = filled[0]
+        fill_px = ep.legs[leg].price
+        perp_hi, spot_lo, _gran = await asyncio.to_thread(
+            self._gap_extremes, c, gap_start_ms, gap_end_ms)
+        worst = spot_lo if leg == "spot" else perp_hi
+        if worst is None or fill_px <= 0:
+            return None
+        adverse = ((fill_px - worst) if leg == "spot"
+                   else (worst - fill_px))
+        return adverse / fill_px * 1e4
+
     def _gap_extremes(self, c: Dict[str, Any], start_ms: int,
                       end_ms: int) -> Tuple[Optional[float], Optional[float], str]:
         """Worst-case perp high / spot low over the missed window. Returns
@@ -636,9 +748,62 @@ class CarryShadowDaemon:
         return None, None, "none"
 
     def _heartbeat(self) -> None:
-        self.ledger.meta_set("heartbeat_ms", str(_now_ms()))
+        now = _now_ms()
+        self.ledger.meta_set("heartbeat_ms", str(now))
         self.ledger.meta_set("subs_active", str(self._subs_active))
         self.ledger.meta_set("dead", self.pool.death_reason or "")
+        # data freshness, not just liveness (measurement only):
+        # /ops degrades on stale books / flapping reconnects, not merely on
+        # a dead process. book_age_ms (global, all subs) is informational
+        # only — thin books legitimately go quiet for >60s; degradation keys
+        # on the open-episode books and the sub-wide median.
+        if self._book_seen_ms:
+            ages = sorted(now - ts for ts in self._book_seen_ms.values())
+            self.ledger.meta_set("book_age_ms", str(ages[-1]))
+            self.ledger.meta_set(
+                "book_age_med_ms", str(ages[len(ages) // 2]))
+        open_coins = [
+            coin for ep in self.pool.live() if ep.state == "open"
+            for coin in (ep.pair, ep.perp)]
+        open_seen = [self._book_seen_ms[c] for c in open_coins
+                     if c in self._book_seen_ms]
+        if open_seen:
+            self.ledger.meta_set(
+                "book_age_open_eps_ms", str(now - max(open_seen)))
+        self.ledger.meta_set("ws_connected", "1" if self._ws else "0")
+        self.ledger.meta_set(
+            "ws_down_ms",
+            str(now - self._ws_down_since) if self._ws_down_since else "0")
+        cutoff = now - 3_600_000
+        while self._connect_ms and self._connect_ms[0] < cutoff:
+            self._connect_ms.popleft()
+        self.ledger.meta_set("reconnects_1h", str(len(self._connect_ms)))
+        self.ledger.meta_set("subs_expected", str(self._subs_expected))
+        # event-loop lag: 1s-tick sampler (see _loop_lag_watch); reported
+        # over the LAST 60 ticks (~1 min) — the deque keeps 120 but the
+        # metric is scoped to the last minute. Catches a blocked loop
+        # delaying pong processing (sync SQLite under tape bursts).
+        if self._loop_lag:
+            lag = sorted(list(self._loop_lag)[-60:])
+            self.ledger.meta_set("loop_lag_max_ms", str(lag[-1]))
+            self.ledger.meta_set(
+                "loop_lag_p99_ms", str(lag[min(len(lag) - 1,
+                                             int(0.99 * len(lag)))]))
+        self._last_hb_ms = now
+
+    async def _loop_lag_watch(self) -> None:
+        """Sleep-1s ticks; the drift vs the nominal second is the loop's
+        scheduling lag — cheap probe for event-loop blockage."""
+        prev = time.monotonic()
+        while not self._shutdown:
+            try:
+                await asyncio.sleep(spec.LOOP_LAG_TICK_S)
+            except asyncio.CancelledError:
+                return
+            now = time.monotonic()
+            self._loop_lag.append(
+                int((now - prev - spec.LOOP_LAG_TICK_S) * 1000))
+            prev = now
         # per-coin liveness + trade counters — lets the status report show
         # which '@N' spot books actually stream (a silent sub is invisible
         # otherwise) and keeps a pm2 crash-loop countable.
@@ -673,10 +838,13 @@ class CarryShadowDaemon:
         if kind == "exit":
             for leg in ("spot", "perp"):
                 l = ep.exit_legs[leg]
-                pf, pvol = self._proxy_result(ep.id, "exit_" + leg, l)
+                pf, pvol, need = self._proxy_result(ep.id, "exit_" + leg, l)
+                crossing, frac = self._frac(l, pvol, need)
                 self.ledger.record_fill(leg, bool(l.filled_at_ms),
                                         None, ts, proxy_filled=pf,
-                                        proxy_vol_usd=pvol)
+                                        proxy_vol_usd=pvol,
+                                        crossing_size_usd=crossing,
+                                        fill_frac_est=frac)
         self._emit(kind, {
             "pair": ep.pair, "net_bps": ep.net_bps(
                 (self.books.get(ep.perp) or BookSnap()).mid,
@@ -722,10 +890,11 @@ class CarryShadowDaemon:
             return
         rows = self.ledger.closed_rows()
         eps = [dict(zip(
-            ["entry", "opened", "closed", "pnl", "cost", "pm", "m0", "state"],
+            ["entry", "opened", "closed", "pnl", "cost", "pm", "m0",
+             "state", "frac"],
             (r["entry_decision_ms"], r["opened_ms"], r["closed_ms"],
              r["realized_pnl"], r["cost_bps"], r["pm_branch"], r["m0"],
-             r["state"])))
+             r["state"], r["fill_frac_est"])))
             for r in rows]
         clusters = 1 + sum(
             1 for a, b in zip(eps, eps[1:])
@@ -736,13 +905,48 @@ class CarryShadowDaemon:
         ann_ret = (sum(e["pnl"] for e in eps) / max(1, len(eps))) / committed \
             / n_days * 365
         verdict = "A" if ann_ret >= spec.HURDLE_APR else "C"
-        unverified = [e["pair_name"] for e in
+        unverified = [r[0] for r in
                       self.ledger._con.execute(
-                          "SELECT pair_name FROM episodes WHERE gap_unverified=1")]
+                          "SELECT pair FROM episodes WHERE gap_unverified=1")]
         out = {"clusters": clusters, "ann_ret_committed": round(ann_ret, 4),
                "hurdle": spec.HURDLE_APR, "verdict": verdict,
                "gap_unverified_n": len(unverified),
                "gap_unverified_pairs": unverified}
+        # §11: pairs with >1% gap time on any day must be named here
+        gap_flags = []
+        for k, v in self.ledger._con.execute(
+                "SELECT key, value FROM meta WHERE key LIKE 'gap_s:%'"):
+            _, day, pair = k.split(":", 2)
+            if float(v) / 86400.0 > 0.01:
+                gap_flags.append(f"{day}:{pair}:{float(v):.0f}s")
+        out["gap_over_1pct"] = gap_flags
+        # §12 (secondary sensitivity — never changes the primary verdict):
+        # fills weighted by fill_frac_est. NULL fracs (pre-instrumentation)
+        # are reported, not guessed.
+        fs = self.ledger._con.execute(
+            "SELECT filled, fill_frac_est FROM fill_stats").fetchall()
+        n_att = len(fs)
+        frac_sum = sum(f[1] for f in fs if f[1] is not None)
+        n_unmeas = sum(1 for f in fs if f[0] and f[1] is None)
+        meas = [e for e in eps if e["frac"] is not None]
+        wret = None
+        if meas:
+            wnet = sum(e["pnl"] * e["frac"] for e in meas) / len(meas)
+            wret = wnet / committed / n_days * 365
+        out["sensitivity_fill_frac"] = {
+            "weighted_fill_rate": (round(frac_sum / n_att, 4)
+                                   if n_att else None),
+            "measured_frac_fills": int(sum(1 for f in fs
+                                           if f[1] is not None)),
+            "unmeasured_strict_fills": n_unmeas,
+            "measured_eps": len(meas),
+            "ann_ret_committed_weighted": (round(wret, 4)
+                                           if wret is not None else None),
+            "weighted_below_hurdle": (wret < spec.HURDLE_APR
+                                      if wret is not None else None),
+            "note": ("weighted annualized return is below the 8%/yr hurdle"
+                     if wret is not None and wret < spec.HURDLE_APR
+                     else None)}
         self.ledger.meta_set("final_readout", json.dumps(out))
         self._emit("final_readout", out, None)
         if verdict == "C":
@@ -783,6 +987,7 @@ class CarryShadowDaemon:
             self._loop(spec.MARGIN_CHECK_S, self._margin_async),
             self._loop(spec.GATE_REFRESH_S, self._refresh_gates),
             self._loop(spec.HEARTBEAT_S, self._heartbeat_async),
+            self._loop_lag_watch(),
         )
 
     async def _margin_async(self) -> None:

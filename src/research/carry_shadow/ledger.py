@@ -74,7 +74,12 @@ class Ledger:
         """Column adds for ledgers created before these fields existed."""
         cols = {r[1] for r in self._con.execute("PRAGMA table_info(fill_stats)")}
         for col, ddl in (("proxy_filled", "ALTER TABLE fill_stats ADD COLUMN proxy_filled INTEGER"),
-                         ("proxy_vol_usd", "ALTER TABLE fill_stats ADD COLUMN proxy_vol_usd REAL")):
+                         ("proxy_vol_usd", "ALTER TABLE fill_stats ADD COLUMN proxy_vol_usd REAL"),
+                         # §12 sensitivity (2026-10-09, measurement only):
+                         # crossed visible size + tape vol vs need, per leg.
+                         # NULL on rows that predate the columns.
+                         ("crossing_size_usd", "ALTER TABLE fill_stats ADD COLUMN crossing_size_usd REAL"),
+                         ("fill_frac_est", "ALTER TABLE fill_stats ADD COLUMN fill_frac_est REAL")):
             if col not in cols:
                 self._con.execute(ddl)
         ecols = {r[1] for r in self._con.execute("PRAGMA table_info(episodes)")}
@@ -89,6 +94,10 @@ class Ledger:
              "ALTER TABLE episodes ADD COLUMN unlegged_max_adverse_bps REAL"),
             ("unlegged_basis_bps",
              "ALTER TABLE episodes ADD COLUMN unlegged_basis_bps REAL"),
+            # §12: episode-level fill fraction = min(leg fracs) — only set
+            # when both legs filled under the measured build; NULL else.
+            ("fill_frac_est",
+             "ALTER TABLE episodes ADD COLUMN fill_frac_est REAL"),
         ):
             if col not in ecols:
                 self._con.execute(ddl)
@@ -124,14 +133,17 @@ class Ledger:
 
     def record_fill(self, leg: str, filled: bool, ttf_s: Optional[float],
                     ts_ms: int, proxy_filled: Optional[bool] = None,
-                    proxy_vol_usd: Optional[float] = None) -> None:
+                    proxy_vol_usd: Optional[float] = None,
+                    crossing_size_usd: Optional[float] = None,
+                    fill_frac_est: Optional[float] = None) -> None:
         self._con.execute(
             "INSERT OR REPLACE INTO fill_stats"
-            " (leg,ts_ms,filled,time_to_fill_s,proxy_filled,proxy_vol_usd)"
-            " VALUES (?,?,?,?,?,?)",
+            " (leg,ts_ms,filled,time_to_fill_s,proxy_filled,proxy_vol_usd,"
+            "  crossing_size_usd,fill_frac_est)"
+            " VALUES (?,?,?,?,?,?,?,?)",
             (leg, ts_ms, int(filled), ttf_s,
              None if proxy_filled is None else int(proxy_filled),
-             proxy_vol_usd))
+             proxy_vol_usd, crossing_size_usd, fill_frac_est))
         self._con.commit()
 
     def fill_rate(self, leg: str) -> tuple[int, float]:

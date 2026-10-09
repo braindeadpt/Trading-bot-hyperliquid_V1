@@ -34,7 +34,7 @@ death criterion).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from src.research.carry_shadow import spec
 
@@ -43,9 +43,12 @@ MS_H = 3_600_000
 
 @dataclass
 class BookSnap:
-    """Top-of-book snapshot for one market."""
+    """Top-of-book snapshot for one market. ``bids``/``asks`` carry
+    (px, sz) depth when the feed provides it — measurement only (§12)."""
     bid: float = 0.0
     ask: float = 0.0
+    bids: Tuple[Tuple[float, float], ...] = ()
+    asks: Tuple[Tuple[float, float], ...] = ()
 
     @property
     def mid(self) -> float:
@@ -59,6 +62,10 @@ class PendingLeg:
     side: str                     # 'buy' | 'sell'
     price: float = 0.0
     filled_at_ms: Optional[int] = None
+    # §12 (measurement only): USD visible on opposing levels that strictly
+    # cross our price at the fill tick. None = depth absent (unmeasured,
+    # not zero) — distinguishes "no crossed size" from "no data".
+    crossed_visible_usd: Optional[float] = None
 
     def check(self, ts_ms: int, book: BookSnap) -> bool:
         if self.filled_at_ms is not None:
@@ -67,8 +74,21 @@ class PendingLeg:
                    else book.bid > self.price)
         if self.price > 0 and book.bid > 0 and book.ask > 0 and crossed:
             self.filled_at_ms = ts_ms
+            self.crossed_visible_usd = self._crossed_visible(book)
             return True
         return False
+
+    def _crossed_visible(self, book: BookSnap) -> Optional[float]:
+        """USD resting on the opposing side that strictly crosses our
+        price right now. Resting BUY: ask levels with px < price; resting
+        SELL: bid levels with px > price (same 'strictly through'
+        semantics as the fill rule)."""
+        levels = book.asks if self.side == "buy" else book.bids
+        if not levels:
+            return None
+        return sum(px * sz for px, sz in levels
+                   if (px < self.price if self.side == "buy"
+                       else px > self.price))
 
     @property
     def filled(self) -> bool:
@@ -168,6 +188,25 @@ class Episode:
             return None
         self._close_unlegged(ts_ms)
         if after == 1:
+            self._charge(spec.TAKER_FEE_BPS)
+            self.state = "aborted"
+            self.close_reason = "unlegged_unwind"
+            return "unlegged_unwind"
+        self.state = "aborted"
+        self.close_reason = "abort_unfilled"
+        return "abort_unfilled"
+
+    def expire_entry_window(self, ts_ms: int) -> Optional[str]:
+        """Resolve a pending entry whose window elapsed — used by gap
+        catchup (§11): a pending maker leg never fills inside a WS gap,
+        so at gap end an already-expired window resolves straight to the
+        abort branch (unwind the loose leg at taker if one filled)."""
+        if self.state != "pending_entry":
+            return None
+        if ts_ms - self.entry_decision_ms < spec.MAKER_FILL_WINDOW_S * 1000:
+            return None
+        self._close_unlegged(ts_ms)
+        if self._n_filled(self.legs) == 1:
             self._charge(spec.TAKER_FEE_BPS)
             self.state = "aborted"
             self.close_reason = "unlegged_unwind"

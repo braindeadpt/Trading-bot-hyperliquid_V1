@@ -92,6 +92,15 @@ def main() -> None:
         xs = sorted(xs)
         return xs[min(len(xs) - 1, int(0.9 * len(xs)))] if xs else 0.0
 
+    # §11: daily gap_seconds per pair (tape coverage, not just margin)
+    gap_rows = con.execute(
+        "SELECT key, value FROM meta WHERE key LIKE 'gap_s:%'").fetchall()
+    if gap_rows:
+        print("\ngap_seconds per pair per day:")
+        for k, v in sorted(gap_rows):
+            _, day, pair = k.split(":", 2)
+            print(f"  {day} {pair:12s} {float(v):8.1f}s")
+
     print("\nper-coin entry/aborts/unlegged risk:")
     for coin in sorted(set(att) | set(by_coin)):
         d = by_coin.get(coin, {"aborts": 0, "unwind_bps": 0.0, "unleg": []})
@@ -116,6 +125,24 @@ def main() -> None:
         "SELECT COALESCE(SUM(proxy_filled),0), COUNT(*) FROM fill_stats").fetchone()
     print(f"\nfill strict: {int(row[1])}/{n} ({rate:.0%})   "
           f"proxy (context): {int(prow[0])}/{prow[1]}")
+    # §12 sensitivity (secondary): frac-weighted fill rate over measured legs
+    fcols = {r[1] for r in con.execute("PRAGMA table_info(fill_stats)")}
+    if "fill_frac_est" in fcols:
+        frow = con.execute(
+            "SELECT COALESCE(SUM(fill_frac_est),0),"
+            " SUM(CASE WHEN fill_frac_est IS NOT NULL THEN 1 ELSE 0 END)"
+            " FROM fill_stats").fetchone()
+        print(f"fill_frac_est weighted rate: "
+              f"{(frow[0] / n) if n else 0.0:.0%} "
+              f"(measured {int(frow[1])}/{n} legs; NULL = pre-§12)")
+    # §11: daily gap_seconds per pair — >1% of the day gets flagged
+    today = time.strftime("%Y%m%d", time.gmtime())
+    gaps = {k.split(":", 2)[2]: float(v) for k, v in meta.items()
+            if k.startswith(f"gap_s:{today}:")}
+    if gaps:
+        print("\ngap_seconds today: " + "  ".join(
+            f"{p}:{s:.0f}s{' [>1%]' if s > 864 else ''}"
+            for p, s in sorted(gaps.items())))
     con.close()
 
 

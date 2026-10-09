@@ -56,6 +56,12 @@ FUNDING_POLL_S = 300          # fundingHistory refresh cadence
 GATE_REFRESH_S = 3600         # PIT liquidity gate refresh cadence
 HEARTBEAT_S = 60              # meta heartbeat for the /ops feed-silence row
 HEARTBEAT_STALE_S = 600       # /ops shows carry_shadow red past this
+# §11 gap semantics (measurement, 2026-10-09): a WS gap longer than this
+# overlapping a pending entry leg or an eligible entry marks the episode
+# gap_unverified / emits gap_entry_unverified
+GAP_UNVERIFIED_MS = 5_000     # >5s of tape silence matters for entry state
+LOOP_LAG_TICK_S = 1.0         # event-loop lag sampler cadence
+LOOP_LAG_WINDOW = 120         # ticks kept (≈ last 2 min); reported max+p99
 SHADOW_NOTIONAL_USD = 10_000  # hypothetical leg size for the fill proxy
 READ_EPS_TARGET = 10          # >=10 closed clustered episodes
 CLUSTER_GAP_H = 24
