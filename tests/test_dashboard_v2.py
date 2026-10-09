@@ -364,6 +364,38 @@ class TestHypotheses(_DashCase):
         assert jev["indep_n"] == 1          # stale trade did NOT count
         assert jev["stale_verdict_excluded"] == 1
 
+    def test_jev_duplicate_verdict_excluded_from_kill(self) -> None:
+        """Two trades on the same jev_decision_ts_ms (restart re-fire)
+        count once — later rows are excluded via duplicate_verdict."""
+        conn = _conn(self._live)
+        boundary_plus = 1791124780000 + 86_400_000
+        verdict_ts = boundary_plus                       # same verdict, twice
+        # both entries within 2h of the verdict (non-stale) and sequential
+        # (no overlap) — the second can only be excluded by the dup rule
+        for tid, et in ((9, boundary_plus + 600_000),
+                        (10, boundary_plus + 4_800_000)):
+            conn.execute(
+                "INSERT INTO trades (id, symbol, side, strategy, status, "
+                "entry_time, exit_time, entry_price, exit_price, size, "
+                "pnl_usd, pnl_pct, signal_metadata) VALUES "
+                "(?, 'SOL', 'long', 'JevJudge', 'closed', ?, ?, 50.0, 51.0, "
+                "0.1, 0.05, 0.002, ?)",
+                (tid, et, et + 1_800_000,
+                 json.dumps({"jev_decision_ts_ms": verdict_ts})),
+            )
+        conn.commit()
+        conn.close()
+        web._ttl_clear()
+        r = self.client.get("/api/hypotheses")
+        jev = next(
+            h for h in r.get_json()["hypotheses"]
+            if h["id"] == "JevJudge::oos_kill"
+        )
+        # baseline BTC trade + first of the dup pair count; the second
+        # trade on the same verdict ts is excluded
+        assert jev["indep_n"] == 2
+        assert jev["duplicate_verdict_excluded"] == 1
+
     def test_sealed_counter_zero_without_board(self) -> None:
         """No persisted confirm board + 0 post-cutoff decisions => the
         public counter reads 0/60 (seal hides metrics, not counts)."""

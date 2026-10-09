@@ -238,3 +238,91 @@ def test_mark_stale_verdicts_annotates_without_deleting(tmp_path) -> None:
     assert _json.loads(rows[3][1]).get("stale_verdict") is None  # Other untouched
     assert mark_stale_verdicts(db) == 0  # idempotent
     db.close()
+
+
+# ── duplicate_verdict rule (2026-10-09) ──────────────────────────────────
+# A restart clears JevJudge's in-memory edge-trigger; the same verdict can
+# then produce a second trade if the first already closed. One verdict =
+# one counted trade: earliest entry per jev_decision_ts_ms counts, the rest
+# are flagged duplicate_verdict=1 and excluded. Rows are never deleted.
+
+from scripts.research.jev_eval import (  # noqa: E402
+    is_duplicate_verdict,
+    mark_duplicate_verdicts,
+    split_duplicate_verdicts,
+    verdict_decision_ts,
+)
+
+
+def _tmeta(ts) -> str:
+    return _json.dumps({"jev_decision_ts_ms": ts})
+
+
+def test_verdict_decision_ts_reads_meta() -> None:
+    assert verdict_decision_ts(_tmeta(12345)) == 12345
+    assert verdict_decision_ts("{}") is None
+    assert verdict_decision_ts(None) is None
+    assert verdict_decision_ts("not json") is None
+
+
+def test_split_duplicate_verdicts_counts_first_only() -> None:
+    # restart re-fire: verdict ts=100 produces trade A (closed) then trade B
+    trades = [
+        _tr(entry=1000, exit_=2000, meta=_tmeta(100)),
+        _tr(entry=3000, exit_=4000, meta=_tmeta(100)),  # same verdict → dupe
+        _tr(entry=5000, exit_=6000, meta=_tmeta(200)),  # new verdict → counts
+    ]
+    kept, dupes = split_duplicate_verdicts(trades)
+    assert [t["entry_time"] for t in kept] == [1000, 5000]
+    assert [t["entry_time"] for t in dupes] == [3000]
+
+
+def test_split_duplicate_verdicts_no_ts_never_dupe() -> None:
+    # pre-instrumentation rows (no jev_decision_ts_ms) can never be dupes
+    trades = [_tr(entry=1000, meta=None), _tr(entry=2000, meta="{}")]
+    kept, dupes = split_duplicate_verdicts(trades)
+    assert len(kept) == 2 and not dupes
+
+
+def test_kill_count_two_trades_same_verdict_ts_counts_one() -> None:
+    """The kill read: two closed trades on one jev_decision_ts_ms count
+    once — the rest feed the exclusion print, never the n."""
+    trades = [
+        _tr(entry=1000, exit_=2000, meta=_tmeta(100)),
+        _tr(entry=3000, exit_=4000, meta=_tmeta(100)),
+        _tr(entry=5000, exit_=6000, meta=_tmeta(100)),
+    ]
+    kept, dupes = split_duplicate_verdicts(trades)
+    assert len(dupes) == 2
+    assert len(_independent_trades(kept)) == 1
+
+
+def test_mark_duplicate_verdicts_annotates_without_deleting(tmp_path) -> None:
+    db = _sqlite3.connect(str(tmp_path / "bot.db"))
+    db.execute(
+        "CREATE TABLE trades (id INTEGER PRIMARY KEY, strategy TEXT, "
+        "entry_time INTEGER, signal_metadata TEXT)"
+    )
+    db.execute("INSERT INTO trades VALUES (1, 'JevJudge', 1000, ?)",
+               (_tmeta(100),))
+    db.execute("INSERT INTO trades VALUES (2, 'JevJudge', 3000, ?)",
+               (_tmeta(100),))   # dupe of ts=100
+    db.execute("INSERT INTO trades VALUES (3, 'JevJudge', 5000, ?)",
+               (_tmeta(200),))   # different verdict
+    db.execute("INSERT INTO trades VALUES (4, 'JevJudge', 6000, '{}')")
+    db.execute("INSERT INTO trades VALUES (5, 'Other', 7000, ?)",
+               (_tmeta(100),))   # other strategy untouched
+    db.commit()
+
+    assert mark_duplicate_verdicts(db) == 1
+    rows = db.execute(
+        "SELECT id, signal_metadata FROM trades ORDER BY id").fetchall()
+    assert len(rows) == 5  # nothing deleted
+    assert "duplicate_verdict" not in _json.loads(rows[0][1])   # earliest kept
+    assert _json.loads(rows[1][1])["duplicate_verdict"] == 1    # dupe flagged
+    assert "duplicate_verdict" not in _json.loads(rows[2][1])
+    assert _json.loads(rows[4][1]).get("duplicate_verdict") is None
+    assert is_duplicate_verdict(rows[1][1]) is True
+    assert is_duplicate_verdict(rows[0][1]) is False
+    assert mark_duplicate_verdicts(db) == 0  # idempotent
+    db.close()

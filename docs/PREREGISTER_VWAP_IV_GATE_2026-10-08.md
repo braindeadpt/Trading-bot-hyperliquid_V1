@@ -138,3 +138,19 @@ so exclusion requires no ADX reconstruction.
 process restarted at **2026-10-08 23:35:59 UTC**
 (`restart_ts_ms = 1791502559498`, pm2 `hyperliquid` restart 3, pid 59216).
 Commit `d12af34`.
+
+**Amendment 3, 2026-10-09 — shadow strategies share the boot candle
+restore (added while the board is still sealed):** every trading-process
+restart was resetting the shadow VWAPDeviation's 24×1h warm-up —
+`_restore_candles_from_db` only injected restored candles into the live
+`self._strategies` list, never into `self._shadow_strategies`, so the
+shadow instance re-collected its buffer at one candle per hour (~24h of
+dead time per restart; observed `3/24` still warming 2.3h after the
+09:28 restart). Shadow strategies are now injected with the same DB rows,
+filtered to candles **closed before boot** (`timestamp_ms + tf <=
+boot_ms` — the in-progress candle is never injected). Execution-strategy
+injection is byte-identical to before: same call, same unfiltered list.
+This changes shadow start-up only — no signal rule, gate, threshold,
+confirmation cutoff, or target is touched; the `n`/cutoff semantics of
+`iv_gate_shadow#confirm` are unchanged (the recorded decision stream is
+the same stream the strategy would have emitted after a live warm-up).

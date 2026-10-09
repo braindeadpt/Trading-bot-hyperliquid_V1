@@ -905,7 +905,11 @@ function renderHypotheses(payload) {
         const staleTxt = staleN > 0
             ? ' <span style="color:var(--yellow);" title="trades com verdict >2h à entrada — marcados, excluídos do kill">(−' + staleN + ' stale)</span>'
             : "";
-        const nTxt = (h.indep_n != null ? h.indep_n + "/" + (h.target != null ? h.target : "?") : "—/" + (h.target != null ? h.target : "?")) + staleTxt;
+        const dupN = Number(h.duplicate_verdict_excluded) || 0;
+        const dupTxt = dupN > 0
+            ? ' <span style="color:var(--yellow);" title="trades reabertos no mesmo jev_decision_ts_ms — só a primeira entrada conta">(−' + dupN + ' dup)</span>'
+            : "";
+        const nTxt = (h.indep_n != null ? h.indep_n + "/" + (h.target != null ? h.target : "?") : "—/" + (h.target != null ? h.target : "?")) + staleTxt + dupTxt;
         const stateCls = h.state && h.state.indexOf("veredicto") === 0 ? "highlight" : "";
         const cutoffTip = h.cutoff_ms ? ' title="fronteira: ' + new Date(h.cutoff_ms).toISOString().slice(0, 10) + '"' : "";
         return `<tr>

@@ -99,6 +99,30 @@ class JevJudge(Strategy):
         return "JevJudge"
 
     # ------------------------------------------------------------------
+    # Restart edge-trigger persistence (2026-10-09)
+    # ------------------------------------------------------------------
+    # ``_last_signaled`` is in-memory: a restart would re-fire the latest
+    # verdict inside its TTL. The engine persists it to runtime_state on
+    # every change and restores it here BEFORE events flow, so one verdict
+    # can never produce two trades across a restart.
+
+    def restore_last_signaled(self, mapping: Dict[str, Any]) -> int:
+        """Load the persisted {symbol: jev_decision_ts_ms} edge-trigger map.
+        Returns how many symbols were restored."""
+        n = 0
+        for sym, ts in (mapping or {}).items():
+            try:
+                self._last_signaled[str(sym)] = int(ts)
+                n += 1
+            except (ValueError, TypeError):
+                continue
+        return n
+
+    def last_signaled_snapshot(self) -> Dict[str, int]:
+        """Persistable copy of the edge-trigger map."""
+        return dict(self._last_signaled)
+
+    # ------------------------------------------------------------------
     # Verdict file (written by the scheduled judge — never blocks the loop)
     # ------------------------------------------------------------------
 

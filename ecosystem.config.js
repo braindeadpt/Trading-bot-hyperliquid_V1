@@ -12,11 +12,14 @@
 // wrappers are versioned in deploy/macos/ — copy them to the app dir on a
 // fresh host.
 //
-// `hyperliquid` and `jev-judge` are long-running services. The rest are cron
-// jobs: autorestart false + cron_restart, so pm2 fires them on schedule and
-// leaves them `stopped` in between — a high restart count on those rows is
-// the number of scheduled fires, not failures. jev-judge was converted to a
-// loop after pm2's cron_restart dropped its timer twice (see its entry).
+// `hyperliquid`, `jev-judge`, `carry-shadow` and `outcome-eval` are
+// long-running services — their wrappers own the cadence (aligned internal
+// loops), pm2 only keeps them alive. The rest are cron jobs: autorestart
+// false + cron_restart, so pm2 fires them on schedule and leaves them
+// `stopped` in between — a high restart count on those rows is the number
+// of scheduled fires, not failures. jev-judge/outcome-eval were converted
+// to loops after pm2's cron_restart dropped/mangled their timers
+// (2026-10-07/09 incidents — see entries).
 
 const CWD = __dirname;
 
@@ -102,7 +105,7 @@ module.exports = {
     // reliable.
     {
       name: 'jev-judge',
-      script: 'run_jev_judge.sh',
+      script: 'deploy/macos/run_jev_judge.sh',
       cwd: CWD,
       interpreter: 'bash',
       exec_mode: 'fork',
@@ -152,7 +155,30 @@ module.exports = {
     },
 
     cron('wallet-fills', 'run_wallet_fills.sh', '7 * * * *'),
-    cron('outcome-eval', 'run_outcome_eval.sh', '20 */3 * * *'),
+
+    // Outcome evaluator — persists 14d shadow scoreboards every 3h.
+    // LONG-RUNNING LOOP like jev-judge: pm2's cron scheduler double-fired
+    // 2026-10-09 00:20 and SIGKILLed the run mid-write, orphaning the eval
+    // PID lock for ~14h (boards frozen, 105 skipped fires). The wrapper now
+    // runs one eval then sleeps to the next 3h boundary; each pass is
+    // capped at 20min so a wedged run can't stall the loop.
+    {
+      name: 'outcome-eval',
+      script: 'deploy/macos/run_outcome_eval.sh',
+      cwd: CWD,
+      interpreter: 'bash',
+      exec_mode: 'fork',
+      instances: 1,
+      autorestart: true,
+      merge_logs: true,
+      out_file: `${LOGS}/outcome-eval-out.log`,
+      error_file: `${LOGS}/outcome-eval-error.log`,
+
+      restart_delay: 120000,
+      kill_timeout: 15000,
+      // No max_restarts cap — frozen scoreboards must never be silent.
+    },
+
     cron('watchdogs', 'run_watchdogs.sh', '45 */6 * * *'),
     cron('overnight', 'run_overnight.sh', '0 5 * * *'),
     cron('backup-monthly', 'run_backup_monthly.sh', '0 4 1 * *'),

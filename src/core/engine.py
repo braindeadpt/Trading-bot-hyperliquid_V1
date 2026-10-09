@@ -734,6 +734,7 @@ class TradingEngine:
         self._feed_health_evaluated: bool = False
         self._feed_health_ready: bool = False
         self._restore_invocation_count = 0
+        self._jev_signaled_seen: Dict[str, int] = {}
         self._last_md_alert_ts: float = 0.0
         _hl_testnet = bool(config.get("exchange.hyperliquid.testnet", False))
         self._hl_predicted = HyperliquidPredictedFundingClient(
@@ -2282,6 +2283,10 @@ class TradingEngine:
                         signals.append(sig)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("Strategy %s error on %s: %s", strategy.name, symbol, exc)
+
+            # JevJudge edge-trigger changed on emit → persist before any
+            # restart could lose it (covers governor/router rejects too)
+            self._maybe_persist_jev_signal_state()
 
             if signals:
                 if self._phase08_regime_router:
@@ -4540,6 +4545,10 @@ class TradingEngine:
         # Restore recent candles from DB for faster strategy warm-up
         await self._restore_candles_from_db()
 
+        # Restore JevJudge edge-trigger state BEFORE events flow — a
+        # restart must not re-fire the last verdict inside its TTL
+        self._restore_jev_signal_state()
+
     async def _sync_open_trades_to_portfolio(self) -> None:
         """Mirror executor open trades into portfolio (idempotent on restart)."""
         open_rows = self._db.get_open_trades()
@@ -4618,6 +4627,13 @@ class TradingEngine:
             sub = getattr(s, "_strategies", None)
             if isinstance(sub, dict):
                 all_strategies.extend(sub.values())
+        # Amendment 3 (2026-10-09): shadow strategies share the same DB
+        # restore so a restart does not reset their warm-up (VWAP iv_gate
+        # needs 24 closed 1h candles — 24h of dead time per restart before
+        # this). Execution strategies get the unfiltered list exactly as
+        # before; shadow injection additionally drops any candle still open
+        # at boot time.
+        boot_ms = int(time.time() * 1000)
 
         for symbol in self._symbols:
             for tf_s, tf_name in tf_map.items():
@@ -4646,6 +4662,19 @@ class TradingEngine:
                             if tf_s == 900:
                                 self._candles_15m_history[symbol].extend(candles)
                             self._inject_candles(symbol, tf_s, candles, all_strategies)
+                            if self._shadow_strategies:
+                                closed = [
+                                    c
+                                    for c in candles
+                                    if c.timestamp_ms + tf_s * 1000 <= boot_ms
+                                ]
+                                if closed:
+                                    self._inject_candles(
+                                        symbol,
+                                        tf_s,
+                                        closed,
+                                        self._shadow_strategies,
+                                    )
                             logger.info(
                                 "Restored %d %s candles for %s from DB",
                                 len(candles), tf_name, symbol,
@@ -4688,6 +4717,78 @@ class TradingEngine:
     def restore_invocation_count(self) -> int:
         """How many times ``_recover_state`` ran (expect 1 per process)."""
         return self._restore_invocation_count
+
+    # ── JevJudge restart edge-trigger persistence ────────────────────────
+    # ``JevJudge._last_signaled`` is in-memory; without this a restart
+    # re-emits the freshest verdict (ttl 90min) and can open a second trade
+    # on the same ``jev_decision_ts_ms`` once the first has closed. The map
+    # is persisted write-through on every change (one tiny UPSERT — Jev
+    # emits at most ~1/h/symbol) and restored at boot before events flow.
+
+    _JEV_STATE_KEY = "jev_last_signaled_v1"
+
+    def _iter_all_strategies(self) -> List[Any]:
+        """Top-level exec strategies plus ensemble sub-strategies."""
+        out: List[Any] = []
+        for s in self._strategies:
+            out.append(s)
+            sub = getattr(s, "_strategies", None)
+            if isinstance(sub, dict):
+                out.extend(sub.values())
+        return out
+
+    def _jev_strategies(self) -> List[Any]:
+        return [s for s in self._iter_all_strategies()
+                if getattr(s, "name", "") == "JevJudge"]
+
+    def _maybe_persist_jev_signal_state(self) -> None:
+        """Write-through persist of JevJudge's edge-trigger map on change."""
+        for s in self._jev_strategies():
+            snap_fn = getattr(s, "last_signaled_snapshot", None)
+            if snap_fn is None:
+                continue
+            snap = snap_fn()
+            if snap == self._jev_signaled_seen:
+                continue
+            try:
+                self._db.save_runtime_state(self._JEV_STATE_KEY, {
+                    "last_signaled": snap,
+                    "saved_ms": int(time.time() * 1000),
+                })
+                self._jev_signaled_seen = snap
+            except Exception as exc:  # noqa: BLE001 — never block the loop
+                logger.warning("JevJudge signaled-state persist failed: %s", exc)
+
+    def _restore_jev_signal_state(self) -> None:
+        """Reload the persisted {symbol: jev_decision_ts_ms} map at boot."""
+        try:
+            saved = self._db.load_runtime_state(self._JEV_STATE_KEY)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("JevJudge signaled-state restore failed: %s", exc)
+            return
+        mapping = (saved or {}).get("last_signaled")
+        if not isinstance(mapping, dict) or not mapping:
+            return
+        self._jev_signaled_seen = {
+            str(k): int(v) for k, v in mapping.items()
+            if isinstance(v, (int, float))
+        }
+        for s in self._jev_strategies():
+            restore = getattr(s, "restore_last_signaled", None)
+            if restore is not None:
+                n = restore(mapping)
+                logger.info(
+                    "JevJudge _last_signaled restored: %s", mapping)
+                self._persist_decision(
+                    decision_type="state_restore",
+                    symbol="",
+                    side="",
+                    strategy="JevJudge",
+                    signal_confidence=0.0,
+                    ts_ms=int(time.time() * 1000),
+                    result="restored",
+                    reason=f"jev_last_signaled n={n} {mapping}",
+                )
 
     def _persist_runtime_state(self) -> None:
         self._risk_state.persist_runtime_state()

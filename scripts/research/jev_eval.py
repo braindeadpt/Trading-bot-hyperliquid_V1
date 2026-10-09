@@ -125,6 +125,80 @@ def mark_stale_verdicts(conn) -> int:
     return marked
 
 
+# Duplicate-verdict rule (2026-10-09): a restart clears JevJudge's
+# in-memory edge-trigger, so the same verdict can produce a second trade
+# if the first already closed. One verdict = one counted trade: the
+# earliest entry per ``jev_decision_ts_ms`` counts, the rest are flagged
+# ``duplicate_verdict=1`` (rows kept, never deleted) and excluded.
+
+
+def verdict_decision_ts(signal_metadata: Optional[str]) -> Optional[int]:
+    """The ``jev_decision_ts_ms`` stamped on the signal, or None."""
+    ts = _signal_meta(signal_metadata).get("jev_decision_ts_ms")
+    if ts in (None, ""):
+        return None
+    try:
+        return int(ts)
+    except (ValueError, TypeError):
+        return None
+
+
+def split_duplicate_verdicts(
+    trade_rows: Sequence[Dict[str, object]],
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    """(kept, dupes): per ``jev_decision_ts_ms`` only the earliest entry
+    counts; later rows on the same verdict are returned as dupes.
+    Rows without a recorded verdict ts are never dupes."""
+    first_by_ts: Dict[int, int] = {}
+    kept: List[Dict[str, object]] = []
+    dupes: List[Dict[str, object]] = []
+    for t in sorted(trade_rows, key=lambda r: int(r["entry_time"])):
+        ts = verdict_decision_ts(t["signal_metadata"])
+        if ts is None or ts not in first_by_ts:
+            kept.append(t)
+            if ts is not None:
+                first_by_ts[ts] = int(t["entry_time"])
+        else:
+            dupes.append(t)
+    return kept, dupes
+
+
+def is_duplicate_verdict(signal_metadata: Optional[str]) -> bool:
+    """True only when the row carries the ``duplicate_verdict=1`` flag —
+    duplication is a property of the row GROUP, so the flag is the record;
+    use ``split_duplicate_verdicts`` for the derived check."""
+    return bool(_signal_meta(signal_metadata).get("duplicate_verdict"))
+
+
+def mark_duplicate_verdicts(conn) -> int:
+    """Annotate JevJudge trades sharing a ``jev_decision_ts_ms`` — every
+    row after the earliest entry gets ``duplicate_verdict=1``. Idempotent;
+    rows are annotated, never deleted. Returns the number newly marked."""
+    rows = conn.execute(
+        "SELECT id, entry_time, signal_metadata FROM trades "
+        "WHERE strategy = 'JevJudge'"
+    ).fetchall()
+    trade_rows = [
+        {"id": r[0], "entry_time": r[1], "signal_metadata": r[2]}
+        for r in rows
+    ]
+    _kept, dupes = split_duplicate_verdicts(trade_rows)
+    marked = 0
+    for d in dupes:
+        meta = _signal_meta(d["signal_metadata"])
+        if meta.get("duplicate_verdict"):
+            continue
+        meta["duplicate_verdict"] = 1
+        conn.execute(
+            "UPDATE trades SET signal_metadata = ? WHERE id = ?",
+            (json.dumps(meta, sort_keys=True), d["id"]),
+        )
+        marked += 1
+    if marked:
+        conn.commit()
+    return marked
+
+
 def _spearman(xs: List[float], ys: List[float]) -> Optional[float]:
     n = len(xs)
     if n < 4:
@@ -174,6 +248,10 @@ def main() -> int:
                     help="annotate JevJudge trades opened on a >2h verdict "
                          "with stale_verdict=1 (RW open of the live DB) "
                          "and exit")
+    ap.add_argument("--mark-dupes", action="store_true",
+                    help="annotate JevJudge trades sharing a "
+                         "jev_decision_ts_ms — all but the earliest entry "
+                         "get duplicate_verdict=1 (RW open) and exit")
     args = ap.parse_args()
 
     if args.mark_stale:
@@ -183,6 +261,15 @@ def main() -> int:
         finally:
             dbw.close()
         print(f"stale_verdict: {marked} trade(s) marked")
+        return 0
+
+    if args.mark_dupes:
+        dbw = sqlite3.connect(str(LIVE_DB), timeout=10.0)
+        try:
+            marked = mark_duplicate_verdicts(dbw)
+        finally:
+            dbw.close()
+        print(f"duplicate_verdict: {marked} trade(s) marked")
         return 0
 
     cfg = load_config(ROOT / "config" / "settings.yaml")
@@ -281,12 +368,19 @@ def main() -> int:
         if is_stale_verdict(t["signal_metadata"], int(t["entry_time"]))
     ]
     trade_rows = [t for t in trade_rows if t not in stale]
+    # one verdict = one counted trade — restarts can re-fire the same
+    # jev_decision_ts_ms after the edge-trigger map is lost
+    trade_rows, dupes = split_duplicate_verdicts(trade_rows)
     indep = _independent_trades(trade_rows)
     print(f"closed trades post-boundary: raw={len(rows)} indep={len(indep)} "
           f"(kill read at indep_n>={JEV_KILL_TARGET_N})")
     if stale:
         print(f"  stale_verdict excluded: {len(stale)} (verdict >2h at entry; "
               f"rows kept, flagged stale_verdict=1)")
+    if dupes:
+        print(f"  duplicate_verdict excluded: {len(dupes)} (same "
+              f"jev_decision_ts_ms as an earlier entry; rows kept, "
+              f"flagged duplicate_verdict=1)")
     pnls = [float(t["pnl_pct"]) for t in indep]
     if pnls:
         w = sum(1 for p in pnls if p > 0)

@@ -622,12 +622,14 @@ def build_hypotheses() -> Dict[str, Any]:
             GEOMETRY_BOUNDARY_MS,
             JEV_KILL_TARGET_N,
             is_stale_verdict,
+            verdict_decision_ts,
         )
 
         conn = _live_db_conn()
         jev_n: Optional[int] = None
         jev_clu: Optional[int] = None
         jev_stale = 0
+        jev_dupes = 0
         jev_state = "confirmação"
         if conn is not None:
             rows = conn.execute(
@@ -638,6 +640,7 @@ def build_hypotheses() -> Dict[str, Any]:
                 (GEOMETRY_BOUNDARY_MS,),
             ).fetchall()
             busy: Dict[str, int] = {}
+            seen_verdict_ts: set = set()
             kept: List[tuple] = []
             for sym, et, xt, meta in rows:
                 # stale_verdict rule (>2h verdict at entry): rows stay in the
@@ -645,6 +648,15 @@ def build_hypotheses() -> Dict[str, Any]:
                 if is_stale_verdict(meta, int(et)):
                     jev_stale += 1
                     continue
+                # duplicate_verdict rule: one verdict = one counted trade.
+                # A restart can re-fire the same jev_decision_ts_ms — only
+                # the earliest entry counts (rows stay, flagged).
+                vts = verdict_decision_ts(meta)
+                if vts is not None:
+                    if vts in seen_verdict_ts:
+                        jev_dupes += 1
+                        continue
+                    seen_verdict_ts.add(vts)
                 if int(et) >= busy.get(sym, -1):
                     kept.append((int(et), int(xt or et)))
                     busy[sym] = int(xt or et)
@@ -665,6 +677,7 @@ def build_hypotheses() -> Dict[str, Any]:
             "target": JEV_KILL_TARGET_N,
             "n_clustered": jev_clu,
             "stale_verdict_excluded": jev_stale,
+            "duplicate_verdict_excluded": jev_dupes,
             "rate_per_day": round(rate, 3) if rate else None,
             "eta_ms": eta_ms,
             "expiry_ms": None,

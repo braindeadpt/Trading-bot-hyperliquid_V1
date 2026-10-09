@@ -16,7 +16,8 @@
 #     itself has its own 30s timeout inside the script.
 #   * token budget stays pinned at 4M (counter is at ~2.1M — never raise).
 set -euo pipefail
-cd "$(dirname "$0")"
+# lives under deploy/macos/ (not copied to root — single source of truth)
+cd "$(dirname "$0")/../.."
 set -a; . ./.env; set +a
 export PYTHONIOENCODING=utf-8
 mkdir -p logs data/research data/live
@@ -64,8 +65,15 @@ while :; do
     wait "$CHILD_PID" || true
     CHILD_PID=""
     kill "$WATCHER" 2>/dev/null || true; wait "$WATCHER" 2>/dev/null || true
-    echo "jev-judge: pass done, sleeping ${SLEEP_S}s"
-    sleep "$SLEEP_S" & CHILD_PID=$!
+    # Align each pass to the next wall-clock multiple of SLEEP_S (boundary
+    # math in src/utils/cron_loop.py — tested in tests/test_cron_loop.py);
+    # flat `sleep 300` would let the cadence drift by the pass runtime.
+    # Backgrounded + waited so INT/TERM interrupts it via `wait`, not after
+    # the sleep completes.
+    echo "jev-judge: pass done, sleeping to next ${SLEEP_S}s boundary"
+    ( ./.venv/bin/python -u -m src.utils.cron_loop "$SLEEP_S" \
+        >> logs/jev_loop.log 2>&1 || sleep 60 ) &
+    CHILD_PID=$!
     wait "$CHILD_PID" || true
     CHILD_PID=""
 done

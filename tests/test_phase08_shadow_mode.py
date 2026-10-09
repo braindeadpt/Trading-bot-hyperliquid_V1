@@ -658,6 +658,83 @@ def test_f_router_block_no_recorder_no_crash() -> None:
     )
 
 
+def test_shadow_strategies_get_boot_candle_restore_closed_only(
+    monkeypatch,
+) -> None:
+    """Amendment 3 (2026-10-09): boot candle restore reaches
+    ``_shadow_strategies`` — the VWAP shadow keeps its 24×1h warm-up across
+    restarts — but only candles fully closed before boot are injected.
+    The execution list is byte-identical to pre-fix behaviour (the raw,
+    unfiltered DB rows)."""
+    import collections
+    from types import SimpleNamespace
+
+    engine, _stub, _cap, _Boom, _MarketEvent, _Signal = _make_router_engine()
+
+    now_ms = int(time.time() * 1000)
+    hour = 3_600_000
+    open_ts = now_ms - (now_ms % hour)  # current hour = in-progress candle
+
+    def _row(ts: int):
+        return SimpleNamespace(
+            open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0,
+            timestamp_ms=ts, oi_total=0.0, buy_volume=0.0,
+            sell_volume=0.0, trade_count=0,
+        )
+
+    # 30 closed 1h candles (ascending) + the still-open current hour.
+    rows_all = [_row(open_ts - i * hour) for i in range(30, 0, -1)]
+    rows_all.append(_row(open_ts))
+
+    monkeypatch.setattr(
+        engine._db,
+        "get_candles",
+        lambda symbol, timeframe, limit=200: (
+            rows_all if timeframe == "1h" else []
+        ),
+    )
+
+    class _ExecStub:
+        """Execution strategy via the _get_state deque path (no on_candle)."""
+
+        name = "JevJudge"
+
+        def __init__(self) -> None:
+            self._state = {
+                s: SimpleNamespace(candles_1h=collections.deque(maxlen=200))
+                for s in ("BTC", "ETH")
+            }
+
+        def _get_state(self, symbol: str):
+            return self._state[symbol]
+
+    class _ShadowVWAP:
+        """Shadow strategy via the on_candle path (like VWAPDeviation)."""
+
+        name = "VWAPDeviation"
+
+        def __init__(self) -> None:
+            self.seen: Dict[str, List[int]] = {"BTC": [], "ETH": []}
+
+        def on_candle(self, candle, symbol: str) -> None:
+            if symbol in self.seen:
+                last = self.seen[symbol][-1] if self.seen[symbol] else None
+                if candle.timestamp_ms != last:
+                    self.seen[symbol].append(candle.timestamp_ms)
+
+    exec_stub, shadow_stub = _ExecStub(), _ShadowVWAP()
+    engine._strategies = [exec_stub]
+    engine._shadow_strategies = [shadow_stub]
+
+    asyncio.run(engine._restore_candles_from_db())
+
+    for sym in ("BTC", "ETH"):
+        exec_ts = [c.timestamp_ms for c in exec_stub._state[sym].candles_1h]
+        assert exec_ts == [r.timestamp_ms for r in rows_all]  # unfiltered
+        assert len(shadow_stub.seen[sym]) == 30  # >=24: warm-up restored
+        assert open_ts not in shadow_stub.seen[sym]  # in-progress excluded
+
+
 if __name__ == "__main__":
     test_phase08_factory_splits_execution_and_shadow()
     print("  factory split OK")

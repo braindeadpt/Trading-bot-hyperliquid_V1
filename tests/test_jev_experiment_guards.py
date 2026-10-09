@@ -396,3 +396,117 @@ def test_stale_verdict_log_is_throttled(tmp_path, caplog) -> None:
             _signal_for(strat, "BTC", now)
     stale = [r for r in caplog.records if "stale verdict" in r.message]
     assert len(stale) == 1
+
+
+# ---------------------------------------------------------------------------
+# 5. Restart re-fire defence (2026-10-09)
+#
+# _last_signaled is in-memory: a restart would re-fire the freshest verdict
+# inside its 90min TTL, opening a second trade on the same
+# jev_decision_ts_ms once the first has closed. The engine persists the map
+# write-through and restores it at boot before events flow.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_restart_with_restored_signaled_fires_zero_new_trades(tmp_path) -> None:
+    """Simulated restart: verdict ts already consumed, its trade long closed.
+    A 'fresh' JevJudge (new process) with the restored map emits NOTHING for
+    that ts — and still fires on the next genuine verdict."""
+    now = int(time.time() * 1000)
+    ts1, ts2 = now - 3_600_000, now - 1_800_000
+    verdicts = {
+        "BTC": {"ts_ms": ts1, "action": "long", "confidence": 0.9,
+                "atr_pct_15m": 0.3},
+    }
+
+    # process 1 consumes the verdict
+    old = _geometry_strategy(tmp_path, verdicts)
+    assert _signal_for(old, "BTC", now) is not None
+    persisted = old.last_signaled_snapshot()
+
+    # restart: new instance, same verdict file still inside TTL
+    new = _geometry_strategy(tmp_path, verdicts)
+    new.restore_last_signaled(persisted)
+    assert _signal_for(new, "BTC", now) is None      # re-fire blocked
+    assert _signal_for(new, "BTC", now) is None      # stays blocked
+
+    # a genuinely new verdict still fires
+    latest = tmp_path / "jev_latest.json"
+    latest.write_text(json.dumps({
+        "BTC": {"ts_ms": ts2, "action": "short", "confidence": 0.9,
+                "atr_pct_15m": 0.3},
+    }))
+    import os as _os
+    _os.utime(latest)  # bump mtime so the file is re-read
+    sig = _signal_for(new, "BTC", now)
+    assert sig is not None and sig.side == "short"
+
+
+@pytest.mark.unit
+def test_restart_without_restore_refires_same_verdict(tmp_path) -> None:
+    """Guard test for the bug itself: WITHOUT the restored map the same
+    verdict re-fires — proving the restore is what prevents it."""
+    now = int(time.time() * 1000)
+    ts1 = now - 3_600_000
+    verdicts = {"BTC": {"ts_ms": ts1, "action": "long", "confidence": 0.9,
+                        "atr_pct_15m": 0.3}}
+    old = _geometry_strategy(tmp_path, verdicts)
+    assert _signal_for(old, "BTC", now) is not None
+    new = _geometry_strategy(tmp_path, verdicts)     # no restore
+    assert _signal_for(new, "BTC", now) is not None  # the bug, demonstrated
+
+
+def _engine_with_jev(tmp_path):
+    """Minimal TradingEngine carrying one JevJudge in _strategies."""
+    from src.core.engine import TradingEngine
+    from src.core.execution import ExecutionEngine
+    from src.core.risk_manager import RiskManager
+    from src.data.database import Database
+    from src.exchanges.hyperliquid_ws import DataBus
+
+    cfg = Config({
+        "symbols": ["BTC"],
+        "mode": "paper",
+        "strategy": {"phase08": {"enabled": True, "paper_only": True},
+                     "cooldown": {"base_minutes": 30, "max_minutes": 120}},
+        "risk": {"max_position_size_pct": 5.0, "leverage_max": 5.0},
+    })
+    jev = _geometry_strategy(tmp_path, {})
+    db = Database(":memory:")
+    engine = TradingEngine(
+        cfg, db, DataBus(), [jev], RiskManager(cfg, db),
+        ExecutionEngine(cfg, db, "paper"),
+    )
+    return engine, jev
+
+
+@pytest.mark.unit
+def test_engine_restores_jev_last_signaled_at_boot(tmp_path) -> None:
+    """runtime_state → strategy map, before events flow: the persisted
+    {symbol: jev_decision_ts_ms} lands on the booted instance."""
+    engine, jev = _engine_with_jev(tmp_path)
+    engine._db.save_runtime_state(engine._JEV_STATE_KEY, {
+        "last_signaled": {"BTC": 1791000000000, "ETH": 1791000001000},
+    })
+    engine._restore_jev_signal_state()
+    assert jev._last_signaled == {"BTC": 1791000000000, "ETH": 1791000001000}
+
+
+@pytest.mark.unit
+def test_engine_persists_jev_signaled_write_through(tmp_path) -> None:
+    """Emit → immediately persisted: a crash between signals loses nothing."""
+    engine, jev = _engine_with_jev(tmp_path)
+    jev._last_signaled["BTC"] = 1791000000000   # as on_data would set it
+    engine._maybe_persist_jev_signal_state()
+    saved = engine._db.load_runtime_state(engine._JEV_STATE_KEY)
+    assert saved["last_signaled"] == {"BTC": 1791000000000}
+    # unchanged map → no rewrite
+    engine._maybe_persist_jev_signal_state()
+    assert engine._db.load_runtime_state(
+        engine._JEV_STATE_KEY)["last_signaled"] == {"BTC": 1791000000000}
+    # new symbol → updated row
+    jev._last_signaled["ETH"] = 1791000001000
+    engine._maybe_persist_jev_signal_state()
+    assert engine._db.load_runtime_state(
+        engine._JEV_STATE_KEY)["last_signaled"]["ETH"] == 1791000001000
