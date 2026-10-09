@@ -1,6 +1,6 @@
 # PREREGISTER — Carry-Shadow: live L2 evidence for the A1 spot–perp carry
 
-Date: 2026-10-09
+Date: 2026-10-09 (v2 — owner-reviewed, margin rule amended)
 Status: FROZEN — committed before any code. Parameters are the primary spec;
 nothing may be tuned on live observations.
 
@@ -25,7 +25,7 @@ today (UBTC counting as BTC collateral is UNVERIFIED — flagged as a shadow
 measurement question). Every other pair (PURR, MON, ZEC, ENA, PUMP, SOL,
 ETH, XPL…) runs on USDC margin and needs an explicit margin rule → §2.
 PM also charges **borrow interest** — measured live, it is a real carry
-cost and feeds the hurdle calc.
+cost and feeds the hurdle calc (§4).
 
 ## 1. Signal rules — identical to A1, re-frozen
 
@@ -39,6 +39,21 @@ cost and feeds the hurdle calc.
 
 ## 2. Margin management (the new piece — fixed a priori)
 
+Three variants were evaluated in-sample on the 12 A1 episodes (IN-SAMPLE
+sanity, marked as such, not evidence):
+
+| Variant | Liquidations | Total net |
+|---|---|---|
+| No margin rule (A1 baseline) | 5/12 | +2,707 bps |
+| Sell-spot → top margin | 0/12 | −2,574 bps |
+| **Proportional deleverage** | **0/12** | **+1,500 bps** |
+
+The choice is **justified a priori, not by the in-sample PnL**: delta-
+neutrality is the hypothesis itself. Sell-spot breaks it (the residual is
+a naked short that bleeds on runners); deleverage preserves it by closing
+a fraction of BOTH legs. That deleverage also scored best in-sample is
+corroboration, not the reason.
+
 Two branches by pair eligibility:
 
 **PM pairs** (base asset in {HYPE}; UBTC pending verification):
@@ -50,81 +65,106 @@ rebalance; measure realized borrow APR as carry cost.
   notional margin ⇒ effective leverage 1.67× (inside the mandated 1–2×).
 - Margin fraction `mf = margin_equity / current_notional`, checked on
   every margin update (live: each L2 tick / 1min; sim: each 2h bar).
-- **Trigger**: `mf < M = 0.45` → close fraction `k` of BOTH legs (taker)
-  such that `mf = M0` after the close: `k = 1 − equity/(M0 × N_t)`.
+- **Trigger**: `mf < M` → close fraction `k` of BOTH legs (taker) such
+  that `mf = M0` after the close: `k = 1 − equity/(M0 × N_t)`.
 - **Floor**: if required `keep = 1−k ≤ 0.05` → close the episode entirely.
-- Liquidation check: `equity ≤ maint×N_t` with `maint = 10%` notional
-  (conservative for low-leverage alts; majors are ~3.1%) → counts as a
-  hypothetical liquidation → kill criterion §5.
-- M/M0 chosen by reasoning, not A1 data: M0=0.60 survives ≈+50–57% adverse
-  before maintenance; M=0.45 fires after ≈12–15% adverse drift, early
-  enough that a ≤12% gap between checks cannot reach maintenance.
+- **Liquidation**: `equity ≤ maint(pair) × N_t` → hypothetical
+  liquidation → kill §5.
+- **Per-pair M/M0 by fixed rule** (not hand-tuned): `maint` is the real
+  HL maintenance fraction = `1/(2 × maxLeverage)` from `meta`:
 
-**Why deleverage and not sell-spot→margin (the literal original spec):**
-in-sample on the 12 A1 episodes the sell-spot rule produced **0
-liquidations but −2,574 bps total** (vs +2,707): selling only the spot
-converts the hedge into a residual net-short that bleeds on runners
-(PUMP −5,690bps, ZEC −4,813bps, both fully unwound). Deleveraging keeps
-delta-neutrality — **the hedge IS the hypothesis** — and the same sim
-gives **0 liquidations, +1,500 bps total** (−1,207bps of foregone funding
-is the insurance cost; worst episode −89bps vs −5,690). Sanity marked
-IN-SAMPLE, not evidence; numbers reported for the record.
+  | perp | maxLev | maint |
+  |---|---|---|
+  | BTC | 40× | 1.25% |
+  | ETH | 25× | 2.0% |
+  | SOL | 20× | 2.5% |
+  | HYPE, PUMP, ENA, XPL, ZEC, AVAX, WLD, TRUMP, FARTCOIN | 10× | 5.0% |
+  | BERA, MON | 5× | 10.0% |
+  | PURR, MEGA, STABLE, AZTEC | 3× | 16.67% |
 
-| Episode | sell-spot rule | deleverage rule |
-|---|---|---|
-| PURR | −836 | +682 |
-| PUMP | −5,690 (unwind) | +76 (18% left open) |
-| HYPE | −9,710 | +213 (41% left) |
-| ENA | −8,051 | −89 (35% left) |
-| ZEC 06-15 | −22,491 (unwind) | +189 (12% left) |
-| ZEC 05-04 | −6,183 | +26 (34% left) |
-| others | −1,309…−3,663 | +1…+114 |
-| **total** | **−2,574** | **+1,500** |
+  Rule: `M_pair = max(0.45, maint + 0.15)`, `M0_pair = M_pair + 0.15`
+  (i.e., the trigger never sits <15pp above maintenance; defaults keep
+  M=0.45/M0=0.60 for every pair in the current table — PURR's trigger
+  distance is 28.3pp, the tightest).
 
-## 3. Economic hurdle (fixed at prereg date)
+## 3. Gap risk (measured on the A1 window, 2h bars — API minimum)
+
+Largest single-2h adverse move per episode vs trigger→maintenance
+distance:
+
+| Episode | Max adverse 2h | Trigger dist | Jumps? |
+|---|---|---|---|
+| **PURR** | **21.5%** | **28.3pp** | no — but only ~7pp headroom |
+| ZEC | 14.9% | 40.0pp | no |
+| HYPE | 13.0% | 40.0pp | no |
+| PUMP | 11.8% | 40.0pp | no |
+| ENA | 10.7% | 40.0pp | no |
+| others | ≤7.7% | 35–44pp | no |
+
+1h granularity is unmeasurable historically (API serves ≥2h only); the
+live shadow measures gaps at L2 tick cadence, not 2h. **Known risk:
+PURR** — lowest maxLev (3× ⇒ maint 16.67%), tightest distance, largest
+observed 2h jumps. A "deleverage failed by gap" event (margin check
+finds `equity ≤ maint×N_t` before a trigger could fire) is a kill event
+equivalent to a hypothetical liquidation (§5.4).
+
+## 4. Economic hurdle (fixed at prereg date)
 
 - Risk-free reference: **rf = 4.0%/yr** (3M T-bill / USDC yield proxy,
   fixed 2026-10-09 — the number, not the instrument, is frozen).
 - **Hurdle: net return on committed capital ≥ rf + 4pp = 8.0%/yr** over
   the shadow window. Fails → verdict C even if PF > 1. Committed capital
   = 1.0× + M0 = 1.6× notional (non-PM) or ~1.1× (PM), deployed-time
-  weighted; return measured net of measured fills, rebalances, funding,
-  and PM borrow interest.
+  weighted; return net of ALL live-measured costs:
+  - effective maker entry/exit costs (mark→fill slippage per leg),
+  - each deleverage event (taker both legs on the closed fraction),
+  - funding effectively received vs predicted per episode,
+  - PM borrow interest (HYPE pair, and BTC if UBTC collateral confirmed).
 
-## 4. What the shadow measures live (L2 only — no orders)
+## 5. What the shadow measures live (L2 only — no orders)
 
 - **Maker fills, both legs**: fill rate within 15 min, time-to-fill,
   unlegged-event frequency + duration, effective cost per entry/exit
   (mark at decision vs fill), % entries never filled.
 - **Margin events**: hypothetical deleverages (count, trigger price, cost
-  at measured spreads), margin-equity path, worst distance to `maint`.
+  at measured spreads), margin-equity path, worst distance to `maint`,
+  gap-check passes (`equity ≤ maint` without a prior trigger).
 - **PM branch**: borrow accrued vs funding received.
 - **Funding**: received vs `fundingHistory` prediction per episode.
+- **ADL (observed-risk log, NOT a kill criterion)**: auto-deleveraging
+  events on the symbol if the API exposes them — recorded as tail-risk
+  evidence.
 - **Episode accounting**: hypothetical entry/exit marks, clustered
   episodes (24h rule), net bps on committed capital.
 
-## 5. Kill criteria — ANY ONE kills the study (verdict C)
+## 6. Kill criteria — ANY ONE kills the study (verdict C)
 
 1. Measured effective cost that drags expected episode edge below **3×**
-   the measured round-trip cost.
-2. Maker fill rate **< 40% within 15 min** on either leg (pooled across
-   filled episodes) — unlegged risk dominates below this.
-3. Final read misses the **8.0%/yr committed-capital hurdle** (§3).
-4. **One hypothetical liquidation** under the active margin rule (§2).
-5. Read condition: verdict taken at **≥10 closed clustered episodes** or
-   at **expiry 2027-12-26** (= 2 × A1's observed 221 days for 10
-   clusters), whichever comes first; at expiry with n < 10 → B at best.
+   the measured round-trip cost — **interim check**: after the first
+   ≥5 closed episodes, if the measured edge fails 3× → immediate death.
+2. Maker fill rate **< 40% within 15 min** on either leg — **interim
+   check**: after ≥20 entry/exit attempts per leg, fill <40% →
+   immediate death (don't wait for the final read).
+3. Final read misses the **8.0%/yr committed-capital hurdle** (§4).
+4. **One hypothetical liquidation** under the active margin rule —
+   including "deleverage failed by gap" (§3).
+5. Read condition: verdict at **≥10 closed clustered episodes** or at
+   **expiry 2027-12-26** (= 2 × A1's observed 221 days for 10 clusters),
+   whichever first; expiry with n < 10 → B at best.
+6. **6-month review 2027-04-09**: if <3 closed clustered episodes, the
+   observed rate is logged and the human decides whether the expiry
+   stands — decision on episode COUNT only, never on PnL.
 
-## 6. Verdict mapping
+## 7. Verdict mapping
 
-- **A**: ≥10 closed clustered episodes, all §5 alive, net ≥ 8%/yr on
+- **A**: ≥10 closed clustered episodes, all §6 alive, net ≥ 8%/yr on
   committed capital, fill gate passed → candidate for a *separate*
   execution preregistration (not automatic promotion).
 - **B**: evidence positive but incomplete (n ∈ [5,10) at expiry, or one
   secondary gate marginal) — keep collecting, no promotion.
-- **C**: any §5 trigger, or net ≤ 0.
+- **C**: any §6 trigger, or net ≤ 0.
 
-## 7. Isolation (enforced)
+## 8. Isolation (enforced)
 
 - Separate module `src/research/carry_shadow/` — reads L2 + funding feeds
   read-only, writes ONLY `data/research/carry_shadow.db`. No writes to
@@ -136,10 +176,10 @@ IN-SAMPLE, not evidence; numbers reported for the record.
 - Logged as mid-window hash-neutral code in
   `docs/PAPER_OOS_90D_PROTOCOL.md` code-change table at implementation.
 
-## 8. Reproducibility
+## 9. Reproducibility
 
 - Module: `src/research/carry_shadow/` (new); wrapper task:
-  `deploy/macos/run_carry_shadow.sh` + PM2 app (separate file, not the
+  `deploy/macos/run_carry_shadow.sh` + PM2 app (separate entry, not the
   jev ecosystem entry — decided at implementation).
 - Raw L2/funding observations persisted in `data/research/carry_shadow.db`
   (append-only) — the full episode ledger is auditable offline.
