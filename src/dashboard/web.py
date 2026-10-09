@@ -521,6 +521,31 @@ def _clustered_count(intervals: List[tuple]) -> int:
     return clusters
 
 
+def _count_confirm_decisions(
+    strategy: str, variant: str, cutoff_ms: int
+) -> Optional[int]:
+    """COUNT(*) of would-enter shadow decisions post-cutoff (read-only)."""
+    rdb = None
+    try:
+        from src.research.shadow_recorder import ShadowRecorder
+
+        rdb = _open_research_db()
+        rec = ShadowRecorder(rdb)
+        return rec.count_decisions(
+            strategy=strategy,
+            variant=variant,
+            since_ms=int(cutoff_ms) + 1,
+        )
+    except Exception:  # noqa: BLE001 — table may not exist
+        return None
+    finally:
+        if rdb is not None:
+            try:
+                rdb.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def build_hypotheses() -> Dict[str, Any]:
     """Preregistered hypotheses — counts only while sealed (no peeking)."""
     from src.research.shadow_outcome_evaluator import (
@@ -542,6 +567,14 @@ def build_hypotheses() -> Dict[str, Any]:
         ) or {}
         n_indep = board.get("n_independent")
         n_clu = board.get("n_clustered")
+        if n_indep is None:
+            # No persisted confirm board — boards only exist once decisions
+            # land. The counter stays public even under seal: 0 qualifying
+            # decisions post-cutoff => indep_n is provably 0; a nonzero raw
+            # count without a board means "eval pending", not "0".
+            raw = _count_confirm_decisions(strategy, variant, cutoff)
+            if raw == 0:
+                n_indep, n_clu = 0, 0
         sealed = bool(board.get("sealed", True)) and not board.get(
             "confirmation_expired"
         )

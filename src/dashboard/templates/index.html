@@ -903,8 +903,9 @@ function renderHypotheses(payload) {
                                : '<span class="up">aberto</span>';
         const nTxt = h.indep_n != null ? h.indep_n + "/" + (h.target != null ? h.target : "?") : "—/" + (h.target != null ? h.target : "?");
         const stateCls = h.state && h.state.indexOf("veredicto") === 0 ? "highlight" : "";
+        const cutoffTip = h.cutoff_ms ? ' title="fronteira: ' + new Date(h.cutoff_ms).toISOString().slice(0, 10) + '"' : "";
         return `<tr>
-            <td class="highlight">${h.name}</td>
+            <td class="highlight"${cutoffTip}>${h.name}</td>
             <td class="${stateCls}">${h.state}</td>
             <td class="num">${nTxt}</td>
             <td class="num">${h.n_clustered != null ? h.n_clustered : "—"}</td>

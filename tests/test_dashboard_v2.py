@@ -301,6 +301,57 @@ class TestHypotheses(_DashCase):
         # VWAP confirmation preregistration is always listed
         assert any("VWAPDeviation" in i for i in ids)
 
+    def test_jev_counts_post_boundary_only(self) -> None:
+        """JevJudge indep_n = closed trades post-2026-10-04 geometry
+        boundary, deduped one-open-position-per-symbol. The fixture has
+        exactly one such trade => 1/100."""
+        r = self.client.get("/api/hypotheses")
+        d = r.get_json()
+        jev = next(h for h in d["hypotheses"] if h["id"] == "JevJudge::oos_kill")
+        assert jev["indep_n"] == 1
+        assert jev["target"] == 100
+        assert jev["n_clustered"] == 1
+        # the frontier stays visible for tooltips
+        assert jev["cutoff_ms"] == 1791124780000
+
+    def test_sealed_counter_zero_without_board(self) -> None:
+        """No persisted confirm board + 0 post-cutoff decisions => the
+        public counter reads 0/60 (seal hides metrics, not counts)."""
+        r = self.client.get("/api/hypotheses")
+        d = r.get_json()
+        vw = next(h for h in d["hypotheses"] if "VWAPDeviation" in h["id"])
+        assert vw["sealed"] is True
+        assert vw["indep_n"] == 0
+        assert vw["n_clustered"] == 0
+
+    def test_sealed_counter_pending_when_decisions_unscored(self) -> None:
+        """Post-cutoff decisions exist but the evaluator has not persisted
+        a board yet => indep stays unknown, never a fabricated 0."""
+        conn = _conn(self._research)
+        cutoff = None
+        from src.research.shadow_outcome_evaluator import (
+            PREREGISTERED_CONFIRMATIONS,
+        )
+
+        for (strategy, variant), (c, _t, _e) in PREREGISTERED_CONFIRMATIONS.items():
+            if strategy == "VWAPDeviation":
+                cutoff = c
+        conn.execute(
+            "INSERT INTO shadow_decisions (symbol, strategy, variant, side, "
+            "would_enter, reason, timestamp_ms, ingested_at_ms) VALUES "
+            "('BTC', 'VWAPDeviation', 'iv_gate_shadow', 'long', 1, "
+            "'routed', ?, ?)",
+            (cutoff + 60_000, cutoff + 60_000),
+        )
+        conn.commit()
+        conn.close()
+        web._ttl_clear()
+        r = self.client.get("/api/hypotheses")
+        d = r.get_json()
+        vw = next(h for h in d["hypotheses"] if "VWAPDeviation" in h["id"])
+        assert vw["sealed"] is True
+        assert vw["indep_n"] is None
+
     def test_sealed_board_never_leaks_metrics(self) -> None:
         """A sealed confirmation board may carry metrics in storage (defence
         in depth) — the endpoint must not forward them."""

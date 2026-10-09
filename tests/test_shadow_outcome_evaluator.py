@@ -1216,3 +1216,63 @@ def test_n_confirm_excludes_fallback_promoted_rows_by_flag() -> None:
         include_maker_variant=False,
     )
     assert boards2[key].n_independent == 1
+
+
+# ── Regression snapshot: unsealed boards ───────────────────────────────────────
+# If a future evaluator change alters any of these numbers, this test fails —
+# that is the point: board semantics are evidence, changes must be deliberate.
+def test_unsealed_board_snapshot_is_stable() -> None:
+    """Frozen expected values for a deterministic 4-decision fixture.
+
+    Fixture: 3 qualifying entries (TP win, SL loss, timeout) + 1 decision
+    overlapped by the timeout window (dedup => n_skipped). Boards are
+    unsealed (no preregistration), so to_dict emits independent_outcomes.
+    """
+    H = 3_600_000
+    base = 1_000_000
+    decisions = [
+        _decision(ts=base, row_id=1, strategy="SnapStrat"),
+        _decision(ts=base + 2 * H, row_id=2, strategy="SnapStrat"),
+        _decision(ts=base + 4 * H, row_id=3, strategy="SnapStrat"),
+        _decision(ts=base + 4 * H + 60_000, row_id=4, strategy="SnapStrat"),
+    ]
+
+    def loader(symbol, ts, max_hold):
+        if ts == base:
+            return [_candle(ts + 60_000, 100.0, 103.0, 99.5, 102.5)], "synthetic"
+        if ts == base + 2 * H:
+            return [_candle(ts + 60_000, 100.0, 100.5, 98.5, 98.8)], "synthetic"
+        return [
+            _candle(ts + i * 60_000, 100.0, 100.4, 99.6, 100.1)
+            for i in range(1, 400)
+        ], "synthetic"
+
+    boards = evaluate_shadow_decisions(
+        decisions, config=Config({}), candle_loader=loader,
+    )
+
+    main = boards["SnapStrat::phase08_shadow"].to_dict()
+    assert main["n_decisions"] == 4
+    assert main["n_evaluated"] == 3
+    assert main["n_independent"] == 3
+    assert main["n_clustered"] == 3
+    assert main["n_skipped"] == 1
+    assert (main["wins"], main["losses"], main["timeouts"]) == (2, 1, 1)
+    assert main["win_rate"] == pytest.approx(2 / 3)
+    assert main["profit_factor"] == pytest.approx(2.0999999999999943)
+    assert main["net_profit_factor"] == pytest.approx(1.6120689655172336)
+    assert main["net_expectancy_r"] == pytest.approx(0.2366666666666647)
+    assert main["expectancy_r"] == pytest.approx(0.36666666666666475)
+    assert main.get("sealed") in (None, False)
+    # Compact persisted rows — the dashboard bootstrap CI consumes these.
+    assert main["independent_outcomes"] == [
+        [1_000_000, 1_060_000, "BTC", 0.0187, 1.87],
+        [8_200_000, 8_260_000, "BTC", -0.0113, -1.13],
+        [15_400_000, 37_000_000, "BTC", -0.0003, -0.03],
+    ]
+
+    maker = boards["SnapStrat::phase08_shadow_maker"].to_dict()
+    assert maker["n_decisions"] == 4
+    assert maker["n_evaluated"] == 0
+    assert maker["n_independent"] == 0
+    assert maker["independent_outcomes"] == []
