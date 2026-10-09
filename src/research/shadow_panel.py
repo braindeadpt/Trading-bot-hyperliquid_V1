@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.exchanges.liquidation_event import is_real_liquidation_source
 from src.research.shadow_outcome_evaluator import (
@@ -22,7 +23,61 @@ from src.utils.config import Config, get_trading_symbols, load_config
 ROOT = Path(__file__).resolve().parents[2]
 GATE_ARTIFACTS = ROOT / "data" / "backtests" / "parity_diag"
 MIN_TRADES_FOR_GATE = 30
+MIN_INDEP_FOR_CI = 30
+PF_CI_BOOTSTRAP_RUNS = 2000
 QUARTER_MS = 90 * 86400 * 1000
+
+
+def bootstrap_profit_factor_ci(
+    net_returns: Sequence[float],
+    *,
+    n_runs: int = PF_CI_BOOTSTRAP_RUNS,
+    seed: int = 0,
+) -> Optional[Tuple[float, float]]:
+    """95% bootstrap CI of the profit factor over independent net returns.
+
+    Resamples ``net_returns`` with replacement (fixed seed → deterministic
+    panel) and returns the (p2.5, p97.5) percentiles of the resampled PF.
+    PF = sum(wins) / |sum(losses)|; a resample with no losses is treated as
+    +inf (excluded from the percentile bounds, consistent with the point
+    estimate convention elsewhere).
+    """
+    vals = [float(v) for v in net_returns]
+    n = len(vals)
+    if n < MIN_INDEP_FOR_CI:
+        return None
+    rng = random.Random(seed)
+    pfs: List[float] = []
+    for _ in range(n_runs):
+        gp = 0.0
+        gl = 0.0
+        for _i in range(n):
+            r = vals[rng.randrange(n)]
+            if r > 0:
+                gp += r
+            elif r < 0:
+                gl -= r
+        if gl <= 0:
+            continue  # all-win resample → PF=inf, unbounded
+        pfs.append(gp / gl)
+    if not pfs:
+        return None
+    pfs.sort()
+    lo = pfs[int(0.025 * (len(pfs) - 1))]
+    hi = pfs[int(0.975 * (len(pfs) - 1))]
+    return (lo, hi)
+
+
+def _independent_net_returns(board: Optional[Dict[str, Any]]) -> List[float]:
+    """net_r_multiple per persisted independent outcome (compact rows)."""
+    rows = (board or {}).get("independent_outcomes") or []
+    out: List[float] = []
+    for r in rows:
+        try:
+            out.append(float(r[4]))
+        except (TypeError, IndexError, ValueError):
+            continue
+    return out
 
 
 def _load_persisted_boards(
@@ -318,6 +373,9 @@ def build_shadow_panel_payload(
                 "signals_total": n_total,
                 "signals_90d": n_quarter,
                 "hypothetical_trades_closed": n_hyp,
+                # Raw evaluated decisions (pre-dedup clusters) — "raw_n" in
+                # the compact board. Sealed boards still expose counts.
+                "n_decisions": (board or {}).get("n_decisions"),
                 "n_independent": (board or {}).get("n_independent"),
                 # Cross-symbol effective n — overlapping [entry, exit]
                 # windows merge into one episode. Informational; gates
@@ -332,6 +390,12 @@ def build_shadow_panel_payload(
                 "net_expectancy_r": (board or {}).get("net_expectancy_r"),
                 "net_pnl_pct": (board or {}).get("net_hypothetical_pnl_pct"),
                 "net_profit_factor": (board or {}).get("net_profit_factor"),
+                # 95% bootstrap CI on net PF over independent outcomes —
+                # None when n_indep < MIN_INDEP_FOR_CI or the board is
+                # sealed (sealed boards never persist per-outcome rows).
+                "net_pf_ci95": bootstrap_profit_factor_ci(
+                    _independent_net_returns(board)
+                ),
                 "mean_fee_cost_pct": (board or {}).get("mean_fee_cost_pct"),
                 "mean_funding_coverage": (board or {}).get("mean_funding_coverage"),
                 "funding_coverage_ok": (board or {}).get("funding_coverage_ok"),

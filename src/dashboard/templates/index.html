@@ -6,7 +6,7 @@
 <title>Hyperliquid Trading Bot Dashboard</title>
 <script src="/socket.io.min.js"></script>
 <script src="/static/lightweight-charts.standalone.production.js"></script>
-<link rel="stylesheet" href="/static/dashboard.css?v=10">
+<link rel="stylesheet" href="/static/dashboard.css?v=11">
 <style>
 /* Inline fallback — guaranteed to apply */
 :root {
@@ -179,6 +179,7 @@ th { font-size: 10px; }
         <span class="badge badge-dim" id="circuit-badge">CB: OFF</span>
         <span class="badge badge-purple" id="uptime-badge">00:00:00</span>
         <span class="badge badge-blue" id="latency-badge">--ms</span>
+        <a href="/ops" class="badge badge-dim" style="text-decoration:none;" title="Logs · feeds · sistema">OPS →</a>
     </div>
 </div>
 
@@ -254,60 +255,138 @@ th { font-size: 10px; }
     </div>
 </div>
 
-<!-- DESK: chart | market + positions -->
-<div class="section-label section-market">
-    <span class="bar"></span><span class="text">Desk</span><span class="line"></span>
-</div>
-<div class="grid desk-grid">
-    <div class="g-8">
-        <div class="panel chart-panel">
-            <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-                <span>Chart <span class="dim">Candles + trades</span></span>
-                <div style="display:flex;gap:6px;align-items:center;">
-                    <select id="chart-symbol" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:10px;height:22px;"></select>
-                    <select id="chart-tf" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:10px;height:22px;">
-                        <option value="1m">1m</option>
-                        <option value="5m" selected>5m</option>
-                        <option value="15m">15m</option>
-                        <option value="1h">1h</option>
-                    </select>
-                    <span id="chart-status" class="dim" style="font-size:9px;"></span>
-                    <span class="live-dot"></span>
-                </div>
+<!-- CONTEXTO — regime + risk gates + governor numa faixa compacta -->
+<div class="panel ctx-panel">
+    <div class="panel-header">Contexto <span class="dim">regime · risk gates · governor</span></div>
+    <div class="ctx-cols">
+        <div class="ctx-col">
+            <div class="sys-col-title">Regime</div>
+            <div class="mini-stats" id="regime-panel">
+                <div class="muted" style="text-align:center;padding:6px 0;">Waiting...</div>
             </div>
-            <div class="panel-body">
-                <div id="chart-container"><span class="muted" style="text-align:center;display:block;padding:100px 0;">Loading chart...</span></div>
+        </div>
+        <div class="ctx-col">
+            <div class="sys-col-title">Risk gates</div>
+            <div class="mini-stats" id="risk-gates-panel">
+                <div class="muted" style="text-align:center;padding:6px 0;">Waiting...</div>
+            </div>
+        </div>
+        <div class="ctx-col">
+            <div class="sys-col-title">Governor</div>
+            <div id="governor-panel"><span class="muted">Waiting...</span></div>
+        </div>
+    </div>
+</div>
+
+<!-- 2 · HIPÓTESES — confirmation samples pré-registadas + shadow board -->
+<div class="section-label section-intel">
+    <span class="bar"></span><span class="text">Hipóteses · path to positive net PnL</span><span class="line"></span>
+</div>
+<div class="grid">
+    <div class="g-12">
+        <div class="panel">
+            <div class="panel-header">
+                Hipóteses pré-registadas
+                <span class="dim" id="hyp-meta">contagens públicas · métricas só quando o selo levanta</span>
+            </div>
+            <div class="panel-body" style="padding:6px 8px;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Hipótese</th>
+                            <th>Estado</th>
+                            <th class="num" title="outcomes independentes / alvo pré-registado">indep n</th>
+                            <th class="num" title="episódios após merge de janelas sobrepostas">clustered</th>
+                            <th class="num" title="outcomes independentes por dia ao ritmo actual">ritmo/d</th>
+                            <th title="data estimada ao ritmo actual">ETA</th>
+                            <th title="prazo pré-registado — expiry sem alvo = leitura final">expiry</th>
+                            <th title="selo de confirmação — o endpoint nunca devolve métricas seladas">SEALED</th>
+                        </tr>
+                    </thead>
+                    <tbody id="hypotheses-tbody">
+                        <tr><td colspan="8" class="muted">Waiting...</td></tr>
+                    </tbody>
+                </table>
+                <details class="fold" id="shadow-fold" style="margin-top:8px;">
+                    <summary>Shadow board <span class="dim" id="shadow-eval-age" title="Idade do lote de avaliação persistido (a análise pesada corre fora do processo, de hora em hora)"></span></summary>
+                    <div class="fold-inner" style="padding:6px 2px;">
+                        <div class="dim" id="shadow-disclaimer" style="font-size:9px;margin-bottom:4px;">Idealized fills — not executable edge · PF e IC só com indep ≥ 30</div>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Strategy</th>
+                                    <th class="num" title="decisões avaliadas (raw)">raw n</th>
+                                    <th class="num" title="outcomes independentes">indep</th>
+                                    <th class="num" title="episódios (janelas sobrepostas merged)">clu</th>
+                                    <th class="num">WR</th>
+                                    <th class="num" title="profit factor líquido (R)">net PF</th>
+                                    <th class="num" title="IC 95% bootstrap — 2000 resamples sobre outcomes independentes">PF IC95</th>
+                                </tr>
+                            </thead>
+                            <tbody id="shadow-panel-tbody">
+                                <tr><td colspan="7" class="muted">Waiting...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </details>
             </div>
         </div>
     </div>
-    <div class="g-4 desk-side">
+</div>
+
+<!-- 3 · EXECUÇÃO — decomposição do PnL líquido + divergence monitor -->
+<div class="section-label section-execution">
+    <span class="bar"></span><span class="text">Execução · PnL líquido</span><span class="line"></span>
+</div>
+<div class="grid">
+    <div class="g-8">
         <div class="panel">
             <div class="panel-header">
-                <span>Live market</span>
-                <span class="live-dot"></span>
+                Net PnL por estratégia
+                <span class="dim" id="exec-pnl-meta">fills + funding reais · trades fechados</span>
             </div>
             <div class="panel-body" style="padding:0;overflow:auto;">
                 <table>
                     <thead>
                         <tr>
-                            <th>Sym</th>
-                            <th class="num">Price</th>
-                            <th class="num" title="Bid–ask spread %">Spr%</th>
-                            <th class="num" title="Current 8h funding">Fund</th>
-                            <th class="num" title="Predicted 8h funding (HL, else CEX avg)">Pred</th>
-                            <th class="num">OI</th>
-                            <th class="num" title="1m volume">Vol</th>
-                            <th class="num" title="Bid/ask imbalance">Imb</th>
-                            <th class="num">Age</th>
+                            <th>Strategy</th>
+                            <th class="num">n</th>
+                            <th class="num">WR</th>
+                            <th class="num" title="price move em fills reais, antes de custos">Gross</th>
+                            <th class="num">Fees</th>
+                            <th class="num" title="slippage modelada (entry+exit slip pct × notional)">Slip</th>
+                            <th class="num" title="funding pago/recebido durante o hold (assinado)">Funding</th>
+                            <th class="num" title="gross − fees + funding">Net</th>
+                            <th class="num" title="net em bps sobre notional">bps</th>
                         </tr>
                     </thead>
-                    <tbody id="live-data-tbody">
-                        <tr><td colspan="9" class="muted" style="text-align:center;">Waiting for data...</td></tr>
+                    <tbody id="exec-pnl-tbody">
+                        <tr><td colspan="9" class="muted">Waiting...</td></tr>
                     </tbody>
                 </table>
             </div>
         </div>
-        <div class="panel pos-panel">
+    </div>
+    <div class="g-4">
+        <div class="panel">
+            <div class="panel-header">
+                Divergência exec ↔ sim
+                <span class="badge badge-dim" id="divergence-badge">—</span>
+            </div>
+            <div class="panel-body" style="padding:8px;" id="divergence-body">
+                <span class="muted">Waiting...</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 4 · POSITIONS + TRADE HISTORY -->
+<div class="section-label section-market">
+    <span class="bar"></span><span class="text">Desk</span><span class="line"></span>
+</div>
+<div class="grid">
+    <div class="g-4">
+        <div class="panel pos-panel" style="max-height:none;height:100%;">
             <div class="panel-header">Open Positions <span class="dim">Active</span>
                 <span>
                     <label class="dim tiny" for="positions-iv-filter">IV</label>
@@ -337,14 +416,8 @@ th { font-size: 10px; }
             </div>
         </div>
     </div>
-</div>
-
-<div class="section-label section-execution">
-    <span class="bar"></span><span class="text">Execution</span><span class="line"></span>
-</div>
-<div class="grid">
-    <div class="g-12">
-        <div class="panel trades-panel">
+    <div class="g-8">
+        <div class="panel trades-panel" style="max-height:none;height:100%;min-height:220px;">
             <div class="panel-header">Trade History <span class="dim">Last 50</span>
                 <span class="dim tiny" id="trades-liq-count" style="margin-left:8px;" title="Trades fechados por liquidation stop-out (flush valida o side)"></span>
                 <span id="trades-filter-stats" class="tiny" style="margin-left:8px;" title="n e net PnL dos trades do filtro IV activo (fechados)"></span>
@@ -371,7 +444,7 @@ th { font-size: 10px; }
                         </tr>
                     </thead>
                     <tbody id="trades-tbody">
-                        <tr><td colspan="12" class="muted" style="text-align:center;">Loading...</td></tr>
+                        <tr><td colspan="14" class="muted" style="text-align:center;">Loading...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -379,239 +452,70 @@ th { font-size: 10px; }
     </div>
 </div>
 
-<div class="section-label section-system">
-    <span class="bar"></span><span class="text">System Health</span><span class="line"></span>
-</div>
-<div class="grid">
+<!-- 5 · CHART -->
+<div class="grid desk-grid" style="margin-top:var(--gap);">
     <div class="g-12">
-        <div class="panel sys-strip">
-            <div class="sys-cols">
-                <div>
-                    <div class="sys-col-title">Engine</div>
-                    <div class="mini-stats mini-stats-2">
-                        <div class="mini-row"><span class="mini-label">State</span><span class="mini-value highlight" id="eng-state">--</span></div>
-                        <div class="mini-row"><span class="mini-label">Uptime</span><span class="mini-value" id="eng-uptime">--</span></div>
-                        <div class="mini-row"><span class="mini-label">Ticks/s</span><span class="mini-value" id="eng-ticks">--</span></div>
-                        <div class="mini-row"><span class="mini-label">Total</span><span class="mini-value" id="eng-total">--</span></div>
-                        <div class="mini-row"><span class="mini-label">Memory</span><span class="mini-value" id="eng-mem">--</span></div>
-                        <div class="mini-row"><span class="mini-label">Daily DD</span><span class="mini-value" id="eng-daily-dd">--</span></div>
-                        <div class="mini-row"><span class="mini-label">Max DD</span><span class="mini-value" id="eng-max-dd">--</span></div>
-                        <div class="mini-row"><span class="mini-label">Exposure</span><span class="mini-value" id="eng-exposure">--</span></div>
-                        <div class="mini-row"><span class="mini-label">Portfolio Lev</span><span class="mini-value" id="eng-portfolio-lev">--</span></div>
-                        <div class="mini-row"><span class="mini-label">Open Risk</span><span class="mini-value" id="eng-open-risk">--</span></div>
-                        <div class="mini-row"><span class="mini-label">Last Error</span><span class="mini-value" id="eng-error" style="color:var(--down);">--</span></div>
-                    </div>
+        <div class="panel chart-panel">
+            <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                <span>Chart <span class="dim">Candles + trades</span></span>
+                <div style="display:flex;gap:6px;align-items:center;">
+                    <select id="chart-symbol" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:10px;height:22px;"></select>
+                    <select id="chart-tf" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:10px;height:22px;">
+                        <option value="1m">1m</option>
+                        <option value="5m" selected>5m</option>
+                        <option value="15m">15m</option>
+                        <option value="1h">1h</option>
+                    </select>
+                    <span id="chart-status" class="dim" style="font-size:9px;"></span>
+                    <span class="live-dot"></span>
                 </div>
-                <div>
-                    <div class="sys-col-title">Risk gates</div>
-                    <div class="mini-stats" id="risk-gates-panel">
-                        <div class="muted" style="text-align:center;padding:8px 0;">Waiting...</div>
-                    </div>
-                </div>
-                <div>
-                    <div class="sys-col-title">Regime</div>
-                    <div class="mini-stats" id="regime-panel">
-                        <div class="muted" style="text-align:center;padding:8px 0;">Waiting...</div>
-                    </div>
-                </div>
-                <div>
-                    <div class="sys-col-title">Governor</div>
-                    <div id="governor-panel">
-                        <span class="muted">Waiting...</span>
-                    </div>
-                </div>
+            </div>
+            <div class="panel-body">
+                <div id="chart-container"><span class="muted" style="text-align:center;display:block;padding:100px 0;">Loading chart...</span></div>
             </div>
         </div>
     </div>
 </div>
 
-<!-- Feed silence — threshold vs age per feed -->
+<!-- DECISION FEED — sinal → decisão de risco → execução na mesma linha -->
 <div class="grid" style="margin-top:var(--gap);">
-<div class="g-12">
-<div class="panel">
-    <div class="panel-header">Feed Silence <span class="dim" id="feed-silence-meta">threshold vs age</span></div>
-    <div class="panel-body" style="padding:6px 8px; overflow-y:auto;">
-        <div id="feed-silence-help" class="muted" style="display:none;" title="Telegram on imminent (90%) and DEGRADED. Early / cadence stay in this table."></div>
-        <table style="width:100%; font-size:11px; border-collapse:collapse;">
-            <thead>
-                <tr style="color:var(--muted); text-align:left;">
-                    <th title="Feed key, only feeds contracted for this deployment">Feed</th>
-                    <th title="Seconds since last event, with expected gap (historical p95/p99 cadence of this feed)">Age / exp gap</th>
-                    <th title="Max allowed silence before degraded">Threshold</th>
-                    <th title="age / threshold — how close to degrading">% of threshold</th>
-                    <th title="Max % of threshold per 10-min bucket, last 24h — a rising sawtooth = age growing between resets">24h %</th>
-                    <th title="Max age per UTC day, last 14 days — a rising staircase = age creeping between resets">14d max age</th>
-                    <th title="Fire-once early/imminent alerts already sent this silence episode (reset on beat). Early fires at warn_fraction of the threshold (configurável, default 50%); imminent at imminent_fraction (configurável, default 90%).">Alerted</th>
-                    <th title="Silence watchdog state">State</th>
-                </tr>
-            </thead>
-            <tbody id="feed-silence-tbody">
-                <tr><td colspan="8" class="muted">Waiting...</td></tr>
-            </tbody>
-        </table>
-    </div>
-</div>
-</div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- SECTION: INTELLIGENCE — Strategies + Signals/Decisions          -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="section-label section-intel">
-    <span class="bar"></span><span class="text">Strategies</span><span class="line"></span>
-</div>
-<div class="grid" style="align-items:start;">
-    <div class="g-8">
-        <div class="panel">
-            <div class="panel-header">Strategies <span class="dim">Click for detail</span></div>
-            <div class="panel-body" id="strategies-panel" style="padding:6px 8px; overflow-y:auto;">
-                <span class="muted">Waiting...</span>
-            </div>
-        </div>
-    </div>
-    <div class="g-4 desk-side">
-        <div class="panel">
-            <div class="panel-header">Signals <span class="dim">Last 20</span></div>
-            <div class="panel-body" style="padding:4px 6px; overflow-y:auto;">
-                <div id="signals-list" class="stream-list"><span class="muted">No signals yet</span></div>
-            </div>
-        </div>
-        <div class="panel">
-            <div class="panel-header">Decisions <span class="dim">Risk + Exec</span></div>
-            <div class="panel-body" style="padding:4px 6px; overflow-y:auto;">
-                <div id="decisions-list" class="stream-list"><span class="muted">No decisions yet</span></div>
-            </div>
-        </div>
-        <div class="panel">
-            <div class="panel-header">Jev <span class="dim" id="jev-sub">TypeSafe verdicts · hourly</span></div>
-            <div class="panel-body" style="padding:4px 6px; overflow-y:auto;">
-                <div id="jev-list" class="stream-list"><span class="muted">Waiting for first verdict…</span></div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<details class="fold">
-<summary>Research <span class="dim">shadow · top traders · watchdogs · DVOL · IV gate</span></summary>
-<div class="fold-inner">
-
-<!-- Shadow observability (Phase08) -->
-<div class="grid">
     <div class="g-12">
-        <div class="panel" style="max-height:280px;">
+        <div class="panel" style="max-height:300px;">
             <div class="panel-header">
-                Shadow strategies
-                <span class="dim" id="shadow-disclaimer">Idealized fills — not executable edge</span>
-                <span class="dim" id="shadow-eval-age" title="Idade do lote de avaliação persistido (a análise pesada corre fora do processo, de hora em hora)"></span>
+                Decision feed
+                <span class="dim">sinal → decisão de risco → execução · últimos 40</span>
             </div>
-            <div class="panel-body" style="padding:6px 8px; max-height:240px; overflow-y:auto;">
-                <div class="muted" style="display:none;" title="INCONCLUSIVE = sample &lt;30 (not tested). FAIL = powered sample lost the baseline gate. WR / E[R] / Hyp.n fill after closed hypothetical trades. tier_b needs L2/tape/funding."></div>
-                <table style="width:100%; font-size:11px; border-collapse:collapse;">
-                    <thead>
-                        <tr style="color:var(--muted); text-align:left;">
-                            <th title="Shadow = signals logged, no OMS orders">Strategy</th>
-                            <th title="Would-enter signals today">Sig today</th>
-                            <th title="Would-enter signals last 7 days">7d</th>
-                            <th title="Closed hypothetical trades evaluated">Hyp. n</th>
-                            <th title="Hypothetical win rate (needs Hyp.n &gt; 0)">WR</th>
-                            <th title="Hypothetical expectancy in R (needs Hyp.n &gt; 0)">E[R]</th>
-                            <th title="Progress toward n≥30 power floor">Gate n/30</th>
-                            <th title="Last baseline-signal gate from research artifacts">Last gate</th>
-                            <th title="Feed fidelity for replay validation">Tier</th>
-                        </tr>
-                    </thead>
-                    <tbody id="shadow-panel-tbody">
-                        <tr><td colspan="9" class="muted">Waiting...</td></tr>
-                    </tbody>
-                </table>
+            <div class="panel-body" style="padding:4px 6px; overflow-y:auto;">
+                <div id="decision-feed-list" class="stream-list"><span class="muted">No signals yet</span></div>
             </div>
         </div>
     </div>
 </div>
 
-<!-- Top Traders aggregate bias + virtual swing -->
-<div class="grid">
-    <div class="g-12">
-        <div class="panel" style="max-height:420px;">
-            <div class="panel-header">
-                Top Traders (aggregate)
-                <span class="dim" id="tt-meta">research only</span>
-            </div>
-            <div class="panel-body" style="padding:6px 8px; max-height:380px; overflow-y:auto;">
-                <div id="tt-help" class="muted" style="display:none;" title="Polls top Hyperliquid wallets. Simulated positions only — OMS never sees these.">
-                    <span id="tt-help-sl">SL</span>
-                    <span id="tt-help-tp">TP</span>
-                    <span id="tt-help-hold">—</span>
-                </div>
-                <div id="tt-empty" class="muted" style="display:none;margin-bottom:6px;"></div>
-                <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">
-                    Wallet lean by symbol <span class="dim">(L/S = wallets long vs short)</span>
-                </div>
-                <table style="width:100%; font-size:11px; border-collapse:collapse; margin-bottom:10px;">
-                    <thead>
-                        <tr style="color:var(--muted); text-align:left;">
-                            <th>Symbol</th>
-                            <th title="−1 short … +1 long (notional-weighted)">Lean</th>
-                            <th>Wallets L/S</th>
-                            <th title="Combined long+short notional of tracked wallets">Size</th>
-                            <th title="Age of last poll for this symbol">Updated</th>
-                        </tr>
-                    </thead>
-                    <tbody id="tt-bias-tbody">
-                        <tr><td colspan="5" class="muted">Waiting...</td></tr>
-                    </tbody>
-                </table>
-                <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">
-                    Open <b>simulated</b> swings <span class="dim" id="tt-open-count"></span>
-                </div>
-                <table style="width:100%; font-size:11px; border-collapse:collapse; margin-bottom:10px;">
-                    <thead>
-                        <tr style="color:var(--muted); text-align:left;">
-                            <th>Symbol</th>
-                            <th>Side</th>
-                            <th>Entry</th>
-                            <th title="Unrealized PnL % vs entry (mark)">uPnL</th>
-                            <th>Age</th>
-                            <th title="Bias when opened / last bias">Bias</th>
-                        </tr>
-                    </thead>
-                    <tbody id="tt-open-tbody">
-                        <tr><td colspan="6" class="muted">None yet — waiting for |bias| ≥ threshold</td></tr>
-                    </tbody>
-                </table>
-                <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">Recent simulated closes</div>
-                <table style="width:100%; font-size:11px; border-collapse:collapse;">
-                    <thead>
-                        <tr style="color:var(--muted); text-align:left;">
-                            <th>Symbol</th>
-                            <th>Side</th>
-                            <th>PnL</th>
-                            <th title="bias_flip / stop_loss / take_profit / max_hold">Exit reason</th>
-                            <th>Held</th>
-                        </tr>
-                    </thead>
-                    <tbody id="tt-closed-tbody">
-                        <tr><td colspan="5" class="muted">None yet</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Research watchdogs (auto re-run gates) -->
-<div class="grid">
-    <div class="g-12">
+<!-- RESEARCH WATCH — DVOL + auto re-run gates (compacto) -->
+<div class="grid" style="margin-top:var(--gap);">
+    <div class="g-6">
         <div class="panel">
             <div class="panel-header">
-                Auto re-run gates
+                Research watch · DVOL
+                <span class="dim" id="dvol-meta">high_iv &gt; p66.7</span>
+            </div>
+            <div class="panel-body" style="padding:8px;">
+                <div id="dvol-current" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px;font-size:11px;">Waiting...</div>
+                <div id="dvol-chart" style="width:100%;height:120px;"></div>
+            </div>
+        </div>
+    </div>
+    <div class="g-6">
+        <div class="panel">
+            <div class="panel-header">
+                Research watch · auto re-run gates
                 <span class="dim" id="wd-meta">bias ≥20 datas · flush ≥30 dias · IV ≥30 trades</span>
             </div>
             <div class="panel-body" style="padding:6px 8px;">
-                <div id="wd-help" class="muted" style="display:none;" title="Watchdogs re-run research probes once enough OOS data accumulates. Evidence only — nothing here trades."></div>
-                <table style="width:100%; font-size:11px; border-collapse:collapse;">
+                <table>
                     <thead>
-                        <tr style="color:var(--muted); text-align:left;">
+                        <tr>
                             <th>Watchdog</th>
                             <th>Progress</th>
                             <th>Status</th>
@@ -627,125 +531,6 @@ th { font-size: 10px; }
     </div>
 </div>
 
-<!-- DVOL / IV regime (Deribit vol index) -->
-<div class="grid">
-    <div class="g-12">
-        <div class="panel">
-            <div class="panel-header">
-                Deribit DVOL — trailing 30d percentile
-                <span class="dim" id="dvol-meta">high_iv &gt; p66.7 · BTC/ETH nativo, SOL/HYPE proxy BTC</span>
-            </div>
-            <div class="panel-body" style="padding:8px;">
-                <div class="muted" style="display:none;">DVOL 30d percentile. IV gate is shadow-only.</div>
-                <div id="dvol-current" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px;font-size:11px;">Waiting...</div>
-                <div id="dvol-chart" style="width:100%;height:150px;"></div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- IV gate shadow — amostra high/low por trade -->
-<div class="grid">
-    <div class="g-12">
-        <div class="panel">
-            <div class="panel-header">
-                Distribuição high/low-IV dos trades shadow
-                <span class="dim" id="ivshadow-meta">amostra a crescer até ao gate de decisão</span>
-            </div>
-            <div class="panel-body" style="padding:8px;">
-                <div class="muted" style="font-size:10px;line-height:1.4;margin-bottom:8px;">
-                    Cada trade roteado pelo regime router regista a classe IV (<code>variant=iv_gate_shadow</code>).
-                    A amostra decide <b>shadow → enforcement</b> quando ≥<span id="ivshadow-target">30</span> trades
-                    <b>closed</b> tiverem decisão (watchdog de recheck). Threshold <code>p66.7</code>.
-                </div>
-                <div id="ivshadow-bar" style="margin-bottom:10px;">
-                    <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-bottom:2px;">
-                        <span id="ivshadow-progress-txt">0/0 closed com decisão</span>
-                        <span id="ivshadow-pct">0%</span>
-                    </div>
-                    <div style="background:var(--border);height:8px;border-radius:4px;">
-                        <div id="ivshadow-bar-fill" style="height:8px;width:0%;background:var(--accent, #4a9eff);border-radius:4px;"></div>
-                    </div>
-                </div>
-                <table style="width:100%;font-size:11px;border-collapse:collapse;">
-                    <thead>
-                        <tr style="color:var(--muted);text-align:left;">
-                            <th>Classe</th>
-                            <th>n</th>
-                            <th>closed</th>
-                            <th>open</th>
-                            <th>% amostra</th>
-                            <th>avg pct</th>
-                            <th title="Accumulated PnL of closed trades in this IV class">Net PnL</th>
-                            <th title="Win rate of closed trades in this IV class">WR</th>
-                            <th title="Average PnL per closed trade">Avg</th>
-                        </tr>
-                    </thead>
-                    <tbody id="ivshadow-tbody">
-                        <tr><td colspan="9" class="muted">Waiting...</td></tr>
-                    </tbody>
-                </table>
-                <div id="ivshadow-rate" style="margin-top:10px;">
-                    <div class="dim" style="font-size:10px;margin-bottom:3px;">
-                        <b>Decisões por dia</b> — taxa de acumulação da amostra (últimas 2 semanas)
-                        <span class="dim" id="ivshadow-rate-sum"></span>
-                    </div>
-                    <div id="ivshadow-rate-svg"></div>
-                </div>
-                <div style="display:flex;gap:14px;margin-top:10px;">
-                    <div style="flex:1;">
-                        <div class="dim" style="font-size:10px;margin-bottom:3px;"><b>Por estratégia</b> <span class="dim">— onde vive a amostra</span></div>
-                        <table style="width:100%;font-size:10px;border-collapse:collapse;">
-                            <thead><tr style="color:var(--muted);text-align:left;">
-                                <th>Estratégia</th><th>n</th><th>closed</th>
-                                <th title="high_iv / low_iv / unknown within the strategy">high/low/unk</th>
-                                <th title="Accumulated PnL of closed trades">Net PnL</th>
-                            </tr></thead>
-                            <tbody id="ivshadow-strat-tbody">
-                                <tr><td colspan="5" class="muted">—</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                    <div style="flex:1;">
-                        <div class="dim" style="font-size:10px;margin-bottom:3px;"><b>Por símbolo</b> <span class="dim">— concentração do risco</span></div>
-                        <table style="width:100%;font-size:10px;border-collapse:collapse;">
-                            <thead><tr style="color:var(--muted);text-align:left;">
-                                <th>Symbol</th><th>n</th><th>closed</th>
-                                <th title="high_iv / low_iv / unknown within the symbol">high/low/unk</th>
-                                <th title="Accumulated PnL of closed trades">Net PnL</th>
-                            </tr></thead>
-                            <tbody id="ivshadow-sym-tbody">
-                                <tr><td colspan="5" class="muted">—</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-                <div id="ivshadow-coverage" class="dim" style="font-size:10px;margin-top:8px;"></div>
-            </div>
-        </div>
-    </div>
-</div>
-</div>
-</details>
-
-<details class="fold" open>
-<summary>Logs <span class="dim">last 50</span></summary>
-<div class="fold-inner">
-<div class="grid">
-    <div class="g-12">
-        <div class="panel" style="max-height:160px;">
-            <div class="panel-header">Live Logs</div>
-            <div class="panel-body" style="padding:4px 8px;">
-                <div id="logs-container" class="log-container" style="max-height:128px; overflow-y:auto;">
-                    <span class="muted">Waiting for logs...</span>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-</div>
-</details>
-
 <div id="auth-gate" class="modal-overlay">
     <div class="modal-box" style="max-width:360px;">
         <div class="modal-header">
@@ -755,19 +540,6 @@ th { font-size: 10px; }
         <input id="auth-token-input" type="password" placeholder="Token" style="width:100%;padding:8px;margin-bottom:10px;background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);">
         <button id="auth-submit-btn" style="width:100%;padding:8px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;font-weight:600;">Connect</button>
         <p id="auth-error" class="muted" style="margin-top:8px;color:var(--down);display:none;"></p>
-    </div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- STRATEGY DRILL-DOWN MODAL                                        -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<div id="strategy-modal" class="modal-overlay" onclick="closeStrategyModal(event)">
-    <div class="modal-box" onclick="event.stopPropagation()">
-        <div class="modal-header">
-            <span class="modal-title" id="modal-title">Strategy Detail</span>
-            <span class="modal-close" onclick="document.getElementById('strategy-modal').classList.remove('active')">&times;</span>
-        </div>
-        <div id="modal-content"><div class="muted" style="text-align:center;">Loading...</div></div>
     </div>
 </div>
 
@@ -884,10 +656,7 @@ function fmtPrice(n) {
     const d = abs >= 1000 ? 2 : abs >= 10 ? 3 : 4;
     return fmtNum(n, d);
 }
-function fmtM(n) {
-    if (n == null || isNaN(n)) return "--";
-    return (n / 1e6).toFixed(2) + "M";
-}
+
 function fmtPct(n, d=2) {
     if (n == null || isNaN(n)) return "--";
     return (n * 100).toFixed(d) + "%";
@@ -896,37 +665,14 @@ function fmtTime(ts) {
     if (!ts) return "--";
     return new Date(ts).toLocaleTimeString("pt-PT", {hour:"2-digit", minute:"2-digit", second:"2-digit"});
 }
-function fmtHM(ts) {
-    if (!ts) return "";
-    return new Date(ts).toLocaleTimeString("pt-PT", {hour:"2-digit", minute:"2-digit"});
-}
-function cadenceColor(pct) {
-    // Continuous 0-100 ramp for where the current gap sits in the feed's own
-    // distribution: green (quiet) -> amber -> red (deep in the tail). Same
-    // hue family as the panel's up/warn/down colors; a rank, not a cutoff.
-    const t = Math.min(100, Math.max(0, pct)) / 100;
-    const hue = Math.round(130 * (1 - t));
-    return "hsl(" + hue + ", 70%, 45%)";
-}
+
+
 function fmtDate(ts) {
     if (!ts) return "--";
     return new Date(ts).toLocaleString("pt-PT", {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"});
 }
-function fmtUptime(sec) {
-    if (!sec || sec < 0) return "--";
-    const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    const s = sec % 60;
-    if (h > 0) return h + "h " + m + "m";
-    if (m > 0) return m + "m " + s + "s";
-    return s + "s";
-}
-function fmtAge(seconds) {
-    if (seconds == null || isNaN(seconds)) return "--";
-    if (seconds < 1) return (seconds * 1000).toFixed(0) + "ms";
-    if (seconds < 60) return seconds.toFixed(1) + "s";
-    return (seconds / 60).toFixed(1) + "m";
-}
+
+
 
 // ── KPIs ──
 function setPnlDisplay(elId, amount) {
@@ -989,159 +735,17 @@ function updateTickBar() {
 }
 
 // ── Live Data ──
-let _lastLiveRows = null;
-let _fundingPred = {};
-function _predictedOf(r) {
-    if (r && r.predicted != null) return r.predicted;
-    const f = r && _fundingPred[r.symbol];
-    return f && f.predicted != null ? f.predicted : null;
-}
-function renderLiveData(rows) {
-    const tbody = document.getElementById("live-data-tbody");
-    if (!tbody) return;
-    if (!rows || rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;">Waiting for data...</td></tr>';
-        return;
-    }
-    _lastLiveRows = rows;
-    const now = Date.now() / 1000;
-    let totalLatency = 0, count = 0;
-    tbody.innerHTML = rows.map(r => {
-        const priceClass = (r.vwap != null && r.price != null)
-            ? (r.price > r.vwap ? "up" : r.price < r.vwap ? "down" : "")
-            : "";
-        const age = r.last_update ? now - r.last_update : null;
-        const ageClass = age != null ? (age > 30 ? "down" : age > 5 ? "yellow" : "") : "";
-        if (age != null) { totalLatency += age * 1000; count++; }
-        const spr = (r.spread_pct != null && Math.abs(Number(r.spread_pct)) > 1e-8)
-            ? fmtNum(r.spread_pct, 3) : "--";
-        const imb = r.imbalance;
-        return `<tr>
-            <td><span class="highlight">${r.symbol}</span></td>
-            <td class="num ${priceClass}">$${fmtNum(r.price)}</td>
-            <td class="num tiny">${spr}</td>
-            <td class="num">${fmtPct(r.funding, 4)}</td>
-            <td class="num">${fmtPct(_predictedOf(r), 4)}</td>
-            <td class="num">${fmtM(r.oi_usd != null ? r.oi_usd : (r.oi && r.price ? r.oi * r.price : null))}</td>
-            <td class="num">${fmtNum(r.volume_1m)}</td>
-            <td class="num ${imb > 0 ? 'up' : imb < 0 ? 'down' : ''}">${fmtNum(imb, 3)}</td>
-            <td class="num tiny ${ageClass}">${fmtAge(age)}</td>
-        </tr>`;
-    }).join('');
-    const avg = count > 0 ? Math.round(totalLatency / count) : null;
-    let dataLatEl = document.getElementById("kpi-data-lat");
-    if (!dataLatEl) {
-        dataLatEl = document.createElement("span");
-        dataLatEl.id = "kpi-data-lat";
-        dataLatEl.style.display = "none";
-        document.body.appendChild(dataLatEl);
-    }
-    if (avg != null) dataLatEl.textContent = avg + "ms";
-}
+
+
 
 // ── Candles ──
-function renderCandles(rows) {
-    const tbody = document.getElementById("candles-tbody");
-    if (!tbody) return;
-    if (!rows || rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;">No candles yet</td></tr>';
-        return;
-    }
-    tbody.innerHTML = rows.map(r => {
-        const chg = r.close != null && r.open != null ? r.close - r.open : 0;
-        const chgClass = chg > 0 ? "up" : chg < 0 ? "down" : "";
-        const buyPct = r.buy_volume != null && r.volume > 0 ? (r.buy_volume / r.volume * 100) : null;
-        // v3.1.23: surface candle age so the user can see staleness
-        // (15m/1h candles only update when they complete, so they may be
-        // hours/days old after a restart). Highlight if > 2x the timeframe.
-        const tfSeconds = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600 };
-        const tfSec = tfSeconds[r.timeframe] || 60;
-        let ageText = "--", ageCls = "muted", ageNum = null;
-        if (r.timestamp_ms) {
-            ageNum = (Date.now() - r.timestamp_ms) / 1000;
-            if (ageNum < 1) { ageText = "now"; ageCls = "up"; }
-            else if (ageNum < 60) { ageText = Math.round(ageNum) + "s"; ageCls = "up"; }
-            else if (ageNum < 3600) { ageText = Math.round(ageNum/60) + "m"; ageCls = ageNum > tfSec * 2 ? "down" : "up"; }
-            else if (ageNum < 86400) { ageText = Math.round(ageNum/3600) + "h"; ageCls = "down"; }
-            else { ageText = Math.round(ageNum/86400) + "d"; ageCls = "down"; }
-        }
-        return `<tr>
-            <td><span class="highlight">${r.symbol}</span></td>
-            <td class="muted">${r.timeframe}</td>
-            <td class="num">${fmtNum(r.open)}</td>
-            <td class="num">${fmtNum(r.high)}</td>
-            <td class="num">${fmtNum(r.low)}</td>
-            <td class="num ${chgClass}">$${fmtNum(r.close)}</td>
-            <td class="num">${fmtNum(r.volume)}</td>
-            <td class="num ${buyPct > 60 ? 'up' : buyPct < 40 ? 'down' : ''}">${buyPct != null ? buyPct.toFixed(0) + "%" : "--"}</td>
-            <td class="num">$${fmtNum(r.vwap)}</td>
-            <td class="num tiny ${ageCls}">${ageText}</td>
-        </tr>`;
-    }).join('');
-}
+
 
 // ── Volume indicators (legacy renderer; panel removed) ──
-function renderVolIndicators(rows) {
-    const tbody = document.getElementById("vol-indicators-tbody");
-    if (!tbody) return;
-    if (!rows || !rows.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="muted" style="text-align:center;">Waiting for data...</td></tr>';
-        return;
-    }
-    tbody.innerHTML = rows.map(r => {
-        const obvClass = r.obv_slope_5m > 0 ? "up" : r.obv_slope_5m < 0 ? "down" : "";
-        const mfiClass = r.mfi_5m > 70 ? "up" : r.mfi_5m < 30 ? "down" : "";
-        let pvsClass = "";
-        let pvsText = "--";
-        if (r.price != null && r.vwap_5m_rolling != null && r.vwap_5m_rolling > 0) {
-            const pct = (r.price / r.vwap_5m_rolling - 1) * 100;
-            pvsClass = pct > 0.05 ? "up" : pct < -0.05 ? "down" : "";
-            pvsText = (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%";
-        }
-        return `<tr>
-            <td><span class="highlight">${r.symbol}</span></td>
-            <td class="num ${obvClass}">${r.obv_slope_5m != null ? fmtNum(r.obv_slope_5m) : "--"}</td>
-            <td class="num ${mfiClass}">${r.mfi_5m != null ? r.mfi_5m.toFixed(0) : "--"}</td>
-            <td class="num">${r.vwap_1m_rolling != null ? "$" + fmtNum(r.vwap_1m_rolling) : "--"}</td>
-            <td class="num">${r.vwap_5m_rolling != null ? "$" + fmtNum(r.vwap_5m_rolling) : "--"}</td>
-            <td class="num">${r.vwap_15m_rolling != null ? "$" + fmtNum(r.vwap_15m_rolling) : "--"}</td>
-            <td class="num">${r.vwap_1h_rolling != null ? "$" + fmtNum(r.vwap_1h_rolling) : "--"}</td>
-            <td class="num ${pvsClass}">${pvsText}</td>
-        </tr>`;
-    }).join('');
-}
+
 
 // ── Engine ──
-function renderEngine(data) {
-    if (!data) return;
-    const state = statusUpdate.running ? "RUNNING" : (statusUpdate.uptime_sec ? "RUNNING" : "STOPPED");
-    const stateEl = document.getElementById("eng-state");
-    stateEl.textContent = state;
-    stateEl.className = "mini-value " + (statusUpdate.running ? "up" : "muted");
-    document.getElementById("eng-uptime").textContent = fmtUptime(statusUpdate.uptime_sec || 0);
-    document.getElementById("eng-ticks").textContent = data.ticks_per_second != null ? data.ticks_per_second.toFixed(1) : "--";
-    document.getElementById("eng-total").textContent = data.total_ticks != null ? data.total_ticks.toLocaleString() : "--";
-    document.getElementById("eng-mem").textContent = (statusUpdate.memory_mb || 0).toFixed(1) + " MB";
-    document.getElementById("eng-daily-dd").textContent = (data.daily_drawdown || 0).toFixed(2) + "%";
-    document.getElementById("eng-max-dd").textContent = (data.max_drawdown_pct || 0).toFixed(2) + "%";
-    document.getElementById("eng-exposure").textContent = (data.directional_exposure || 0).toFixed(1) + "%";
-    const lev = data.portfolio_leverage != null ? data.portfolio_leverage : 0;
-    const levMax = data.leverage_max != null ? data.leverage_max : 0;
-    const levEl = document.getElementById("eng-portfolio-lev");
-    if (levEl) {
-        levEl.textContent = lev.toFixed(2) + "x" + (levMax > 0 ? " / " + levMax.toFixed(0) + "x" : "");
-        levEl.className = "mini-value " + (levMax > 0 && lev > levMax * 0.9 ? "yellow" : "highlight");
-    }
-    document.getElementById("eng-open-risk").textContent = (data.open_trade_risk || 0).toFixed(2) + "%";
-    const errEl = document.getElementById("eng-error");
-    if (data.last_error) {
-        errEl.textContent = data.last_error.substring(0, 40);
-        errEl.style.color = "var(--down)";
-    } else {
-        errEl.textContent = "None";
-        errEl.style.color = "var(--up)";
-    }
-}
+
 
 // ── Regime (v3.1.23) ──
 function renderRegime(data) {
@@ -1214,35 +818,9 @@ function renderGovernor(data) {
 }
 
 // ── Strategies ──
-function renderStrategies(data) {
-    const div = document.getElementById("strategies-panel");
-    if (!data || data.length === 0) { div.innerHTML = '<span class="muted">No strategies</span>'; return; }
-    div.innerHTML = data.map(s => {
-        const enabled = s.enabled !== false;
-        const statusClass = s.last_signal_status === "executed" ? "pill-executed" : s.last_signal_status === "approved" ? "pill-approved" : s.last_signal_status === "rejected" ? "pill-rejected" : "pill-pending";
-        const stratClass = s.strategy_class || "other";
-        const classColors = {trend: "var(--up)", revert: "var(--accent)", carry: "var(--yellow)", micro: "var(--accent2)"};
-        const classColor = classColors[stratClass] || "var(--muted)";
-        const govTag = s.governor_disabled ? '<span style="color:var(--down);font-size:8px;margin-left:4px;">GOV-OFF</span>' : '';
-        const sharpeStr = s.trades_30d > 0 ? `Sharpe ${s.sharpe_30d >= 0 ? "+" : ""}${s.sharpe_30d.toFixed(2)}` : '';
-        return `<div class="strategy-card ${enabled ? 'active' : 'inactive'}" onclick="showStrategyDetail('${s.name}')">
-            <div class="strategy-name">${s.name} ${enabled ? "●" : "○"} ${govTag}</div>
-            <div class="strategy-desc">${s.description || ""}</div>
-            <div style="margin-top:2px; font-size:9px; color:var(--dim);">
-                <span style="color:${classColor};font-weight:600;">${stratClass.toUpperCase()}</span>
-                | ${s.signals_today || 0} today
-                | 30d: ${s.trades_30d || 0} trades ${sharpeStr}
-            </div>
-            <div style="margin-top:2px; font-size:9px; color:var(--dim);">
-                Last: <span class="${s.last_signal_side === 'long' ? 'up' : s.last_signal_side === 'short' ? 'down' : ''}">${s.last_signal_side ? s.last_signal_side.toUpperCase() : "never"}</span>
-                ${s.last_signal_confidence != null ? `(${(s.last_signal_confidence * 100).toFixed(0)}%)` : ""}
-                <span class="pill ${statusClass}">${s.last_signal_status || "idle"}</span>
-            </div>
-        </div>`;
-    }).join('');
-}
 
-// ── Shadow / gate progress ──
+
+// ── Shadow board — compacto: só estratégias activas, PF líquido + IC95 ──
 function renderShadowPanel(payload) {
     const tbody = document.getElementById("shadow-panel-tbody");
     const disc = document.getElementById("shadow-disclaimer");
@@ -1254,10 +832,10 @@ function renderShadowPanel(payload) {
     const ageEl = document.getElementById("shadow-eval-age");
     if (ageEl && payload) {
         if (payload.evaluation_pending) {
-            ageEl.textContent = " · eval pendente";
+            ageEl.textContent = "eval pendente";
             ageEl.style.color = "var(--yellow)";
         } else if (payload.eval_age_minutes != null) {
-            ageEl.textContent = " · eval há " + Math.round(payload.eval_age_minutes) + "min";
+            ageEl.textContent = "eval há " + Math.round(payload.eval_age_minutes) + "min";
             ageEl.style.color = payload.eval_age_minutes > 75 ? "var(--yellow)" : "";
         } else {
             ageEl.textContent = "";
@@ -1265,34 +843,25 @@ function renderShadowPanel(payload) {
     }
     const rows = (payload && payload.rows) || [];
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="9" class="muted">No shadow strategies</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="muted">No shadow strategies</td></tr>';
         return;
     }
     tbody.innerHTML = rows.map(r => {
-        const g = r.last_gate || {};
-        const verdict = g.verdict || "—";
-        const vColor = verdict === "PASS" ? "var(--up)" : verdict === "FAIL" ? "var(--down)" : "var(--yellow)";
-        const pct = Math.min(100, Number(r.gate_progress_pct) || 0);
-        const bar = `<div style="background:var(--border);height:6px;border-radius:3px;width:72px;display:inline-block;vertical-align:middle;">
-            <div style="height:6px;border-radius:3px;width:${pct}%;background:var(--accent);"></div>
-        </div> <span style="font-size:9px;">${r.gate_progress_n || 0}/${r.gate_progress_target || 30}</span>`;
-        const wr = r.hypothetical_win_rate != null ? (100 * r.hypothetical_win_rate).toFixed(0) + "%" : "—";
-        const er = r.hypothetical_expectancy_r != null ? Number(r.hypothetical_expectancy_r).toFixed(2) : "—";
-        const fail = (g.failed_conditions || []).join("; ") || g.reason || "";
-        let gateHint = "";
-        if (verdict === "FAIL") {
-            const conds = (g.failed_conditions || []).join(" ");
-            if (conds.includes("not_profitable") && conds.includes("B1_")) {
-                gateHint = " <span class='dim' style='font-size:9px;'>(no edge + loses $)</span>";
-            } else if (conds.includes("not_profitable")) {
-                gateHint = " <span class='dim' style='font-size:9px;'>(loses money)</span>";
-            } else if (conds.includes("B1_")) {
-                gateHint = " <span class='dim' style='font-size:9px;'>(≤ random)</span>";
-            }
-        } else if (verdict === "INCONCLUSIVE") {
-            gateHint = " <span class='dim' style='font-size:9px;'>(n&lt;30)</span>";
+        const indep = r.n_independent;
+        const rawN = r.n_decisions != null ? r.n_decisions : (r.hypothetical_trades_closed || 0);
+        // PF e IC95 só com indep ≥ 30 — o endpoint já omite o IC; escondemos
+        // também o PF point-estimate abaixo do power floor.
+        const powered = indep != null && indep >= 30;
+        const pf = powered && r.net_profit_factor != null
+            ? Number(r.net_profit_factor).toFixed(2) : "—";
+        let ci = "—";
+        if (powered && Array.isArray(r.net_pf_ci95)) {
+            ci = "[" + Number(r.net_pf_ci95[0]).toFixed(2) + ", " + Number(r.net_pf_ci95[1]).toFixed(2) + "]";
         }
-        const freq = r.frequency_insufficient_90d ? " <span style='color:var(--yellow)' title='n&lt;30 in 90d'>freq</span>" : "";
+        const wr = powered && r.hypothetical_win_rate != null
+            ? (100 * r.hypothetical_win_rate).toFixed(0) + "%" : "—";
+        const pfCls = powered && r.net_profit_factor != null
+            ? (r.net_profit_factor >= 1 ? "up" : "down") : "";
         const liqProv = r.liquidation_provenance;
         let liqBadge = "";
         if (liqProv) {
@@ -1307,144 +876,148 @@ function renderShadowPanel(payload) {
             liqBadge = ` <span style="color:${liqColor};font-weight:600;font-size:9px;" title="${liqTitle}">liq:${liqProv}</span>`;
         }
         return `<tr style="border-top:1px solid var(--border);">
-            <td title="${r.fidelity_note || ""}">${r.strategy}${freq}</td>
-            <td>${r.signals_today || 0}</td>
-            <td>${r.signals_7d || 0}</td>
-            <td>${r.hypothetical_trades_closed || 0}</td>
-            <td>${wr}</td>
-            <td>${er}</td>
-            <td>${bar}</td>
-            <td style="color:${vColor};" title="${fail}">${verdict}${gateHint}</td>
-            <td style="font-size:9px;color:var(--dim);">${(r.fidelity_tier || "").replace("tier_", "")}${liqBadge}</td>
+            <td title="${(r.fidelity_tier || "") + (r.fidelity_note ? " · " + r.fidelity_note : "")}">${r.strategy}${liqBadge}</td>
+            <td class="num">${rawN}</td>
+            <td class="num">${indep != null ? indep : "—"}</td>
+            <td class="num">${r.n_clustered != null ? r.n_clustered : "—"}</td>
+            <td class="num">${wr}</td>
+            <td class="num ${pfCls}">${pf}</td>
+            <td class="num" style="font-size:9px;">${ci}</td>
         </tr>`;
     }).join("");
 }
 
-function _ttFmtAge(ms) {
-    if (ms == null) return "—";
-    const sec = Math.max(0, Math.floor(Number(ms) / 1000));
-    if (sec < 60) return sec + "s";
-    const m = Math.floor(sec / 60);
-    if (m < 60) return m + "m";
-    const h = Math.floor(m / 60);
-    if (h < 48) return h + "h";
-    return (h / 24).toFixed(1) + "d";
-}
-
-function _ttLeanLabel(bias) {
-    const b = Number(bias) || 0;
-    if (b >= 0.55) return "LONG lean";
-    if (b <= -0.55) return "SHORT lean";
-    if (b > 0.05) return "mild long";
-    if (b < -0.05) return "mild short";
-    return "flat";
-}
-
-function _ttExitLabel(reason) {
-    const r = String(reason || "");
-    if (r === "bias_flip" || r === "EXIT_BIAS_FLIP") return "bias flipped";
-    if (r === "stop_loss" || r === "sl") return "stop-loss";
-    if (r === "take_profit" || r === "tp") return "take-profit";
-    if (r === "max_hold" || r === "timeout") return "max hold";
-    return r || "—";
-}
-
-function renderTopTradersPanel(payload) {
-    const meta = document.getElementById("tt-meta");
-    const empty = document.getElementById("tt-empty");
-    const biasBody = document.getElementById("tt-bias-tbody");
-    const openBody = document.getElementById("tt-open-tbody");
-    const closedBody = document.getElementById("tt-closed-tbody");
-    const openCount = document.getElementById("tt-open-count");
-    if (!biasBody || !openBody || !closedBody) return;
-    if (!payload || payload.error) {
-        biasBody.innerHTML = '<tr><td colspan="5" class="muted">Unavailable</td></tr>';
+// ── Hipóteses pré-registadas (counts públicos; métricas só pós-selo) ──
+function renderHypotheses(payload) {
+    const tbody = document.getElementById("hypotheses-tbody");
+    if (!tbody) return;
+    const rows = (payload && payload.hypotheses) || [];
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="muted">Sem hipóteses registadas</td></tr>';
         return;
     }
-    const thr = payload.bias_threshold != null ? Number(payload.bias_threshold) : 0.55;
-    const slPct = payload.stop_loss_pct != null ? (100 * Number(payload.stop_loss_pct)).toFixed(0) : "4";
-    const tpPct = payload.take_profit_pct != null ? (100 * Number(payload.take_profit_pct)).toFixed(0) : "10";
-    const hold = payload.max_hold_hours != null ? payload.max_hold_hours + "h" : "120h";
-    const helpSl = document.getElementById("tt-help-sl");
-    const helpTp = document.getElementById("tt-help-tp");
-    const helpHold = document.getElementById("tt-help-hold");
-    if (helpSl) helpSl.textContent = "SL " + slPct + "%";
-    if (helpTp) helpTp.textContent = "TP " + tpPct + "%";
-    if (helpHold) helpHold.textContent = hold;
-    if (meta) {
-        const auto = payload.auto_from_leaderboard ? "auto wallets" : "manual wallets";
-        meta.textContent = `${payload.wallets_configured || 0} wallets · ${auto} · open if |bias|≥${thr.toFixed(2)} · hold≤${hold}`;
-        meta.title = payload.disclaimer || "";
-    }
-    if (empty) {
-        if (payload.empty_reason) {
-            empty.style.display = "block";
-            empty.textContent = payload.empty_reason;
-        } else {
-            empty.style.display = "none";
-        }
-    }
-    const snaps = payload.snapshots || [];
-    if (!snaps.length) {
-        biasBody.innerHTML = '<tr><td colspan="5" class="muted">No bias samples yet — waiting for wallet poll</td></tr>';
-    } else {
-        biasBody.innerHTML = snaps.map(s => {
-            const b = Number(s.net_bias) || 0;
-            const col = b > 0.05 ? "var(--up)" : b < -0.05 ? "var(--down)" : "var(--muted)";
-            const barW = Math.min(100, Math.abs(b) * 100);
-            const notion = ((Number(s.long_notional_usd)||0) + (Number(s.short_notional_usd)||0));
-            const notionS = notion >= 1e6 ? (notion/1e6).toFixed(1)+"M" : notion >= 1e3 ? (notion/1e3).toFixed(0)+"k" : notion.toFixed(0);
-            const strong = Math.abs(b) >= thr;
-            return `<tr style="border-top:1px solid var(--border);">
-                <td class="highlight">${s.symbol}${strong ? ' <span class="pill" style="font-size:9px;">signal</span>' : ''}</td>
-                <td style="color:${col};" title="net_bias=${b.toFixed(3)}">
-                    <div style="background:var(--border);height:6px;width:64px;display:inline-block;vertical-align:middle;border-radius:3px;">
-                        <div style="height:6px;width:${barW}%;background:${col};border-radius:3px;"></div>
-                    </div> ${b.toFixed(2)} <span class="dim">${_ttLeanLabel(b)}</span>
-                </td>
-                <td>${s.n_long||0}/${s.n_short||0}</td>
-                <td class="num">${notionS}</td>
-                <td class="muted">${_ttFmtAge(s.age_ms)}</td>
-            </tr>`;
-        }).join("");
-    }
-    const opens = payload.open_positions || [];
-    if (openCount) openCount.textContent = opens.length ? `(${opens.length})` : "(0)";
-    if (!opens.length) {
-        openBody.innerHTML = '<tr><td colspan="6" class="muted">None yet — waiting for |bias| ≥ threshold</td></tr>';
-    } else {
-        openBody.innerHTML = opens.map(p => {
-            const pnl = Number(p.unrealized_pnl_pct) || 0;
-            const col = pnl >= 0 ? "var(--up)" : "var(--down)";
-            return `<tr style="border-top:1px solid var(--border);">
-                <td class="highlight">${p.symbol} <span class="dim" style="font-size:9px;">SIM</span></td>
-                <td class="${p.side==='long'?'up':'down'}">${(p.side||'').toUpperCase()}</td>
-                <td class="num">${Number(p.entry_price).toFixed(2)}</td>
-                <td style="color:${col};">${(pnl*100).toFixed(2)}%</td>
-                <td class="muted">${_ttFmtAge(p.age_ms)}</td>
-                <td class="num" title="entry bias → last bias">${Number(p.entry_bias||0).toFixed(2)} → ${Number(p.last_bias||0).toFixed(2)}</td>
-            </tr>`;
-        }).join("");
-    }
-    const closed = payload.closed_trades || [];
-    if (!closed.length) {
-        closedBody.innerHTML = '<tr><td colspan="5" class="muted">None yet</td></tr>';
-    } else {
-        closedBody.innerHTML = closed.slice(0, 15).map(t => {
-            const pnl = Number(t.pnl_pct) || 0;
-            const col = pnl >= 0 ? "var(--up)" : "var(--down)";
-            const holdAge = (t.entry_ts_ms != null && t.exit_ts_ms != null)
-                ? _ttFmtAge(Number(t.exit_ts_ms) - Number(t.entry_ts_ms)) : "—";
-            return `<tr style="border-top:1px solid var(--border);">
-                <td class="highlight">${t.symbol}</td>
-                <td class="${t.side==='long'?'up':'down'}">${(t.side||'').toUpperCase()}</td>
-                <td style="color:${col};">${(pnl*100).toFixed(2)}%</td>
-                <td class="muted">${_ttExitLabel(t.exit_reason)}</td>
-                <td class="muted">${holdAge}</td>
-            </tr>`;
-        }).join("");
-    }
+    const fd = t => t ? new Date(t).toLocaleDateString("pt-PT", {year:"numeric", month:"short", day:"numeric"}) : "—";
+    tbody.innerHTML = rows.map(h => {
+        const sealed = !!h.sealed;
+        const sealTxt = sealed ? '<span style="color:var(--yellow);font-weight:700;">SEALED</span>'
+                               : '<span class="up">aberto</span>';
+        const nTxt = h.indep_n != null ? h.indep_n + "/" + (h.target != null ? h.target : "?") : "—/" + (h.target != null ? h.target : "?");
+        const stateCls = h.state && h.state.indexOf("veredicto") === 0 ? "highlight" : "";
+        return `<tr>
+            <td class="highlight">${h.name}</td>
+            <td class="${stateCls}">${h.state}</td>
+            <td class="num">${nTxt}</td>
+            <td class="num">${h.n_clustered != null ? h.n_clustered : "—"}</td>
+            <td class="num">${h.rate_per_day != null ? h.rate_per_day.toFixed(2) : "—"}</td>
+            <td>${fd(h.eta_ms)}</td>
+            <td>${fd(h.expiry_ms)}</td>
+            <td>${sealTxt}</td>
+        </tr>`;
+    }).join("");
 }
+
+// ── Execução — decomposição do PnL líquido (fills + funding reais) ──
+function renderExecPnl(payload) {
+    const tbody = document.getElementById("exec-pnl-tbody");
+    if (!tbody) return;
+    const rows = (payload && payload.rows) || [];
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="muted">Sem trades fechados</td></tr>';
+        return;
+    }
+    const usd = v => v == null ? "—" : (v >= 0 ? "+" : "−") + "$" + fmtNum(Math.abs(v));
+    tbody.innerHTML = rows.map(r => {
+        const netCls = r.net >= 0 ? "up" : "down";
+        return `<tr>
+            <td class="highlight">${r.strategy}</td>
+            <td class="num">${r.trades}</td>
+            <td class="num">${r.win_rate != null ? (100 * r.win_rate).toFixed(0) + "%" : "—"}</td>
+            <td class="num">${usd(r.gross)}</td>
+            <td class="num down">−$${fmtNum(r.fees)}</td>
+            <td class="num down">−$${fmtNum(r.slippage)}</td>
+            <td class="num ${r.funding >= 0 ? "up" : "down"}">${usd(r.funding)}</td>
+            <td class="num ${netCls}" style="font-weight:700;">${usd(r.net)}</td>
+            <td class="num">${r.net_bps_on_notional != null ? r.net_bps_on_notional.toFixed(1) : "—"}</td>
+        </tr>`;
+    }).join("");
+}
+
+// ── Divergência exec ↔ sim — tripwire para bugs do avaliador ──
+function renderDivergence(payload) {
+    const body = document.getElementById("divergence-body");
+    const badge = document.getElementById("divergence-badge");
+    if (!body) return;
+    if (!payload || payload.error || payload.n_pairs == null) {
+        body.innerHTML = '<span class="muted">Indisponível</span>';
+        if (badge) { badge.textContent = "—"; badge.className = "badge badge-dim"; }
+        return;
+    }
+    const n = payload.n_pairs || 0;
+    const minN = payload.min_pairs || 5;
+    const thr = payload.alert_threshold_bps || 25;
+    if (n < minN) {
+        if (badge) { badge.textContent = "n=" + n; badge.className = "badge badge-dim"; }
+        body.innerHTML = '<span class="muted">A acumular pares exec↔sim (' + n + '/' + minN + ' para o alerta)</span>';
+        return;
+    }
+    const alert = !!payload.alert;
+    if (badge) {
+        badge.textContent = alert ? "ALERT" : "OK";
+        badge.className = "badge " + (alert ? "badge-red" : "badge-green");
+    }
+    const mad = payload.mean_abs_delta_bps, sd = payload.mean_delta_bps, mx = payload.max_abs_delta_bps;
+    body.innerHTML = `
+        <div class="mini-stats">
+            <div class="mini-row"><span class="mini-label">mean |Δ|</span>
+                <span class="mini-value ${alert ? 'down' : 'up'}">${mad != null ? mad.toFixed(1) : "—"} bps</span></div>
+            <div class="mini-row"><span class="mini-label">mean Δ (signed)</span>
+                <span class="mini-value">${sd != null ? (sd >= 0 ? "+" : "") + sd.toFixed(1) : "—"} bps</span></div>
+            <div class="mini-row"><span class="mini-label">max |Δ|</span>
+                <span class="mini-value">${mx != null ? mx.toFixed(1) : "—"} bps</span></div>
+            <div class="mini-row"><span class="mini-label">pares / threshold</span>
+                <span class="mini-value">${n} · alerta &gt; ${thr} bps</span></div>
+        </div>
+        <div class="dim" style="font-size:9px;margin-top:4px;">real paper PnL vs simulação do avaliador na mesma decisão — drift &gt;${thr} bps sugere bug no eval</div>`;
+}
+
+// ── Decision feed — sinal → decisão de risco → execução (uma linha) ──
+function renderDecisionFeed(data) {
+    const div = document.getElementById("decision-feed-list");
+    if (!div) return;
+    const rows = Array.isArray(data) ? data : ((data && data.rows) || []);
+    if (!rows.length) { div.innerHTML = '<span class="muted">No signals yet</span>'; return; }
+    const stagePill = {
+        executed: "pill-executed", pending: "pill-pending",
+        rejected: "pill-rejected", emitted: "pill-pending",
+    };
+    div.innerHTML = rows.slice(0, 40).map(s => {
+        const sideClass = s.side === "long" ? "up" : s.side === "short" ? "down" : "";
+        const pnlTxt = s.trade_pnl_usd != null
+            ? ' <span class="' + (s.trade_pnl_usd >= 0 ? 'up' : 'down') + '">' +
+              (s.trade_pnl_usd >= 0 ? '+' : '') + '$' + fmtNum(s.trade_pnl_usd) + '</span>'
+            : "";
+        const tradeTxt = s.trade_id != null
+            ? ' <span class="dim">#' + s.trade_id + ' ' + (s.trade_status || '') + '</span>' + pnlTxt
+            : "";
+        const confTxt = s.confidence != null ? ' <span class="dim">' + (s.confidence * 100).toFixed(0) + '%</span>' : "";
+        const det = s.stage_detail ? ' <span class="dim">' + s.stage_detail + '</span>' : "";
+        return `<div class="stream-item">
+            <span class="stream-time">${fmtTime(s.ts)}</span>
+            <span class="stream-symbol">${s.symbol}</span>
+            <span class="${sideClass}">${(s.side || "--").toUpperCase()}</span>
+            <span class="muted">${s.strategy || "?"}${confTxt}</span>
+            <span class="pill ${stagePill[s.stage] || "pill-pending"}">${(s.stage || "emitted").toUpperCase()}</span>${det}${tradeTxt}
+        </div>`;
+    }).join('');
+}
+
+
+
+
+
+
+
+
 
 // ── Research watchdogs ──
 function renderResearchWatchdogs(payload) {
@@ -1587,271 +1160,6 @@ function fmtDur(sec) {
     return (sec / 86400).toFixed(1) + "d";
 }
 
-function sparklineSvg(series, w, h, warnFrac, imminentFrac) {
-    // series: [[ts_ms, pct], ...] — % of silence threshold per bucket, 24h.
-    // Color from the CONFIGURED warn/imminent fractions (same single source
-    // as the bar/% columns) — never a hardcoded 60/90 that could drift.
-    if (!series || !series.length) return '<span class="muted">—</span>';
-    const raw = series.map(p => Number(p[1]));
-    const vals = raw.map(v => Math.max(0, Math.min(100, v)));
-    const minV = Math.min.apply(null, vals);
-    const maxV = Math.max.apply(null, vals);
-    const span = Math.max(1, maxV - minV);
-    const pad = 2;
-    const x = (i) => pad + (i / Math.max(1, vals.length - 1)) * (w - 2 * pad);
-    const y = (v) => (h - pad) - ((v - minV) / span) * (h - 2 * pad);
-    const pts = vals.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
-    const wF = warnFrac != null ? Number(warnFrac) : 0.5;
-    const iF = imminentFrac != null ? Number(imminentFrac) : 0.9;
-    const color = maxV >= iF * 100 ? "var(--down)" : maxV >= wF * 100 ? "var(--warn, #d29922)" : "var(--up)";
-    // data-tips carries the RAW values (unclamped, exact pct) + bucket ts
-    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block;cursor:crosshair;" data-tips="' +
-        encodeURIComponent(JSON.stringify(series.map((p, i) => [p[0], raw[i]]))) +
-        '" data-tip-format="pct">' +
-        '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.2" />' +
-        '<circle cx="' + x(vals.length - 1).toFixed(1) + '" cy="' + y(vals[vals.length - 1]).toFixed(1) + '" r="1.6" fill="' + color + '" />' +
-        '</svg>';
-}
-
-function sparklineAbs(series, w, h, maxSilenceSec, warnFrac, imminentFrac) {
-    // series: [[ts_ms, max_age_sec], ...] — daily max age, last 14 days.
-    // Raw seconds scaled to the cell; color by fraction of the feed's
-    // silence threshold using the CONFIGURED warn/imminent fractions (same
-    // single source as the other columns), never a hardcoded 60/90.
-    if (!series || !series.length) return '<span class="muted">—</span>';
-    const raw = series.map(p => Math.max(0, Number(p[1])));
-    const vals = raw.slice();
-    const minV = Math.min.apply(null, vals);
-    const maxV = Math.max.apply(null, vals);
-    const span = Math.max(1, maxV - minV);
-    const pad = 2;
-    const x = (i) => pad + (i / Math.max(1, vals.length - 1)) * (w - 2 * pad);
-    const y = (v) => (h - pad) - ((v - minV) / span) * (h - 2 * pad);
-    const pts = vals.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
-    const th = Math.max(1, Number(maxSilenceSec) || 1);
-    const lastPct = (vals[vals.length - 1] / th) * 100;
-    const wF = warnFrac != null ? Number(warnFrac) : 0.5;
-    const iF = imminentFrac != null ? Number(imminentFrac) : 0.9;
-    const color = lastPct >= iF * 100 ? "var(--down)" : lastPct >= wF * 100 ? "var(--warn, #d29922)" : "var(--up)";
-    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block;cursor:crosshair;" data-tips="' +
-        encodeURIComponent(JSON.stringify(series.map((p, i) => [p[0], raw[i]]))) +
-        '" data-tip-format="abs">' +
-        '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.2" />' +
-        '<circle cx="' + x(vals.length - 1).toFixed(1) + '" cy="' + y(vals[vals.length - 1]).toFixed(1) + '" r="1.6" fill="' + color + '" />' +
-        '</svg>';
-}
-
-// ── Sparkline hover tooltip: exact value + timestamp of the nearest bucket ──
-let _sparkTip = null;
-function _sparkTipEl() {
-    if (!_sparkTip) {
-        _sparkTip = document.createElement("div");
-        _sparkTip.style.cssText = "position:fixed;z-index:9999;pointer-events:none;display:none;" +
-            "background:rgba(18,22,28,0.95);border:1px solid var(--border);border-radius:4px;" +
-            "padding:3px 6px;font-size:10px;color:var(--text);white-space:nowrap;font-family:'SF Mono','Consolas',monospace;";
-        document.body.appendChild(_sparkTip);
-    }
-    return _sparkTip;
-}
-document.addEventListener("mousemove", function (e) {
-    const tip = _sparkTipEl();
-    const svg = e.target && e.target.closest ? e.target.closest("svg[data-tips]") : null;
-    if (!svg) { tip.style.display = "none"; return; }
-    let series = null;
-    try { series = JSON.parse(decodeURIComponent(svg.getAttribute("data-tips"))); } catch (err) { series = null; }
-    if (!series || !series.length) { tip.style.display = "none"; return; }
-    const rect = svg.getBoundingClientRect();
-    const frac = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
-    const idx = Math.max(0, Math.min(series.length - 1, Math.round(frac * (series.length - 1))));
-    const [ts, v] = series[idx];
-    const fmt = svg.getAttribute("data-tip-format");
-    const txt = fmt === "pct"
-        ? fmtTime(ts) + " · " + v.toFixed(1) + "% do threshold"
-        : fmtDate(ts) + " · max " + fmtDur(v);
-    tip.textContent = txt;
-    tip.style.display = "block";
-    tip.style.left = (e.clientX + 12) + "px";
-    tip.style.top = (e.clientY + 14) + "px";
-});
-
-function renderFeedSilence(payload) {
-    const tbody = document.getElementById("feed-silence-tbody");
-    const meta = document.getElementById("feed-silence-meta");
-    if (!tbody) return;
-    const sil = (payload && payload.feed_silence) || {};
-    const sparks = (payload && payload.feed_silence_spark) || {};
-    const daily = (payload && payload.feed_silence_daily) || {};
-    const creep = (payload && payload.feed_silence_creep) || {};
-    const entries = Object.entries(sil);
-    if (!entries.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="muted">No silence data (feed_silence monitor off)</td></tr>';
-        if (meta) meta.textContent = "threshold vs age";
-        return;
-    }
-    // Global header state: the whole header bar turns amber when any contracted
-    // feed crosses ~90% of its silence threshold (imminent, still healthy) and
-    // red when a feed actually degrades. Consumes only the monitor's
-    // per-feed `warn_level` field (single derivation) plus the backend flag.
-    const hdr = document.querySelector(".header");
-    const imminentAny = !!(payload && payload.feed_silence_imminent)
-        || Object.values(sil).some(st => st && st.warn_level === "imminent");
-    const degradedAny = !!(payload && payload.feed_silence_degraded);
-    if (hdr) {
-        hdr.classList.toggle("state-degraded", degradedAny);
-        hdr.classList.toggle("state-imminent", !degradedAny && imminentAny);
-        const imminentNames = Object.entries(sil)
-            .filter(([, st]) => st && st.warn_level === "imminent")
-            .map(([f]) => f);
-        hdr.title = imminentNames.length
-            ? "FEED IMMINENT: " + imminentNames.join(", ") + " at ≥90% of silence threshold"
-            : "";
-    }
-    if (meta) meta.textContent = payload && payload.feed_silence_degraded
-        ? "degraded feeds present" : "all feeds healthy";
-    const rows = entries.map(([feed, st]) => {
-        const age = st.age_sec == null ? null : Number(st.age_sec);
-        const max = Number(st.max_silence_sec) || 0;
-        const degraded = !!st.degraded;
-        // % of threshold: pure display (bar width + text) — the COLOR comes
-        // from warn_level below, never from hardcoded 60/90 cutoffs that
-        // could drift from the configured warn/imminent fractions.
-        let pct = null, pctTxt = "—";
-        if (age != null && max > 0) {
-            pct = (age / max) * 100;
-            pctTxt = pct.toFixed(0) + "%";
-        }
-        const ageTxt = age == null ? "—" : (age < 60 ? age.toFixed(0) + "s"
-            : age < 3600 ? (age / 60).toFixed(1) + "m"
-            : (age / 3600).toFixed(1) + "h");
-        const maxTxt = (max / 3600).toFixed(1) + "h";
-        // Expected gap = historical p95/p99 cadence of this feed. Distinguishes
-        // normal quiet (age < p99) from anomalous thinning (age > p99).
-        const p95 = st.cadence_p95_sec == null ? null : Number(st.cadence_p95_sec);
-        const p99 = st.cadence_p99_sec == null ? null : Number(st.cadence_p99_sec);
-        const p50 = st.cadence_p50_sec == null ? null : Number(st.cadence_p50_sec);
-        const gapPct = st.cadence_pct_current == null ? null : Number(st.cadence_pct_current);
-        // where the CURRENT gap sits in the feed's recorded distribution
-        const gapPctTxt = gapPct != null
-            ? ' · gap actual no percentil ' + gapPct.toFixed(0) + ' do histórico' : '';
-        const nSamples = st.cadence_samples == null ? 0 : Number(st.cadence_samples);
-        // Cadence breach: the current gap is ABOVE the feed's own rolling p99
-        // (the same condition that fires check_cadence) — delivery is thinning
-        // out. p95 breach is the softer amber step below it.
-        const gapOverP99 = (age != null && p99 != null && age > p99);
-        const gapOverP95 = !gapOverP99 && (age != null && p95 != null && age > p95);
-        // Color by where the current gap sits in the feed's own distribution
-        // (0-100, continuous ramp) once the p99 is trusted — the rank is the
-        // signal, not a hard p95/p99 cutoff. The badge and text keep the
-        // exact p99 breach for the alert semantics.
-        const colorPct = (p99 != null && gapPct != null) ? gapPct : null;
-        const expColor = colorPct == null ? "var(--muted)" : cadenceColor(colorPct);
-        const expTxt = (p99 == null)
-            ? (nSamples > 0 ? "learning…" : "—")
-            : gapOverP99 ? "gap " + fmtDur(age) + " > p99 " + fmtDur(p99)
-            : "exp ≤ " + fmtDur(p99);
-        const warnLvl = st.warn_level || "none";
-        const alerted50 = !!st.warned_50_pct;
-        const alerted90 = !!st.warned_90_pct;
-        const earlyFrac = st.warn_fraction != null
-            ? Math.round(Number(st.warn_fraction) * 100) : 50;
-        const imminentFrac = st.imminent_fraction != null
-            ? Math.round(Number(st.imminent_fraction) * 100) : 90;
-        // WHEN each alert fired (persisted in the monitor state, reset on
-        // beat) — 'early 14:32' style, with full precision in the tooltip.
-        const earlyAt = st.warned_50_at_ms ? " · " + fmtHM(st.warned_50_at_ms) : "";
-        const imminentAt = st.warned_90_at_ms ? " · " + fmtHM(st.warned_90_at_ms) : "";
-        // Daily episode counters (UTC day, rolled by the monitor): how many
-        // early/imminent episodes this feed has already had today. Visible as
-        // 'N× hoje' next to the level; per-level breakdown in the tooltip.
-        const earlyToday = st.early_count_today == null ? 0 : Number(st.early_count_today);
-        const imminentToday = st.imminent_count_today == null ? 0 : Number(st.imminent_count_today);
-        const epsToday = earlyToday + imminentToday;
-        const todayTxt = epsToday > 0 ? " · " + epsToday + "× hoje" : "";
-        const epsTitle = (earlyToday > 0 || imminentToday > 0)
-            ? " · " + (earlyToday > 0 ? earlyToday + " episódio(s) early" : "")
-              + (earlyToday > 0 && imminentToday > 0 ? " + " : "")
-              + (imminentToday > 0 ? imminentToday + " episódio(s) imminent" : "") + " hoje"
-            : "";
-        const alertedTitle = (degraded ? ""
-            : alerted90 && st.warned_90_at_ms
-                ? "imminent disparou a " + fmtTime(st.warned_90_at_ms) + " · " + fmtDate(st.warned_90_at_ms)
-            : alerted50 && st.warned_50_at_ms
-                ? "early disparou a " + fmtTime(st.warned_50_at_ms) + " · " + fmtDate(st.warned_50_at_ms)
-            : "") + epsTitle;
-        const alertedTxt = degraded ? "—"
-            : alerted90 ? "imminent @ " + imminentFrac + "%" + imminentAt + todayTxt
-            : alerted50 ? "early @ " + earlyFrac + "%" + earlyAt + todayTxt
-            : "—";
-        const alertedColor = degraded ? "var(--muted)"
-            : alerted90 ? "var(--down)"
-            : alerted50 ? "var(--warn, #d29922)"
-            : "var(--muted)";
-        const stateTxt = warnLvl === "degraded" ? "DEGRADED"
-            : warnLvl === "imminent" ? "IMMINENT"
-            : warnLvl === "early" ? "EARLY"
-            : (pct == null ? "never seen" : "OK");
-        const stateColor = warnLvl === "degraded" ? "var(--down)"
-            : warnLvl === "imminent" ? "var(--down)"
-            : warnLvl === "early" ? "var(--warn, #d29922)"
-            : "var(--up)";
-        // Bar + % text colors keyed off the SAME single warn_level — so the
-        // visual escalation tracks the configured warn/imminent fractions
-        // (FEED_SILENCE_WARN_FRACTION / _IMMINENT_FRACTION) instead of
-        // re-deriving a fixed 60/90% cutoff that could drift from the config.
-        const barW = Math.max(2, Math.min(100, pct == null ? 0 : pct));
-        const barColor = warnLvl === "degraded" || warnLvl === "imminent"
-            ? "var(--down)" : warnLvl === "early" ? "#d29922" : "var(--up)";
-        const pctColor = warnLvl === "degraded" || warnLvl === "imminent"
-            ? "var(--down)" : warnLvl === "early" ? "#d29922" : "var(--muted)";
-        // Creep badge: the production staircase rule (feed_silence_creep) sees
-        // the daily max age rising consistently — same signal as the
-        // feed_age_creep watchdog. Amber normally, red when the staircase is
-        // already >=90% of the threshold.
-        const cr = creep[feed];
-        const creepBadge = cr && cr.creeping
-            ? '<span class="pill ' + ((pct != null && pct >= 90) ? "pill-creep-hi" : "pill-creep") + '" title="max age diário a subir há ' + cr.days + ' dias (+' + Math.round(cr.growth_frac * 100) + '% do threshold) — cadência a degradar">creeping</span>'
-            : '';
-        // Cadence badge: current gap above the feed's rolling p99 (or the
-        // fire-once check_cadence already flagged this episode). Tooltip
-        // carries the exact comparison and the sample count behind the p99.
-        const cadenceBad = gapOverP99 || !!st.warned_cadence;
-        const cadenceBadge = cadenceBad && p99 != null
-            ? '<span class="pill pill-cadence" title="gap atual ' + fmtDur(age) + ' > p99 histórico ' + fmtDur(p99) + ' (n=' + nSamples + ')' + (st.warned_cadence ? ' — alerta cadence emitido' : '') + ' — cadência a degradar">cadence</span>'
-            : '';
-        // Boot verdict badge: the preflight that ran at boot classified this
-        // feed as merely stale (bot was off — age explained by the downtime,
-        // boot NOT gated) vs genuinely dead while the bot ran (boot blocked,
-        // the fstream lesson). Verdict of the LAST boot; the runtime
-        // warn_level above stays the source of truth for the row's color.
-        const bootDowntime = st.boot_downtime_sec == null ? null : Number(st.boot_downtime_sec);
-        const bootAt = st.boot_at_ms ? fmtHM(Number(st.boot_at_ms)) : '';
-        const bootBadge = st.boot_status === "stale-since-downtime"
-            ? '<span class="pill pill-stale" title="no boot o feed estava obsoleto porque o bot esteve desligado (downtime ' + (bootDowntime == null ? '?' : fmtDur(bootDowntime)) + ' + tolerância) — o preflight NÃO bloqueou o arranque; o monitor runtime assume a partir daqui' + (bootAt ? ' · boot às ' + bootAt : '') + '">stale@boot</span>'
-            : st.boot_status === "fail"
-                ? '<span class="pill pill-dead" title="no boot o feed já estava morto enquanto o bot corria — o preflight bloqueou o arranque (lição fstream)' + (bootAt ? ' · boot às ' + bootAt : '') + '">dead@boot</span>'
-                : '';
-        return '<tr style="border-top:1px solid var(--border);">' +
-            '<td style="padding:3px 4px;font-family:monospace;">' + feed + ' ' + creepBadge + ' ' + cadenceBadge + ' ' + bootBadge + '</td>' +
-            '<td style="padding:3px 4px;">' + ageTxt +
-                '<div style="font-size:9px;color:' + expColor + ';white-space:nowrap;" title="Distribuição de gaps do feed (p50/p95/p99 = ' + (p50 == null ? "—" : fmtDur(p50)) + ' / ' + (p95 == null ? "—" : fmtDur(p95)) + ' / ' + (p99 == null ? "—" : fmtDur(p99)) + ')' + gapPctTxt + ' · learning needs ' + (st.cadence_min_samples == null ? 100 : Number(st.cadence_min_samples)) + ' gap samples (FEED_CADENCE_MIN_SAMPLES)">' + expTxt + '</div>' +
-            '</td>' +
-            '<td style="padding:3px 4px;">' + maxTxt + '</td>' +
-            '<td style="padding:3px 4px;width:26%;">' +
-                '<div style="display:flex;align-items:center;gap:6px;">' +
-                    '<div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;">' +
-                        '<div style="width:' + barW + '%;height:100%;background:' + barColor + ';"></div>' +
-                    '</div>' +
-                    '<span style="font-size:10px;white-space:nowrap;color:' + pctColor + ';">' + pctTxt + '</span>' +
-                '</div>' +
-            '</td>' +
-            '<td style="padding:3px 4px;width:96px;">' + sparklineSvg(sparks[feed] || [], 92, 20, st.warn_fraction, st.imminent_fraction) + '</td>' +
-            '<td style="padding:3px 4px;width:96px;" title="Daily max age (seconds) per UTC day, last 14 days">' + sparklineAbs(daily[feed] || [], 92, 20, max, st.warn_fraction, st.imminent_fraction) + '</td>' +
-            '<td style="padding:3px 4px;font-weight:600;color:' + alertedColor + ';" title="' + alertedTitle.replace(/"/g, "&quot;") + '">' + alertedTxt + '</td>' +
-            '<td style="padding:3px 4px;font-weight:600;color:' + stateColor + ';">' + stateTxt + '</td>' +
-            '</tr>';
-    }).join("");
-    tbody.innerHTML = rows;
-}
 
 function renderDvolPanel(payload) {
     const cur = document.getElementById("dvol-current");
@@ -1906,173 +1214,13 @@ function drawDvolChart(container, series, threshold) {
 }
 
 // ── IV gate shadow sample ──
-function renderIvGateShadow(payload) {
-    const tbody = document.getElementById("ivshadow-tbody");
-    if (!tbody) return;
-    if (!payload || payload.error || !payload.by_class) {
-        tbody.innerHTML = '<tr><td colspan="6" class="muted">Unavailable</td></tr>';
-        return;
-    }
-    const target = Number(payload.target_closed) || 30;
-    document.getElementById("ivshadow-target").textContent = target;
-    const rows = payload.by_class;
-    const withDec = Number(payload.trades_with_decision) || 0;
-    const total = Math.max(1, withDec);
-    const order = ["high_iv", "low_iv", "unknown"];
-    const labels = { high_iv: "high_iv", low_iv: "low_iv", unknown: "unknown (sem decisão)" };
-    const colors = { high_iv: "var(--up)", low_iv: "var(--down)", unknown: "var(--muted)" };
-    const rowsHtml = order.map(cls => {
-        const s = rows[cls] || { n: 0, n_closed: 0, n_open: 0, n_pct: 0, avg_pct: null, net_pnl_usd: null, win_rate: null, avg_pnl_usd: null };
-        const pctShare = total > 0 ? (s.n / total * 100) : 0;
-        const avgPct = s.avg_pct == null ? "—" : s.avg_pct.toFixed(1) + "%";
-        const nPctNote = s.n_pct ? ' <span class="dim" style="font-size:9px;">(' + s.n_pct + " com pct)</span>" : "";
-        const net = s.net_pnl_usd == null ? "—" :
-            '<span class="' + (s.net_pnl_usd >= 0 ? "up" : "down") + '">' +
-            (s.net_pnl_usd >= 0 ? "+" : "") + s.net_pnl_usd.toFixed(2) + '</span>';
-        const wr = s.win_rate == null ? "—" : (s.win_rate * 100).toFixed(0) + "%";
-        const avg = s.avg_pnl_usd == null ? "—" :
-            '<span class="' + (s.avg_pnl_usd >= 0 ? "up" : "down") + '">' +
-            (s.avg_pnl_usd >= 0 ? "+" : "") + s.avg_pnl_usd.toFixed(2) + '</span>';
-        return '<tr>' +
-            '<td style="color:' + (colors[cls] || "") + ';font-weight:600;">' + (labels[cls] || cls) + '</td>' +
-            '<td>' + s.n + '</td>' +
-            '<td>' + s.n_closed + '</td>' +
-            '<td>' + s.n_open + '</td>' +
-            '<td>' + pctShare.toFixed(0) + '%</td>' +
-            '<td>' + avgPct + nPctNote + '</td>' +
-            '<td class="num">' + net + '</td>' +
-            '<td class="num">' + wr + '</td>' +
-            '<td class="num">' + avg + '</td>' +
-            '</tr>';
-    }).join("");
-    tbody.innerHTML = rowsHtml;
-    // Progress toward the decision gate (n closed with an IV decision).
-    const closed = (rows.high_iv ? rows.high_iv.n_closed : 0) + (rows.low_iv ? rows.low_iv.n_closed : 0);
-    const pct = Math.max(0, Math.min(100, closed / target * 100));
-    document.getElementById("ivshadow-progress-txt").textContent =
-        closed + "/" + target + " closed com decisão";
-    document.getElementById("ivshadow-pct").textContent = pct.toFixed(0) + "%";
-    const fill = document.getElementById("ivshadow-bar-fill");
-    fill.style.width = pct.toFixed(0) + "%";
-    fill.style.background = pct >= 100 ? "var(--up)" : (pct >= 60 ? "var(--yellow, #d29922)" : "var(--accent, #4a9eff)");
-    // Decision-count-per-day sparkline (sample accumulation rate, 14d).
-    const rateSvg = document.getElementById("ivshadow-rate-svg");
-    const rateSum = document.getElementById("ivshadow-rate-sum");
-    const perDay = (payload.decisions_per_day || []).map(d => ({ date: d.date, n: Number(d.n) || 0 }));
-    if (rateSvg && perDay.length) {
-        const maxN = Math.max.apply(null, perDay.map(d => d.n).concat([1]));
-        const lastN = perDay[perDay.length - 1].n;
-        const total14 = perDay.reduce((a, d) => a + d.n, 0);
-        const bw = Math.max(2, Math.floor(520 / perDay.length) - 2);
-        const bars = perDay.map(d => {
-            const h = Math.max(1, Math.round((d.n / maxN) * 34));
-            const color = d.n === 0 ? "var(--border)" : "var(--accent, #4a9eff)";
-            const title = d.date + ": " + d.n + " decisões";
-            return '<div title="' + title + '" style="display:inline-block;width:' + bw + 'px;height:38px;margin-right:2px;vertical-align:bottom;">' +
-                '<div style="height:' + h + 'px;background:' + color + ';border-radius:2px 2px 0 0;"></div>' +
-                '<div style="font-size:8px;color:var(--dim);text-align:center;">' + (d.n > 0 ? d.n : "") + '</div>' +
-                '</div>';
-        }).join("");
-        rateSvg.innerHTML = bars;
-        if (rateSum) {
-            rateSum.textContent = " · total 14d: " + total14 + " · hoje: " + lastN;
-        }
-    } else if (rateSvg) {
-        rateSvg.innerHTML = '<span class="muted">—</span>';
-    }
-    // Distribution by strategy / symbol (per IV class + aggregate).
-    function renderDim(tbodyId, dim) {
-        const tbody = document.getElementById(tbodyId);
-        if (!tbody) return;
-        const entries = Object.entries(dim || {});
-        if (!entries.length) {
-            tbody.innerHTML = '<tr><td colspan="5" class="muted">—</td></tr>';
-            return;
-        }
-        tbody.innerHTML = entries.map(([key, st]) => {
-            const c = st.classes || {};
-            const hi = (c.high_iv && c.high_iv.n) || 0;
-            const lo = (c.low_iv && c.low_iv.n) || 0;
-            const unk = (c.unknown && c.unknown.n) || 0;
-            const net = st.n_closed == null || st.n_closed === 0 ? null :
-                (c.high_iv && c.high_iv.net_pnl_usd != null ? c.high_iv.net_pnl_usd : 0) +
-                (c.low_iv && c.low_iv.net_pnl_usd != null ? c.low_iv.net_pnl_usd : 0) +
-                (c.unknown && c.unknown.net_pnl_usd != null ? c.unknown.net_pnl_usd : 0);
-            const netTxt = net == null ? "—" :
-                '<span class="' + (net >= 0 ? "up" : "down") + '">' + (net >= 0 ? "+" : "") + net.toFixed(2) + '</span>';
-            const mixTxt = '<span class="up">' + hi + '</span>/<span class="down">' + lo + '</span>/<span class="muted">' + unk + '</span>';
-            return '<tr>' +
-                '<td class="highlight">' + key + '</td>' +
-                '<td>' + st.n + '</td>' +
-                '<td>' + st.n_closed + '</td>' +
-                '<td>' + mixTxt + '</td>' +
-                '<td class="num">' + netTxt + '</td>' +
-                '</tr>';
-        }).join("");
-    }
-    renderDim("ivshadow-strat-tbody", payload.by_strategy);
-    renderDim("ivshadow-sym-tbody", payload.by_symbol);
-    const cov = document.getElementById("ivshadow-coverage");
-    const jc = payload.join_coverage_pct == null ? null : Number(payload.join_coverage_pct);
-    const tc = payload.trade_coverage_pct == null ? null : Number(payload.trade_coverage_pct);
-    // Concentration caveat banner: the sample is dominated by one strategy /
-    // symbol (~80%+) — the verdict would reflect that single driver.
-    const conc = payload.concentration;
-    const concTxt = conc && conc.flagged
-        ? '<div style="margin-top:6px;color:var(--warn, #d29922);font-weight:600;font-size:10px;" title="Top estratégia ' + ((conc.combined && conc.combined.top_strategy) || '—') + ' com ' + Math.round(((conc.combined && conc.combined.top_strategy_share) || 0) * 100) + '% e top símbolo ' + ((conc.combined && conc.combined.top_symbol) || '—') + ' com ' + Math.round(((conc.combined && conc.combined.top_symbol_share) || 0) * 100) + '% da amostra (≥' + Math.round((conc.threshold || 0.8) * 100) + '%) — o veredito reflete um único driver, não o regime IV">⚠ Concentração: amostra dominada por um único driver</div>'
-        : '';
-    const covBar = (label, pct, color) => pct == null ? "" :
-        '<div style="display:flex;align-items:center;gap:6px;margin:2px 0;">' +
-        '<span style="min-width:150px;">' + label + '</span>' +
-        '<div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden;">' +
-        '<div style="width:' + Math.max(0, Math.min(100, pct)).toFixed(0) + '%;height:100%;background:' + color + ';"></div></div>' +
-        '<span style="min-width:44px;text-align:right;">' + pct.toFixed(1) + '%</span></div>';
-    cov.innerHTML =
-        '<div style="margin-bottom:4px;"><b>Cobertura do join</b> — decisões→trades (wiring, não edge):</div>' +
-        covBar("decisões matched a trades", jc, jc >= 90 ? "var(--up)" : jc >= 60 ? "var(--warn, #d29922)" : "var(--down)") +
-        covBar("trades com decisão IV", tc, tc >= 90 ? "var(--up)" : tc >= 60 ? "var(--warn, #d29922)" : "var(--down)") +
-        concTxt +
-        '<div style="margin-top:4px;">decisões: ' + (payload.n_decisions || 0) +
-        " · matched: " + (payload.matched || 0) +
-        " · trades com decisão: " + withDec + " / " + (payload.total || 0) +
-        (payload.verdict && payload.verdict.status ? " · veredito: <b>" + payload.verdict.status + "</b>" : "") +
-        " · backtest ref: " + (payload.backtest ? "+" + payload.backtest.net_high_iv_only_usd + " USD (n=" + payload.backtest.n + ")" : "—") +
-        '</div>';
-}
+
 
 // ── Signals ──
-function renderSignals(data) {
-    const div = document.getElementById("signals-list");
-    if (!data || data.length === 0) { div.innerHTML = '<span class="muted">No signals yet</span>'; return; }
-    div.innerHTML = data.slice(0, 20).map(s => {
-        const sideClass = s.side === "long" ? "up" : s.side === "short" ? "down" : "";
-        const statusClass = s.status === "executed" ? "pill-executed" : s.status === "approved" ? "pill-approved" : s.status === "rejected" ? "pill-rejected" : "pill-pending";
-        return `<div class="stream-item">
-            <span class="stream-time">${s.time || fmtTime(s.timestamp_ms)}</span>
-            <span class="stream-symbol">${s.symbol}</span>
-            <span class="${sideClass}">${s.side ? s.side.toUpperCase() : "--"}</span>
-            <span class="pill ${statusClass}">${s.status || "PENDING"}</span>
-            <span class="muted">${s.strategy || "?"}</span>
-            <span class="muted">${s.confidence != null ? (s.confidence * 100).toFixed(0) + "%" : ""}</span>
-        </div>`;
-    }).join('');
-}
+
 
 // ── Decisions ──
-function renderDecisions(data) {
-    const div = document.getElementById("decisions-list");
-    if (!data || data.length === 0) { div.innerHTML = '<span class="muted">No decisions yet</span>'; return; }
-    div.innerHTML = data.slice(0, 20).map(d => {
-        const resultClass = d.result === "approved" || d.result === "executed" ? "up" : d.result === "rejected" ? "down" : "";
-        return `<div class="stream-item">
-            <span class="stream-time">${d.time || fmtTime(d.timestamp_ms)}</span>
-            <span class="stream-symbol">${d.symbol}</span>
-            <span class="${d.side === 'long' ? 'up' : d.side === 'short' ? 'down' : ''}">${d.side ? d.side.toUpperCase() : "--"}</span>
-            <span class="${resultClass}">${d.result || d.status || "--"}</span>
-            <span class="muted tiny">${d.reason ? d.reason.substring(0, 40) : ""}</span>
-        </div>`;
-    }).join('');
-}
+
 
 // ── Positions ──
 let _positionsAll = [];
@@ -2260,22 +1408,7 @@ function renderTrades(data) {
 }
 
 // ── Logs ──
-function renderLogs(data) {
-    const div = document.getElementById("logs-container");
-    if (!data || data.length === 0) { div.innerHTML = '<span class="muted">Waiting for logs...</span>'; return; }
-    div.innerHTML = data.map(l => {
-        if (typeof l === "string") {
-            const cls = l.includes("WARNING") ? "log-warn" : l.includes("ERROR") || l.includes("CRITICAL") ? "log-error" : "";
-            return `<div class="log-entry ${cls}">${l}</div>`;
-        }
-        let cls = "log-info";
-        const level = (l.level || "").toUpperCase();
-        if (level === "WARNING" || level === "WARN") cls = "log-warn";
-        if (level === "ERROR" || level === "CRITICAL") cls = "log-error";
-        return `<div class="log-entry ${cls}"><span class="muted">${l.time || ""}</span> <span class="${cls}">[${level}]</span> ${l.message || ""}</div>`;
-    }).join('');
-    div.scrollTop = div.scrollHeight;
-}
+
 
 // ── Alert banner — critical states surfaced above the fold ──
 function updateAlertBanner() {
@@ -2424,46 +1557,10 @@ socket.on("status", (data) => {
 let _lastPortfolio = null;
 let _lastEngine = null;
 socket.on("portfolio", (data) => { _lastPortfolio = data; updateKPIs(data, _lastEngine); });
-socket.on("engine_monitor", (data) => { _lastEngine = data; renderEngine(data); renderRegime(data); renderRiskGates(data); renderGovernor(data); updateKPIs(_lastPortfolio, data); });
-socket.on("live_data", (data) => { renderLiveData(data); renderVolIndicators(data); });
-socket.on("funding_update", (data) => {
-    _fundingPred = data || {};
-    if (_lastLiveRows) renderLiveData(_lastLiveRows);
-});
-socket.on("candles", (data) => renderCandles(data));
-socket.on("signals", (data) => renderSignals(data));
-socket.on("decisions", (data) => renderDecisions(data));
-socket.on("jev_verdicts", (data) => renderJevVerdicts(data));
-
-// ── Jev verdicts (TypeSafe experiment) ──
-function renderJevVerdicts(data) {
-    const div = document.getElementById("jev-list");
-    const sub = document.getElementById("jev-sub");
-    const rows = (data && data.verdicts) || [];
-    const minConf = (data && data.min_confidence) || 0.60;
-    if (sub) {
-        const age = data && data.file_age_min != null ? ` · feed ${Math.round(data.file_age_min)}m ago` : "";
-        sub.textContent = `TypeSafe · conf≥${minConf} trades${age}`;
-    }
-    if (!rows.length) { div.innerHTML = '<span class="muted">Waiting for first verdict…</span>'; return; }
-    div.innerHTML = rows.map(v => {
-        const sideCls = v.action === 'long' ? 'up' : v.action === 'short' ? 'down' : '';
-        const confTxt = v.confidence != null ? Number(v.confidence).toFixed(2) : "--";
-        const confCls = v.tradeable ? 'up' : 'muted';
-        const flag = v.tradeable ? ' ▸TRADE' : '';
-        const age = v.verdict_age_min != null ? `${Math.round(v.verdict_age_min)}m` : '';
-        return `<div class="stream-item">
-            <span class="stream-symbol">${v.symbol}</span>
-            <span class="${sideCls}">${(v.action || '--').toUpperCase()}</span>
-            <span class="${confCls}">${confTxt}${flag}</span>
-            <span class="muted tiny">${v.regime || ''} ${age}</span>
-        </div>`;
-    }).join('');
-}
-socket.on("strategies", (data) => renderStrategies(data));
+socket.on("engine_monitor", (data) => { _lastEngine = data; renderRegime(data); renderRiskGates(data); renderGovernor(data); updateKPIs(_lastPortfolio, data); });
+socket.on("decision_feed", (data) => renderDecisionFeed(data));
 socket.on("positions", (data) => renderPositions(data));
 socket.on("trades", (data) => renderTrades(data));
-socket.on("logs", (data) => renderLogs(data));
 
 // REST + timers must live inside this closure: render*/updateKPIs are scoped
 // here. Defining pollAll outside caused silent ReferenceErrors (empty panels).
@@ -2483,15 +1580,16 @@ pollAll = function pollAll() {
     if (!socket || !socket.connected) {
         authFetch("/api/trades").then(r => r.json()).then(d => renderTrades(d)).catch(() => {});
         authFetch("/api/positions").then(r => r.json()).then(d => renderPositions(d)).catch(() => {});
+        authFetch("/api/decision_feed").then(r => r.json()).then(d => renderDecisionFeed(d)).catch(() => {});
     }
-    authFetch("/api/market_data_health").then(r => r.json()).then(d => renderFeedSilence(d)).catch(() => {});
 };
 pollResearch = function pollResearch() {
-    authFetch("/api/shadow_panel?evaluate=0").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
-    authFetch("/api/top_traders").then(r => r.json()).then(d => renderTopTradersPanel(d)).catch(() => {});
+    authFetch("/api/hypotheses").then(r => r.json()).then(d => renderHypotheses(d)).catch(() => {});
+    authFetch("/api/execution_pnl").then(r => r.json()).then(d => renderExecPnl(d)).catch(() => {});
+    authFetch("/api/execution_divergence").then(r => r.json()).then(d => renderDivergence(d)).catch(() => {});
+    authFetch("/api/shadow_panel?evaluate=1").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
     authFetch("/api/research_watchdogs").then(r => r.json()).then(d => renderResearchWatchdogs(d)).catch(() => {});
     authFetch("/api/dvol").then(r => r.json()).then(d => renderDvolPanel(d)).catch(() => {});
-    authFetch("/api/iv_gate_shadow").then(r => r.json()).then(d => renderIvGateShadow(d)).catch(() => {});
     authFetch("/api/gate").then(r => r.json()).then(d => renderGate(d)).catch(() => {});
 };
 
@@ -2511,12 +1609,6 @@ if (!window.__hlDashTimers) {
     }, 5000);
     setInterval(pollAll, 5000);
     setInterval(pollResearch, 60000);
-    // Full hypothetical evaluation is heavy (can block Flask for minutes on large
-    // shadow DBs and churns ~1.3M objects per run). Refresh hourly — this is a
-    // research view; the light panel already updates every minute via pollResearch.
-    setInterval(() => {
-        authFetch("/api/shadow_panel?evaluate=1").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
-    }, 3600000);
     setInterval(() => {
         if (statusUpdate.uptime_sec != null && statusReceivedAt > 0) {
             const s = statusUpdate.uptime_sec + Math.floor((Date.now() - statusReceivedAt) / 1000);
@@ -2530,49 +1622,8 @@ if (!window.__hlDashTimers) {
 } // end bindSocketHandlers
 
 // ── Strategy Modal ──
-async function showStrategyDetail(name) {
-    const modal = document.getElementById('strategy-modal');
-    const content = document.getElementById('modal-content');
-    document.getElementById('modal-title').textContent = name;
-    modal.classList.add('active');
-    content.innerHTML = '<div class="muted" style="text-align:center;">Loading...</div>';
-    try {
-        const res = await authFetch('/api/strategy/' + encodeURIComponent(name));
-        const data = await res.json();
-        if (data.error) { content.innerHTML = '<div class="muted" style="text-align:center;color:var(--down)">' + data.error + '</div>'; return; }
-        const s = data.stats || {};
-        let html = '<div class="stat-row"><span class="stat-label">Enabled</span><span class="stat-value" style="color:' + (data.enabled ? 'var(--up)' : 'var(--muted)') + '">' + (data.enabled ? 'YES' : 'NO') + '</span></div>';
-        html += '<div class="stat-row"><span class="stat-label">Description</span><span class="stat-value" style="font-weight:400;max-width:300px;text-align:right;">' + (data.description || "—") + '</span></div>';
-        html += '<div class="stat-row"><span class="stat-label">Params</span><span class="stat-value" style="font-weight:400;max-width:300px;text-align:right;font-family:monospace;font-size:10px;">' + JSON.stringify(data.params || {}) + '</span></div>';
-        if (data.note) {
-            html += '<div class="muted" style="font-size:10px;margin-top:6px;line-height:1.35;">' + data.note + '</div>';
-        }
-        html += '<div style="margin-top:10px; font-weight:600; font-size:11px; color:var(--accent);">Performance</div>';
-        html += '<div class="stat-row"><span class="stat-label">Signals (tot/app/rej)</span><span class="stat-value">' + (s.total_signals || 0) + ' / ' + (s.approved_signals || 0) + ' / ' + (s.rejected_signals || 0) + '</span></div>';
-        html += '<div class="stat-row"><span class="stat-label">Trades (win / loss)</span><span class="stat-value">' + (s.winning_trades || 0) + ' / ' + (s.losing_trades || 0) + '</span></div>';
-        html += '<div class="stat-row"><span class="stat-label">Win Rate</span><span class="stat-value" style="color:' + ((s.win_rate || 0) >= 0.5 ? 'var(--up)' : 'var(--down)') + '">' + ((s.win_rate || 0) * 100).toFixed(1) + '%</span></div>';
-        html += '<div class="stat-row"><span class="stat-label">Total PnL</span><span class="stat-value" style="color:' + ((s.total_pnl_pct || 0) >= 0 ? 'var(--up)' : 'var(--down)') + '">' + ((s.total_pnl_pct || 0) >= 0 ? '+' : '') + (s.total_pnl_pct || 0).toFixed(2) + '%</span></div>';
-        html += '<div class="stat-row"><span class="stat-label">Avg PnL/trade</span><span class="stat-value">' + ((s.avg_pnl_pct || 0) >= 0 ? '+' : '') + (s.avg_pnl_pct || 0).toFixed(2) + '%</span></div>';
-        const hist = data.signal_history || [];
-        if (hist.length > 0) {
-            html += '<div style="margin-top:10px;font-weight:600;font-size:11px;color:var(--accent);">Recent Signals</div>';
-            html += '<table><thead><tr><th>Time</th><th>Sym</th><th>Side</th><th>Conf</th><th>Status</th></tr></thead><tbody>';
-            html += hist.map(sig => '<tr><td class="muted tiny">' + (sig.time || '--') + '</td><td><span class="highlight">' + sig.symbol + '</span></td><td class="' + (sig.side === 'long' ? 'up' : 'down') + '">' + (sig.side || '--').toUpperCase() + '</td><td class="num">' + (sig.confidence != null ? Math.round(sig.confidence * 100) + '%' : '--') + '</td><td><span class="pill pill-' + (sig.status || 'pending') + '">' + (sig.status || 'PENDING') + '</span></td></tr>').join('');
-            html += '</tbody></table>';
-        }
-        content.innerHTML = html;
-    } catch (e) {
-        content.innerHTML = '<div class="muted" style="text-align:center;color:var(--down)">Failed to load: ' + e.message + '</div>';
-    }
-}
-function closeStrategyModal(e) {
-    if (e.target === document.getElementById('strategy-modal')) {
-        document.getElementById('strategy-modal').classList.remove('active');
-    }
-}
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') document.getElementById('strategy-modal').classList.remove('active');
-});
+
+
 
 // ═══════════════════════════════════════════════════════════════════
 //  Chart — lightweight-charts candlestick + trade markers

@@ -473,6 +473,21 @@ class StrategyScoreboard:
             d["n_regime_excluded"] = self.n_regime_excluded
         if self.variant == VARIANT_ROUTER_BLOCKED:
             d["section_label"] = ROUTER_BLOCKED_SECTION_LABEL
+        # Compact per-outcome rows let read paths (dashboard bootstrap CI,
+        # execution-vs-sim divergence) work without re-running the evaluator.
+        # SEALED boards emit nothing per-outcome — a resolvable per-trade
+        # return list would defeat the no-peeking rule.
+        if not self.sealed:
+            d["independent_outcomes"] = [
+                [
+                    o.entry_ts_ms,
+                    o.exit_ts_ms,
+                    o.symbol,
+                    round(o.net_pnl_pct, 8),
+                    round(o.net_r_multiple, 6),
+                ]
+                for o in self.independent_outcome_rows
+            ]
         if include_outcomes:
             d["outcomes"] = [asdict(o) for o in self.outcomes]
         return d

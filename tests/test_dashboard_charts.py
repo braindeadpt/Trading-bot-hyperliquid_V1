@@ -234,8 +234,21 @@ class TestDashboardLayout:
         assert "portfolio.daily_trades ||" not in html
         assert "Risk limit" not in html
         assert 'id="kpi-daily-total"' in html
-        assert "Top Traders (aggregate)" in html
-        assert 'id="ivshadow-tbody"' in html
+        # Redesign 2026-10: main page answers one question — "closer to a
+        # positive-net-PnL strategy?" Top-traders aggregate and the high/low-IV
+        # shadow distribution moved out (sealed hypothesis counter instead).
+        assert "Top Traders (aggregate)" not in html
+        assert 'id="ivshadow-tbody"' not in html
+        assert 'id="tt-bias-tbody"' not in html
+        # The five blocks + merged feed + research watch stay:
+        assert 'id="gate-panel"' in html
+        assert 'id="hypotheses-tbody"' in html
+        assert 'id="exec-pnl-tbody"' in html
+        assert 'id="divergence-body"' in html
+        assert 'id="decision-feed-list"' in html
+        assert 'id="shadow-panel-tbody"' in html
+        assert 'id="wd-tbody"' in html
+        assert 'id="dvol-chart"' in html
         assert 'class="research-fold"' not in html
 
 

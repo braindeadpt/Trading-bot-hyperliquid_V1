@@ -476,7 +476,3 @@ class TestResearchWatchdogsTemplate:
         assert "pr.concentration_caveat" in html
         assert "⚠ conc" in html
         assert "var(--warn, #d29922)" in html
-        # the IV gate shadow panel shows the concentration banner too
-        assert "payload.concentration" in html
-        assert "concTxt" in html
-        assert "Concentração: amostra dominada" in html

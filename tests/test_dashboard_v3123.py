@@ -144,7 +144,7 @@ def test_governor_last_metrics_property():
 def test_engine_emits_governor_in_engine_monitor():
     """engine_monitor payload must include governor + regime + reconcile fields."""
     from src.dashboard import web
-    src = inspect_getsource(web.DashboardEmitter._emit_engine_monitor)
+    src = inspect_getsource(web._engine_monitor_payload)
     for field in ["governor", "regime_per_symbol", "reconcile", "ws_health", "adx_per_symbol"]:
         assert field in src, f"engine_monitor missing {field}"
 

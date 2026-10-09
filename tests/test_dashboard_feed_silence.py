@@ -21,7 +21,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-TEMPLATE_PATH = ROOT / "src" / "dashboard" / "templates" / "index.html"
+TEMPLATE_PATH = ROOT / "src" / "dashboard" / "templates" / "ops.html"
 
 
 class _SilenceStub:

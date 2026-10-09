@@ -1,0 +1,1092 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ops — Hyperliquid Bot</title>
+<script src="/socket.io.min.js"></script>
+<link rel="stylesheet" href="/static/dashboard.css?v=11">
+<style>
+/* Inline fallback — guaranteed to apply */
+:root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-hover: #1c2128;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --dim: #6e7681;
+    --up: #3fb950;
+    --down: #f85149;
+    --accent: #58a6ff;
+    --accent2: #a371f7;
+    --warn: #d29922;
+    --yellow: #fbbf24;
+    --radius: 6px;
+    --gap: 10px;
+    --pad: 10px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); font-size: 12px; line-height: 1.3; padding: 10px; min-height: 100vh; }
+.header { display: flex; justify-content: space-between; align-items: center; height: 32px; margin-bottom: var(--gap); padding: 0 2px; }
+.header.state-imminent { background: rgba(210,153,34,0.10); box-shadow: inset 0 0 0 1px var(--yellow); }
+.header.state-degraded { background: rgba(255,77,79,0.10); box-shadow: inset 0 0 0 1px var(--down); }
+h1 { font-size: 14px; margin: 0; color: var(--accent); font-weight: 600; }
+.badges { display: flex; gap: 6px; align-items: center; }
+.badge { padding: 2px 8px; border-radius: 4px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+.badge-green { background: #1a472a; color: var(--up); }
+.badge-yellow { background: #451a03; color: var(--yellow); }
+.badge-red { background: #450a0a; color: var(--down); }
+.badge-blue { background: #1e3a5f; color: var(--accent); }
+.badge-purple { background: #2e1065; color: var(--accent2); }
+.kpi-bar { display: flex; gap: var(--gap); margin-bottom: var(--gap); }
+.kpi-cell { flex: 1 1 0; min-width: 0; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+.kpi-cell .label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.3px; }
+.kpi-cell .value { font-size: 18px; font-weight: 700; font-family: 'SF Mono', 'Consolas', monospace; letter-spacing: -0.5px; }
+.kpi-cell .sub { font-size: 9px; color: var(--dim); margin-top: 1px; }
+.grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: var(--gap); width: 100%; max-width: none; margin: 0; align-items: stretch; }
+.g-3 { grid-column: span 3; }
+.g-4 { grid-column: span 4; }
+.g-5 { grid-column: span 5; }
+.g-6 { grid-column: span 6; }
+.g-8 { grid-column: span 8; }
+.g-12 { grid-column: span 12; }
+.grid > [class^="g-"] { display: flex; flex-direction: column; min-width: 0; }
+.grid > [class^="g-"] > .panel { flex: 1; width: 100%; }
+.grid > [class^="g-"]:not(.desk-side) > .panel { height: 100%; }
+.section-label { margin: 8px 0 4px 0; }
+.desk-grid { min-height: min(42vh, 440px); }
+.desk-side { display: flex; flex-direction: column; gap: var(--gap); height: 100%; min-height: 0; }
+.desk-side > .panel { flex: 1; min-height: 0; height: auto; }
+.desk-side > .panel.pos-panel { flex: 0 0 auto; max-height: 120px; }
+.sys-strip > .sys-cols { display: grid; grid-template-columns: 1.4fr 1.2fr 1fr 0.8fr; gap: 0; }
+.sys-strip > .sys-cols > div { padding: 8px 10px; border-right: 1px solid var(--border); min-width: 0; }
+.sys-strip > .sys-cols > div:last-child { border-right: none; }
+.sys-col-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent); margin-bottom: 6px; }
+#chart-container { width: 100%; height: 100%; min-height: 360px; }
+.panel.chart-panel { min-height: 360px; }
+.panel.chart-panel > .panel-body { padding: 0; flex: 1; min-height: 0; display: flex; }
+.trades-panel { min-height: 280px; max-height: 340px; }
+.sys-grid .panel { max-height: none; min-height: 0; }
+.mini-stats-2 { display: grid; grid-template-columns: 1fr 1fr; column-gap: 12px; }
+.mini-stats-2 .mini-row { min-height: 18px; }
+@media (max-width: 1100px) {
+    .g-8, .g-6 { grid-column: span 12; }
+    .g-4 { grid-column: span 12; }
+    .g-3 { grid-column: span 6; }
+}
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); display: flex; flex-direction: column; overflow: hidden; }
+.panel-header { height: 24px; min-height: 24px; padding: 0 8px; background: rgba(88,166,255,0.06); border-bottom: 1px solid rgba(48,54,61,0.5); display: flex; justify-content: space-between; align-items: center; font-size: 10px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
+.panel-header .dim { font-size: 9px; color: var(--muted); font-weight: 400; text-transform: none; }
+.panel-header .live-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--up); animation: blink 1s infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+.panel-body { padding: 6px 8px; overflow: auto; flex: 1; }
+table { width: 100%; border-collapse: collapse; font-size: 10px; }
+th { text-align: left; padding: 4px 4px; color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 500; font-size: 9px; text-transform: uppercase; letter-spacing: 0.3px; position: sticky; top: 0; background: var(--panel); z-index: 2; }
+td { padding: 3px 4px; border-bottom: 1px solid rgba(48,54,61,0.3); vertical-align: middle; }
+tr:hover td { background: var(--panel-hover); }
+.num { text-align: right; font-family: 'SF Mono', 'Consolas', monospace; }
+.up { color: var(--up); font-weight: 600; }
+.down { color: var(--down); font-weight: 600; }
+.muted { color: var(--muted); }
+.dim { color: var(--dim); }
+.highlight { color: var(--accent2); font-weight: 600; }
+.tiny { font-size: 9px; }
+.yellow { color: var(--yellow); font-weight: 600; }
+.pill { display: inline-block; padding: 0px 4px; border-radius: 3px; font-size: 8px; font-weight: 700; text-transform: uppercase; }
+.pill-pending { background: rgba(217,119,6,0.15); color: #d97706; }
+.pill-creep { background: rgba(210,153,34,0.18); color: #d29922; }
+.pill-creep-hi { background: rgba(239,68,68,0.18); color: #ef4444; }
+.pill-cadence { background: rgba(239,68,68,0.15); color: #ef4444; }
+.pill-stale { background: rgba(210,153,34,0.18); color: #d29922; }
+.pill-dead { background: rgba(239,68,68,0.18); color: #ef4444; }
+.pill-approved { background: rgba(26,71,42,0.3); color: var(--up); }
+.pill-rejected { background: rgba(239,68,68,0.15); color: #ef4444; }
+.pill-executed { background: rgba(59,130,246,0.15); color: #3b82f6; }
+.mini-stats { display: flex; flex-direction: column; gap: 1px; }
+.mini-row { display: flex; justify-content: space-between; align-items: baseline; font-size: 10px; padding: 2px 0; border-bottom: 1px dotted rgba(48,54,61,0.2); }
+.mini-row:last-child { border-bottom: none; }
+.mini-label { color: var(--muted); font-size: 9px; }
+.mini-value { font-family: 'SF Mono', monospace; }
+.strategy-card { padding: 6px 8px; margin-bottom: 4px; background: var(--panel-hover); border-radius: 4px; border-left: 2px solid var(--border); cursor: pointer; transition: filter 0.2s; }
+.strategy-card.active { border-left-color: var(--up); }
+.strategy-card.inactive { border-left-color: var(--muted); opacity: 0.6; }
+.strategy-card:hover { filter: brightness(1.15); }
+.strategy-name { font-weight: 600; font-size: 11px; margin-bottom: 1px; }
+.strategy-desc { color: var(--dim); font-size: 9px; line-height: 1.3; }
+.stream-list { font-size: 10px; line-height: 1.4; }
+.stream-item { padding: 2px 0; border-bottom: 1px dotted rgba(48,54,61,0.3); display: flex; gap: 6px; align-items: baseline; }
+.stream-item:last-child { border-bottom: none; }
+.stream-time { color: var(--muted); font-size: 9px; min-width: 50px; font-family: 'SF Mono', monospace; }
+.stream-symbol { color: var(--accent2); font-weight: 600; }
+.log-container { font-size: 9px; font-family: 'SF Mono', 'Consolas', monospace; line-height: 1.4; }
+.log-warn { color: var(--warn); }
+.log-error { color: var(--down); }
+.tick-bar { display: flex; gap: 2px; margin-top: 4px; }
+.tick-cell { flex: 1; height: 8px; background: #1a1a1a; border-radius: 2px; transition: background 0.3s; }
+.tick-cell.active { background: var(--up); }
+.modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; justify-content: center; align-items: center; }
+.modal-overlay.active { display: flex; }
+.modal-box { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); width: 90%; max-width: 700px; max-height: 85vh; overflow-y: auto; padding: 14px; }
+.modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.modal-title { font-size: 13px; font-weight: 600; color: var(--accent); }
+.modal-close { cursor: pointer; font-size: 18px; color: var(--muted); line-height: 1; }
+.stat-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.stat-label { color: var(--dim); font-size: 10px; }
+.stat-value { font-weight: 600; font-size: 10px; }
+/* v3.1.23: Section labels for visual grouping */
+.section-label { display: flex; align-items: center; gap: 8px; margin: 8px 0 4px 0; padding: 0 2px; }
+.section-label:first-of-type { margin-top: 4px; }
+.section-label .bar { width: 3px; height: 14px; border-radius: 2px; }
+.section-label .text { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+.section-label .line { flex: 1; height: 1px; background: var(--border); }
+.section-market .bar { background: var(--accent); }
+.section-execution .bar { background: var(--up); }
+.section-system .bar { background: var(--yellow); }
+.section-intel .bar { background: var(--accent2); }
+.section-logs .bar { background: var(--dim); }
+:root { --panel-bg: var(--panel); }
+details.fold { margin-top: var(--gap); background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+details.fold > summary { list-style: none; cursor: pointer; min-height: 32px; padding: 6px 12px; display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: var(--accent2); background: rgba(163,113,247,0.08); user-select: none; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: "▸"; font-size: 10px; color: var(--muted); }
+details.fold[open] > summary::before { content: "▾"; }
+details.fold > summary .dim { font-weight: 400; text-transform: none; letter-spacing: 0; margin-left: auto; }
+details.fold .fold-inner { padding: 8px; display: flex; flex-direction: column; gap: var(--gap); }
+details.fold .panel { max-height: none; }
+body { font-size: 13px; }
+table { font-size: 11px; }
+th { font-size: 10px; }
+.kpi-cell .value { font-size: 20px; }
+.panel-header { height: 28px; min-height: 28px; font-size: 11px; }
+@media (max-width: 900px) { .g-3 { grid-column: span 12; } }
+</style>
+</head>
+<body>
+
+<div class="header">
+    <div style="display:flex;align-items:center;gap:8px;">
+        <span class="badge badge-green" id="conn-badge">LIVE</span>
+        <h1>Hyperliquid Bot · OPS</h1>
+    </div>
+    <div class="badges">
+        <a href="/" class="badge badge-dim" style="text-decoration:none;" title="Página principal">&larr; MAIN</a>
+        <span class="badge badge-blue" id="mode-badge">PAPER</span>
+        <span class="badge badge-green" id="status-badge">RUNNING</span>
+        <span class="badge badge-dim" id="circuit-badge">CB: OFF</span>
+        <span class="badge badge-purple" id="uptime-badge">00:00:00</span>
+        <span class="badge badge-blue" id="latency-badge">--ms</span>
+    </div>
+</div>
+
+<div id="alert-banner" class="alert-banner" style="display:none;">
+    <div class="alert-items" id="alert-items"></div>
+</div>
+
+<!-- SYS STRIP — State · Uptime · Memory · Last Error · DD · Exposure -->
+<div class="grid">
+    <div class="g-12">
+        <div class="panel sys-strip">
+            <div class="sys-cols" style="grid-template-columns:1.4fr 1.2fr;">
+                <div>
+                    <div class="sys-col-title">Engine</div>
+                    <div class="mini-stats mini-stats-2">
+                        <div class="mini-row"><span class="mini-label">State</span><span class="mini-value highlight" id="eng-state">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Uptime</span><span class="mini-value" id="eng-uptime">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Ticks/s</span><span class="mini-value" id="eng-ticks">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Total</span><span class="mini-value" id="eng-total">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Memory</span><span class="mini-value" id="eng-mem">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Daily DD</span><span class="mini-value" id="eng-daily-dd">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Max DD</span><span class="mini-value" id="eng-max-dd">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Exposure</span><span class="mini-value" id="eng-exposure">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Portfolio Lev</span><span class="mini-value" id="eng-portfolio-lev">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Open Risk</span><span class="mini-value" id="eng-open-risk">--</span></div>
+                        <div class="mini-row"><span class="mini-label">Last Error</span><span class="mini-value" id="eng-error" style="color:var(--down);">--</span></div>
+                    </div>
+                </div>
+                <div>
+                    <div class="sys-col-title">Risk gates</div>
+                    <div class="mini-stats" id="risk-gates-panel">
+                        <div class="muted" style="text-align:center;padding:8px 0;">Waiting...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- LIVE MARKET -->
+<div class="grid" style="margin-top:var(--gap);">
+    <div class="g-12">
+        <div class="panel">
+            <div class="panel-header">
+                <span>Live market</span>
+                <span class="live-dot"></span>
+            </div>
+            <div class="panel-body" style="padding:0;overflow:auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Sym</th>
+                            <th class="num">Price</th>
+                            <th class="num" title="Bid–ask spread %">Spr%</th>
+                            <th class="num" title="Current 8h funding">Fund</th>
+                            <th class="num" title="Predicted 8h funding (HL, else CEX avg)">Pred</th>
+                            <th class="num">OI</th>
+                            <th class="num" title="1m volume">Vol</th>
+                            <th class="num" title="Bid/ask imbalance">Imb</th>
+                            <th class="num">Age</th>
+                        </tr>
+                    </thead>
+                    <tbody id="live-data-tbody">
+                        <tr><td colspan="9" class="muted" style="text-align:center;">Waiting for data...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- FEED SILENCE -->
+<div class="grid" style="margin-top:var(--gap);">
+<div class="g-12">
+<div class="panel">
+    <div class="panel-header">Feed Silence <span class="dim" id="feed-silence-meta">threshold vs age</span></div>
+    <div class="panel-body" style="padding:6px 8px; overflow-y:auto;">
+        <div id="feed-silence-help" class="muted" style="display:none;" title="Telegram on imminent (90%) and DEGRADED. Early / cadence stay in this table."></div>
+        <table style="width:100%; font-size:11px; border-collapse:collapse;">
+            <thead>
+                <tr style="color:var(--muted); text-align:left;">
+                    <th title="Feed key, only feeds contracted for this deployment">Feed</th>
+                    <th title="Seconds since last event, with expected gap (historical p95/p99 cadence of this feed)">Age / exp gap</th>
+                    <th title="Max allowed silence before degraded">Threshold</th>
+                    <th title="age / threshold — how close to degrading">% of threshold</th>
+                    <th title="Max % of threshold per 10-min bucket, last 24h — a rising sawtooth = age growing between resets">24h %</th>
+                    <th title="Max age per UTC day, last 14 days — a rising staircase = age creeping between resets">14d max age</th>
+                    <th title="Fire-once early/imminent alerts already sent this silence episode (reset on beat). Early fires at warn_fraction of the threshold (configurável, default 50%); imminent at imminent_fraction (configurável, default 90%).">Alerted</th>
+                    <th title="Silence watchdog state">State</th>
+                </tr>
+            </thead>
+            <tbody id="feed-silence-tbody">
+                <tr><td colspan="8" class="muted">Waiting...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+</div>
+</div>
+
+<!-- STRATEGIES + JEV -->
+<div class="grid" style="margin-top:var(--gap);align-items:start;">
+    <div class="g-8">
+        <div class="panel">
+            <div class="panel-header">Strategies <span class="dim">Click for detail</span></div>
+            <div class="panel-body" id="strategies-panel" style="padding:6px 8px; overflow-y:auto;">
+                <span class="muted">Waiting...</span>
+            </div>
+        </div>
+    </div>
+    <div class="g-4">
+        <div class="panel">
+            <div class="panel-header">Jev <span class="dim" id="jev-sub">TypeSafe verdicts · hourly</span></div>
+            <div class="panel-body" style="padding:4px 6px; overflow-y:auto;">
+                <div id="jev-list" class="stream-list"><span class="muted">Waiting for first verdict…</span></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- LIVE LOGS -->
+<div class="grid" style="margin-top:var(--gap);">
+    <div class="g-12">
+        <div class="panel" style="max-height:280px;">
+            <div class="panel-header">Live Logs</div>
+            <div class="panel-body" style="padding:4px 8px;">
+                <div id="logs-container" class="log-container" style="max-height:240px; overflow-y:auto;">
+                    <span class="muted">Waiting for logs...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="auth-gate" class="modal-overlay">
+    <div class="modal-box" style="max-width:360px;">
+        <div class="modal-header">
+            <span class="modal-title">Dashboard Access</span>
+        </div>
+        <p class="muted" style="margin-bottom:10px;">Enter your dashboard token to continue.</p>
+        <input id="auth-token-input" type="password" placeholder="Token" style="width:100%;padding:8px;margin-bottom:10px;background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);">
+        <button id="auth-submit-btn" style="width:100%;padding:8px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;font-weight:600;">Connect</button>
+        <p id="auth-error" class="muted" style="margin-top:8px;color:var(--down);display:none;"></p>
+    </div>
+</div>
+
+<div id="strategy-modal" class="modal-overlay" onclick="closeStrategyModal(event)">
+    <div class="modal-box" onclick="event.stopPropagation()">
+        <div class="modal-header">
+            <span class="modal-title" id="modal-title">Strategy Detail</span>
+            <span class="modal-close" onclick="document.getElementById('strategy-modal').classList.remove('active')">&times;</span>
+        </div>
+        <div id="modal-content"><div class="muted" style="text-align:center;">Loading...</div></div>
+    </div>
+</div>
+
+<script>
+const AUTH_REQUIRED = {{ auth_required|default(false)|tojson }};
+
+function getDashboardToken() {
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get("token");
+    if (fromUrl) {
+        sessionStorage.setItem("dashboard_token", fromUrl);
+        return fromUrl;
+    }
+    return sessionStorage.getItem("dashboard_token") || "";
+}
+function setDashboardToken(token) { sessionStorage.setItem("dashboard_token", token); }
+function showAuthGate(msg) {
+    const gate = document.getElementById("auth-gate");
+    gate.classList.add("active");
+    if (msg) {
+        const err = document.getElementById("auth-error");
+        err.textContent = msg;
+        err.style.display = "block";
+    }
+}
+function hideAuthGate() {
+    document.getElementById("auth-gate").classList.remove("active");
+    document.getElementById("auth-error").style.display = "none";
+}
+async function authFetch(url, opts) {
+    opts = opts || {};
+    const headers = Object.assign({}, opts.headers || {});
+    const token = getDashboardToken();
+    if (token) headers["X-Dashboard-Token"] = token;
+    const res = await fetch(url, Object.assign({}, opts, { headers }));
+    if (res.status === 401 && AUTH_REQUIRED) {
+        showAuthGate("Invalid or missing token.");
+    }
+    return res;
+}
+async function verifyAuthAndConnect() {
+    if (!AUTH_REQUIRED) { hideAuthGate(); connectSocket(); pollAll(); return; }
+    const token = getDashboardToken();
+    if (!token) { showAuthGate(); return; }
+    try {
+        const res = await authFetch("/api/auth/check", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token }),
+        });
+        if (!res.ok) { showAuthGate("Invalid token."); return; }
+        hideAuthGate();
+        connectSocket();
+        pollAll();
+    } catch (e) { showAuthGate("Connection failed."); }
+}
+document.getElementById("auth-submit-btn").addEventListener("click", async () => {
+    const input = document.getElementById("auth-token-input");
+    const token = (input.value || "").trim();
+    if (!token) return;
+    setDashboardToken(token);
+    await verifyAuthAndConnect();
+});
+
+let socket = null;
+let pollAll = function () {};
+function connectSocket() {
+    if (socket && socket.connected) return;
+    const token = getDashboardToken();
+    socket = io({ auth: token ? { token } : {}, transports: ["websocket", "polling"] });
+    bindSocketHandlers();
+}
+
+function bindSocketHandlers() {
+let statusUpdate = {};
+let statusReceivedAt = 0;
+let lastSocketLatency = null;
+let _lastLiveRows = null;
+let _fundingPred = {};
+
+function renderLiveData(rows) {
+    const tbody = document.getElementById("live-data-tbody");
+    if (!tbody) return;
+    if (!rows || rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;">Waiting for data...</td></tr>';
+        return;
+    }
+    _lastLiveRows = rows;
+    const now = Date.now() / 1000;
+    let totalLatency = 0, count = 0;
+    tbody.innerHTML = rows.map(r => {
+        const priceClass = (r.vwap != null && r.price != null)
+            ? (r.price > r.vwap ? "up" : r.price < r.vwap ? "down" : "")
+            : "";
+        const age = r.last_update ? now - r.last_update : null;
+        const ageClass = age != null ? (age > 30 ? "down" : age > 5 ? "yellow" : "") : "";
+        if (age != null) { totalLatency += age * 1000; count++; }
+        const spr = (r.spread_pct != null && Math.abs(Number(r.spread_pct)) > 1e-8)
+            ? fmtNum(r.spread_pct, 3) : "--";
+        const imb = r.imbalance;
+        return `<tr>
+            <td><span class="highlight">${r.symbol}</span></td>
+            <td class="num ${priceClass}">$${fmtNum(r.price)}</td>
+            <td class="num tiny">${spr}</td>
+            <td class="num">${fmtPct(r.funding, 4)}</td>
+            <td class="num">${fmtPct(_predictedOf(r), 4)}</td>
+            <td class="num">${fmtM(r.oi_usd != null ? r.oi_usd : (r.oi && r.price ? r.oi * r.price : null))}</td>
+            <td class="num">${fmtNum(r.volume_1m)}</td>
+            <td class="num ${imb > 0 ? 'up' : imb < 0 ? 'down' : ''}">${fmtNum(imb, 3)}</td>
+            <td class="num tiny ${ageClass}">${fmtAge(age)}</td>
+        </tr>`;
+    }).join('');
+    const avg = count > 0 ? Math.round(totalLatency / count) : null;
+    let dataLatEl = document.getElementById("kpi-data-lat");
+    if (!dataLatEl) {
+        dataLatEl = document.createElement("span");
+        dataLatEl.id = "kpi-data-lat";
+        dataLatEl.style.display = "none";
+        document.body.appendChild(dataLatEl);
+    }
+    if (avg != null) dataLatEl.textContent = avg + "ms";
+}
+
+function _predictedOf(r) {
+    if (r && r.predicted != null) return r.predicted;
+    const f = r && _fundingPred[r.symbol];
+    return f && f.predicted != null ? f.predicted : null;
+}
+
+
+
+function renderEngine(data) {
+    if (!data) return;
+    const state = statusUpdate.running ? "RUNNING" : (statusUpdate.uptime_sec ? "RUNNING" : "STOPPED");
+    const stateEl = document.getElementById("eng-state");
+    stateEl.textContent = state;
+    stateEl.className = "mini-value " + (statusUpdate.running ? "up" : "muted");
+    document.getElementById("eng-uptime").textContent = fmtUptime(statusUpdate.uptime_sec || 0);
+    document.getElementById("eng-ticks").textContent = data.ticks_per_second != null ? data.ticks_per_second.toFixed(1) : "--";
+    document.getElementById("eng-total").textContent = data.total_ticks != null ? data.total_ticks.toLocaleString() : "--";
+    document.getElementById("eng-mem").textContent = (statusUpdate.memory_mb || 0).toFixed(1) + " MB";
+    document.getElementById("eng-daily-dd").textContent = (data.daily_drawdown || 0).toFixed(2) + "%";
+    document.getElementById("eng-max-dd").textContent = (data.max_drawdown_pct || 0).toFixed(2) + "%";
+    document.getElementById("eng-exposure").textContent = (data.directional_exposure || 0).toFixed(1) + "%";
+    const lev = data.portfolio_leverage != null ? data.portfolio_leverage : 0;
+    const levMax = data.leverage_max != null ? data.leverage_max : 0;
+    const levEl = document.getElementById("eng-portfolio-lev");
+    if (levEl) {
+        levEl.textContent = lev.toFixed(2) + "x" + (levMax > 0 ? " / " + levMax.toFixed(0) + "x" : "");
+        levEl.className = "mini-value " + (levMax > 0 && lev > levMax * 0.9 ? "yellow" : "highlight");
+    }
+    document.getElementById("eng-open-risk").textContent = (data.open_trade_risk || 0).toFixed(2) + "%";
+    const errEl = document.getElementById("eng-error");
+    if (data.last_error) {
+        errEl.textContent = data.last_error.substring(0, 40);
+        errEl.style.color = "var(--down)";
+    } else {
+        errEl.textContent = "None";
+        errEl.style.color = "var(--up)";
+    }
+}
+
+function renderStrategies(data) {
+    const div = document.getElementById("strategies-panel");
+    if (!data || data.length === 0) { div.innerHTML = '<span class="muted">No strategies</span>'; return; }
+    div.innerHTML = data.map(s => {
+        const enabled = s.enabled !== false;
+        const statusClass = s.last_signal_status === "executed" ? "pill-executed" : s.last_signal_status === "approved" ? "pill-approved" : s.last_signal_status === "rejected" ? "pill-rejected" : "pill-pending";
+        const stratClass = s.strategy_class || "other";
+        const classColors = {trend: "var(--up)", revert: "var(--accent)", carry: "var(--yellow)", micro: "var(--accent2)"};
+        const classColor = classColors[stratClass] || "var(--muted)";
+        const govTag = s.governor_disabled ? '<span style="color:var(--down);font-size:8px;margin-left:4px;">GOV-OFF</span>' : '';
+        const sharpeStr = s.trades_30d > 0 ? `Sharpe ${s.sharpe_30d >= 0 ? "+" : ""}${s.sharpe_30d.toFixed(2)}` : '';
+        return `<div class="strategy-card ${enabled ? 'active' : 'inactive'}" onclick="showStrategyDetail('${s.name}')">
+            <div class="strategy-name">${s.name} ${enabled ? "●" : "○"} ${govTag}</div>
+            <div class="strategy-desc">${s.description || ""}</div>
+            <div style="margin-top:2px; font-size:9px; color:var(--dim);">
+                <span style="color:${classColor};font-weight:600;">${stratClass.toUpperCase()}</span>
+                | ${s.signals_today || 0} today
+                | 30d: ${s.trades_30d || 0} trades ${sharpeStr}
+            </div>
+            <div style="margin-top:2px; font-size:9px; color:var(--dim);">
+                Last: <span class="${s.last_signal_side === 'long' ? 'up' : s.last_signal_side === 'short' ? 'down' : ''}">${s.last_signal_side ? s.last_signal_side.toUpperCase() : "never"}</span>
+                ${s.last_signal_confidence != null ? `(${(s.last_signal_confidence * 100).toFixed(0)}%)` : ""}
+                <span class="pill ${statusClass}">${s.last_signal_status || "idle"}</span>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function renderFeedSilence(payload) {
+    const tbody = document.getElementById("feed-silence-tbody");
+    const meta = document.getElementById("feed-silence-meta");
+    if (!tbody) return;
+    const sil = (payload && payload.feed_silence) || {};
+    const sparks = (payload && payload.feed_silence_spark) || {};
+    const daily = (payload && payload.feed_silence_daily) || {};
+    const creep = (payload && payload.feed_silence_creep) || {};
+    const entries = Object.entries(sil);
+    if (!entries.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="muted">No silence data (feed_silence monitor off)</td></tr>';
+        if (meta) meta.textContent = "threshold vs age";
+        return;
+    }
+    // Global header state: the whole header bar turns amber when any contracted
+    // feed crosses ~90% of its silence threshold (imminent, still healthy) and
+    // red when a feed actually degrades. Consumes only the monitor's
+    // per-feed `warn_level` field (single derivation) plus the backend flag.
+    const hdr = document.querySelector(".header");
+    const imminentAny = !!(payload && payload.feed_silence_imminent)
+        || Object.values(sil).some(st => st && st.warn_level === "imminent");
+    const degradedAny = !!(payload && payload.feed_silence_degraded);
+    if (hdr) {
+        hdr.classList.toggle("state-degraded", degradedAny);
+        hdr.classList.toggle("state-imminent", !degradedAny && imminentAny);
+        const imminentNames = Object.entries(sil)
+            .filter(([, st]) => st && st.warn_level === "imminent")
+            .map(([f]) => f);
+        hdr.title = imminentNames.length
+            ? "FEED IMMINENT: " + imminentNames.join(", ") + " at ≥90% of silence threshold"
+            : "";
+    }
+    if (meta) meta.textContent = payload && payload.feed_silence_degraded
+        ? "degraded feeds present" : "all feeds healthy";
+    const rows = entries.map(([feed, st]) => {
+        const age = st.age_sec == null ? null : Number(st.age_sec);
+        const max = Number(st.max_silence_sec) || 0;
+        const degraded = !!st.degraded;
+        // % of threshold: pure display (bar width + text) — the COLOR comes
+        // from warn_level below, never from hardcoded 60/90 cutoffs that
+        // could drift from the configured warn/imminent fractions.
+        let pct = null, pctTxt = "—";
+        if (age != null && max > 0) {
+            pct = (age / max) * 100;
+            pctTxt = pct.toFixed(0) + "%";
+        }
+        const ageTxt = age == null ? "—" : (age < 60 ? age.toFixed(0) + "s"
+            : age < 3600 ? (age / 60).toFixed(1) + "m"
+            : (age / 3600).toFixed(1) + "h");
+        const maxTxt = (max / 3600).toFixed(1) + "h";
+        // Expected gap = historical p95/p99 cadence of this feed. Distinguishes
+        // normal quiet (age < p99) from anomalous thinning (age > p99).
+        const p95 = st.cadence_p95_sec == null ? null : Number(st.cadence_p95_sec);
+        const p99 = st.cadence_p99_sec == null ? null : Number(st.cadence_p99_sec);
+        const p50 = st.cadence_p50_sec == null ? null : Number(st.cadence_p50_sec);
+        const gapPct = st.cadence_pct_current == null ? null : Number(st.cadence_pct_current);
+        // where the CURRENT gap sits in the feed's recorded distribution
+        const gapPctTxt = gapPct != null
+            ? ' · gap actual no percentil ' + gapPct.toFixed(0) + ' do histórico' : '';
+        const nSamples = st.cadence_samples == null ? 0 : Number(st.cadence_samples);
+        // Cadence breach: the current gap is ABOVE the feed's own rolling p99
+        // (the same condition that fires check_cadence) — delivery is thinning
+        // out. p95 breach is the softer amber step below it.
+        const gapOverP99 = (age != null && p99 != null && age > p99);
+        const gapOverP95 = !gapOverP99 && (age != null && p95 != null && age > p95);
+        // Color by where the current gap sits in the feed's own distribution
+        // (0-100, continuous ramp) once the p99 is trusted — the rank is the
+        // signal, not a hard p95/p99 cutoff. The badge and text keep the
+        // exact p99 breach for the alert semantics.
+        const colorPct = (p99 != null && gapPct != null) ? gapPct : null;
+        const expColor = colorPct == null ? "var(--muted)" : cadenceColor(colorPct);
+        const expTxt = (p99 == null)
+            ? (nSamples > 0 ? "learning…" : "—")
+            : gapOverP99 ? "gap " + fmtDur(age) + " > p99 " + fmtDur(p99)
+            : "exp ≤ " + fmtDur(p99);
+        const warnLvl = st.warn_level || "none";
+        const alerted50 = !!st.warned_50_pct;
+        const alerted90 = !!st.warned_90_pct;
+        const earlyFrac = st.warn_fraction != null
+            ? Math.round(Number(st.warn_fraction) * 100) : 50;
+        const imminentFrac = st.imminent_fraction != null
+            ? Math.round(Number(st.imminent_fraction) * 100) : 90;
+        // WHEN each alert fired (persisted in the monitor state, reset on
+        // beat) — 'early 14:32' style, with full precision in the tooltip.
+        const earlyAt = st.warned_50_at_ms ? " · " + fmtHM(st.warned_50_at_ms) : "";
+        const imminentAt = st.warned_90_at_ms ? " · " + fmtHM(st.warned_90_at_ms) : "";
+        // Daily episode counters (UTC day, rolled by the monitor): how many
+        // early/imminent episodes this feed has already had today. Visible as
+        // 'N× hoje' next to the level; per-level breakdown in the tooltip.
+        const earlyToday = st.early_count_today == null ? 0 : Number(st.early_count_today);
+        const imminentToday = st.imminent_count_today == null ? 0 : Number(st.imminent_count_today);
+        const epsToday = earlyToday + imminentToday;
+        const todayTxt = epsToday > 0 ? " · " + epsToday + "× hoje" : "";
+        const epsTitle = (earlyToday > 0 || imminentToday > 0)
+            ? " · " + (earlyToday > 0 ? earlyToday + " episódio(s) early" : "")
+              + (earlyToday > 0 && imminentToday > 0 ? " + " : "")
+              + (imminentToday > 0 ? imminentToday + " episódio(s) imminent" : "") + " hoje"
+            : "";
+        const alertedTitle = (degraded ? ""
+            : alerted90 && st.warned_90_at_ms
+                ? "imminent disparou a " + fmtTime(st.warned_90_at_ms) + " · " + fmtDate(st.warned_90_at_ms)
+            : alerted50 && st.warned_50_at_ms
+                ? "early disparou a " + fmtTime(st.warned_50_at_ms) + " · " + fmtDate(st.warned_50_at_ms)
+            : "") + epsTitle;
+        const alertedTxt = degraded ? "—"
+            : alerted90 ? "imminent @ " + imminentFrac + "%" + imminentAt + todayTxt
+            : alerted50 ? "early @ " + earlyFrac + "%" + earlyAt + todayTxt
+            : "—";
+        const alertedColor = degraded ? "var(--muted)"
+            : alerted90 ? "var(--down)"
+            : alerted50 ? "var(--warn, #d29922)"
+            : "var(--muted)";
+        const stateTxt = warnLvl === "degraded" ? "DEGRADED"
+            : warnLvl === "imminent" ? "IMMINENT"
+            : warnLvl === "early" ? "EARLY"
+            : (pct == null ? "never seen" : "OK");
+        const stateColor = warnLvl === "degraded" ? "var(--down)"
+            : warnLvl === "imminent" ? "var(--down)"
+            : warnLvl === "early" ? "var(--warn, #d29922)"
+            : "var(--up)";
+        // Bar + % text colors keyed off the SAME single warn_level — so the
+        // visual escalation tracks the configured warn/imminent fractions
+        // (FEED_SILENCE_WARN_FRACTION / _IMMINENT_FRACTION) instead of
+        // re-deriving a fixed 60/90% cutoff that could drift from the config.
+        const barW = Math.max(2, Math.min(100, pct == null ? 0 : pct));
+        const barColor = warnLvl === "degraded" || warnLvl === "imminent"
+            ? "var(--down)" : warnLvl === "early" ? "#d29922" : "var(--up)";
+        const pctColor = warnLvl === "degraded" || warnLvl === "imminent"
+            ? "var(--down)" : warnLvl === "early" ? "#d29922" : "var(--muted)";
+        // Creep badge: the production staircase rule (feed_silence_creep) sees
+        // the daily max age rising consistently — same signal as the
+        // feed_age_creep watchdog. Amber normally, red when the staircase is
+        // already >=90% of the threshold.
+        const cr = creep[feed];
+        const creepBadge = cr && cr.creeping
+            ? '<span class="pill ' + ((pct != null && pct >= 90) ? "pill-creep-hi" : "pill-creep") + '" title="max age diário a subir há ' + cr.days + ' dias (+' + Math.round(cr.growth_frac * 100) + '% do threshold) — cadência a degradar">creeping</span>'
+            : '';
+        // Cadence badge: current gap above the feed's rolling p99 (or the
+        // fire-once check_cadence already flagged this episode). Tooltip
+        // carries the exact comparison and the sample count behind the p99.
+        const cadenceBad = gapOverP99 || !!st.warned_cadence;
+        const cadenceBadge = cadenceBad && p99 != null
+            ? '<span class="pill pill-cadence" title="gap atual ' + fmtDur(age) + ' > p99 histórico ' + fmtDur(p99) + ' (n=' + nSamples + ')' + (st.warned_cadence ? ' — alerta cadence emitido' : '') + ' — cadência a degradar">cadence</span>'
+            : '';
+        // Boot verdict badge: the preflight that ran at boot classified this
+        // feed as merely stale (bot was off — age explained by the downtime,
+        // boot NOT gated) vs genuinely dead while the bot ran (boot blocked,
+        // the fstream lesson). Verdict of the LAST boot; the runtime
+        // warn_level above stays the source of truth for the row's color.
+        const bootDowntime = st.boot_downtime_sec == null ? null : Number(st.boot_downtime_sec);
+        const bootAt = st.boot_at_ms ? fmtHM(Number(st.boot_at_ms)) : '';
+        const bootBadge = st.boot_status === "stale-since-downtime"
+            ? '<span class="pill pill-stale" title="no boot o feed estava obsoleto porque o bot esteve desligado (downtime ' + (bootDowntime == null ? '?' : fmtDur(bootDowntime)) + ' + tolerância) — o preflight NÃO bloqueou o arranque; o monitor runtime assume a partir daqui' + (bootAt ? ' · boot às ' + bootAt : '') + '">stale@boot</span>'
+            : st.boot_status === "fail"
+                ? '<span class="pill pill-dead" title="no boot o feed já estava morto enquanto o bot corria — o preflight bloqueou o arranque (lição fstream)' + (bootAt ? ' · boot às ' + bootAt : '') + '">dead@boot</span>'
+                : '';
+        return '<tr style="border-top:1px solid var(--border);">' +
+            '<td style="padding:3px 4px;font-family:monospace;">' + feed + ' ' + creepBadge + ' ' + cadenceBadge + ' ' + bootBadge + '</td>' +
+            '<td style="padding:3px 4px;">' + ageTxt +
+                '<div style="font-size:9px;color:' + expColor + ';white-space:nowrap;" title="Distribuição de gaps do feed (p50/p95/p99 = ' + (p50 == null ? "—" : fmtDur(p50)) + ' / ' + (p95 == null ? "—" : fmtDur(p95)) + ' / ' + (p99 == null ? "—" : fmtDur(p99)) + ')' + gapPctTxt + ' · learning needs ' + (st.cadence_min_samples == null ? 100 : Number(st.cadence_min_samples)) + ' gap samples (FEED_CADENCE_MIN_SAMPLES)">' + expTxt + '</div>' +
+            '</td>' +
+            '<td style="padding:3px 4px;">' + maxTxt + '</td>' +
+            '<td style="padding:3px 4px;width:26%;">' +
+                '<div style="display:flex;align-items:center;gap:6px;">' +
+                    '<div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;">' +
+                        '<div style="width:' + barW + '%;height:100%;background:' + barColor + ';"></div>' +
+                    '</div>' +
+                    '<span style="font-size:10px;white-space:nowrap;color:' + pctColor + ';">' + pctTxt + '</span>' +
+                '</div>' +
+            '</td>' +
+            '<td style="padding:3px 4px;width:96px;">' + sparklineSvg(sparks[feed] || [], 92, 20, st.warn_fraction, st.imminent_fraction) + '</td>' +
+            '<td style="padding:3px 4px;width:96px;" title="Daily max age (seconds) per UTC day, last 14 days">' + sparklineAbs(daily[feed] || [], 92, 20, max, st.warn_fraction, st.imminent_fraction) + '</td>' +
+            '<td style="padding:3px 4px;font-weight:600;color:' + alertedColor + ';" title="' + alertedTitle.replace(/"/g, "&quot;") + '">' + alertedTxt + '</td>' +
+            '<td style="padding:3px 4px;font-weight:600;color:' + stateColor + ';">' + stateTxt + '</td>' +
+            '</tr>';
+    }).join("");
+    tbody.innerHTML = rows;
+}
+
+function renderLogs(data) {
+    const div = document.getElementById("logs-container");
+    if (!data || data.length === 0) { div.innerHTML = '<span class="muted">Waiting for logs...</span>'; return; }
+    div.innerHTML = data.map(l => {
+        if (typeof l === "string") {
+            const cls = l.includes("WARNING") ? "log-warn" : l.includes("ERROR") || l.includes("CRITICAL") ? "log-error" : "";
+            return `<div class="log-entry ${cls}">${l}</div>`;
+        }
+        let cls = "log-info";
+        const level = (l.level || "").toUpperCase();
+        if (level === "WARNING" || level === "WARN") cls = "log-warn";
+        if (level === "ERROR" || level === "CRITICAL") cls = "log-error";
+        return `<div class="log-entry ${cls}"><span class="muted">${l.time || ""}</span> <span class="${cls}">[${level}]</span> ${l.message || ""}</div>`;
+    }).join('');
+    div.scrollTop = div.scrollHeight;
+}
+
+function renderJevVerdicts(data) {
+    const div = document.getElementById("jev-list");
+    const sub = document.getElementById("jev-sub");
+    const rows = (data && data.verdicts) || [];
+    const minConf = (data && data.min_confidence) || 0.60;
+    if (sub) {
+        const age = data && data.file_age_min != null ? ` · feed ${Math.round(data.file_age_min)}m ago` : "";
+        sub.textContent = `TypeSafe · conf≥${minConf} trades${age}`;
+    }
+    if (!rows.length) { div.innerHTML = '<span class="muted">Waiting for first verdict…</span>'; return; }
+    div.innerHTML = rows.map(v => {
+        const sideCls = v.action === 'long' ? 'up' : v.action === 'short' ? 'down' : '';
+        const confTxt = v.confidence != null ? Number(v.confidence).toFixed(2) : "--";
+        const confCls = v.tradeable ? 'up' : 'muted';
+        const flag = v.tradeable ? ' ▸TRADE' : '';
+        const age = v.verdict_age_min != null ? `${Math.round(v.verdict_age_min)}m` : '';
+        return `<div class="stream-item">
+            <span class="stream-symbol">${v.symbol}</span>
+            <span class="${sideCls}">${(v.action || '--').toUpperCase()}</span>
+            <span class="${confCls}">${confTxt}${flag}</span>
+            <span class="muted tiny">${v.regime || ''} ${age}</span>
+        </div>`;
+    }).join('');
+}
+
+function closeStrategyModal(e) {
+    if (e.target === document.getElementById('strategy-modal')) {
+        document.getElementById('strategy-modal').classList.remove('active');
+    }
+}
+
+function fmtNum(n, d=2) {
+    if (n == null || n === undefined || isNaN(n)) return "--";
+    return Number(n).toLocaleString("en-US", {minimumFractionDigits:d, maximumFractionDigits:d});
+}
+
+function fmtPrice(n) {
+    if (n == null || n === undefined || isNaN(n)) return "--";
+    const abs = Math.abs(Number(n));
+    const d = abs >= 1000 ? 2 : abs >= 10 ? 3 : 4;
+    return fmtNum(n, d);
+}
+
+function fmtM(n) {
+    if (n == null || isNaN(n)) return "--";
+    return (n / 1e6).toFixed(2) + "M";
+}
+
+function fmtPct(n, d=2) {
+    if (n == null || isNaN(n)) return "--";
+    return (n * 100).toFixed(d) + "%";
+}
+
+function fmtTime(ts) {
+    if (!ts) return "--";
+    return new Date(ts).toLocaleTimeString("pt-PT", {hour:"2-digit", minute:"2-digit", second:"2-digit"});
+}
+
+function fmtHM(ts) {
+    if (!ts) return "";
+    return new Date(ts).toLocaleTimeString("pt-PT", {hour:"2-digit", minute:"2-digit"});
+}
+
+function cadenceColor(pct) {
+    // Continuous 0-100 ramp for where the current gap sits in the feed's own
+    // distribution: green (quiet) -> amber -> red (deep in the tail). Same
+    // hue family as the panel's up/warn/down colors; a rank, not a cutoff.
+    const t = Math.min(100, Math.max(0, pct)) / 100;
+    const hue = Math.round(130 * (1 - t));
+    return "hsl(" + hue + ", 70%, 45%)";
+}
+
+function fmtDate(ts) {
+    if (!ts) return "--";
+    return new Date(ts).toLocaleString("pt-PT", {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"});
+}
+
+function fmtUptime(sec) {
+    if (!sec || sec < 0) return "--";
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) return h + "h " + m + "m";
+    if (m > 0) return m + "m " + s + "s";
+    return s + "s";
+}
+
+function fmtAge(seconds) {
+    if (seconds == null || isNaN(seconds)) return "--";
+    if (seconds < 1) return (seconds * 1000).toFixed(0) + "ms";
+    if (seconds < 60) return seconds.toFixed(1) + "s";
+    return (seconds / 60).toFixed(1) + "m";
+}
+
+function fmtDur(sec) {
+    if (sec == null || isNaN(sec)) return "—";
+    if (sec < 60) return sec.toFixed(0) + "s";
+    if (sec < 3600) return (sec / 60).toFixed(0) + "m";
+    if (sec < 86400) return (sec / 3600).toFixed(1) + "h";
+    return (sec / 86400).toFixed(1) + "d";
+}
+
+function sparklineSvg(series, w, h, warnFrac, imminentFrac) {
+    // series: [[ts_ms, pct], ...] — % of silence threshold per bucket, 24h.
+    // Color from the CONFIGURED warn/imminent fractions (same single source
+    // as the bar/% columns) — never a hardcoded 60/90 that could drift.
+    if (!series || !series.length) return '<span class="muted">—</span>';
+    const raw = series.map(p => Number(p[1]));
+    const vals = raw.map(v => Math.max(0, Math.min(100, v)));
+    const minV = Math.min.apply(null, vals);
+    const maxV = Math.max.apply(null, vals);
+    const span = Math.max(1, maxV - minV);
+    const pad = 2;
+    const x = (i) => pad + (i / Math.max(1, vals.length - 1)) * (w - 2 * pad);
+    const y = (v) => (h - pad) - ((v - minV) / span) * (h - 2 * pad);
+    const pts = vals.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
+    const wF = warnFrac != null ? Number(warnFrac) : 0.5;
+    const iF = imminentFrac != null ? Number(imminentFrac) : 0.9;
+    const color = maxV >= iF * 100 ? "var(--down)" : maxV >= wF * 100 ? "var(--warn, #d29922)" : "var(--up)";
+    // data-tips carries the RAW values (unclamped, exact pct) + bucket ts
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block;cursor:crosshair;" data-tips="' +
+        encodeURIComponent(JSON.stringify(series.map((p, i) => [p[0], raw[i]]))) +
+        '" data-tip-format="pct">' +
+        '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.2" />' +
+        '<circle cx="' + x(vals.length - 1).toFixed(1) + '" cy="' + y(vals[vals.length - 1]).toFixed(1) + '" r="1.6" fill="' + color + '" />' +
+        '</svg>';
+}
+
+function sparklineAbs(series, w, h, maxSilenceSec, warnFrac, imminentFrac) {
+    // series: [[ts_ms, max_age_sec], ...] — daily max age, last 14 days.
+    // Raw seconds scaled to the cell; color by fraction of the feed's
+    // silence threshold using the CONFIGURED warn/imminent fractions (same
+    // single source as the other columns), never a hardcoded 60/90.
+    if (!series || !series.length) return '<span class="muted">—</span>';
+    const raw = series.map(p => Math.max(0, Number(p[1])));
+    const vals = raw.slice();
+    const minV = Math.min.apply(null, vals);
+    const maxV = Math.max.apply(null, vals);
+    const span = Math.max(1, maxV - minV);
+    const pad = 2;
+    const x = (i) => pad + (i / Math.max(1, vals.length - 1)) * (w - 2 * pad);
+    const y = (v) => (h - pad) - ((v - minV) / span) * (h - 2 * pad);
+    const pts = vals.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
+    const th = Math.max(1, Number(maxSilenceSec) || 1);
+    const lastPct = (vals[vals.length - 1] / th) * 100;
+    const wF = warnFrac != null ? Number(warnFrac) : 0.5;
+    const iF = imminentFrac != null ? Number(imminentFrac) : 0.9;
+    const color = lastPct >= iF * 100 ? "var(--down)" : lastPct >= wF * 100 ? "var(--warn, #d29922)" : "var(--up)";
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block;cursor:crosshair;" data-tips="' +
+        encodeURIComponent(JSON.stringify(series.map((p, i) => [p[0], raw[i]]))) +
+        '" data-tip-format="abs">' +
+        '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.2" />' +
+        '<circle cx="' + x(vals.length - 1).toFixed(1) + '" cy="' + y(vals[vals.length - 1]).toFixed(1) + '" r="1.6" fill="' + color + '" />' +
+        '</svg>';
+}
+
+// ── Sparkline hover tooltip: exact value + timestamp of the nearest bucket ──
+let _sparkTip = null;
+function _sparkTipEl() {
+    if (!_sparkTip) {
+        _sparkTip = document.createElement("div");
+        _sparkTip.style.cssText = "position:fixed;z-index:9999;pointer-events:none;display:none;" +
+            "background:rgba(18,22,28,0.95);border:1px solid var(--border);border-radius:4px;" +
+            "padding:3px 6px;font-size:10px;color:var(--text);white-space:nowrap;font-family:'SF Mono','Consolas',monospace;";
+        document.body.appendChild(_sparkTip);
+    }
+    return _sparkTip;
+}
+document.addEventListener("mousemove", function (e) {
+    const tip = _sparkTipEl();
+    const svg = e.target && e.target.closest ? e.target.closest("svg[data-tips]") : null;
+    if (!svg) { tip.style.display = "none"; return; }
+    let series = null;
+    try { series = JSON.parse(decodeURIComponent(svg.getAttribute("data-tips"))); } catch (err) { series = null; }
+    if (!series || !series.length) { tip.style.display = "none"; return; }
+    const rect = svg.getBoundingClientRect();
+    const frac = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
+    const idx = Math.max(0, Math.min(series.length - 1, Math.round(frac * (series.length - 1))));
+    const [ts, v] = series[idx];
+    const fmt = svg.getAttribute("data-tip-format");
+    const txt = fmt === "pct"
+        ? fmtTime(ts) + " · " + v.toFixed(1) + "% do threshold"
+        : fmtDate(ts) + " · max " + fmtDur(v);
+    tip.textContent = txt;
+    tip.style.display = "block";
+    tip.style.left = (e.clientX + 12) + "px";
+    tip.style.top = (e.clientY + 14) + "px";
+});
+
+async function showStrategyDetail(name) {
+    const modal = document.getElementById('strategy-modal');
+    const content = document.getElementById('modal-content');
+    document.getElementById('modal-title').textContent = name;
+    modal.classList.add('active');
+    content.innerHTML = '<div class="muted" style="text-align:center;">Loading...</div>';
+    try {
+        const res = await authFetch('/api/strategy/' + encodeURIComponent(name));
+        const data = await res.json();
+        if (data.error) { content.innerHTML = '<div class="muted" style="text-align:center;color:var(--down)">' + data.error + '</div>'; return; }
+        const s = data.stats || {};
+        let html = '<div class="stat-row"><span class="stat-label">Enabled</span><span class="stat-value" style="color:' + (data.enabled ? 'var(--up)' : 'var(--muted)') + '">' + (data.enabled ? 'YES' : 'NO') + '</span></div>';
+        html += '<div class="stat-row"><span class="stat-label">Description</span><span class="stat-value" style="font-weight:400;max-width:300px;text-align:right;">' + (data.description || "—") + '</span></div>';
+        html += '<div class="stat-row"><span class="stat-label">Params</span><span class="stat-value" style="font-weight:400;max-width:300px;text-align:right;font-family:monospace;font-size:10px;">' + JSON.stringify(data.params || {}) + '</span></div>';
+        if (data.note) {
+            html += '<div class="muted" style="font-size:10px;margin-top:6px;line-height:1.35;">' + data.note + '</div>';
+        }
+        html += '<div style="margin-top:10px; font-weight:600; font-size:11px; color:var(--accent);">Performance</div>';
+        html += '<div class="stat-row"><span class="stat-label">Signals (tot/app/rej)</span><span class="stat-value">' + (s.total_signals || 0) + ' / ' + (s.approved_signals || 0) + ' / ' + (s.rejected_signals || 0) + '</span></div>';
+        html += '<div class="stat-row"><span class="stat-label">Trades (win / loss)</span><span class="stat-value">' + (s.winning_trades || 0) + ' / ' + (s.losing_trades || 0) + '</span></div>';
+        html += '<div class="stat-row"><span class="stat-label">Win Rate</span><span class="stat-value" style="color:' + ((s.win_rate || 0) >= 0.5 ? 'var(--up)' : 'var(--down)') + '">' + ((s.win_rate || 0) * 100).toFixed(1) + '%</span></div>';
+        html += '<div class="stat-row"><span class="stat-label">Total PnL</span><span class="stat-value" style="color:' + ((s.total_pnl_pct || 0) >= 0 ? 'var(--up)' : 'var(--down)') + '">' + ((s.total_pnl_pct || 0) >= 0 ? '+' : '') + (s.total_pnl_pct || 0).toFixed(2) + '%</span></div>';
+        html += '<div class="stat-row"><span class="stat-label">Avg PnL/trade</span><span class="stat-value">' + ((s.avg_pnl_pct || 0) >= 0 ? '+' : '') + (s.avg_pnl_pct || 0).toFixed(2) + '%</span></div>';
+        const hist = data.signal_history || [];
+        if (hist.length > 0) {
+            html += '<div style="margin-top:10px;font-weight:600;font-size:11px;color:var(--accent);">Recent Signals</div>';
+            html += '<table><thead><tr><th>Time</th><th>Sym</th><th>Side</th><th>Conf</th><th>Status</th></tr></thead><tbody>';
+            html += hist.map(sig => '<tr><td class="muted tiny">' + (sig.time || '--') + '</td><td><span class="highlight">' + sig.symbol + '</span></td><td class="' + (sig.side === 'long' ? 'up' : 'down') + '">' + (sig.side || '--').toUpperCase() + '</td><td class="num">' + (sig.confidence != null ? Math.round(sig.confidence * 100) + '%' : '--') + '</td><td><span class="pill pill-' + (sig.status || 'pending') + '">' + (sig.status || 'PENDING') + '</span></td></tr>').join('');
+            html += '</tbody></table>';
+        }
+        content.innerHTML = html;
+    } catch (e) {
+        content.innerHTML = '<div class="muted" style="text-align:center;color:var(--down)">Failed to load: ' + e.message + '</div>';
+    }
+}
+
+function renderRiskGates(data) {
+    const div = document.getElementById("risk-gates-panel");
+    if (!div) return;
+    const liveClientHealthy = !!(statusUpdate.ws_healthy);
+    const reconcileRunning = !!(data && data.reconcile && data.reconcile.running);
+    const wsHealthRunning = !!(data && data.ws_health && data.ws_health.running);
+    const fbActive = !!(data && data.funding_blackout_active);
+    const cb = !!(data && data.circuit_breaker);
+    const volBlocked = (data && data.vol_circuit_blocked) || {};
+    const volAnyBlocked = Object.values(volBlocked).some(v => v);
+    const volSnapshot = (data && data.vol_circuit) || {};
+    const volSamples = volSnapshot.BTC ? volSnapshot.BTC.samples : 0;
+    const volClass = volAnyBlocked ? "yellow" : (volSamples > 0 ? "up" : "muted");
+    const cbClass = cb ? "down" : "up";
+    const fbClass = fbActive ? "yellow" : "up";
+    const reconClass = reconcileRunning ? "up" : "muted";
+    const wsClass = wsHealthRunning ? "up" : "muted";
+    const liveClass = liveClientHealthy ? "up" : "down";
+    div.innerHTML = `
+        <div class="mini-row"><span class="mini-label">Circuit Breaker</span><span class="mini-value ${cbClass}">${cb ? "TRIPPED" : "OK"}</span></div>
+        <div class="mini-row"><span class="mini-label">Funding Blackout</span><span class="mini-value ${fbClass}">${fbActive ? "ACTIVE" : "OK"}</span></div>
+        <div class="mini-row"><span class="mini-label">Vol Circuit (BTC)</span><span class="mini-value ${volClass}">${volAnyBlocked ? "BLOCKED" : (volSamples > 0 ? `OK (${volSamples} samples)` : "WARMING")}</span></div>
+        <div class="mini-row"><span class="mini-label">Reconciliation</span><span class="mini-value ${reconClass}">${reconcileRunning ? "RUNNING" : "OFF (paper)"}</span></div>
+        <div class="mini-row"><span class="mini-label">WS Health Loop</span><span class="mini-value ${wsClass}">${wsHealthRunning ? "RUNNING" : "OFF (paper)"}</span></div>
+        <div class="mini-row"><span class="mini-label">HL WS Feed</span><span class="mini-value ${liveClass}">${liveClientHealthy ? "HEALTHY" : "STALE"}</span></div>
+    `;
+}
+
+function updateAlertBanner() {
+    const items = [];
+    const connected = socket && socket.connected;
+    if (!connected) {
+        items.push({ txt: "Dashboard OFFLINE — socket desligado", warn: false });
+    }
+    if (statusUpdate && Object.keys(statusUpdate).length) {
+        if (statusUpdate.circuit_breaker === "ON") {
+            items.push({ txt: "CIRCUIT BREAKER ATIVO", warn: false });
+        }
+        if (statusUpdate.running === false) {
+            items.push({ txt: "Engine STOPPED", warn: false });
+        }
+        if (statusUpdate.ws_healthy === false) {
+            items.push({ txt: "WebSocket Hyperliquid degraded", warn: true });
+        }
+        const staleSec = Date.now() - (statusReceivedAt || 0);
+        if (connected && staleSec > 15000) {
+            items.push({ txt: "Status feed stale (" + Math.round(staleSec / 1000) + "s)", warn: true });
+        }
+    }
+    const banner = document.getElementById("alert-banner");
+    const box = document.getElementById("alert-items");
+    if (!banner || !box) return;
+    if (!items.length) { banner.style.display = "none"; return; }
+    banner.style.display = "block";
+    box.innerHTML = items.map(i =>
+        `<div class="alert-item ${i.warn ? "warn" : ""}"><span class="adot"></span>${i.txt}</div>`
+    ).join("");
+}
+setInterval(updateAlertBanner, 5000);
+
+socket.on("connect", () => {
+    document.getElementById("conn-badge").textContent = "LIVE";
+    document.getElementById("conn-badge").className = "badge badge-green";
+    updateAlertBanner();
+});
+socket.on("disconnect", () => {
+    document.getElementById("conn-badge").textContent = "OFFLINE";
+    document.getElementById("conn-badge").className = "badge badge-red";
+    updateAlertBanner();
+});
+socket.on("status", (data) => {
+    statusUpdate = data;
+    statusReceivedAt = Date.now();
+    if (data.mode) document.getElementById("mode-badge").textContent = data.mode.toUpperCase();
+    const statusEl = document.getElementById("status-badge");
+    statusEl.textContent = data.running ? "RUNNING" : "STOPPED";
+    statusEl.className = "badge " + (data.running ? "badge-green" : "badge-red");
+    const cbEl = document.getElementById("circuit-badge");
+    cbEl.textContent = "CB: " + (data.circuit_breaker || "OFF");
+    cbEl.className = "badge " + (data.circuit_breaker === "ON" ? "badge-red badge-pulse" : "badge-dim");
+    updateAlertBanner();
+    const uptime = data.uptime_sec || 0;
+    const h = Math.floor(uptime / 3600).toString().padStart(2, "0");
+    const m = Math.floor((uptime % 3600) / 60).toString().padStart(2, "0");
+    const s = (uptime % 60).toString().padStart(2, "0");
+    document.getElementById("uptime-badge").textContent = `${h}:${m}:${s}`;
+});
+socket.on("engine_monitor", (data) => { renderEngine(data); renderRiskGates(data); });
+socket.on("live_data", (data) => { _lastLiveRows = data; renderLiveData(data); });
+socket.on("funding_update", (data) => {
+    _fundingPred = data || {};
+    if (_lastLiveRows) renderLiveData(_lastLiveRows);
+});
+socket.on("market_data_health", (data) => renderFeedSilence(data));
+socket.on("strategies", (data) => renderStrategies(data));
+socket.on("jev_verdicts", (data) => renderJevVerdicts(data));
+socket.on("logs", (data) => renderLogs(data));
+
+pollAll = function pollAll() {
+    authFetch("/api/status").then(r => r.json()).then(d => {
+        statusUpdate = d;
+        statusReceivedAt = Date.now();
+        if (d.mode) document.getElementById("mode-badge").textContent = d.mode.toUpperCase();
+        const statusEl = document.getElementById("status-badge");
+        statusEl.textContent = d.running ? "RUNNING" : "STOPPED";
+        statusEl.className = "badge " + (d.running ? "badge-green" : "badge-red");
+    }).catch(() => {});
+    if (!socket || !socket.connected) {
+        authFetch("/api/market_data_health").then(r => r.json()).then(d => renderFeedSilence(d)).catch(() => {});
+        authFetch("/api/logs").then(r => r.json()).then(d => renderLogs(d)).catch(() => {});
+        authFetch("/api/engine_monitor").then(r => r.json()).then(d => { renderEngine(d); renderRiskGates(d); }).catch(() => {});
+        authFetch("/api/live_data").then(r => r.json()).then(d => { _lastLiveRows = d; renderLiveData(d); }).catch(() => {});
+        authFetch("/api/strategies").then(r => r.json()).then(d => renderStrategies(d)).catch(() => {});
+    }
+};
+
+if (!window.__hlOpsTimers) {
+    window.__hlOpsTimers = true;
+    let _pingStart = null;
+    setInterval(() => {
+        if (socket && socket.connected) {
+            _pingStart = Date.now();
+            socket.emit("ping", () => {
+                lastSocketLatency = Date.now() - _pingStart;
+                document.getElementById("latency-badge").textContent = lastSocketLatency + "ms";
+                document.getElementById("latency-badge").className = "badge " + (lastSocketLatency > 500 ? "badge-yellow" : "badge-blue");
+            });
+        }
+    }, 5000);
+    setInterval(pollAll, 5000);
+    setInterval(() => {
+        if (statusUpdate.uptime_sec != null && statusReceivedAt > 0) {
+            const s = statusUpdate.uptime_sec + Math.floor((Date.now() - statusReceivedAt) / 1000);
+            const h = Math.floor(s / 3600).toString().padStart(2, "0");
+            const m = Math.floor((s % 3600) / 60).toString().padStart(2, "0");
+            const sec = (s % 60).toString().padStart(2, "0");
+            document.getElementById("uptime-badge").textContent = `${h}:${m}:${sec}`;
+        }
+    }, 1000);
+}
+} // end bindSocketHandlers
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') document.getElementById('strategy-modal').classList.remove('active');
+});
+
+verifyAuthAndConnect();
+</script>
+</body>
+</html>

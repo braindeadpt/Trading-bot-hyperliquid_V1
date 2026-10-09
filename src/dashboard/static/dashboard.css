@@ -302,3 +302,10 @@ details.fold .panel { max-height: none; }
 @media (max-width: 1100px) {
     .g-3, .g-4, .g-6, .g-8 { grid-column: span 12; }
 }
+
+/* Context strip — regime + risk gates + governor in one band */
+.ctx-panel { margin-bottom: var(--gap); }
+.ctx-cols { display: grid; grid-template-columns: 1fr 1.2fr 0.9fr; gap: 0; }
+.ctx-col { padding: 6px 10px; border-right: 1px solid var(--border); min-width: 0; }
+.ctx-col:last-child { border-right: none; }
+@media (max-width: 900px) { .ctx-cols { grid-template-columns: 1fr; } .ctx-col { border-right: none; border-bottom: 1px solid var(--border); } .ctx-col:last-child { border-bottom: none; } }

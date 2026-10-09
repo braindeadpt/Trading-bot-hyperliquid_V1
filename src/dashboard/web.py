@@ -29,10 +29,14 @@ logger = logging.getLogger(__name__)
 
 
 def _open_research_db() -> "ResearchDatabase":
-    """Central research DB accessor for dashboard read paths (config-resolved)."""
+    """Central research DB accessor for dashboard read paths (config-resolved).
+
+    Always read-only (``mode=ro``) — the dashboard never writes research
+    state; heavy evaluation runs out-of-process.
+    """
     from src.data.research_database import ResearchDatabase
 
-    return ResearchDatabase.open()
+    return ResearchDatabase.open(read_only=True)
 
 
 class _PositionsCapitalView:
@@ -130,6 +134,504 @@ def _predicted_funding_for(sym: str, ctx: Any = None) -> Optional[float]:
     if agg is not None:
         return getattr(agg, "predicted_funding_avg", None)
     return None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Decision feed — signal → risk gate → execution in one row (merged panel)
+# ═════════════════════════════════════════════════════════════════════════════
+
+_DECISION_FEED_WINDOW_MS = 15_000
+_TRADE_MATCH_WINDOW_MS = 120_000
+_DIVERGENCE_MATCH_MS = 120_000
+# Mean |real-vs-sim| above this on the JevJudge paper book means the shadow
+# evaluator's fill/bracket model is drifting from the real paper path —
+# deterministic costs alone (maker+taker ≈ 6 bps) can't produce it; a
+# systematic simulator bug (bracket parse, side, stale candles) lands ≥50 bps.
+DIVERGENCE_ALERT_BPS = 25.0
+DIVERGENCE_MIN_PAIRS = 5
+
+
+def _live_db_conn() -> Any:
+    db = getattr(_engine, "_db", None) if _engine is not None else None
+    if db is None or not hasattr(db, "_conn"):
+        return None
+    try:
+        return db._conn()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def build_decision_feed(limit: int = 40) -> List[Dict[str, Any]]:
+    """One row per signal: emitted → gate verdict → execution outcome.
+
+    Signals, decision_audit gate rows and trades share ``event.timestamp_ms``
+    as their timestamp, so the join keys on symbol+side+ts window — the same
+    ordering the engine itself applies downstream of a signal.
+    """
+    conn = _live_db_conn()
+    if conn is None:
+        return []
+    limit = max(1, min(int(limit), 200))
+    try:
+        sigs = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT timestamp, symbol, side, strategy, confidence, price, "
+                "reason FROM signals ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        ]
+        if not sigs:
+            return []
+        t_min = min(int(s["timestamp"]) for s in sigs) - _DECISION_FEED_WINDOW_MS
+        decisions = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT timestamp, decision_type, symbol, side, strategy, "
+                "result, reason, metadata FROM decision_audit "
+                "WHERE timestamp >= ? ORDER BY timestamp",
+                (t_min,),
+            ).fetchall()
+        ]
+        trades = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, symbol, side, strategy, entry_time, status, "
+                "pnl_usd, exit_reason FROM trades WHERE entry_time >= ? "
+                "ORDER BY entry_time",
+                (t_min,),
+            ).fetchall()
+        ]
+    except Exception as exc:  # noqa: BLE001 — feed degrades, never 500s
+        logger.debug("decision_feed query failed: %s", exc)
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for s in sigs:
+        s_ts = int(s["timestamp"])
+        sym, side, strat = s["symbol"], s["side"], s["strategy"]
+        chain = [
+            d for d in decisions
+            if d["symbol"] == sym
+            and abs(int(d["timestamp"]) - s_ts) <= _DECISION_FEED_WINDOW_MS
+            and (not d.get("side") or d["side"] == side)
+            and (not d.get("strategy") or d["strategy"] == strat)
+        ]
+        trade = next(
+            (
+                t for t in trades
+                if t["symbol"] == sym
+                and t["side"] == side
+                and (not strat or t["strategy"] in (strat, None))
+                and 0 <= int(t["entry_time"]) - s_ts <= _TRADE_MATCH_WINDOW_MS
+            ),
+            None,
+        )
+        rej = next(
+            (d for d in chain if d["result"] in ("rejected", "failed")),
+            None,
+        )
+        executed = next((d for d in chain if d["result"] == "executed"), None)
+        pending = next((d for d in chain if d["result"] == "pending"), None)
+        if rej is not None:
+            stage = "rejected"
+            stage_detail = f'{rej["decision_type"]}: {rej["reason"] or ""}'
+        elif executed is not None or trade is not None:
+            stage = "executed"
+            stage_detail = (
+                (executed or {}).get("reason") or
+                (f'trade #{trade["id"]} {trade["status"]}' if trade else "")
+            )
+        elif pending is not None:
+            stage = "pending"
+            stage_detail = pending.get("reason") or "awaiting_fill"
+        else:
+            stage = "emitted"
+            stage_detail = ""
+        out.append({
+            "ts": s_ts,
+            "symbol": sym,
+            "side": side,
+            "strategy": strat,
+            "confidence": s.get("confidence"),
+            "price": s.get("price"),
+            "signal_reason": s.get("reason"),
+            "stage": stage,
+            "stage_detail": (stage_detail or "")[:120],
+            "trade_id": trade["id"] if trade else None,
+            "trade_status": trade["status"] if trade else None,
+            "trade_pnl_usd": trade.get("pnl_usd") if trade else None,
+            "trade_exit_reason": trade.get("exit_reason") if trade else None,
+        })
+    return out
+
+
+def _execution_strategy_names() -> List[str]:
+    """Live execution strategy names (config list ∩ instantiated)."""
+    names: List[str] = []
+    cfg = getattr(_engine, "_config", None) if _engine is not None else None
+    try:
+        from src.utils.config import get_strategy_section
+
+        p08 = get_strategy_section(cfg, "phase08") if cfg is not None else {}
+        names = [str(s) for s in (p08.get("execution_strategies") or [])]
+    except Exception:  # noqa: BLE001
+        names = []
+    live = getattr(_engine, "_strategies", None) if _engine is not None else None
+    live_names = {getattr(s, "name", "") for s in (live or [])}
+    if live_names:
+        names = [n for n in names if n in live_names] or sorted(live_names)
+    return names or sorted(live_names)
+
+
+def build_execution_pnl() -> Dict[str, Any]:
+    """Net-PnL decomposition per executing strategy — real fills + funding.
+
+    Ledger per closed trade (all USD):
+      gross  = stored pnl_usd + fees      (price move on actual fill prices)
+      fees   = entry_fee + exit_notional × exit_fee_pct (signal_metadata,
+               tier-0 taker 0.045% fallback)
+      slip   = (entry_slip_pct + exit_slip_pct) × entry notional (modeled)
+      funding = funding_paid (signed cashflow accumulated during the hold)
+      net    = pnl_usd + funding_paid  == gross − fees + funding
+    """
+    conn = _live_db_conn()
+    if conn is None:
+        return {"rows": [], "error": "no_db"}
+    names = _execution_strategy_names()
+    try:
+        trades = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT strategy, symbol, side, entry_price, exit_price, size, "
+                "pnl_usd, pnl_pct, entry_fee, funding_paid, signal_metadata, "
+                "status, entry_time, exit_time FROM trades "
+                "WHERE status = 'closed'"
+            ).fetchall()
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("execution_pnl query failed: %s", exc)
+        return {"rows": [], "error": str(exc)[:120]}
+
+    def _meta_pct(t: Dict[str, Any], key: str, default: float) -> float:
+        try:
+            meta = json.loads(t.get("signal_metadata") or "{}")
+            return safe_float(meta.get(key), default)
+        except (ValueError, TypeError):
+            return default
+
+    per: Dict[str, Dict[str, Any]] = {}
+    for t in trades:
+        strat = str(t.get("strategy") or "unknown")
+        if names and strat not in names:
+            continue
+        notional_in = safe_float(t.get("entry_price")) * safe_float(t.get("size"))
+        notional_out = safe_float(t.get("exit_price")) * safe_float(t.get("size"))
+        pnl = safe_float(t.get("pnl_usd"))
+        entry_fee = safe_float(t.get("entry_fee"))
+        exit_fee = notional_out * _meta_pct(t, "exit_fee_pct", 0.00045)
+        fees = entry_fee + exit_fee
+        slip = notional_in * (
+            _meta_pct(t, "entry_slippage_pct", 0.0)
+            + _meta_pct(t, "exit_slippage_pct", 0.0)
+        )
+        funding = safe_float(t.get("funding_paid"))
+        net = pnl + funding
+        agg = per.setdefault(
+            strat,
+            {"strategy": strat, "trades": 0, "wins": 0, "gross": 0.0,
+             "fees": 0.0, "slippage": 0.0, "funding": 0.0, "net": 0.0,
+             "notional": 0.0},
+        )
+        agg["trades"] += 1
+        agg["wins"] += 1 if net > 0 else 0
+        agg["gross"] += pnl + fees
+        agg["fees"] += fees
+        agg["slippage"] += slip
+        agg["funding"] += funding
+        agg["net"] += net
+        agg["notional"] += notional_in
+    rows = sorted(per.values(), key=lambda r: r["strategy"])
+    for r in rows:
+        r["win_rate"] = r["wins"] / r["trades"] if r["trades"] else None
+        for k in ("gross", "fees", "slippage", "funding", "net"):
+            r[k] = round(r[k], 4)
+        r["notional"] = round(r["notional"], 2)
+        r["net_bps_on_notional"] = (
+            round(r["net"] / r["notional"] * 1e4, 2) if r["notional"] else None
+        )
+    return {
+        "rows": rows,
+        "basis": "closed trades · fills + funding reais · net = gross − fees + funding",
+        "executing": names,
+        "generated_ms": int(time.time() * 1000),
+    }
+
+
+def _load_latest_board_metrics(strategy: str, variant: str) -> Optional[Dict[str, Any]]:
+    """Newest persisted scoreboard dict for strategy::variant (read-only)."""
+    rdb = None
+    try:
+        from src.research.shadow_outcome_evaluator import scoreboard_key
+
+        rdb = _open_research_db()
+        conn = rdb._conn()
+        try:
+            row = conn.execute(
+                "SELECT MAX(evaluated_at_ms) AS ts FROM shadow_outcome_scoreboards"
+            ).fetchone()
+        except Exception:  # noqa: BLE001 — table may not exist
+            return None
+        ts = int(row["ts"]) if row and row["ts"] is not None else None
+        if ts is None:
+            return None
+        want = scoreboard_key(strategy, variant)
+        for r in conn.execute(
+            "SELECT metrics_json FROM shadow_outcome_scoreboards "
+            "WHERE evaluated_at_ms = ?",
+            (ts,),
+        ).fetchall():
+            try:
+                d = json.loads(r["metrics_json"])
+            except Exception:  # noqa: BLE001
+                continue
+            key = scoreboard_key(
+                str(d.get("strategy")), str(d.get("variant") or "")
+            )
+            if key == want:
+                d["_evaluated_at_ms"] = ts
+                return d
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        if rdb is not None:
+            try:
+                rdb.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def build_execution_divergence() -> Dict[str, Any]:
+    """Real paper PnL vs the shadow evaluator's simulation — JevJudge.
+
+    For each closed JevJudge paper trade, find the independent simulated
+    outcome the evaluator produced for the SAME routed decision
+    (``JevJudge::iv_gate_shadow`` board, persisted hourly out-of-process)
+    and compare net %: real = pnl_pct + funding_paid/notional (fills +
+    funding reais); sim = net_pnl_pct (fees+slip+funding model). A growing
+    mean |Δ| means the simulator drifted from the real fill path.
+    """
+    board = _load_latest_board_metrics("JevJudge", "iv_gate_shadow")
+    outcomes = (board or {}).get("independent_outcomes") or []
+    conn = _live_db_conn()
+    trades: List[Dict[str, Any]] = []
+    if conn is not None:
+        try:
+            trades = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT id, symbol, side, entry_price, entry_time, "
+                    "exit_time, size, pnl_usd, pnl_pct, funding_paid "
+                    "FROM trades WHERE strategy = 'JevJudge' "
+                    "AND status = 'closed' ORDER BY entry_time"
+                ).fetchall()
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("divergence trades query failed: %s", exc)
+
+    pairs: List[Dict[str, Any]] = []
+    used_trades: set = set()
+    for o in outcomes:
+        try:
+            o_ts, _x, o_sym, o_net_pct, _nr = (
+                int(o[0]), o[1], str(o[2]), float(o[3]), o[4]
+            )
+        except (TypeError, IndexError, ValueError):
+            continue
+        best = None
+        best_gap = _DIVERGENCE_MATCH_MS + 1
+        for t in trades:
+            if t["id"] in used_trades or t["symbol"] != o_sym:
+                continue
+            gap = abs(int(t["entry_time"]) - o_ts)
+            if gap <= _DIVERGENCE_MATCH_MS and gap < best_gap:
+                best, best_gap = t, gap
+        if best is None:
+            continue
+        used_trades.add(best["id"])
+        notional = safe_float(best.get("entry_price")) * safe_float(best.get("size"))
+        real_net_pct = safe_float(best.get("pnl_pct")) + (
+            safe_float(best.get("funding_paid")) / notional if notional else 0.0
+        )
+        delta_bps = (real_net_pct - o_net_pct) * 1e4
+        pairs.append({
+            "trade_id": best["id"],
+            "symbol": o_sym,
+            "side": best.get("side"),
+            "entry_time": int(best["entry_time"]),
+            "real_bps": round(real_net_pct * 1e4, 2),
+            "sim_bps": round(o_net_pct * 1e4, 2),
+            "delta_bps": round(delta_bps, 2),
+        })
+
+    deltas = [abs(p["delta_bps"]) for p in pairs]
+    signed = [p["delta_bps"] for p in pairs]
+    mean_abs = sum(deltas) / len(deltas) if deltas else None
+    payload: Dict[str, Any] = {
+        "strategy": "JevJudge",
+        "n_outcomes": len(outcomes),
+        "n_trades": len(trades),
+        "n_pairs": len(pairs),
+        "mean_delta_bps": (
+            round(sum(signed) / len(signed), 2) if signed else None
+        ),
+        "mean_abs_delta_bps": round(mean_abs, 2) if mean_abs is not None else None,
+        "max_abs_delta_bps": round(max(deltas), 2) if deltas else None,
+        "alert_threshold_bps": DIVERGENCE_ALERT_BPS,
+        "min_pairs": DIVERGENCE_MIN_PAIRS,
+        "alert": bool(
+            mean_abs is not None
+            and len(pairs) >= DIVERGENCE_MIN_PAIRS
+            and mean_abs > DIVERGENCE_ALERT_BPS
+        ),
+        "evaluated_at_ms": (board or {}).get("_evaluated_at_ms"),
+        "pairs": pairs[-12:],
+        "generated_ms": int(time.time() * 1000),
+    }
+    return payload
+
+
+def _clustered_count(intervals: List[tuple]) -> int:
+    """Merge [entry, exit] windows across symbols — same boundary convention
+    as the evaluator (touching edges do not overlap)."""
+    iv = sorted(
+        (int(a), int(b)) for a, b in intervals if a is not None and b is not None
+    )
+    if not iv:
+        return 0
+    clusters = 1
+    _cs, ce = iv[0]
+    for s, e in iv[1:]:
+        if s > ce:
+            clusters += 1
+            ce = e
+        else:
+            ce = max(ce, e)
+    return clusters
+
+
+def build_hypotheses() -> Dict[str, Any]:
+    """Preregistered hypotheses — counts only while sealed (no peeking)."""
+    from src.research.shadow_outcome_evaluator import (
+        PREREGISTERED_CONFIRMATIONS,
+        VARIANT_CONFIRM_SUFFIX,
+        scoreboard_key,
+    )
+
+    now_ms = int(time.time() * 1000)
+    day_ms = 86_400_000
+    out: List[Dict[str, Any]] = []
+
+    # ── Shadow confirmation boards (e.g. VWAPDeviation::iv_gate_shadow) ──
+    for (strategy, variant), (cutoff, target, expiry) in sorted(
+        PREREGISTERED_CONFIRMATIONS.items()
+    ):
+        board = _load_latest_board_metrics(
+            strategy, variant + VARIANT_CONFIRM_SUFFIX
+        ) or {}
+        n_indep = board.get("n_independent")
+        n_clu = board.get("n_clustered")
+        sealed = bool(board.get("sealed", True)) and not board.get(
+            "confirmation_expired"
+        )
+        expired = bool(board.get("confirmation_expired"))
+        # Rate: measured post-cutoff when the board has rows; else the
+        # preregistered discovery rate implied by expiry = cutoff + 2·T.
+        if n_indep and board.get("_evaluated_at_ms"):
+            days = max((now_ms - cutoff) / day_ms, 1.0)
+            rate = float(n_indep) / days
+        else:
+            rate = (
+                2.0 * float(target) * day_ms / float(expiry - cutoff)
+                if expiry and expiry > cutoff
+                else 0.0
+            )
+        eta_ms = None
+        if n_indep is not None and rate > 0 and n_indep < target:
+            eta_ms = now_ms + int((target - n_indep) / rate * day_ms)
+        if expired:
+            state = "veredicto C — expiry atingido"
+        elif n_indep is not None and n_indep >= target:
+            state = "veredicto — leitura final"
+        else:
+            state = "confirmação"
+        out.append({
+            "id": f"{strategy}::{variant}",
+            "name": f"{strategy} {variant}",
+            "state": state,
+            "indep_n": n_indep,
+            "target": target,
+            "n_clustered": n_clu,
+            "rate_per_day": round(rate, 3) if rate else None,
+            "eta_ms": eta_ms,
+            "expiry_ms": expiry,
+            "cutoff_ms": cutoff,
+            "sealed": sealed,
+            # The sealed rule is structural: metric fields are never
+            # emitted for a sealed board (they are also absent upstream).
+        })
+
+    # ── JevJudge OOS kill read (PREREGISTER_JEV_OOS_KILL_2026-10-08) ──
+    try:
+        from scripts.research.jev_eval import (
+            GEOMETRY_BOUNDARY_MS,
+            JEV_KILL_TARGET_N,
+        )
+
+        conn = _live_db_conn()
+        jev_n: Optional[int] = None
+        jev_clu: Optional[int] = None
+        jev_state = "confirmação"
+        if conn is not None:
+            rows = conn.execute(
+                "SELECT symbol, entry_time, exit_time FROM trades "
+                "WHERE strategy = 'JevJudge' AND status = 'closed' "
+                "AND entry_time > ? ORDER BY entry_time",
+                (GEOMETRY_BOUNDARY_MS,),
+            ).fetchall()
+            busy: Dict[str, int] = {}
+            kept: List[tuple] = []
+            for sym, et, xt in rows:
+                if int(et) >= busy.get(sym, -1):
+                    kept.append((int(et), int(xt or et)))
+                    busy[sym] = int(xt or et)
+            jev_n = len(kept)
+            jev_clu = _clustered_count(kept)
+            if jev_n >= JEV_KILL_TARGET_N:
+                jev_state = "veredicto — kill read"
+        days = max((now_ms - GEOMETRY_BOUNDARY_MS) / day_ms, 1.0)
+        rate = (jev_n or 0) / days
+        eta_ms = None
+        if jev_n is not None and rate > 0 and jev_n < JEV_KILL_TARGET_N:
+            eta_ms = now_ms + int((JEV_KILL_TARGET_N - jev_n) / rate * day_ms)
+        out.append({
+            "id": "JevJudge::oos_kill",
+            "name": "JevJudge OOS (kill se PF≤1 @ n=100)",
+            "state": jev_state,
+            "indep_n": jev_n,
+            "target": JEV_KILL_TARGET_N,
+            "n_clustered": jev_clu,
+            "rate_per_day": round(rate, 3) if rate else None,
+            "eta_ms": eta_ms,
+            "expiry_ms": None,
+            "cutoff_ms": GEOMETRY_BOUNDARY_MS,
+            "sealed": False,
+        })
+    except Exception as exc:  # noqa: BLE001 — hypotheses panel degrades
+        logger.debug("jev hypothesis row failed: %s", exc)
+
+    return {"hypotheses": out, "generated_ms": now_ms}
 
 
 def set_engine(engine: Any) -> None:
@@ -503,6 +1005,152 @@ def build_portfolio_payload(engine: Any) -> Dict[str, Any]:
         return {}
 
 
+def _engine_monitor_payload(engine: Any) -> Dict[str, Any]:
+    """Engine health payload — shared by the ``engine_monitor`` socket event
+    and the ``/api/engine_monitor`` REST endpoint (ops page)."""
+    stats = getattr(engine, "_tick_stats", {})
+    last_err = getattr(engine, "_last_error", None)
+    last_events = getattr(engine, "_last_market_events", {})
+
+    vol_cb = getattr(engine, "_vol_circuit", None)
+    vol_snapshot = vol_cb.snapshot() if vol_cb is not None else {}
+    vol_blocked = {
+        sym: int(st.get("block_until_ms", 0)) > time.time() * 1000
+        for sym, st in vol_snapshot.items()
+    } if vol_snapshot else {}
+
+    recent = []
+    for sym, evt in sorted(last_events.items(), key=lambda x: x[1].get("processed_at", 0), reverse=True)[:3]:
+        recent.append({
+            "symbol": sym,
+            "price": evt.get("price"),
+            "age_ms": int((time.time() - evt.get("processed_at", 0)) * 1000),
+        })
+
+    all_strategy_names = []
+    for s in getattr(engine, "_strategies", []):
+        all_strategy_names.append(getattr(s, "name", "unknown"))
+        sub_strategies = getattr(s, "_strategies", None)
+        if sub_strategies and isinstance(sub_strategies, dict):
+            for sub_name, sub in sub_strategies.items():
+                all_strategy_names.append(getattr(sub, "name", sub_name))
+
+    regime_per_symbol: Dict[str, str] = {}
+    adx_per_symbol: Dict[str, Optional[float]] = {}
+    for sym, evt in last_events.items():
+        adx = evt.get("adx_14")
+        if adx is not None and isinstance(adx, (int, float)):
+            adx_per_symbol[sym] = float(adx)
+            if adx >= 25.0:
+                regime_per_symbol[sym] = "trend"
+            elif adx <= 20.0:
+                regime_per_symbol[sym] = "range"
+            else:
+                regime_per_symbol[sym] = "transition"
+        else:
+            regime_per_symbol[sym] = "unknown"
+
+    recon_task = getattr(engine, "_reconcile_task", None)
+    ws_task = getattr(engine, "_ws_health_check_task", None)
+    reconcile_status = {
+        "running": recon_task is not None and not recon_task.done(),
+        "enabled": recon_task is not None,
+    }
+    ws_health_status = {
+        "running": ws_task is not None and not ws_task.done(),
+        "enabled": ws_task is not None,
+    }
+
+    governor = getattr(engine, "_strategy_governor", None)
+    governor_info = {
+        "disabled": sorted(governor.disabled_strategies) if governor else [],
+        "active_count": sum(
+            1 for s in all_strategy_names
+            if governor is None or s not in governor.disabled_strategies
+        ) if governor else len(all_strategy_names),
+    }
+
+    risk = getattr(engine, "_risk", None)
+    portfolio = getattr(engine, "portfolio", None)
+    portfolio_leverage = 0.0
+    total_notional = 0.0
+    long_exposure = 0.0
+    short_exposure = 0.0
+    leverage_max = 0.0
+    open_trade_risk = 0.0
+    daily_drawdown = 0.0
+    max_drawdown_pct = 0.0
+    mark_prices = getattr(engine, "get_mark_prices_sync", lambda: {})() or {}
+    live_metrics: Dict[str, Any] = {}
+    if portfolio is not None:
+        build_live = getattr(portfolio, "build_live_dashboard_metrics", None)
+        if build_live is not None:
+            try:
+                live_metrics = build_live(mark_prices)
+            except Exception as exc:
+                logger.warning("engine_monitor live metrics failed: %s", exc)
+
+    if risk is not None and portfolio is not None:
+        snap = getattr(portfolio, "get_dashboard_snapshot_sync", lambda: None)()
+        capital = live_metrics.get("capital") or (
+            snap.total_equity if snap else getattr(portfolio, "sync_capital", lambda: 0)()
+        )
+        positions = snap.positions if snap else getattr(portfolio, "get_positions_sync", lambda: {})()
+        if capital > 0:
+            portfolio_leverage = risk.get_portfolio_leverage(positions, capital, mark_prices)
+            total_notional = risk.get_portfolio_total_notional(positions, mark_prices)
+            long_exposure, short_exposure = risk.get_directional_exposure(
+                _PositionsCapitalView(positions, capital)
+            )
+            open_trade_risk = risk.get_open_risk_pct(positions, capital)
+        leverage_max = getattr(risk, "_leverage_max", 0.0)
+        if snap is not None:
+            daily_drawdown = live_metrics.get(
+                "daily_max_drawdown_pct",
+                snap.daily_max_drawdown_pct,
+            )
+            max_drawdown_pct = live_metrics.get(
+                "max_drawdown_pct",
+                snap.max_drawdown_pct,
+            )
+        else:
+            daily_drawdown = getattr(portfolio, "sync_daily_max_drawdown_pct", lambda: 0)()
+            max_drawdown_pct = getattr(portfolio, "sync_max_drawdown_pct", lambda: 0)()
+
+    fb = getattr(engine, "_funding_blackout", None)
+    funding_blackout_active = bool(
+        fb.is_blocked(int(time.time() * 1000)) if fb is not None else False
+    )
+    circuit_breaker = bool(getattr(risk, "circuit_breaker_tripped", False)) if risk else False
+
+    return {
+        "ticks_per_second": stats.get("per_second", 0),
+        "total_ticks": stats.get("total", 0),
+        "last_error": last_err,
+        "recent_events": recent,
+        "symbols": getattr(engine, "_symbols", []),
+        "strategies": all_strategy_names,
+        "regime_per_symbol": regime_per_symbol,
+        "adx_per_symbol": adx_per_symbol,
+        "reconcile": reconcile_status,
+        "ws_health": ws_health_status,
+        "governor": governor_info,
+        "vol_circuit_blocked": vol_blocked,
+        "vol_circuit": vol_snapshot,
+        "portfolio_leverage": portfolio_leverage,
+        "leverage_max": leverage_max,
+        "total_notional_usd": total_notional,
+        "directional_exposure": long_exposure + short_exposure,
+        "long_exposure_pct": long_exposure,
+        "short_exposure_pct": short_exposure,
+        "open_trade_risk": open_trade_risk,
+        "daily_drawdown": daily_drawdown,
+        "max_drawdown_pct": max_drawdown_pct,
+        "circuit_breaker": circuit_breaker,
+        "funding_blackout_active": funding_blackout_active,
+    }
+
+
 class DashboardEmitter:
     """Emits real-time dashboard updates via Socket.IO.
 
@@ -520,8 +1168,7 @@ class DashboardEmitter:
         "status",
         "candles",
         "strategies",
-        "signals",
-        "decisions",
+        "decision_feed",
         "jev_verdicts",
         "portfolio",
         "trades",
@@ -774,147 +1421,7 @@ class DashboardEmitter:
 
     def _emit_engine_monitor(self) -> None:
         """Engine health - ticks/sec, total ticks, last error, regime, reconciliation."""
-        stats = getattr(_engine, "_tick_stats", {})
-        last_err = getattr(_engine, "_last_error", None)
-        last_events = getattr(_engine, "_last_market_events", {})
-
-        vol_cb = getattr(_engine, "_vol_circuit", None)
-        vol_snapshot = vol_cb.snapshot() if vol_cb is not None else {}
-        vol_blocked = {
-            sym: int(st.get("block_until_ms", 0)) > time.time() * 1000
-            for sym, st in vol_snapshot.items()
-        } if vol_snapshot else {}
-
-        recent = []
-        for sym, evt in sorted(last_events.items(), key=lambda x: x[1].get("processed_at", 0), reverse=True)[:3]:
-            recent.append({
-                "symbol": sym,
-                "price": evt.get("price"),
-                "age_ms": int((time.time() - evt.get("processed_at", 0)) * 1000),
-            })
-
-        all_strategy_names = []
-        for s in getattr(_engine, "_strategies", []):
-            all_strategy_names.append(getattr(s, "name", "unknown"))
-            sub_strategies = getattr(s, "_strategies", None)
-            if sub_strategies and isinstance(sub_strategies, dict):
-                for sub_name, sub in sub_strategies.items():
-                    all_strategy_names.append(getattr(sub, "name", sub_name))
-
-        regime_per_symbol: Dict[str, str] = {}
-        adx_per_symbol: Dict[str, Optional[float]] = {}
-        for sym, evt in last_events.items():
-            adx = evt.get("adx_14")
-            if adx is not None and isinstance(adx, (int, float)):
-                adx_per_symbol[sym] = float(adx)
-                if adx >= 25.0:
-                    regime_per_symbol[sym] = "trend"
-                elif adx <= 20.0:
-                    regime_per_symbol[sym] = "range"
-                else:
-                    regime_per_symbol[sym] = "transition"
-            else:
-                regime_per_symbol[sym] = "unknown"
-
-        recon_task = getattr(_engine, "_reconcile_task", None)
-        ws_task = getattr(_engine, "_ws_health_check_task", None)
-        reconcile_status = {
-            "running": recon_task is not None and not recon_task.done(),
-            "enabled": recon_task is not None,
-        }
-        ws_health_status = {
-            "running": ws_task is not None and not ws_task.done(),
-            "enabled": ws_task is not None,
-        }
-
-        governor = getattr(_engine, "_strategy_governor", None)
-        governor_info = {
-            "disabled": sorted(governor.disabled_strategies) if governor else [],
-            "active_count": sum(
-                1 for s in all_strategy_names
-                if governor is None or s not in governor.disabled_strategies
-            ) if governor else len(all_strategy_names),
-        }
-
-        risk = getattr(_engine, "_risk", None)
-        portfolio = getattr(_engine, "portfolio", None)
-        portfolio_leverage = 0.0
-        total_notional = 0.0
-        long_exposure = 0.0
-        short_exposure = 0.0
-        leverage_max = 0.0
-        open_trade_risk = 0.0
-        daily_drawdown = 0.0
-        max_drawdown_pct = 0.0
-        mark_prices = getattr(_engine, "get_mark_prices_sync", lambda: {})() or {}
-        live_metrics: Dict[str, Any] = {}
-        if portfolio is not None:
-            build_live = getattr(portfolio, "build_live_dashboard_metrics", None)
-            if build_live is not None:
-                try:
-                    live_metrics = build_live(mark_prices)
-                except Exception as exc:
-                    logger.warning("engine_monitor live metrics failed: %s", exc)
-
-        if risk is not None and portfolio is not None:
-            snap = getattr(portfolio, "get_dashboard_snapshot_sync", lambda: None)()
-            capital = live_metrics.get("capital") or (
-                snap.total_equity if snap else getattr(portfolio, "sync_capital", lambda: 0)()
-            )
-            positions = snap.positions if snap else getattr(portfolio, "get_positions_sync", lambda: {})()
-            if capital > 0:
-                portfolio_leverage = risk.get_portfolio_leverage(positions, capital, mark_prices)
-                total_notional = risk.get_portfolio_total_notional(positions, mark_prices)
-                long_exposure, short_exposure = risk.get_directional_exposure(
-                    _PositionsCapitalView(positions, capital)
-                )
-                open_trade_risk = risk.get_open_risk_pct(positions, capital)
-            leverage_max = getattr(risk, "_leverage_max", 0.0)
-            if snap is not None:
-                daily_drawdown = live_metrics.get(
-                    "daily_max_drawdown_pct",
-                    snap.daily_max_drawdown_pct,
-                )
-                max_drawdown_pct = live_metrics.get(
-                    "max_drawdown_pct",
-                    snap.max_drawdown_pct,
-                )
-            else:
-                daily_drawdown = getattr(portfolio, "sync_daily_max_drawdown_pct", lambda: 0)()
-                max_drawdown_pct = getattr(portfolio, "sync_max_drawdown_pct", lambda: 0)()
-
-        fb = getattr(_engine, "_funding_blackout", None)
-        funding_blackout_active = bool(
-            fb.is_blocked(int(time.time() * 1000)) if fb is not None else False
-        )
-        circuit_breaker = bool(getattr(risk, "circuit_breaker_tripped", False)) if risk else False
-
-        self._safe_emit("engine_monitor", {
-            "ticks_per_second": stats.get("per_second", 0),
-            "total_ticks": stats.get("total", 0),
-            "last_error": last_err,
-            "recent_events": recent,
-            "symbols": getattr(_engine, "_symbols", []),
-            "strategies": all_strategy_names,
-            "regime_per_symbol": regime_per_symbol,
-            "adx_per_symbol": adx_per_symbol,
-            "reconcile": reconcile_status,
-            "ws_health": ws_health_status,
-            "governor": governor_info,
-            "vol_circuit_blocked": vol_blocked,
-            "vol_circuit": vol_snapshot,
-            "portfolio_leverage": portfolio_leverage,
-            "leverage_max": leverage_max,
-            "total_notional_usd": total_notional,
-            "directional_exposure": long_exposure + short_exposure,
-            "long_exposure_pct": long_exposure,
-            "short_exposure_pct": short_exposure,
-            "open_trade_risk": open_trade_risk,
-            "daily_drawdown": daily_drawdown,
-            "max_drawdown_pct": max_drawdown_pct,
-            "circuit_breaker": circuit_breaker,
-            "funding_blackout_active": funding_blackout_active,
-        })
+        self._safe_emit("engine_monitor", _engine_monitor_payload(_engine))
 
     def _emit_candles(self) -> None:
         """Candle status - which timeframes have data, OHLCV if available."""
@@ -988,15 +1495,9 @@ class DashboardEmitter:
 
         self._safe_emit("strategies", result)
 
-    def _emit_signals(self) -> None:
-        """Last 20 signals with full detail."""
-        sig_hist = getattr(_engine, "_signal_history", [])[:20]
-        self._safe_emit("signals", sig_hist)
-
-    def _emit_decisions(self) -> None:
-        """Risk + execution decisions."""
-        decisions = getattr(_engine, "_decision_history", [])[:20]
-        self._safe_emit("decisions", decisions)
+    def _emit_decision_feed(self) -> List[Dict[str, Any]]:
+        """Merged signal → gate → execution feed (one row per signal)."""
+        return build_decision_feed(limit=40)
 
     def _emit_jev_verdicts(self) -> Optional[Dict[str, Any]]:
         """Latest TypeSafe/Jev hourly verdicts (paper experiment feed).
@@ -1548,12 +2049,17 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 cfg = load_config(Path("config/settings.yaml"))
             p08 = get_strategy_section(cfg, "phase08")
             shadow_names = [str(s) for s in (p08.get("shadow_strategies") or [])]
-            # Also surface live shadow instances if wired on the engine
+            # Active list = configured ∩ actually instantiated — pruned
+            # strategies never surface even if a stale config names them.
             live_shadow = getattr(_engine, "_shadow_strategies", None) if _engine else None
-            if live_shadow:
-                for s in live_shadow:
-                    n = getattr(s, "name", None)
-                    if n and n not in shadow_names:
+            live_names = {
+                getattr(s, "name", None) for s in (live_shadow or [])
+            }
+            live_names.discard(None)
+            if live_names:
+                shadow_names = [n for n in shadow_names if n in live_names]
+                for n in sorted(live_names):
+                    if n not in shadow_names:
                         shadow_names.append(n)
         except Exception as exc:  # noqa: BLE001
             return jsonify({"error": str(exc), "rows": []}), 500
@@ -1578,29 +2084,6 @@ def create_app(config: Dict[str, Any]) -> tuple:
         with _shadow_panel_lock:
             _shadow_panel_cache[cache_key] = {"ts": now, "payload": payload}
         return jsonify(payload)
-
-    @app.route("/api/top_traders")
-    def api_top_traders():
-        """Top-wallet aggregate bias + virtual swing book (research only)."""
-        cached = _ttl_get("top_traders")
-        if cached is not None:
-            return jsonify(cached)
-        from src.research.top_trader_panel import build_top_traders_panel_payload
-        from src.utils.config import load_config
-
-        try:
-            cfg = None
-            if _engine is not None and getattr(_engine, "_config", None) is not None:
-                cfg = _engine._config
-            else:
-                from pathlib import Path
-
-                cfg = load_config(Path("config/settings.yaml"))
-            payload = build_top_traders_panel_payload(config=cfg, engine=_engine)
-            return jsonify(_ttl_put("top_traders", payload, _RESEARCH_CACHE_TTL_S))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("top_traders panel failed: %s", exc)
-            return jsonify({"error": str(exc), "snapshots": [], "open_positions": []}), 500
 
     @app.route("/api/research_watchdogs")
     def api_research_watchdogs():
@@ -1666,6 +2149,87 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 "now_ms": int(time.time() * 1000),
             }
         return jsonify(_ttl_put("gate", data, _RESEARCH_CACHE_TTL_S))
+
+    @app.route("/ops")
+    def ops_page():
+        """Operator page — logs, feed silence, live market, sys-strip."""
+        return render_template(
+            "ops.html",
+            auth_required=(
+                _auth_enabled
+                and bool(_dashboard_token)
+                and not _is_direct_local_request()
+            ),
+            symbols=sorted(_allowed_symbols()) or ["BTC", "ETH", "SOL"],
+        )
+
+    @app.route("/api/engine_monitor")
+    def api_engine_monitor():
+        """REST twin of the ``engine_monitor`` socket event (ops page)."""
+        if _engine is None:
+            return jsonify({}), 503
+        try:
+            return jsonify(_engine_monitor_payload(_engine))
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/hypotheses")
+    def api_hypotheses():
+        """Preregistered hypotheses — sealed boards expose counts only."""
+        cached = _ttl_get("hypotheses")
+        if cached is not None:
+            return jsonify(cached)
+        try:
+            payload = build_hypotheses()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hypotheses failed: %s", exc)
+            payload = {"hypotheses": [], "error": str(exc)[:200]}
+        return jsonify(_ttl_put("hypotheses", payload, _RESEARCH_CACHE_TTL_S))
+
+    @app.route("/api/execution_pnl")
+    def api_execution_pnl():
+        """Net-PnL decomposition (gross/fees/slippage/funding/net) for the
+        strategies actually executing — fills + funding only."""
+        cached = _ttl_get("execution_pnl")
+        if cached is not None:
+            return jsonify(cached)
+        try:
+            payload = build_execution_pnl()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("execution_pnl failed: %s", exc)
+            payload = {"rows": [], "error": str(exc)[:200]}
+        return jsonify(_ttl_put("execution_pnl", payload, _RESEARCH_CACHE_TTL_S))
+
+    @app.route("/api/decision_feed")
+    def api_decision_feed():
+        """Merged signal → gate → execution feed (one line per signal)."""
+        cached = _ttl_get("decision_feed")
+        if cached is not None:
+            return jsonify(cached)
+        try:
+            limit = int(request.args.get("limit", "40"))
+        except ValueError:
+            limit = 40
+        try:
+            payload = {"rows": build_decision_feed(limit)}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("decision_feed failed: %s", exc)
+            payload = {"rows": [], "error": str(exc)[:200]}
+        return jsonify(_ttl_put("decision_feed", payload, _MD_HEALTH_TTL_S))
+
+    @app.route("/api/execution_divergence")
+    def api_execution_divergence():
+        """Real paper PnL vs shadow-evaluator simulation for JevJudge —
+        early tripwire for evaluator bugs (mean |Δ| in bps)."""
+        cached = _ttl_get("execution_divergence")
+        if cached is not None:
+            return jsonify(cached)
+        try:
+            payload = build_execution_divergence()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("execution_divergence failed: %s", exc)
+            payload = {"n_pairs": 0, "error": str(exc)[:200]}
+        return jsonify(_ttl_put("execution_divergence", payload, _FEED_SPARK_TTL_S))
 
     @app.route("/api/dvol")
     def api_dvol():
@@ -1737,111 +2301,6 @@ def create_app(config: Dict[str, Any]) -> tuple:
             logger.warning("dvol endpoint failed: %s", exc)
             return jsonify({"error": str(exc), "series": {}, "current": {}}), 500
 
-    @app.route("/api/iv_gate_shadow")
-    def api_iv_gate_shadow():
-        """Shadow IV sample distribution — n per class + avg percentile.
-
-        Uses the exact same join/slices as ``scripts/research/iv_gate_shadow_vs_pnl.py``
-        (the single source of truth), so the dashboard and the recheck watchdog
-        can never disagree about what counts as a matched IV decision. Read-only
-        research data — the gate stays shadow, never touches execution.
-        """
-        cached = _ttl_get("iv_gate_shadow")
-        if cached is not None:
-            return jsonify(cached)
-        try:
-            from scripts.research.iv_gate_shadow_vs_pnl import (
-                BACKTEST_EVIDENCE,
-                build_report,
-            )
-            from scripts.research.iv_gate_shadow_recheck import (
-                TARGET_CLOSED,
-                concentration_caveat,
-            )
-
-            report = build_report()
-            if report.get("error"):
-                return jsonify({"error": report["error"], "by_class": {}, "total": 0}), 200
-            by_class = {}
-            for cls in ("high_iv", "low_iv", "unknown"):
-                s = report["slices"][cls]
-                by_class[cls] = {
-                    "n": s["n"],
-                    "n_closed": s["n_closed"],
-                    "n_open": s["n_open"],
-                    "n_pct": s.get("n_pct", 0),
-                    "avg_pct": s.get("avg_pct"),
-                    # Accumulated PnL of closed trades in the slice — the
-                    # live-vs-backtest evidence the gate will be decided on.
-                    "net_pnl_usd": s.get("net_pnl_usd"),
-                    "win_rate": s.get("win_rate"),
-                    "avg_pnl_usd": s.get("avg_pnl_usd"),
-                    "median_pnl_usd": s.get("median_pnl_usd"),
-                    "best_usd": s.get("best_usd"),
-                    "worst_usd": s.get("worst_usd"),
-                }
-            def _slice_summary(s):
-                return {
-                    "n": s.get("n", 0),
-                    "n_closed": s.get("n_closed", 0),
-                    "n_open": s.get("n_open", 0),
-                    "n_pct": s.get("n_pct", 0),
-                    "avg_pct": s.get("avg_pct"),
-                    "net_pnl_usd": s.get("net_pnl_usd"),
-                    "win_rate": s.get("win_rate"),
-                    "avg_pnl_usd": s.get("avg_pnl_usd"),
-                }
-
-            def _dimension_summary(per_class):
-                """Transpose {cls: {key: slice}} → {key: {classes, n, n_closed}}.
-
-                The report groups slices by IV class; the panel wants the
-                strategy/symbol distribution WITHIN each class, so the
-                dimension key is the outer row and the IV class the inner
-                columns, plus the aggregate across classes."""
-                keys: set = set()
-                for by_key in (per_class or {}).values():
-                    keys.update(by_key.keys())
-                out = {}
-                for key in sorted(keys):
-                    classes = {
-                        cls: _slice_summary(
-                            (per_class.get(cls) or {}).get(key) or {}
-                        )
-                        for cls in ("high_iv", "low_iv", "unknown")
-                    }
-                    out[key] = {
-                        "classes": classes,
-                        "n": sum((classes[c]["n"] or 0) for c in classes),
-                        "n_closed": sum((classes[c]["n_closed"] or 0) for c in classes),
-                        "n_open": sum((classes[c]["n_open"] or 0) for c in classes),
-                    }
-                return out
-
-            n_dec = max(1, report["n_decisions"])
-            n_total = max(1, report["n_trades"])
-            payload = {
-                "by_class": by_class,
-                "by_strategy": _dimension_summary(report.get("per_strategy") or {}),
-                "by_symbol": _dimension_summary(report.get("per_symbol") or {}),
-                "total": report["n_trades"],
-                "n_decisions": report["n_decisions"],
-                "matched": report["matched_decisions"],
-                "trades_with_decision": report["trades_with_decision"],
-                "join_coverage_pct": round(report["matched_decisions"] / n_dec * 100, 1),
-                "trade_coverage_pct": round(report["trades_with_decision"] / n_total * 100, 1),
-                "verdict": report["verdict"],
-                "concentration": concentration_caveat(report),
-                "decisions_per_day": report.get("decisions_per_day", []),
-                "threshold": report["iv_high_pct"],
-                "target_closed": TARGET_CLOSED,
-                "backtest": BACKTEST_EVIDENCE,
-                "asof_ms": int(time.time() * 1000),
-            }
-            return jsonify(_ttl_put("iv_gate_shadow", payload, _RESEARCH_CACHE_TTL_S))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("iv_gate_shadow endpoint failed: %s", exc)
-            return jsonify({"error": str(exc), "by_class": {}, "total": 0}), 500
 
     @app.route("/api/strategy/<name>")
     def api_strategy_detail(name):
