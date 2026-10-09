@@ -56,10 +56,10 @@ def sleep_to_next_boundary(
     interval_ms = int(interval_s * 1000)
     offset_ms = int(offset_s * 1000)
     if local:
-        # timegm(localtime()) = local wall-clock read as an epoch ("local
+        # timegm(localtime(t)) = local wall-clock read as an epoch ("local
         # epoch") — multiples land on the same local slots a cron
         # expression would hit, and the phase follows DST automatically
-        now_ms = calendar.timegm(time.localtime()) * 1000
+        now_ms = calendar.timegm(time.localtime(_now())) * 1000
     else:
         now_ms = int(_now() * 1000)
     wait_s = ms_to_next_boundary(now_ms, interval_ms, offset_ms) / 1000.0
