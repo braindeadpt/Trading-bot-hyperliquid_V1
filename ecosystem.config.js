@@ -49,7 +49,7 @@ module.exports = {
   apps: [
     {
       name: 'hyperliquid',
-      script: 'run_paper.sh',
+      script: 'deploy/macos/run_paper.sh',
       cwd: CWD,
       interpreter: 'bash',
       exec_mode: 'fork',
@@ -183,8 +183,8 @@ module.exports = {
       // No max_restarts cap — frozen scoreboards must never be silent.
     },
 
-    cron('watchdogs', 'run_watchdogs.sh', '45 */6 * * *'),
-    cron('overnight', 'run_overnight.sh', '0 5 * * *'),
-    cron('backup-monthly', 'run_backup_monthly.sh', '0 4 1 * *'),
+    cron('watchdogs', 'deploy/macos/run_watchdogs.sh', '45 */6 * * *'),
+    cron('overnight', 'deploy/macos/run_overnight.sh', '0 5 * * *'),
+    cron('backup-monthly', 'deploy/macos/run_backup_monthly.sh', '0 4 1 * *'),
   ],
 };
