@@ -4,7 +4,7 @@
 # --backup-root is explicit: the script default (D:/hyperliquid_backup) is
 # Windows-only and would otherwise resolve as a literal 'D:' dir under cwd.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/../.."
 set -a; . ./.env; set +a
 export PYTHONIOENCODING=utf-8
 mkdir -p logs /Users/noder/hyperliquid_backup
