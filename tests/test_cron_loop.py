@@ -36,3 +36,25 @@ def test_sleep_to_next_boundary_uses_injected_clock() -> None:
     )
     assert slept == [210.0]
     assert waited == pytest.approx(210.0)
+
+
+def test_offset_phase_replicates_cron_20_every_3h() -> None:
+    """interval=10800s offset=1200s must land on :20 of every 3rd hour —
+    the old `20 */3 * * *` cron schedule exactly."""
+    iv, off = 10_800_000, 1_200_000
+    import datetime
+    base = int(datetime.datetime(
+        2026, 10, 9, 0, 20, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    # on a boundary -> next boundary is +3h (03:20)
+    assert ms_to_next_boundary(base, iv, off) == iv
+    # 12:53:16 -> next :20 boundary is 15:20 -> wait 2h26m44s
+    t = int(datetime.datetime(
+        2026, 10, 9, 12, 53, 16, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    wait = ms_to_next_boundary(t, iv, off)
+    wake = datetime.datetime.fromtimestamp(
+        (t + wait) / 1000, tz=datetime.timezone.utc)
+    assert (wake.hour, wake.minute, wake.second) == (15, 20, 0)
+    # just before a boundary
+    assert ms_to_next_boundary(base + iv - 1, iv, off) == 1
+    # zero offset keeps old behaviour
+    assert ms_to_next_boundary(90_000, 300_000, 0) == 210_000

@@ -20,39 +20,45 @@ import time
 from typing import Callable
 
 
-def ms_to_next_boundary(now_ms: int, interval_ms: int) -> int:
-    """Milliseconds until the next strict multiple of ``interval_ms``.
+def ms_to_next_boundary(now_ms: int, interval_ms: int, offset_ms: int = 0) -> int:
+    """Milliseconds until the next multiple of ``interval_ms`` + ``offset_ms``.
+
+    ``offset_ms`` shifts the boundary phase — e.g. interval 10800s + offset
+    1200s replicates cron ``20 */3 * * *`` (:20 of every third hour).
 
     ``now`` exactly on a boundary waits a full interval (the boundary that
     already started is not "next").
     """
     if interval_ms <= 0:
         raise ValueError(f"interval_ms must be > 0, got {interval_ms}")
-    rem = now_ms % interval_ms
+    rem = (now_ms - offset_ms) % interval_ms
     return interval_ms - rem if rem else interval_ms
 
 
 def sleep_to_next_boundary(
     interval_s: float,
+    offset_s: float = 0.0,
     *,
     _sleep: Callable[[float], None] = time.sleep,
     _now: Callable[[], float] = time.time,
 ) -> float:
-    """Sleep until the next wall-clock multiple of ``interval_s`` seconds.
+    """Sleep until the next wall-clock multiple of ``interval_s`` + ``offset_s``.
 
     Returns the seconds slept (injectable clock/sleep for tests).
     """
     interval_ms = int(interval_s * 1000)
-    wait_s = ms_to_next_boundary(int(_now() * 1000), interval_ms) / 1000.0
+    offset_ms = int(offset_s * 1000)
+    wait_s = ms_to_next_boundary(int(_now() * 1000), interval_ms, offset_ms) / 1000.0
     _sleep(wait_s)
     return wait_s
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("usage: python -m src.utils.cron_loop <interval_s>",
+    if len(sys.argv) not in (2, 3):
+        print("usage: python -m src.utils.cron_loop <interval_s> [offset_s]",
               file=sys.stderr)
         raise SystemExit(2)
     iv = float(sys.argv[1])
-    waited = sleep_to_next_boundary(iv)
-    print(f"aligned to {iv:g}s boundary (slept {waited:.1f}s)")
+    off = float(sys.argv[2]) if len(sys.argv) == 3 else 0.0
+    waited = sleep_to_next_boundary(iv, off)
+    print(f"aligned to {iv:g}s boundary +{off:g}s (slept {waited:.1f}s)")

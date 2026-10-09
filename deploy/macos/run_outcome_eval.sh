@@ -21,7 +21,8 @@ set -a; . ./.env; set +a
 export PYTHONIOENCODING=utf-8
 mkdir -p logs data/research
 
-INTERVAL_S="${EVAL_LOOP_INTERVAL_S:-10800}"    # 3h, aligned to wall clock
+INTERVAL_S="${EVAL_LOOP_INTERVAL_S:-10800}"    # 3h
+OFFSET_S="${EVAL_LOOP_OFFSET_S:-1200}"         # :20 phase — matches old cron "20 */3 * * *"
 PASS_TIMEOUT_S="${EVAL_PASS_TIMEOUT_S:-1200}"  # 20min hard kill per run
 LOCK="data/research/.outcome_eval_loop.lock"
 
@@ -50,7 +51,7 @@ cleanup() {
 trap 'exit 0' INT TERM
 trap cleanup EXIT
 
-echo "outcome-eval: loop start pid=$$ interval=${INTERVAL_S}s run-timeout=${PASS_TIMEOUT_S}s"
+echo "outcome-eval: loop start pid=$$ interval=${INTERVAL_S}s offset=${OFFSET_S}s run-timeout=${PASS_TIMEOUT_S}s"
 while :; do
     echo "outcome-eval: run start $(date -u +%FT%TZ)"
     ./.venv/bin/python -u -X utf8 scripts/research/evaluate_shadow_outcomes.py \
@@ -62,8 +63,8 @@ while :; do
     wait "$CHILD_PID" || true
     CHILD_PID=""
     kill "$WATCHER" 2>/dev/null || true; wait "$WATCHER" 2>/dev/null || true
-    echo "outcome-eval: run done $(date -u +%FT%TZ); sleeping to next ${INTERVAL_S}s boundary"
-    ( ./.venv/bin/python -u -m src.utils.cron_loop "$INTERVAL_S" \
+    echo "outcome-eval: run done $(date -u +%FT%TZ); sleeping to next ${INTERVAL_S}s boundary +${OFFSET_S}s"
+    ( ./.venv/bin/python -u -m src.utils.cron_loop "$INTERVAL_S" "$OFFSET_S" \
         >> logs/outcome_eval_loop.log 2>&1 || sleep 300 ) &
     CHILD_PID=$!
     wait "$CHILD_PID" || true
