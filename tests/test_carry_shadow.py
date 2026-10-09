@@ -884,3 +884,51 @@ def test_gap_expired_unwind_charged_at_worst_candle_price(tmp_path) -> None:
         (ep.id,)).fetchone()
     assert row[0] == pytest.approx(expected) and row[1] == 1
     d.shutdown()
+
+
+def test_gap_unwind_uses_worst_1m_price(tmp_path) -> None:
+    """§11: a maker window expiring inside a gap unwinds the loose leg at
+    the worst 1m extreme inside the gap, never gap-end mid: a filled
+    spot buy @99 is unwound as a sell at the gap's spot low 96 ->
+    ~303bps adverse + taker, emitted on the unlegged_unwind event."""
+    import asyncio as _a
+    now = int(time.time() * 1000)
+    f = _stub_fetch(now)
+
+    def candles(coin, iv, s, e, p):
+        if iv == "2h" and e - s >= 86_400_000:
+            return [(now - i * 7_200_000, 100.0, 101.0, 99.0, 100.0,
+                     900_000.0, 10) for i in range(450)]
+        if iv == "1m":
+            if coin == "PURR/USDC":
+                return [(s + 60_000, 99.0, 99.5, 96.0, 96.5, 500.0, 5)]
+            return [(s + 60_000, 100.0, 100.5, 99.5, 100.0, 500.0, 5)]
+        return []
+    f["candles"] = candles
+    d = CarryShadowDaemon(db_path=str(tmp_path / "cs.db"), fetch=f)
+    d.cands = [{"pair_name": "PURR/USDC", "base": "PURR", "perp": "PURR",
+                "max_lev": 5.0, "maint": 0.1, "m": 0.45, "m0": 0.6,
+                "pm": True}]
+    for c in d.cands:
+        d._register_candidate(c)
+    d.in_universe["PURR/USDC"] = True
+    d.books["PURR/USDC"] = BookSnap(99.0, 100.0)
+    d.books["PURR"] = BookSnap(99.0, 100.0)
+    _a.run(d._maybe_entry(d.cands[0], 0.20, now))
+    ep = d.pool.get("PURR/USDC")
+    d.books["PURR/USDC"] = BookSnap(98.5, 98.9)   # spot leg fills @99
+    d._on_pair_book(d.cands[0], now + 1_000)
+    assert ep.legs["spot"].filled and not ep.legs["perp"].filled
+    gap_end = now + spec.MAKER_FILL_WINDOW_S * 1000 + 60_000
+    _a.run(d._catchup_gap(gap_end - 20_000, gap_end))
+    assert ep.state == "aborted" and ep.close_reason == "unlegged_unwind"
+    adverse = (99.0 - 96.0) / 99.0 * 1e4          # ~303.03 bps
+    assert ep.cost_bps == pytest.approx(spec.TAKER_FEE_BPS + adverse)
+    assert ep.unwind_adverse_bps == pytest.approx(adverse)
+    assert ep.unwind_candle_iv == "1m"
+    blob = json.loads(d.ledger._con.execute(
+        "SELECT data FROM events WHERE kind='unlegged_unwind'"
+    ).fetchone()[0])
+    assert blob["unwind_adverse_bps"] == pytest.approx(adverse)
+    assert blob["unwind_candle_iv"] == "1m"
+    d.shutdown()

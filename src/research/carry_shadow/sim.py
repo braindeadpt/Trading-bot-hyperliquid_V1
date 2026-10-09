@@ -132,6 +132,12 @@ class Episode:
     unlegged_ref_price: float = 0.0
     unlegged_basis_bps: Optional[float] = None
     unlegged_max_adverse_bps: float = 0.0
+    # §11: set by the daemon before a gap-expired unwind — adverse bps of
+    # the loose leg's worst 1m price inside the gap vs its fill price,
+    # plus the candle granularity used. None = unwind priced at taker
+    # only (no candle evidence, or unwind outside a gap).
+    unwind_adverse_bps: Optional[float] = None
+    unwind_candle_iv: Optional[str] = None
     close_reason: str = ""
 
     # ─── equity / margin zones ───────────────────────────────────────────

@@ -245,8 +245,13 @@ amendment on:
 - Conservative fill rule inside a gap: a pending maker leg **does not**
   fill during the gap (aligned with the strict-cross rule — no tape
   evidence, no fill). If the leg's window expires inside the gap, the
-  attempt counts as an abort at gap end (`expire_entry_window`), with
-  the loose leg unwound at taker as usual.
+  attempt counts as an abort at gap end (`expire_entry_window`); the
+  loose leg is unwound at the **worst 1m candle price inside the gap**
+  (spot low when selling the spot leg back, perp high when buying the
+  perp short back — `unwind_adverse_bps`/`unwind_candle_iv` on the
+  abort event) **plus taker**, never the gap-end mid. When candles are
+  unavailable the unwind is charged taker only and the episode stays
+  `gap_unverified`-flagged.
 - `gap_s:<YYYYMMDD>:<pair>` counters in meta accumulate gap seconds per
   pair per day; the status report shows them and the final readout
   mentions any pair over **1% gap time**.
@@ -291,7 +296,10 @@ the primary verdict:
   denominator as the strict rate).
 - `ann_ret_committed_weighted`: episode PnL weighted by the episode's
   `fill_frac_est`, over measured episodes only (`measured_eps`
-  reported; NULLs are counted, not guessed).
+  reported; NULLs are counted, not guessed). For like-for-like
+  comparison the readout also emits `ann_ret_committed_measured` —
+  the primary formula restricted to the same measured subset and its
+  own committed-capital mean.
 - `weighted_below_hurdle`: if the weighted annualized return falls
   below 8%/yr the readout says so explicitly (`note` field).
 

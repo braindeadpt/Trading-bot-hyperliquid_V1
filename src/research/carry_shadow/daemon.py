@@ -547,6 +547,8 @@ class CarryShadowDaemon:
                             "unlegged_max_adverse_bps":
                                 ep.unlegged_max_adverse_bps or None,
                             "unlegged_basis_bps": ep.unlegged_basis_bps,
+                            "unwind_adverse_bps": ep.unwind_adverse_bps,
+                            "unwind_candle_iv": ep.unwind_candle_iv,
                             "bbo": self._bbo(
                                 self.pair_by_coin.get(ep.perp) or {})},
                        ep.id, ts)
@@ -719,14 +721,16 @@ class CarryShadowDaemon:
             return None
         leg = filled[0]
         fill_px = ep.legs[leg].price
-        perp_hi, spot_lo, _gran = await asyncio.to_thread(
+        perp_hi, spot_lo, gran = await asyncio.to_thread(
             self._gap_extremes, c, gap_start_ms, gap_end_ms)
         worst = spot_lo if leg == "spot" else perp_hi
+        ep.unwind_candle_iv = gran
         if worst is None or fill_px <= 0:
             return None
         adverse = ((fill_px - worst) if leg == "spot"
                    else (worst - fill_px))
-        return adverse / fill_px * 1e4
+        ep.unwind_adverse_bps = adverse / fill_px * 1e4
+        return ep.unwind_adverse_bps
 
     def _gap_extremes(self, c: Dict[str, Any], start_ms: int,
                       end_ms: int) -> Tuple[Optional[float], Optional[float], str]:
@@ -929,10 +933,16 @@ class CarryShadowDaemon:
         frac_sum = sum(f[1] for f in fs if f[1] is not None)
         n_unmeas = sum(1 for f in fs if f[0] and f[1] is None)
         meas = [e for e in eps if e["frac"] is not None]
-        wret = None
+        wret = prim_meas = None
         if meas:
+            # like-for-like: primary and weighted returns computed over
+            # the SAME measured subset and committed capital
+            committed_meas = sum(1.1 if e["pm"] else 1.0 + (e["m0"] or 0.6)
+                                 for e in meas) / len(meas)
+            prim_meas = (sum(e["pnl"] for e in meas) / len(meas)) \
+                / committed_meas / n_days * 365
             wnet = sum(e["pnl"] * e["frac"] for e in meas) / len(meas)
-            wret = wnet / committed / n_days * 365
+            wret = wnet / committed_meas / n_days * 365
         out["sensitivity_fill_frac"] = {
             "weighted_fill_rate": (round(frac_sum / n_att, 4)
                                    if n_att else None),
@@ -940,6 +950,9 @@ class CarryShadowDaemon:
                                            if f[1] is not None)),
             "unmeasured_strict_fills": n_unmeas,
             "measured_eps": len(meas),
+            "ann_ret_committed_measured": (round(prim_meas, 4)
+                                           if prim_meas is not None
+                                           else None),
             "ann_ret_committed_weighted": (round(wret, 4)
                                            if wret is not None else None),
             "weighted_below_hurdle": (wret < spec.HURDLE_APR
