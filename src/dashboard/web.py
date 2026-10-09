@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import secrets
+import sqlite3
 import threading
 import time
 from collections import deque
@@ -867,6 +868,66 @@ def _attach_feed_silence_boot(body: Dict[str, Any]) -> None:
         st["boot_stale"] = bool(b.get("stale_since_downtime"))
         st["boot_downtime_sec"] = boot.get("downtime_sec")
         st["boot_at_ms"] = boot.get("boot_at_ms")
+
+
+_CARRY_SHADOW_DB = ROOT / "data" / "research" / "carry_shadow.db"
+_CARRY_SHADOW_STALE_S = 600.0  # heartbeat cadence 60s; red past 10min
+
+
+def _carry_shadow_status() -> Optional[Dict[str, Any]]:
+    """Carry-shadow daemon heartbeat — read-only against its own ledger DB.
+
+    The daemon (separate process, per docs/PREREGISTER_CARRY_SHADOW.md)
+    writes meta['heartbeat_ms'] every 60s. Surfaced in the feed_silence map
+    as a pseudo-feed row so the ops panel colors it like any silent feed —
+    degraded past 10min without heartbeat, or when the experiment died.
+    """
+    if not _CARRY_SHADOW_DB.exists():
+        return None
+    try:
+        con = sqlite3.connect(
+            f"file:{_CARRY_SHADOW_DB}?mode=ro", uri=True, timeout=2.0)
+        meta = dict(con.execute("SELECT key, value FROM meta"))
+        con.close()
+    except Exception as exc:  # noqa: BLE001 — panel degrades, never 500s
+        logger.debug("carry_shadow meta read failed: %s", exc)
+        return None
+    now = int(time.time() * 1000)
+    hb = int(float(meta.get("heartbeat_ms") or 0))
+    age = round((now - hb) / 1000.0, 1) if hb else None
+    dead = meta.get("dead") or ""
+    degraded = bool(dead) or (age is not None and age > _CARRY_SHADOW_STALE_S)
+    row = {
+        "last_event_ms": hb or None,
+        "age_sec": age,
+        "max_silence_sec": _CARRY_SHADOW_STALE_S,
+        "degraded": degraded,
+        "warn_level": "degraded" if degraded else "none",
+        "warned_50_pct": False, "warned_90_pct": False,
+        "warned_cadence": False,
+        "early_count_today": 0, "imminent_count_today": 0,
+        "cadence_p50_sec": None, "cadence_p95_sec": None,
+        "cadence_p99_sec": None, "cadence_samples": 0,
+        "cadence_min_samples": None, "cadence_pct_current": None,
+        "warn_fraction": 0.5, "imminent_fraction": 0.9,
+    }
+    return {
+        "row": row,
+        "subs_active": int(meta.get("subs_active") or 0),
+        "book_missing": int(meta.get("book_missing_count") or 0),
+        "dead": dead or None,
+    }
+
+
+def _attach_carry_shadow_feed(body: Dict[str, Any]) -> None:
+    """Inject carry_shadow into the feed_silence map (own DB, read-only)."""
+    st = _carry_shadow_status()
+    if st is None:
+        return
+    body.setdefault("feed_silence", {})["carry_shadow"] = st["row"]
+    if st["row"]["degraded"]:
+        body["feed_silence_degraded"] = True
+    body["carry_shadow"] = {k: v for k, v in st.items() if k != "row"}
 
 
 # ── Aux-job heartbeats (pm2 cron jobs running OUTSIDE this process) ──────
@@ -2010,6 +2071,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
             return jsonify(cached)
         if _engine is None:
             body = {"feeds": [], "overall": "red"}
+            _attach_carry_shadow_feed(body)
             _attach_aux_jobs(body)
             return jsonify(body)
         summary = getattr(_engine, "_market_data_health_summary", None)
@@ -2033,6 +2095,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 body.get("feed_silence", {})
             )
             _attach_feed_silence_boot(body)
+            _attach_carry_shadow_feed(body)
             _attach_aux_jobs(body)
             return jsonify(_ttl_put("market_data_health", body, _MD_HEALTH_TTL_S))
         health = getattr(_engine, "_market_data_health", {}) or {}
@@ -2060,6 +2123,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
             body.get("feed_silence", {})
         )
         _attach_feed_silence_boot(body)
+        _attach_carry_shadow_feed(body)
         _attach_aux_jobs(body)
         return jsonify(_ttl_put("market_data_health", body, _MD_HEALTH_TTL_S))
 
