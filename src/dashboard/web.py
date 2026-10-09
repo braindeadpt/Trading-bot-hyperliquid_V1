@@ -909,7 +909,47 @@ def _carry_shadow_status() -> Optional[Dict[str, Any]]:
     hb = int(float(meta.get("heartbeat_ms") or 0))
     age = round((now - hb) / 1000.0, 1) if hb else None
     dead = meta.get("dead") or ""
+    # data-freshness degradation (2026-10-09): the heartbeat alone only
+    # proves the process is alive — a WS flap loop kept it green while
+    # books went stale. The global book_age_ms is informational only (thin
+    # books legitimately go quiet); degradation keys on the open-episode
+    # books, the sub-wide median, and a sustained WS disconnect. Daemon
+    # meta keys absent on older builds never degrade — they surface as
+    # metrics_missing in degraded_reasons so the gap is visible.
+    def _mi(key: str) -> Optional[int]:
+        v = meta.get(key)
+        return int(float(v)) if v not in (None, "") else None
+
+    book_age_ms = _mi("book_age_ms")
+    book_age_med_ms = _mi("book_age_med_ms")
+    book_age_open_ms = _mi("book_age_open_eps_ms")
+    ws_connected = meta.get("ws_connected") == "1"
+    ws_down_ms = _mi("ws_down_ms")
+    subs_active = int(meta.get("subs_active") or 0)
+    subs_expected = int(meta.get("subs_expected") or 0)
+    reconnects_1h = int(meta.get("reconnects_1h") or 0)
+    telemetry_absent = (meta.get("book_age_ms") is None
+                        and meta.get("reconnects_1h") is None
+                        and meta.get("ws_connected") is None)
     degraded = bool(dead) or (age is not None and age > _CARRY_SHADOW_STALE_S)
+    reasons = []
+    if telemetry_absent:
+        reasons.append("metrics_missing")
+    if book_age_open_ms is not None and book_age_open_ms > 60_000:
+        degraded = True
+        reasons.append(f"open-episode books stale {book_age_open_ms/1000:.0f}s")
+    if book_age_med_ms is not None and book_age_med_ms > 30_000:
+        degraded = True
+        reasons.append(f"median book age {book_age_med_ms/1000:.0f}s")
+    if ws_down_ms is not None and ws_down_ms > 30_000:
+        degraded = True
+        reasons.append(f"ws down {ws_down_ms/1000:.0f}s")
+    if subs_expected and subs_active < subs_expected:
+        degraded = True
+        reasons.append(f"subs {subs_active}/{subs_expected}")
+    if reconnects_1h > 5:
+        degraded = True
+        reasons.append(f"reconnects_1h={reconnects_1h}")
     row = {
         "last_event_ms": hb or None,
         "age_sec": age,
@@ -926,7 +966,17 @@ def _carry_shadow_status() -> Optional[Dict[str, Any]]:
     }
     return {
         "row": row,
-        "subs_active": int(meta.get("subs_active") or 0),
+        "subs_active": subs_active,
+        "subs_expected": subs_expected,
+        "book_age_ms": book_age_ms,
+        "book_age_med_ms": book_age_med_ms,
+        "book_age_open_eps_ms": book_age_open_ms,
+        "ws_connected": ws_connected,
+        "ws_down_ms": ws_down_ms,
+        "reconnects_1h": reconnects_1h,
+        "loop_lag_max_ms": _mi("loop_lag_max_ms"),
+        "loop_lag_p99_ms": _mi("loop_lag_p99_ms"),
+        "degraded_reasons": reasons,
         "book_missing": int(meta.get("book_missing_count") or 0),
         "dead": dead or None,
     }

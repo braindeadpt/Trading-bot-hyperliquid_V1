@@ -154,7 +154,11 @@ module.exports = {
       // No max_restarts cap (same rationale as hyperliquid/jev-judge).
     },
 
-    cron('wallet-fills', 'run_wallet_fills.sh', '7 * * * *'),
+    // wallet-fills: dormant, no consumer, 2026-10-09.
+    // TopTraderFlow was removed and no hypothesis consumes
+    // top_trader_fills / wallet_fills_cursor — do not register until a new
+    // preregistration uses the data.
+    // cron('wallet-fills', 'run_wallet_fills.sh', '7 * * * *'),
 
     // Outcome evaluator — persists 14d shadow scoreboards every 3h.
     // LONG-RUNNING LOOP like jev-judge: pm2's cron scheduler double-fired
