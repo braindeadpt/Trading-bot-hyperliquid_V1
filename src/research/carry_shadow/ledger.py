@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     cost_bps REAL NOT NULL DEFAULT 0.0,
     maint REAL, m_trigger REAL, m0 REAL,
     last_funding_ms INTEGER,
+    gap_unverified INTEGER NOT NULL DEFAULT 0,  -- 1 = WS gap could not be replayed
     notes TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
@@ -46,10 +47,12 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts_ms);
 CREATE INDEX IF NOT EXISTS ix_events_kind ON events(kind);
 CREATE TABLE IF NOT EXISTS fill_stats (
-    leg TEXT NOT NULL,      -- spot|perp
+    leg TEXT NOT NULL,      -- spot|perp (entry_*|exit_* prefixed)
     ts_ms INTEGER NOT NULL,
-    filled INTEGER NOT NULL,
+    filled INTEGER NOT NULL,           -- strict-crossing model (THE GATE)
     time_to_fill_s REAL,
+    proxy_filled INTEGER,              -- context only: aggressor vol >= size
+    proxy_vol_usd REAL,
     PRIMARY KEY (leg, ts_ms)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -64,7 +67,20 @@ class Ledger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._con = sqlite3.connect(str(self.path))
         self._con.executescript(_SCHEMA)
+        self._migrate()
         self._con.commit()
+
+    def _migrate(self) -> None:
+        """Column adds for ledgers created before these fields existed."""
+        cols = {r[1] for r in self._con.execute("PRAGMA table_info(fill_stats)")}
+        for col, ddl in (("proxy_filled", "ALTER TABLE fill_stats ADD COLUMN proxy_filled INTEGER"),
+                         ("proxy_vol_usd", "ALTER TABLE fill_stats ADD COLUMN proxy_vol_usd REAL")):
+            if col not in cols:
+                self._con.execute(ddl)
+        ecols = {r[1] for r in self._con.execute("PRAGMA table_info(episodes)")}
+        if "gap_unverified" not in ecols:
+            self._con.execute(
+                "ALTER TABLE episodes ADD COLUMN gap_unverified INTEGER DEFAULT 0")
 
     def event(self, kind: str, data: Dict[str, Any],
               episode_id: Optional[int] = None, ts_ms: Optional[int] = None) -> None:
@@ -96,10 +112,15 @@ class Ledger:
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
     def record_fill(self, leg: str, filled: bool, ttf_s: Optional[float],
-                    ts_ms: int) -> None:
+                    ts_ms: int, proxy_filled: Optional[bool] = None,
+                    proxy_vol_usd: Optional[float] = None) -> None:
         self._con.execute(
-            "INSERT OR REPLACE INTO fill_stats (leg,ts_ms,filled,time_to_fill_s)"
-            " VALUES (?,?,?,?)", (leg, ts_ms, int(filled), ttf_s))
+            "INSERT OR REPLACE INTO fill_stats"
+            " (leg,ts_ms,filled,time_to_fill_s,proxy_filled,proxy_vol_usd)"
+            " VALUES (?,?,?,?,?,?)",
+            (leg, ts_ms, int(filled), ttf_s,
+             None if proxy_filled is None else int(proxy_filled),
+             proxy_vol_usd))
         self._con.commit()
 
     def fill_rate(self, leg: str) -> tuple[int, float]:
@@ -128,6 +149,11 @@ class Ledger:
         self._con.execute(
             "INSERT OR REPLACE INTO meta (key,value) VALUES (?,?)", (key, value))
         self._con.commit()
+
+    def meta_incr(self, key: str) -> int:
+        val = int(self.meta_get(key) or 0) + 1
+        self.meta_set(key, str(val))
+        return val
 
     def close(self) -> None:
         self._con.close()

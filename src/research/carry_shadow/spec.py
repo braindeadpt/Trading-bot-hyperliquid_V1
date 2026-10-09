@@ -54,6 +54,9 @@ HURDLE_APR = HURDLE_RF + 0.04  # >= 8.0%/yr on committed capital
 MARGIN_CHECK_S = 60           # live margin evaluation cadence
 FUNDING_POLL_S = 300          # fundingHistory refresh cadence
 GATE_REFRESH_S = 3600         # PIT liquidity gate refresh cadence
+HEARTBEAT_S = 60              # meta heartbeat for the /ops feed-silence row
+HEARTBEAT_STALE_S = 600       # /ops shows carry_shadow red past this
+SHADOW_NOTIONAL_USD = 10_000  # hypothetical leg size for the fill proxy
 READ_EPS_TARGET = 10          # >=10 closed clustered episodes
 CLUSTER_GAP_H = 24
 EXPIRY_ISO = "2027-12-26"

@@ -229,6 +229,32 @@ def _stub_fetch(now_ms: int):
     }
 
 
+def test_spot_coin_uses_atindex_name_from_spotmeta(tmp_path) -> None:
+    """P1: spot legs subscribe by spotMeta universe name ('@{index}'), never
+    by base token name — only PURR/USDC carries a real name."""
+    now = int(time.time() * 1000)
+    f = _stub_fetch(now)
+    f["spot_pairs"] = lambda: (
+        [{"pair_name": "@107", "index": 107, "base_name": "HYPE"},
+         {"pair_name": "@142", "index": 142, "base_name": "UBTC"}],
+        {})
+    f["post"] = lambda p: {"universe": [
+        {"name": "HYPE", "maxLeverage": 10},
+        {"name": "BTC", "maxLeverage": 40}]}
+    d = CarryShadowDaemon(db_path=str(tmp_path / "cs.db"), fetch=f)
+    cands = d._discover_candidates()
+    assert {c["pair_name"] for c in cands} == {"@107", "@142"}
+    for c in cands:
+        d._register_candidate(c)
+    # the WS coin map keys on pair_name (@N) AND perp — not the base token
+    assert d.pair_by_coin["@107"]["perp"] == "HYPE"
+    assert d.pair_by_coin["@142"]["perp"] == "BTC"   # U-prefix -> BTC
+    assert d.pair_by_coin["HYPE"]["pair_name"] == "@107"
+    assert d.pair_by_coin["@107"]["pm"] is True       # HYPE PM-eligible
+    assert d.pair_by_coin["@142"]["pm"] is False      # UBTC unconfirmed
+    d.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_daemon_lifecycle_end_to_end(tmp_path) -> None:
     now = int(time.time() * 1000)
@@ -279,6 +305,150 @@ async def test_daemon_dead_flag_blocks_new_entries(tmp_path) -> None:
     d.books["PURR"] = BookSnap(99.0, 100.0)
     await d._refresh_funding()
     assert d.pool.live() == []
+    d.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_book_missing_recorded_not_silent(tmp_path) -> None:
+    """P2: funding-eligible + in-universe but no live book -> book_missing
+    event + meta counter; the expiry can't end in a silent 0-episode C."""
+    now = int(time.time() * 1000)
+    d = CarryShadowDaemon(db_path=str(tmp_path / "cs.db"),
+                          fetch=_stub_fetch(now))
+    await d.boot()
+    assert d.in_universe.get("PURR/USDC") is True
+    await d._refresh_funding()          # f_ann eligible, books missing
+    await d._refresh_funding()
+    assert d.pool.live() == []          # no episode (still fail-safe)
+    assert d.ledger.meta_get("book_missing_count") == "3"  # boot + 2 polls
+    kinds = [r[0] for r in d.ledger._con.execute("SELECT kind FROM events")]
+    assert kinds.count("book_missing") == 3
+    d.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_ws_gap_catchup_liquidation_and_deleverage(tmp_path) -> None:
+    """P3: on reconnect, missed-window extremes are replayed through the
+    margin rule — past maintenance = death; past trigger = deleverage at
+    the worst price."""
+    now = int(time.time() * 1000)
+
+    async def _open_btc_ep(d):
+        d.books["@142"] = BookSnap(99.0, 100.0)
+        d.books["BTC"] = BookSnap(99.0, 100.0)
+        await d._refresh_funding()
+        ep = d.pool.get("@142")
+        assert ep is not None
+        # force-fill both legs
+        ep.on_book_entry(now, BookSnap(98.5, 98.9), BookSnap(100.1, 100.2))
+        d._handle_entry_event(ep, "fill", now)
+        return ep
+
+    # case 1: gap high past maintenance (BTC maint 1.25%, M .45, M0 .60)
+    # liq: eq=.6-adv <= .0125*(1+adv) -> adv >= .52 ; gap_hi=160 -> adv .60 liq
+    d = CarryShadowDaemon(db_path=str(tmp_path / "a.db"),
+                          fetch=_btc_fetch(160.0, now))
+    await d.boot()
+    ep = await _open_btc_ep(d)
+    await d._catchup_gap(now - 120_000, now)
+    assert ep.state == "liquidated" and d.pool.dead
+    assert d.ledger.meta_get("dead") == "gap_kill"
+    d.shutdown()
+
+    # case 2: gap high past trigger but not maintenance: adv .30 < liq
+    # eq=.6-.3=.3 < .45*1.3=.585 -> deleverage at the worst price
+    d = CarryShadowDaemon(db_path=str(tmp_path / "b.db"),
+                          fetch=_btc_fetch(130.0, now))
+    await d.boot()
+    ep = await _open_btc_ep(d)
+    await d._catchup_gap(now - 120_000, now)
+    assert ep.state == "open" and ep.q < 1.0 and ep.deleverages == 1
+    kinds = [r[0] for r in d.ledger._con.execute("SELECT kind FROM events")]
+    assert "gap_catchup" in kinds and "rebalance" in kinds
+    assert not d.pool.dead
+    d.shutdown()
+
+
+def _btc_fetch(gap_hi: float, now: int = 0):
+    """BTC-only stub: @142 spot pair, 40x perp (maint 1.25%), funding 0.1%/h,
+    gap candles replay a perp high of `gap_hi`; 2h series keeps the pair
+    in-universe. 1m returns [] when gap_hi is None (no-data path)."""
+    now = now or int(time.time() * 1000)
+    f = _stub_fetch(now)
+    f["spot_pairs"] = lambda: (
+        [{"pair_name": "@142", "index": 142, "base_name": "UBTC"}], {})
+    f["post"] = lambda p: {"universe": [{"name": "BTC", "maxLeverage": 40}]}
+    f["funding"] = lambda c, s, e: [(now - h * 3_600_000, 0.001)
+                                    for h in range(48)]
+    def candles(coin, iv, s, e, p):
+        # 2h liquidity series only when the request spans a real history
+        # window — a ~minutes-long gap query must fall through to the
+        # interval-specific data (or [] = "no data for the missed window")
+        if iv == "2h" and e - s >= 86_400_000:
+            return [(now - i * 7_200_000, 100.0, 101.0, 99.0, 100.0,
+                     900_000.0, 10) for i in range(450)]
+        if iv == "1m" and gap_hi is not None:
+            return [(s + 60_000, 100.0, gap_hi, 99.0, gap_hi, 500.0, 5)]
+        return []
+    f["candles"] = candles
+    return f
+
+
+@pytest.mark.asyncio
+async def test_gap_catchup_missing_marks_gap_unverified(tmp_path) -> None:
+    """P3.5: no candle data for the missed window -> episode flagged
+    gap_unverified=1 and counted separately at the readout, not dropped."""
+    now = int(time.time() * 1000)
+    d = CarryShadowDaemon(db_path=str(tmp_path / "g.db"),
+                          fetch=_btc_fetch(None, now))
+    await d.boot()
+    d.books["@142"] = BookSnap(99.0, 100.0)
+    d.books["BTC"] = BookSnap(99.0, 100.0)
+    await d._refresh_funding()
+    ep = d.pool.get("@142")
+    ep.on_book_entry(now, BookSnap(98.5, 98.9), BookSnap(100.1, 100.2))
+    d._handle_entry_event(ep, "fill", now)
+    await d._catchup_gap(now - 120_000, now)
+    gu = d.ledger._con.execute(
+        "SELECT gap_unverified FROM episodes WHERE id=?", (ep.id,)).fetchone()
+    assert gu[0] == 1 and ep.state == "open"
+    kinds = [r[0] for r in d.ledger._con.execute("SELECT kind FROM events")]
+    assert "gap_catchup_missing" in kinds
+    d.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_fill_proxy_uses_trade_volume_at_our_price(tmp_path) -> None:
+    """P4: trades feed accumulates aggressor USD at-or-better than our
+    resting price; proxy recorded on fill_stats next to the strict gate."""
+    now = int(time.time() * 1000)
+    d = CarryShadowDaemon(db_path=str(tmp_path / "cs.db"),
+                          fetch=_stub_fetch(now))
+    await d.boot()
+    d.books["PURR/USDC"] = BookSnap(99.0, 100.0)
+    d.books["PURR"] = BookSnap(99.0, 100.0)
+    await d._refresh_funding()
+    ep = d.pool.get("PURR/USDC")
+    assert ep is not None and ep.state == "pending_entry"
+    # sell-aggressor prints below our 99.0 spot bid -> proxy evidence
+    for _ in range(3):
+        d._on_trade({"coin": "PURR/USDC", "px": "98.9", "sz": "40",
+                     "side": "A", "time": now + 60_000})
+    acc = d._proxy[(ep.id, "spot")]
+    assert acc["vol_usd"] == pytest.approx(3 * 98.9 * 40)
+    # resolve legs unfilled at window end -> proxy row still written
+    # (books must NOT cross our resting prices or the strict model fills)
+    d.books["PURR/USDC"] = BookSnap(99.0, 100.5)
+    d.books["PURR"] = BookSnap(98.0, 100.5)
+    ev = ep.on_book_entry(now + 901_000, d.books["PURR/USDC"], d.books["PURR"])
+    d._handle_entry_event(ep, ev, now + 901_000)
+    row = d.ledger._con.execute(
+        "SELECT leg, filled, proxy_filled, proxy_vol_usd FROM fill_stats"
+        " WHERE leg='spot'").fetchone()
+    assert row is not None and row[1] == 0
+    need = spec.SHADOW_NOTIONAL_USD
+    assert row[2] == (1 if row[3] >= need else 0)
+    assert row[3] == pytest.approx(3 * 98.9 * 40)
     d.shutdown()
 
 

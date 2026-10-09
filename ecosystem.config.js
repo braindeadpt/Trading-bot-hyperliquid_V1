@@ -124,6 +124,33 @@ module.exports = {
       // capped feeder freezes the only executing strategy's input.
     },
 
+    // Carry-shadow daemon — live L2 evidence for the A1 spot-perp carry
+    // study (docs/PREREGISTER_CARRY_SHADOW.md). Separate long-running
+    // process: own WS/REST pollers on PUBLIC market data only, hypothetical
+    // episodes in data/research/carry_shadow.db, zero orders, zero engine
+    // contact (tests/test_carry_shadow.py asserts the import surface).
+    // Its 60s meta heartbeat surfaces on /ops as a pseudo-feed row — red
+    // past 10min silent. Not a cron: it IS the loop.
+    {
+      name: 'carry-shadow',
+      script: 'deploy/macos/run_carry_shadow.sh',
+      cwd: CWD,
+      interpreter: 'bash',
+      exec_mode: 'fork',
+      instances: 1,
+      autorestart: true,
+      merge_logs: true,
+      out_file: `${LOGS}/carry-shadow-out.log`,
+      error_file: `${LOGS}/carry-shadow-error.log`,
+
+      // Long-running market-data loop: generous delay like jev-judge —
+      // evidence continuity beats fast restart, and the heartbeat row on
+      // /ops makes a dead daemon visible instead of silent.
+      restart_delay: 60000,
+      kill_timeout: 15000,
+      // No max_restarts cap (same rationale as hyperliquid/jev-judge).
+    },
+
     cron('wallet-fills', 'run_wallet_fills.sh', '7 * * * *'),
     cron('outcome-eval', 'run_outcome_eval.sh', '20 */3 * * *'),
     cron('watchdogs', 'run_watchdogs.sh', '45 */6 * * *'),

@@ -52,6 +52,13 @@ class CarryShadowDaemon:
         self.in_universe: Dict[str, bool] = {}
         self._prev_zone: Dict[str, str] = {}
         self._px_hist: Dict[str, Deque[Tuple[int, float]]] = {}
+        # trades ring + fill-proxy accumulators per pending leg
+        self._trades: Dict[str, Deque[Tuple[int, float, float, str]]] = {}
+        self._proxy: Dict[Tuple[int, str], Dict[str, Any]] = {}
+        self._trade_counts: Dict[str, int] = {}
+        self._book_seen_ms: Dict[str, int] = {}
+        self._last_ws_ms = 0
+        self._subs_active = 0
         self._shutdown = False
         self._ws: Any = None
         # Injectable fetchers keep the daemon testable without network.
@@ -69,6 +76,8 @@ class CarryShadowDaemon:
     # ─── boot ────────────────────────────────────────────────────────────
 
     async def boot(self) -> None:
+        # every boot = a (re)start — pm2 crash-loops stay visible via heartbeat
+        self.ledger.meta_incr("restart_count")
         if self.ledger.meta_get("dead"):
             logger.error("experiment is DEAD (%s) — no new episodes",
                          self.ledger.meta_get("dead"))
@@ -77,16 +86,26 @@ class CarryShadowDaemon:
         cands = await asyncio.to_thread(self._discover_candidates)
         self.cands = cands
         for c in cands:
-            self.pair_by_coin[c["pair_name"]] = c
-            self.pair_by_coin[c["perp"]] = c
-            self.funding_tail[c["perp"]] = deque(maxlen=72)
-            self.neg_since[c["pair_name"]] = None
-            self._px_hist[c["pair_name"]] = deque(maxlen=240)
+            self._register_candidate(c)
         await self._refresh_gates()
         await self._refresh_funding()
         self._reload_episodes()
+        self.ledger.meta_set("candidates", json.dumps(
+            [c["pair_name"] for c in self.cands]))
         logger.info("boot: %d candidate pairs, %d episodes reloaded",
                     len(cands), len(self.pool.episodes))
+
+    def _register_candidate(self, c: Dict[str, Any]) -> None:
+        """Wire coin->candidate maps. The WS coin for a spot leg is the
+        spotMeta universe name — '@{index}' for every pair except the named
+        'PURR/USDC' (verified live 2026-10-09: l2Book answers '@107' etc.)."""
+        self.pair_by_coin[c["pair_name"]] = c
+        self.pair_by_coin[c["perp"]] = c
+        self.funding_tail.setdefault(c["perp"], deque(maxlen=72))
+        self.neg_since.setdefault(c["pair_name"], None)
+        self._px_hist.setdefault(c["pair_name"], deque(maxlen=240))
+        self._trades.setdefault(c["pair_name"], deque(maxlen=5000))
+        self._trades.setdefault(c["perp"], deque(maxlen=5000))
 
     def _discover_candidates(self) -> List[Dict[str, Any]]:
         """A1 name-match rule: spot base == perp, or 'U'+perp (UBTC→BTC)."""
@@ -137,9 +156,23 @@ class CarryShadowDaemon:
     # ─── REST pollers (run in threads; hl_post is blocking) ──────────────
 
     async def _refresh_gates(self) -> None:
-        """PIT liquidity gates: rolling-30d median 2h notional per leg."""
+        """PIT liquidity gates: rolling-30d median 2h notional per leg.
+        Also re-discovers candidates — newly listed spot pairs or perps are
+        picked up hourly (the mapping source is spotMeta, refreshed here)."""
         end = _now_ms()
         start = end - (spec.LIQ_LOOKBACK_D + 5) * MS_D
+        try:
+            fresh = await asyncio.to_thread(self._discover_candidates)
+            known = {c["pair_name"] for c in self.cands}
+            for c in fresh:
+                if c["pair_name"] not in known:
+                    self.cands.append(c)
+                    self._register_candidate(c)
+                    self._emit("candidate_added", dict(c), None, end)
+                    if self._ws is not None:
+                        await self._subscribe_coin(self._ws, c)
+        except Exception as exc:  # noqa: BLE001 — keep last-good candidate set
+            logger.warning("candidate refresh failed: %s", exc)
         for c in self.cands:
             ok = await asyncio.to_thread(self._gate_one, c, start, end)
             self.in_universe[c["pair_name"]] = ok
@@ -231,18 +264,34 @@ class CarryShadowDaemon:
         if f_ann < spec.ENTRY_F_ANN or not self.in_universe.get(c["pair_name"]):
             return
         spot, perp = self.books.get(c["pair_name"]), self.books.get(c["perp"])
-        if not spot or not perp or spot.mid <= 0 or perp.mid <= 0:
-            return  # no live book yet — wait for next poll
+        # Eligible by the funding rule but a leg book is missing/empty —
+        # record it; silence here would hide a dead feed behind 0 episodes.
+        missing = []
+        if not spot or spot.bid <= 0:
+            missing.append("spot")
+        if not perp or perp.ask <= 0:
+            missing.append("perp")
+        if missing:
+            n = self.ledger.meta_incr("book_missing_count")
+            self._emit("book_missing", {
+                "pair": c["pair_name"], "perp": c["perp"], "f_ann": f_ann,
+                "missing": missing, "count": n}, None, now_ms)
+            return
         ep = Episode(pair=c["pair_name"], perp=c["perp"],
                      entry_decision_ms=now_ms, pm_branch=c["pm"],
                      maint=c["maint"], m_trigger=c["m"], m0=c["m0"])
         ep.place_entry(spot, perp)
         ep.id = self.ledger.episode_open(ep.row())
         self.pool.add(ep)
+        self._arm_proxy(ep, "spot")
+        self._arm_proxy(ep, "perp")
         self._emit("entry_attempt", {
             "pair": ep.pair, "perp": ep.perp, "f_ann": f_ann,
             "spot_bid": ep.legs["spot"].price,
             "perp_ask": ep.legs["perp"].price,
+            # raw leg spreads at decision time — recorded, not filtered
+            "spot_spread_bps": (spot.ask - spot.bid) / (spot.ask + spot.bid) * 1e4,
+            "perp_spread_bps": (perp.ask - perp.bid) / (perp.ask + perp.bid) * 1e4,
             "pm_branch": ep.pm_branch, "maint": ep.maint,
             "m_trigger": ep.m_trigger, "m0": ep.m0}, ep.id, now_ms)
 
@@ -255,6 +304,8 @@ class CarryShadowDaemon:
         if not spot or not perp or spot.mid <= 0 or perp.mid <= 0:
             return
         ep.place_exit(now_ms, spot, perp)
+        self._arm_proxy(ep, "spot", exit_leg=True)
+        self._arm_proxy(ep, "perp", exit_leg=True)
         self.ledger.episode_update(ep.id, state="pending_exit")
         self._emit("exit_attempt", {"pair": ep.pair, "f_ann": f_ann,
                                     "spot_ask": ep.exit_legs["spot"].price,
@@ -262,6 +313,14 @@ class CarryShadowDaemon:
                    ep.id, now_ms)
 
     # ─── websocket ───────────────────────────────────────────────────────
+
+    async def _subscribe_coin(self, ws: Any, c: Dict[str, Any]) -> None:
+        for coin in (c["pair_name"], c["perp"]):
+            for chan in ("l2Book", "trades"):
+                await ws.send(json.dumps({
+                    "method": "subscribe",
+                    "subscription": {"type": chan, "coin": coin}}))
+                self._subs_active += 1
 
     async def ws_loop(self) -> None:
         backoff = 2.0
@@ -272,11 +331,13 @@ class CarryShadowDaemon:
                         close_timeout=5, open_timeout=10) as ws:
                     self._ws = ws
                     backoff = 2.0
-                    for coin in self.pair_by_coin:
-                        await ws.send(json.dumps({
-                            "method": "subscribe",
-                            "subscription": {"type": "l2Book", "coin": coin}}))
+                    self._subs_active = 0
+                    for c in self.cands:
+                        await self._subscribe_coin(ws, c)
+                    if self._last_ws_ms:
+                        await self._catchup_gap(self._last_ws_ms, _now_ms())
                     async for raw in ws:
+                        self._last_ws_ms = _now_ms()
                         self._on_ws_message(raw)
             except asyncio.CancelledError:
                 return
@@ -290,21 +351,73 @@ class CarryShadowDaemon:
     def _on_ws_message(self, raw: Any) -> None:
         try:
             payload = json.loads(raw)
-            if payload.get("channel") != "l2Book":
+            channel = payload.get("channel")
+            data = payload.get("data")
+            if channel == "trades" and isinstance(data, list):
+                for t in data:
+                    self._on_trade(t)
                 return
-            data = payload["data"]
+            if channel != "l2Book" or not isinstance(data, dict):
+                return
             levels = data.get("levels") or [[], []]
             if not levels[0] or not levels[1]:
                 return
             coin = str(data["coin"])
             self.books[coin] = BookSnap(bid=float(levels[0][0]["px"]),
                                         ask=float(levels[1][0]["px"]))
+            self._book_seen_ms[coin] = int(data.get("time") or _now_ms())
             ts = int(data.get("time") or _now_ms())
             c = self.pair_by_coin.get(coin)
             if c:
                 self._on_pair_book(c, ts)
         except (KeyError, ValueError, TypeError) as exc:
             logger.debug("WS parse skip: %s", exc)
+
+    def _on_trade(self, t: Dict[str, Any]) -> None:
+        """Trade tick → ring + fill-proxy accumulation on pending legs.
+
+        HL trade 'side': 'B' = buy aggressor, 'A' = sell aggressor. A resting
+        maker BUY at P sees sell-aggressor prints at px<=P as fill evidence;
+        a resting SELL sees buy-aggressor prints at px>=P.
+        """
+        coin = str(t.get("coin", ""))
+        ring = self._trades.get(coin)
+        if ring is None:
+            return
+        self._trade_counts[coin] = self._trade_counts.get(coin, 0) + 1
+        px, sz = float(t["px"]), float(t["sz"])
+        ts = int(t.get("time") or _now_ms())
+        ring.append((ts, px, sz, str(t.get("side", ""))))
+        for (ep_id, leg_key), acc in list(self._proxy.items()):
+            if acc["coin"] != coin:
+                continue
+            our_side = acc["side"]           # our resting side
+            want_aggr = "A" if our_side == "buy" else "B"
+            if str(t.get("side")) != want_aggr:
+                continue
+            ok = px <= acc["price"] if our_side == "buy" else px >= acc["price"]
+            if ok:
+                acc["vol_usd"] += px * sz
+
+    def _arm_proxy(self, ep: Episode, leg: str, exit_leg: bool = False) -> None:
+        legs = ep.exit_legs if exit_leg else ep.legs
+        l = legs[leg]
+        coin = ep.pair if leg == "spot" else ep.perp
+        self._proxy[(ep.id, ("exit_" if exit_leg else "") + leg)] = {
+            "coin": coin, "side": l.side, "price": l.price,
+            "vol_usd": 0.0,
+            "need_usd": spec.SHADOW_NOTIONAL_USD * ep.q,
+        }
+
+    def _proxy_result(self, ep_id: int, leg_key: str,
+                      leg: Any) -> Tuple[bool, float]:
+        acc = self._proxy.pop((ep_id, leg_key), None)
+        if acc is None or leg.filled_at_ms is None:
+            # unfilled leg: proxy still measured over the full window
+            if acc is None:
+                return False, 0.0
+            return acc["vol_usd"] >= acc["need_usd"], acc["vol_usd"]
+        return acc["vol_usd"] >= acc["need_usd"], acc["vol_usd"]
 
     def _on_pair_book(self, c: Dict[str, Any], ts: int) -> None:
         ep = self.pool.get(c["pair_name"])
@@ -328,9 +441,11 @@ class CarryShadowDaemon:
         if ev == "fill":
             for leg in ("spot", "perp"):
                 l = ep.legs[leg]
+                pf, pvol = self._proxy_result(ep.id, leg, l)
                 self.ledger.record_fill(
-                    leg, True, (l.filled_at_ms - ep.entry_decision_ms) / 1000.0,
-                    l.filled_at_ms or ts)
+                    leg, True,
+                    (l.filled_at_ms - ep.entry_decision_ms) / 1000.0,
+                    l.filled_at_ms or ts, proxy_filled=pf, proxy_vol_usd=pvol)
             self.ledger.episode_update(
                 ep.id, state="open", opened_ms=ep.opened_ms,
                 p0=ep.p0, s0=ep.s0, cost_bps=ep.cost_bps)
@@ -339,8 +454,10 @@ class CarryShadowDaemon:
         else:
             for leg in ("spot", "perp"):
                 l = ep.legs[leg]
+                pf, pvol = self._proxy_result(ep.id, leg, l)
                 self.ledger.record_fill(leg, bool(l.filled_at_ms),
-                                        None, ts)
+                                        None, ts, proxy_filled=pf,
+                                        proxy_vol_usd=pvol)
             self.ledger.episode_update(
                 ep.id, state="aborted", close_reason=ep.close_reason,
                 cost_bps=ep.cost_bps)
@@ -403,6 +520,96 @@ class CarryShadowDaemon:
             return None
         return (max(window) - ep.p0) / ep.p0  # adverse = perp up for the short
 
+    async def _catchup_gap(self, gap_start_ms: int, gap_end_ms: int) -> None:
+        """Re-evaluate open episodes over the missed window (WS outage).
+
+        For each open episode: fetch the perp candle high and spot candle low
+        over the gap and run the margin check at the worst prices, exactly as
+        prereg §3: extreme past maintenance -> hypothetical liquidation (death);
+        past trigger only -> deleverage at the interval's worst price.
+        Granularity: try 1m, then 15m/1h/2h (candleSnapshot may not serve the
+        finest interval for the range — the used one is recorded).
+        """
+        for ep in self.pool.live():
+            if ep.state != "open":
+                continue
+            c = self.pair_by_coin.get(ep.perp)
+            if not c:
+                continue
+            perp_hi, spot_lo, gran = await asyncio.to_thread(
+                self._gap_extremes, c, gap_start_ms - 60_000, gap_end_ms)
+            if perp_hi is None:
+                # episode survives but is flagged — counted separately at the
+                # final readout, never silently excluded
+                self.ledger.episode_update(ep.id, gap_unverified=1)
+                self._emit("gap_catchup_missing",
+                           {"pair": ep.pair, "gap_ms": gap_end_ms - gap_start_ms},
+                           ep.id)
+                continue
+            prev = self._prev_zone.get(ep.pair, "ok")
+            zone_at_worst = ep.margin_zone(perp_hi)
+            ev = ep.on_margin_tick(gap_end_ms, perp_hi, spot_lo or 0.0)
+            self._emit("gap_catchup", {
+                "pair": ep.pair, "gran": gran,
+                "gap_ms": gap_end_ms - gap_start_ms,
+                "perp_hi": perp_hi, "spot_lo": spot_lo,
+                "zone_at_worst": zone_at_worst, "event": ev},
+                ep.id, gap_end_ms)
+            if ev == "liquidated":
+                self.ledger.episode_update(ep.id, state="liquidated",
+                                           close_reason="liquidated")
+                kind = "gap_kill" if prev == "ok" else "liquidation"
+                self._emit(kind, {"pair": ep.pair, "mid": perp_hi,
+                                  "prev_zone": prev, "source": "catchup"},
+                           ep.id, gap_end_ms)
+                self._die(kind if kind == "gap_kill" else "liquidation")
+            elif ev == "delev_floor":
+                self._close_episode(ep, ev, gap_end_ms, "delev_floor")
+            elif ev == "rebalance":
+                self.ledger.episode_update(
+                    ep.id, q=ep.q, margin=ep.collateral,
+                    cost_bps=ep.cost_bps, cum_f=ep.cum_f)
+                self._emit("rebalance", {
+                    "pair": ep.pair, "q": ep.q, "deleverages": ep.deleverages,
+                    "source": "catchup", "worst_px": perp_hi},
+                    ep.id, gap_end_ms)
+
+    def _gap_extremes(self, c: Dict[str, Any], start_ms: int,
+                      end_ms: int) -> Tuple[Optional[float], Optional[float], str]:
+        """Worst-case perp high / spot low over the missed window. Returns
+        (perp_high, spot_low, granularity_used)."""
+        for iv, page in (("1m", MS_D), ("15m", 7 * MS_D), ("1h", 30 * MS_D),
+                         ("2h", 60 * MS_D)):
+            try:
+                bars = self.fetch["candles"](c["perp"], iv, start_ms, end_ms,
+                                             page)
+                if bars:
+                    hi = max(b[2] for b in bars)
+                    sbars = self.fetch["candles"](c["pair_name"], iv,
+                                                  start_ms, end_ms, page)
+                    lo = min((b[3] for b in sbars), default=None) if sbars else None
+                    return hi, lo, iv
+            except Exception:  # noqa: BLE001 — try the coarser interval
+                continue
+        return None, None, "none"
+
+    def _heartbeat(self) -> None:
+        self.ledger.meta_set("heartbeat_ms", str(_now_ms()))
+        self.ledger.meta_set("subs_active", str(self._subs_active))
+        self.ledger.meta_set("dead", self.pool.death_reason or "")
+        # per-coin liveness + trade counters — lets the status report show
+        # which '@N' spot books actually stream (a silent sub is invisible
+        # otherwise) and keeps a pm2 crash-loop countable.
+        for coin, ts in self._book_seen_ms.items():
+            self.ledger.meta_set(f"book_seen:{coin}", str(ts))
+        for coin, n in self._trade_counts.items():
+            self.ledger.meta_set(f"trades:{coin}", str(n))
+        if self.pool.dead:
+            return
+
+    async def _heartbeat_async(self) -> None:
+        self._heartbeat()
+
     def _close_episode(self, ep: Episode, ev: str, ts: int, kind: str) -> None:
         self.ledger.episode_update(
             ep.id, state=ep.state, closed_ms=ts,
@@ -412,7 +619,10 @@ class CarryShadowDaemon:
         if kind == "exit":
             for leg in ("spot", "perp"):
                 l = ep.exit_legs[leg]
-                self.ledger.record_fill(leg, bool(l.filled_at_ms), None, ts)
+                pf, pvol = self._proxy_result(ep.id, "exit_" + leg, l)
+                self.ledger.record_fill(leg, bool(l.filled_at_ms),
+                                        None, ts, proxy_filled=pf,
+                                        proxy_vol_usd=pvol)
         self._emit(kind, {
             "pair": ep.pair, "net_bps": ep.net_bps(
                 (self.books.get(ep.perp) or BookSnap()).mid,
@@ -469,8 +679,13 @@ class CarryShadowDaemon:
         ann_ret = (sum(e["pnl"] for e in eps) / max(1, len(eps))) / committed \
             / n_days * 365
         verdict = "A" if ann_ret >= spec.HURDLE_APR else "C"
+        unverified = [e["pair_name"] for e in
+                      self.ledger._con.execute(
+                          "SELECT pair_name FROM episodes WHERE gap_unverified=1")]
         out = {"clusters": clusters, "ann_ret_committed": round(ann_ret, 4),
-               "hurdle": spec.HURDLE_APR, "verdict": verdict}
+               "hurdle": spec.HURDLE_APR, "verdict": verdict,
+               "gap_unverified_n": len(unverified),
+               "gap_unverified_pairs": unverified}
         self.ledger.meta_set("final_readout", json.dumps(out))
         self._emit("final_readout", out, None)
         if verdict == "C":
@@ -510,6 +725,7 @@ class CarryShadowDaemon:
             self._loop(spec.FUNDING_POLL_S, self._refresh_funding),
             self._loop(spec.MARGIN_CHECK_S, self._margin_async),
             self._loop(spec.GATE_REFRESH_S, self._refresh_gates),
+            self._loop(spec.HEARTBEAT_S, self._heartbeat_async),
         )
 
     async def _margin_async(self) -> None:
