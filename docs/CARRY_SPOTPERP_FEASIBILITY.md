@@ -72,6 +72,89 @@ around zero except ENA −169bps and MON −92bps — the real risk term).
    funding accrual resolution is coarse; realized fills could differ at
    sub-2h granularity.
 
+## Robustness addendum (2026-10-09 — same frozen spec/data, X/Y untouched)
+
+Script: `scripts/research/carry_a1_robustness.py` →
+`data/backtests/carry_a1/carry_a1_robustness.json`.
+
+### 1. Censoring — closed vs open episodes
+
+| Set | n | Total net bps |
+|---|---|---|
+| **Closed** (exit rule fired) | 3 | **+162.6** (MON +69.2/12.8d, MON +22.7/9.5d, ZEC +70.7/33.4d) |
+| **Open @ pull**, maker exit | 9 | +2544.6 |
+| **Open @ pull**, worst-case taker exit (−6bps extra) | 9 | +2490.6 |
+
+Taker exit costs each open episode only −6 bps; at the observed funding
+pace (2.2–8.0 bps/day) covering it takes **0.8–2.7 days**. The headline is
+*not* manufactured by unrealized positions — but it does rest on them
+(93% of net bps are still open).
+
+### 2. Independence — 24h-entry clustering + 1000-run control
+
+Entries within 24h chained into one cluster: **n_clustered = 10**
+(SOL+ETH+BTC 08-22/23 merged). The ≥10 gate holds **by exactly one** —
+literal A, zero margin. Clustered random control (one common time-shift
+per cluster, durations preserved, 1000 runs, seed 42): **percentile 99.5**.
+
+### 3. Concentration — leave-one-symbol-out
+
+| Removed | n | Net ann. on deployed | Edge ÷ cost |
+|---|---|---|---|
+| — (full) | 12 | +13.9% | 18.8× |
+| PURR | 11 | **+10.1%** | 12.2× |
+| PUMP | 11 | +13.7% | 18.5× |
+| XPL | 12 | +13.9% (XPL emitted no episodes) | 18.8× |
+
+The edge is **carry, not PURR** — without PURR it stays positive and >3×.
+
+### 4. Construction biases
+
+- **Liquidity gate is point-in-time**: `liq_ok` derives from trailing-30d
+  rolling medians evaluated at each bar's own day; audit confirms every
+  episode entered on an in-universe day. No lookahead.
+- **Direction**: all 12 episodes are long-spot/short-perp (entry requires
+  f_ann ≥ +15% > 0). No short-spot (impossible on HL) ever emitted.
+- **Return on capital**: deployed-only 13.9%/yr → on committed capital
+  (spot + margin = **1.5×** notional, sized for +50% spike) **9.3%/yr** →
+  on **total reserved capital** (peak 9 concurrent × 1.5, reserved over
+  the 151d span) **4.1%/yr**.
+
+### 5. The real finding — the +50% margin buffer is not enough
+
+| Episode | Max adverse move on short | Distance to +50% liq |
+|---|---|---|
+| ZEC 06-15 | **+221.7%** | **−171.7pp — liquidated** |
+| PUMP 08-09 | +165.2% | −115.2pp — liquidated |
+| HYPE 05-22 | +69.6% | −19.6pp — liquidated |
+| ENA 09-07 | +65.5% | −15.5pp — liquidated |
+| ZEC 05-04 | +64.2% | −14.2pp — liquidated |
+| SOL | +32.8% | +17.2pp |
+| PURR | +28.7% | +21.3pp |
+| others | <14% | safe |
+
+**5 of 12 episodes would have been liquidated** at the mandated 50% margin
+buffer. Survivors of the worst observed excursion (ZEC +221%) need margin
+≈ 2.3× notional ⇒ capital ≈ 3.3× notional ⇒ ann on committed ≈ **4.2%/yr**.
+
+Liquidation-aware re-run (forced unwind at the liq bar's marks, funding to
+truncation, zero liquidation penalty — *optimistic*): aggregate +3386 bps,
+99th pct stays high. Delta-neutrality means the spot leg's gain offsets the
+lost margin — the real dangers are the liquidation penalty, forced-unwind
+slippage on thin spot books, and trusting a stale 2h spot mark at exactly
+the violent moment (PUMP's spot was +88% at the liq bar vs perp +50% — that
++38pp basis capture is fragile). Either way, the carry survives forced
+exits only if the spot leg tracks — which is the assumption this study
+can't verify at marks alone.
+
+### Post-addendum verdict
+
+Literal gates: **A stands** (n_clustered = 10 ≥ 10; no-PURR = +10.1% > 0;
+liq-aware aggregate still positive). In spirit: **A−, provisional** — the
+PnL rests on 9 open episodes, on n at the exact threshold, and on a margin
+buffer reality violates. The honest headline number is **~4–9%/yr on real
+capital**, not 13.9%.
+
 ## Next step if pursued
 
 Shadow-list eligible per prereg. Before any live/paper sizing: measure
