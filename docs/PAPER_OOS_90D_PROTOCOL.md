@@ -91,6 +91,19 @@ Do **not** decide on mid-window snapshots. Formal verdict only at day 90
   `ps -p <pid> -o command` confirmation. Rationale: a pattern SIGTERM hit
   the supervised `carry-shadow` while cleaning a manual duplicate
   (`docs/INCIDENT_RUNBOOK.md` §7).
+- **`pm2 delete`/`start` without a HEAD gate** (ops rule, added 2026-10-09):
+  every approved restart bundle must first run
+  `git -C /Users/noder/hyperliquid/app rev-parse HEAD` and require it to
+  equal the SHA named in the order; abort if different. Rationale: the
+  17:28 UTC wrapper-migration start ran the pre-`412c6e2` ecosystem because
+  the Mac had not received the pushed commit.
+  **Mac git transport**: the repo's `origin` is credential-less HTTPS —
+  the Mac cannot fetch/push by itself. Updates arrive via the Windows
+  clone: commit on Mac -> `git fetch ssh://noder@192.168.1.118/...` on
+  Windows -> `git push origin`; inbound commits go the other way
+  (`git push ssh://... <sha>:refs/heads/<tmp>` then ff-merge on the Mac).
+  This loop must be verified closed before any restart.
+
 
 ## Artifacts
 
