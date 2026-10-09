@@ -79,6 +79,7 @@ WATCHDOG_IDS = (
     "feed_cadence",
     "liq_feed_gap",
     "nightly_keepalive",
+    "overnight_stale",
     "bot_alive",
 )
 
@@ -231,6 +232,11 @@ def fresh_state() -> Dict[str, Dict[str, Any]]:
             "open_gap_start_ms": None,
         },
         "nightly_keepalive": {
+            "triggered": False,
+            "runs": [],
+            "alerted_since_ms": None,
+        },
+        "overnight_stale": {
             "triggered": False,
             "runs": [],
             "alerted_since_ms": None,
@@ -860,6 +866,86 @@ def check_nightly_keepalive(
     return False
 
 
+# ── overnight run staleness watchdog ──────────────────────────────────
+#
+# nightly_keepalive covers the >40h "task never ran" case. This is the
+# tighter tripwire for the cron-window guard (2026-10-09): if the Mac
+# sleeps through the 05:00 boundary the delayed pm2 fire *skips* by
+# design, so a missed night pages by the 12:45 watchdogs run.
+# Signal = NIGHTLY_STATUS.json ``generated_ms`` only — written by every
+# real run, even all-blocked ones, and unreachable by the guard's skip
+# path (which exits before python). Experiment artifacts are deliberately
+# NOT consulted: their mtime can be bumped by any rsync/regen/touch and
+# would mask a missed night. Missing/unreadable status counts as stale.
+# Edge-triggered both ways: alert on ok->stale, recovery note on stale->ok.
+
+OVERNIGHT_STALE_MS = 26 * 3_600_000
+
+
+def check_overnight_stale(
+    shared: Dict[str, Dict[str, Any]],
+    *,
+    force: bool = False,
+) -> bool:
+    """Alert once per missed-night episode; notify again on recovery."""
+    sub = shared["overnight_stale"]
+    now_ms = int(time.time() * 1000)
+    age_ms: Optional[int] = None
+    try:
+        if NIGHTLY_STATUS_PATH.exists():
+            payload = json.loads(NIGHTLY_STATUS_PATH.read_text(encoding="utf-8"))
+            gen = payload.get("generated_ms")
+            if isinstance(gen, (int, float)):
+                age_ms = now_ms - int(gen)
+    except Exception as exc:
+        log(f"overnight_stale: status unreadable: {exc}")
+
+    stale = age_ms is None or age_ms > OVERNIGHT_STALE_MS
+    alerted = sub.get("alerted_since_ms")
+    if stale:
+        if alerted is None or force:
+            sub["alerted_since_ms"] = now_ms
+            age_h = (age_ms or 0) / 3_600_000
+            sub["runs"].append({
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "status_age_h": round(age_h, 1) if age_ms is not None else None,
+            })
+            save_shared_state(shared)
+            notifier = build_alert_notifier()
+            if notifier is not None:
+                try:
+                    asyncio.run(asyncio.wait_for(notifier.send(
+                        "⚠️ <b>OVERNIGHT STALE</b>\n"
+                        f"NIGHTLY_STATUS.json tem <b>{age_h:.1f}h</b> "
+                        f"(limiar {OVERNIGHT_STALE_MS // 3_600_000}h) — a "
+                        "corrida das 05:00 não produziu output. Verificar "
+                        "cron guard / Mac sleep / pm2.", "warning"),
+                        timeout=15))
+                except Exception as exc:  # noqa: BLE001
+                    log(f"overnight_stale: notify failed (best-effort): {exc}")
+            log(f"overnight_stale: ALERT — sem output há {age_h:.1f}h")
+            return True
+        log("overnight_stale: episódio em curso — já alertado")
+        return False
+    if alerted is not None:
+        sub["alerted_since_ms"] = None
+        save_shared_state(shared)
+        notifier = build_alert_notifier()
+        if notifier is not None:
+            try:
+                asyncio.run(asyncio.wait_for(notifier.send(
+                    "✅ <b>OVERNIGHT RECUPEROU</b>\n"
+                    f"NIGHTLY_STATUS.json fresco ({(age_ms or 0) / 3_600_000:.1f}h) — "
+                    "a corrida das 05:00 voltou.", "info"), timeout=15))
+            except Exception as exc:  # noqa: BLE001
+                log(f"overnight_stale: recovery notify failed: {exc}")
+        log("overnight_stale: overnight retomou — episódio fechado, re-armado")
+        return False
+    log(f"overnight_stale: ok (último output há "
+        f"{(age_ms or 0) / 3_600_000:.1f}h)")
+    return False
+
+
 # ── bot process liveness watchdog ─────────────────────────────────────
 #
 # Every other watchdog monitors DATA produced by the bot — none watched the
@@ -988,6 +1074,7 @@ GATE_FUNCS = {
     "feed_cadence": "check_cadence_degrading",
     "liq_feed_gap": "check_liq_gap",
     "nightly_keepalive": "check_nightly_keepalive",
+    "overnight_stale": "check_overnight_stale",
     "bot_alive": "check_bot_alive",
 }
 
@@ -1032,6 +1119,7 @@ def main() -> int:
         f"creep >= {CREEP_MIN_DAYS}d de escada no max diário, "
         f"cadence DEGRADING (rec mediana > p99 histórico), "
         f"liq_gap > {LIQ_GAP_ALERT_MS // 3_600_000}h silêncio, "
+        f"overnight_stale > {OVERNIGHT_STALE_MS // 3_600_000}h sem output, "
         f"bot_alive lock+{BOT_LOG_STALE_MS // 60_000}min log, "
         f"check a cada {args.hours:.0f}h) ===")
     if not _run_lock_acquired():

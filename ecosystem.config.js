@@ -186,5 +186,26 @@ module.exports = {
     cron('watchdogs', 'deploy/macos/run_watchdogs.sh', '45 */6 * * *'),
     cron('overnight', 'deploy/macos/run_overnight.sh', '0 5 * * *'),
     cron('backup-monthly', 'deploy/macos/run_backup_monthly.sh', '0 4 1 * *'),
+
+    // keep-awake — pm2-managed twin of the LaunchAgent `com.noder.keepawake`
+    // (caffeinate -is, pid 96837 since 2026-09-29, RunAtLoad+KeepAlive).
+    // Holds PreventSystemSleep so a slept cron boundary can't turn the
+    // wrapper guard into a missed night. `interpreter: none` execs the
+    // binary directly; autorestart keeps it alive in-session and
+    // `pm2 resurrect` (com.PM2, RunAtLoad on GUI login) brings it back
+    // after reboot. Overlapping assertions are harmless.
+    {
+      name: 'keep-awake',
+      script: '/usr/bin/caffeinate',
+      args: '-is',
+      interpreter: 'none',
+      exec_mode: 'fork',
+      instances: 1,
+      autorestart: true,
+      merge_logs: true,
+      out_file: `${LOGS}/keep-awake-out.log`,
+      error_file: `${LOGS}/keep-awake-error.log`,
+      restart_delay: 30000,
+    },
   ],
 };

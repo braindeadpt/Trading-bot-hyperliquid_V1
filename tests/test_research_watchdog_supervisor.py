@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -624,3 +625,83 @@ class TestCadenceGate:
             assert run["hist_p99_sec"] == 30.0
         finally:
             sup.STATE_PATH = Path("data/research/research_watchdogs_state.json")
+
+
+class TestOvernightStale:
+    """Edge-triggered on NIGHTLY_STATUS.json ``generated_ms`` only.
+
+    The status file is written by every real overnight run (even
+    all-blocked ones) and is unreachable by the cron guard's skip path.
+    Experiment artifacts (20*.json) are deliberately ignored: their mtime
+    can be bumped by any rsync/regen/touch and would mask a missed night.
+    Both transitions notify: ok->stale alerts, stale->ok sends a recovery
+    note.
+    """
+
+    def _status(self, tmp_path: Path, age_h: float) -> None:
+        (tmp_path / "NIGHTLY_STATUS.json").write_text(json.dumps(
+            {"generated_ms": int((time.time() - age_h * 3600) * 1000)}))
+
+    def _stub(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sup, "NIGHTLY_STATUS_PATH",
+                            tmp_path / "NIGHTLY_STATUS.json")
+        monkeypatch.setattr(sup, "STATE_PATH", tmp_path / "state.json")
+
+    def test_fresh_status_is_ok(self, monkeypatch, tmp_path):
+        shared = sup.fresh_state()
+        self._stub(monkeypatch, tmp_path)
+        self._status(tmp_path, 2.0)
+        monkeypatch.setattr(sup, "build_alert_notifier", lambda: None)
+        assert sup.check_overnight_stale(shared) is False
+        assert shared["overnight_stale"]["alerted_since_ms"] is None
+        assert shared["overnight_stale"]["runs"] == []
+
+    def test_stale_alerts_once_then_recovery_notifies(
+        self, monkeypatch, tmp_path
+    ):
+        shared = sup.fresh_state()
+        self._stub(monkeypatch, tmp_path)
+        self._status(tmp_path, 30.0)  # >26h stale
+        sent: list = []
+
+        class _FakeNotifier:
+            async def send(self, msg, level="info", *, force=False):
+                sent.append(level)
+
+        monkeypatch.setattr(sup, "build_alert_notifier",
+                            lambda: _FakeNotifier())
+
+        assert sup.check_overnight_stale(shared) is True
+        assert sent == ["warning"]
+        assert shared["overnight_stale"]["alerted_since_ms"] is not None
+        assert len(shared["overnight_stale"]["runs"]) == 1
+
+        # same episode -> quiet
+        assert sup.check_overnight_stale(shared) is False
+        assert sent == ["warning"]
+
+        # fresh status -> stale->ok transition notifies recovery
+        self._status(tmp_path, 0.5)
+        assert sup.check_overnight_stale(shared) is False
+        assert sent == ["warning", "info"]
+        assert shared["overnight_stale"]["alerted_since_ms"] is None
+
+    def test_missing_status_is_stale(self, monkeypatch, tmp_path):
+        shared = sup.fresh_state()
+        self._stub(monkeypatch, tmp_path)  # no NIGHTLY_STATUS.json written
+        monkeypatch.setattr(sup, "build_alert_notifier", lambda: None)
+        assert sup.check_overnight_stale(shared) is True
+        assert shared["overnight_stale"]["runs"][-1]["status_age_h"] is None
+
+    def test_fresh_artifact_does_not_mask_stale_status(
+        self, monkeypatch, tmp_path
+    ):
+        """A touched/regen'd 20*.json must NOT count as a run."""
+        shared = sup.fresh_state()
+        self._stub(monkeypatch, tmp_path)
+        self._status(tmp_path, 30.0)  # stale status
+        # decoy: an experiment artifact touched "now" — must be ignored
+        (tmp_path / "20261010_030000_iv_thresholds.json").write_text("{}")
+        monkeypatch.setattr(sup, "build_alert_notifier", lambda: None)
+        assert sup.check_overnight_stale(shared) is True
+        assert shared["overnight_stale"]["alerted_since_ms"] is not None
