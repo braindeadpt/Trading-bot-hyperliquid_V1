@@ -308,7 +308,7 @@ th { font-size: 10px; }
                     </tbody>
                 </table>
                 <details class="fold" id="shadow-fold" style="margin-top:8px;">
-                    <summary>Shadow board <span class="dim" id="shadow-eval-age" title="Idade do lote de avaliação persistido (a análise pesada corre fora do processo, de hora em hora)"></span></summary>
+                    <summary>Shadow board <span class="dim" id="shadow-count"></span> <span class="dim" id="shadow-eval-age" title="Idade do lote de avaliação persistido (a análise pesada corre fora do processo, de hora em hora)"></span></summary>
                     <div class="fold-inner" style="padding:6px 2px;">
                         <div class="dim" id="shadow-disclaimer" style="font-size:9px;margin-bottom:4px;">Idealized fills — not executable edge · PF e IC só com indep ≥ 30</div>
                         <table>
@@ -842,6 +842,8 @@ function renderShadowPanel(payload) {
         }
     }
     const rows = (payload && payload.rows) || [];
+    const sc = document.getElementById("shadow-count");
+    if (sc) sc.textContent = rows.length ? "(" + rows.length + ")" : "";
     if (!rows.length) {
         tbody.innerHTML = '<tr><td colspan="7" class="muted">No shadow strategies</td></tr>';
         return;
@@ -912,8 +914,19 @@ function renderHypotheses(payload) {
         const nTxt = (h.indep_n != null ? h.indep_n + "/" + (h.target != null ? h.target : "?") : "—/" + (h.target != null ? h.target : "?")) + staleTxt + dupTxt;
         const stateCls = h.state && h.state.indexOf("veredicto") === 0 ? "highlight" : "";
         const cutoffTip = h.cutoff_ms ? ' title="fronteira: ' + new Date(h.cutoff_ms).toISOString().slice(0, 10) + '"' : "";
+        // CarryA1 detail sub-line — §6 kill-check inputs only (counts),
+        // never PnL/returns: sealed by construction on the backend.
+        let detailTxt = "";
+        const dt = h.detail;
+        if (dt) {
+            const fr = o => (o && o.n) ? o.filled + "/" + o.n : "0/0";
+            const st = dt.states || {};
+            const gaps = (dt.gap_today || []).map(g => g.pair + " " + g.s + "s" + (g.over_1pct ? " !>1%" : "")).join(" ");
+            const kill = h.dead_reason_type ? " · kill: " + h.dead_reason_type : "";
+            detailTxt = `<div class="dim" style="font-size:9px;font-weight:400;margin-top:2px;">fill ${fr(dt.fill && dt.fill.spot)}s ${fr(dt.fill && dt.fill.perp)}p (≥20/perna, <40% mata) · open ${st.open || 0} closed ${st.closed || 0} aborted ${st.aborted || 0} · liq ${dt.liquidations} delev ${dt.deleverages} · unlegged ${dt.unlegged_intervals}+${dt.unlegged_unwinds} gap×${dt.gap_unverified_eps}${gaps ? " · gap hj: " + gaps : ""} · custo §6.1: ${dt.cost_check}${kill}</div>`;
+        }
         return `<tr>
-            <td class="highlight"${cutoffTip}>${h.name}</td>
+            <td class="highlight"${cutoffTip}>${h.name}${detailTxt}</td>
             <td class="${stateCls}">${h.state}</td>
             <td class="num">${nTxt}</td>
             <td class="num">${h.n_clustered != null ? h.n_clustered : "—"}</td>

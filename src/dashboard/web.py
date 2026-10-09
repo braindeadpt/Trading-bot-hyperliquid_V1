@@ -687,6 +687,12 @@ def build_hypotheses() -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — hypotheses panel degrades
         logger.debug("jev hypothesis row failed: %s", exc)
 
+    # ── CarryA1 shadow (daemon ledger, read-only — counts + §6 inputs) ──
+    try:
+        out.append(_carry_a1_hypothesis(now_ms))
+    except Exception as exc:  # noqa: BLE001 — degrade, never 500
+        logger.debug("carry hypothesis row failed: %s", exc)
+
     return {"hypotheses": out, "generated_ms": now_ms}
 
 
@@ -991,6 +997,143 @@ def _attach_carry_shadow_feed(body: Dict[str, Any]) -> None:
     if st["row"]["degraded"]:
         body["feed_silence_degraded"] = True
     body["carry_shadow"] = {k: v for k, v in st.items() if k != "row"}
+
+
+# ── CarryA1 hypothesis row (PREREGISTER_CARRY_SHADOW §6) ─────────────────
+# Counts + kill-check inputs only — sealed by construction: no net bps,
+# ann_ret, per-episode PnL or funding deltas are ever emitted. The §6.1
+# interim cost check surfaces as pass/fail only.
+_CARRY_A1_TARGET_N = 10
+_CARRY_A1_EXPIRY_MS = int(
+    datetime(2027, 12, 26, tzinfo=timezone.utc).timestamp() * 1000)
+_CARRY_A1_REVIEW_MS = int(
+    datetime(2027, 4, 9, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _carry_a1_hypothesis(now_ms: int) -> Dict[str, Any]:
+    """CarryA1 spot–perp shadow row — clustered-closed count + §6 inputs.
+
+    Reads the daemon ledger read-only (mode=ro). A missing or unreadable
+    DB degrades to a "—" row instead of raising.
+    """
+    row: Dict[str, Any] = {
+        "id": "CarryA1::shadow",
+        "name": "CarryA1 spot–perp (shadow)",
+        "state": "—",
+        "indep_n": None,
+        "target": _CARRY_A1_TARGET_N,
+        "n_clustered": None,
+        "rate_per_day": None,
+        "eta_ms": None,
+        "expiry_ms": _CARRY_A1_EXPIRY_MS,
+        "cutoff_ms": None,
+        "review_ms": _CARRY_A1_REVIEW_MS,
+        "sealed": False,
+        "detail": None,
+    }
+    if not _CARRY_SHADOW_DB.exists():
+        return row
+    try:
+        con = sqlite3.connect(
+            f"file:{_CARRY_SHADOW_DB}?mode=ro", uri=True, timeout=2.0)
+        con.row_factory = sqlite3.Row
+        eps = [dict(r) for r in con.execute("SELECT * FROM episodes")]
+        # §6.2 gate mirrored exactly as the daemon runs it: strict fill
+        # rate per leg over ALL fill_stats rows (legs are stored
+        # unprefixed; the exit_ prefix only exists in proxy keys).
+        fill = {r[0]: {"n": int(r[1]), "filled": int(r[2])}
+                for r in con.execute(
+                    "SELECT leg, COUNT(*), COALESCE(SUM(filled),0)"
+                    " FROM fill_stats WHERE leg IN ('spot','perp')"
+                    " GROUP BY leg")}
+        ev_kinds = {r[0]: r[1] for r in con.execute(
+            "SELECT kind, COUNT(*) FROM events GROUP BY kind")}
+        today = time.strftime("%Y%m%d", time.gmtime())
+        gap_today = [
+            {"pair": k.split(":", 2)[2], "s": round(float(v)),
+             "over_1pct": float(v) > 864.0}
+            for k, v in con.execute(
+                "SELECT key, value FROM meta WHERE key LIKE ?",
+                (f"gap_s:{today}:%",))]
+        dead = (con.execute("SELECT value FROM meta WHERE key='dead'")
+                .fetchone() or [""])[0]
+        con.close()
+    except Exception as exc:  # noqa: BLE001 — degrade, never 500
+        logger.debug("carry_a1 ledger read failed: %s", exc)
+        return row
+
+    eps.sort(key=lambda e: e["entry_decision_ms"])
+    states: Dict[str, int] = {}
+    closed_iv: List[tuple] = []
+    n_liq = n_unleg = n_gap_eps = 0
+    n_closed = 0
+    first_entry = None
+    for e in eps:
+        states[e["state"]] = states.get(e["state"], 0) + 1
+        if first_entry is None:
+            first_entry = e["entry_decision_ms"]
+        if e["state"] == "liquidated" or e.get("close_reason") in (
+                "liquidated", "gap_kill"):
+            n_liq += 1
+        if e.get("unlegged_s") is not None:
+            n_unleg += 1
+        if e.get("gap_unverified"):
+            n_gap_eps += 1
+        if e["state"] == "closed":
+            n_closed += 1
+            closed_iv.append(
+                (int(e["opened_ms"] or e["entry_decision_ms"]),
+                 int(e["closed_ms"] or now_ms)))
+
+    clu = _clustered_count(closed_iv)
+    # §6 gates are the daemon's alone (_check_interim_gates -> _die ->
+    # meta['dead']) — two implementations of the same gate would diverge.
+    # dead carries numbers (e.g. 'edge:12.3<3x cost:4.0') that must never
+    # surface: emit only the type, plus the leg for fill_rate.
+    dead_type = ""
+    if dead:
+        parts = dead.split(":")
+        dead_type = parts[0] + (
+            ":" + parts[1]
+            if parts[0] == "fill_rate" and len(parts) > 1 else "")
+    # §6.1 interim check arm state — never pass/fail (a "pass" before the
+    # final read reveals edge >= 3x cost, i.e. PnL information).
+    cost_check = "armado" if n_closed >= 5 else f"pendente ({n_closed}/5)"
+
+    day_ms = 86_400_000.0
+    days = max((now_ms - (first_entry or now_ms)) / day_ms, 1.0)
+    rate = clu / days
+    eta_ms = (now_ms + int((_CARRY_A1_TARGET_N - clu) / rate * day_ms)
+              if rate > 0 and clu < _CARRY_A1_TARGET_N else None)
+    if dead:
+        state = "veredicto C — kill"
+    elif clu >= _CARRY_A1_TARGET_N:
+        state = "veredicto — leitura final"
+    else:
+        state = "confirmação"
+    row.update({
+        "state": state,
+        "dead_reason_type": dead_type or None,
+        "indep_n": clu,
+        "n_clustered": clu,
+        "rate_per_day": round(rate, 3),
+        "eta_ms": eta_ms,
+        "cutoff_ms": first_entry,
+        "detail": {
+            "fill": {leg: fill.get(leg, {"n": 0, "filled": 0})
+                     for leg in ("spot", "perp")},
+            "states": states,
+            "liquidations": n_liq,
+            "deleverages": ev_kinds.get("rebalance", 0),
+            "unlegged_intervals": n_unleg,
+            "unlegged_unwinds": ev_kinds.get("unlegged_unwind", 0),
+            "gap_unverified_eps": n_gap_eps,
+            "gap_entry_unverified": ev_kinds.get("gap_entry_unverified", 0),
+            "gap_today": gap_today,
+            "cost_check": cost_check,
+        },
+    })
+    return row
 
 
 # ── Aux-job heartbeats (pm2 cron jobs running OUTSIDE this process) ──────
