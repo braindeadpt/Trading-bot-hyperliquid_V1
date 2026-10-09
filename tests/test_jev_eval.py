@@ -161,3 +161,80 @@ def test_percentile_basic() -> None:
 def test_geometry_boundary_is_2026_10_04_commit() -> None:
     # 96f1b15 committed 2026-10-04 14:39:40 UTC
     assert GEOMETRY_BOUNDARY_MS == 1791124780000
+
+
+# ── stale_verdict rule (deviation 2026-10-09) ─────────────────────────────
+# A trade opened on a verdict older than 2h at entry is flagged
+# stale_verdict=1 and excluded from the kill count. Rows are never deleted.
+
+import json as _json
+import sqlite3 as _sqlite3
+
+from scripts.research.jev_eval import (  # noqa: E402
+    STALE_VERDICT_MS,
+    is_stale_verdict,
+    mark_stale_verdicts,
+    verdict_age_ms,
+)
+
+
+def test_stale_verdict_ms_is_two_hours() -> None:
+    assert STALE_VERDICT_MS == 2 * 3_600_000
+
+
+def test_verdict_age_ms_reads_decision_ts() -> None:
+    meta = _json.dumps({"jev_decision_ts_ms": 1_000})
+    assert verdict_age_ms(meta, 1_000 + STALE_VERDICT_MS) == STALE_VERDICT_MS
+    assert verdict_age_ms(meta, 1_500) == 500
+    # No recorded verdict ts -> no age -> never stale (pre-instrumentation)
+    assert verdict_age_ms("{}", 1_500) is None
+    assert verdict_age_ms(None, 1_500) is None
+    assert verdict_age_ms("not json", 1_500) is None
+
+
+def test_is_stale_verdict_flag_and_derived() -> None:
+    fresh = _json.dumps({"jev_decision_ts_ms": 1_000})
+    assert is_stale_verdict(fresh, 1_000 + 60_000) is False
+    assert is_stale_verdict(fresh, 1_000 + STALE_VERDICT_MS + 1) is True
+    # Explicit flag wins even without derivable ts
+    flagged = _json.dumps({"stale_verdict": 1})
+    assert is_stale_verdict(flagged, 5_000) is True
+    assert is_stale_verdict(None, 5_000) is False
+
+
+def test_mark_stale_verdicts_annotates_without_deleting(tmp_path) -> None:
+    db = _sqlite3.connect(str(tmp_path / "bot.db"))
+    db.execute(
+        "CREATE TABLE trades (id INTEGER PRIMARY KEY, strategy TEXT, "
+        "entry_time INTEGER, signal_metadata TEXT)"
+    )
+    stale_meta = _json.dumps({"jev_decision_ts_ms": 1_000})
+    fresh_meta = _json.dumps({"jev_decision_ts_ms": 9_000})
+    db.execute(
+        "INSERT INTO trades VALUES (1, 'JevJudge', ?, ?)",
+        (1_000 + STALE_VERDICT_MS + 60_000, stale_meta),  # verdict 2h+1m old
+    )
+    db.execute(
+        "INSERT INTO trades VALUES (2, 'JevJudge', ?, ?)",
+        (10_000, fresh_meta),                             # verdict 1s old
+    )
+    db.execute(
+        "INSERT INTO trades VALUES (3, 'JevJudge', ?, ?)",
+        (10_000, '{}'),                                    # no verdict ts
+    )
+    db.execute(
+        "INSERT INTO trades VALUES (4, 'Other', ?, ?)",
+        (1_000 + STALE_VERDICT_MS + 60_000, stale_meta),  # other strategy
+    )
+    db.commit()
+
+    assert mark_stale_verdicts(db) == 1
+    rows = db.execute(
+        "SELECT id, signal_metadata FROM trades ORDER BY id"
+    ).fetchall()
+    assert len(rows) == 4  # nothing deleted
+    assert _json.loads(rows[0][1])["stale_verdict"] == 1
+    assert "stale_verdict" not in _json.loads(rows[1][1])
+    assert _json.loads(rows[3][1]).get("stale_verdict") is None  # Other untouched
+    assert mark_stale_verdicts(db) == 0  # idempotent
+    db.close()

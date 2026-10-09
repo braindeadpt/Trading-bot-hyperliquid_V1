@@ -53,6 +53,77 @@ JEV_MAX_HOLD_MS = 4 * 3_600_000
 # paper fills instantly at limit; adverse selection not simulated).
 JEV_FEE_RT = 0.00015 + 0.00045
 
+# Stale-verdict rule (operational deviation 2026-10-09,
+# docs/PAPER_OOS_90D_PROTOCOL.md): while the jev-judge pm2 cron was dead
+# (2026-10-07 08:10 → 10-09 10:31 UTC) the strategy's 90min consumption TTL
+# refused every verdict — zero stale trades opened. The rule is fixed
+# regardless: a trade opened on a verdict older than 2h at entry is marked
+# ``stale_verdict=1`` in ``signal_metadata`` and excluded from the kill
+# count. Nothing is ever deleted.
+STALE_VERDICT_MS = 2 * 3_600_000
+
+
+def _signal_meta(signal_metadata: Optional[str]) -> Dict[str, object]:
+    try:
+        m = json.loads(signal_metadata or "{}")
+    except (ValueError, TypeError):
+        return {}
+    return m if isinstance(m, dict) else {}
+
+
+def verdict_age_ms(
+    signal_metadata: Optional[str], entry_time_ms: int
+) -> Optional[int]:
+    """Age of the Jev verdict at trade open — None when the metadata has no
+    ``jev_decision_ts_ms`` (pre-instrumentation trades are not stale)."""
+    ts = _signal_meta(signal_metadata).get("jev_decision_ts_ms")
+    if ts in (None, ""):
+        return None
+    try:
+        return int(entry_time_ms) - int(ts)
+    except (ValueError, TypeError):
+        return None
+
+
+def is_stale_verdict(signal_metadata: Optional[str], entry_time_ms: int) -> bool:
+    """True when the row is flagged ``stale_verdict=1`` OR the recorded
+    verdict was already >2h old at entry. The derived check runs even when
+    the flag was never written, so counters stay honest without a marking
+    pass."""
+    meta = _signal_meta(signal_metadata)
+    if meta.get("stale_verdict"):
+        return True
+    age = verdict_age_ms(signal_metadata, entry_time_ms)
+    return age is not None and age > STALE_VERDICT_MS
+
+
+def mark_stale_verdicts(conn) -> int:
+    """Annotate JevJudge trades opened on a >2h verdict with
+    ``stale_verdict=1``. Idempotent; rows are annotated, never deleted.
+    Returns the number newly marked. Requires a RW connection to the live
+    DB — brief UPDATE, WAL-safe against a running bot.
+    """
+    rows = conn.execute(
+        "SELECT id, entry_time, signal_metadata FROM trades "
+        "WHERE strategy = 'JevJudge'"
+    ).fetchall()
+    marked = 0
+    for rid, entry_ms, meta_raw in rows:
+        meta = _signal_meta(meta_raw)
+        if meta.get("stale_verdict"):
+            continue
+        age = verdict_age_ms(meta_raw, int(entry_ms))
+        if age is not None and age > STALE_VERDICT_MS:
+            meta["stale_verdict"] = 1
+            conn.execute(
+                "UPDATE trades SET signal_metadata = ? WHERE id = ?",
+                (json.dumps(meta, sort_keys=True), rid),
+            )
+            marked += 1
+    if marked:
+        conn.commit()
+    return marked
+
 
 def _spearman(xs: List[float], ys: List[float]) -> Optional[float]:
     n = len(xs)
@@ -99,7 +170,20 @@ def main() -> int:
                     help="random-direction control runs (fixed seed)")
     ap.add_argument("--seed", type=int, default=42,
                     help="fixed seed for the random baseline")
+    ap.add_argument("--mark-stale", action="store_true",
+                    help="annotate JevJudge trades opened on a >2h verdict "
+                         "with stale_verdict=1 (RW open of the live DB) "
+                         "and exit")
     args = ap.parse_args()
+
+    if args.mark_stale:
+        dbw = sqlite3.connect(str(LIVE_DB), timeout=10.0)
+        try:
+            marked = mark_stale_verdicts(dbw)
+        finally:
+            dbw.close()
+        print(f"stale_verdict: {marked} trade(s) marked")
+        return 0
 
     cfg = load_config(ROOT / "config" / "settings.yaml")
     rdb_path = Path(ResearchDatabase.resolve_path(cfg))
@@ -184,18 +268,25 @@ def main() -> int:
         "and status='closed' and entry_time > ? order by entry_time",
         (GEOMETRY_BOUNDARY_MS,),
     ).fetchall()
-    indep = _independent_trades(
-        [
-            {
-                "symbol": r[0], "side": r[1], "entry_price": r[2],
-                "entry_time": r[3], "exit_time": r[4], "pnl_pct": r[5],
-                "signal_metadata": r[6],
-            }
-            for r in rows
-        ]
-    )
+    trade_rows = [
+        {
+            "symbol": r[0], "side": r[1], "entry_price": r[2],
+            "entry_time": r[3], "exit_time": r[4], "pnl_pct": r[5],
+            "signal_metadata": r[6],
+        }
+        for r in rows
+    ]
+    stale = [
+        t for t in trade_rows
+        if is_stale_verdict(t["signal_metadata"], int(t["entry_time"]))
+    ]
+    trade_rows = [t for t in trade_rows if t not in stale]
+    indep = _independent_trades(trade_rows)
     print(f"closed trades post-boundary: raw={len(rows)} indep={len(indep)} "
           f"(kill read at indep_n>={JEV_KILL_TARGET_N})")
+    if stale:
+        print(f"  stale_verdict excluded: {len(stale)} (verdict >2h at entry; "
+              f"rows kept, flagged stale_verdict=1)")
     pnls = [float(t["pnl_pct"]) for t in indep]
     if pnls:
         w = sum(1 for p in pnls if p > 0)

@@ -73,6 +73,9 @@ class JevJudge(Strategy):
             cfg.get("latest_path") or _DEFAULT_LATEST_PATH
         )
         self.MIN_CONFIDENCE = float(cfg.get("min_confidence", 0.60))
+        # Consumption TTL — deliberately stricter than the 2h stale_verdict
+        # marking policy (scripts/research/jev_eval.py): a verdict older than
+        # this never produces a decision; >2h is the post-hoc evidence flag.
         self.DECISION_TTL_MS = int(cfg.get("decision_ttl_ms", 90 * 60_000))
         self.BASE_SIZE_PCT = float(cfg.get("base_size_pct", 0.01))
         # Exit geometry: SL = max(sl_pct_min, atr_mult * ATR%), TP = tp_r_mult x SL.
@@ -117,14 +120,23 @@ class JevJudge(Strategy):
         if not isinstance(v, dict):
             return None
         ts = v.get("ts_ms")
-        if not ts or now_ms - int(ts) > self.DECISION_TTL_MS:
+        if not ts:
+            return None
+        age_ms = now_ms - int(ts)
+        if age_ms > self.DECISION_TTL_MS:
+            self._maybe_warn(
+                now_ms,
+                f"stale verdict {symbol}: age={age_ms / 3_600_000:.2f}h "
+                f"> ttl={self.DECISION_TTL_MS / 3_600_000:.2f}h — "
+                "fail-closed, no decision",
+            )
             return None
         return v
 
     def _maybe_warn(self, now_ms: int, msg: str) -> None:
         if now_ms - self._last_warn_ms > self.WARMUP_LOG_MS:
             self._last_warn_ms = now_ms
-            logger.info("JevJudge: %s", msg)
+            logger.warning("JevJudge: %s", msg)
 
     # ------------------------------------------------------------------
     # Entry / exit

@@ -187,7 +187,7 @@ th { font-size: 10px; }
 <div class="grid">
     <div class="g-12">
         <div class="panel sys-strip">
-            <div class="sys-cols" style="grid-template-columns:1.4fr 1.2fr;">
+            <div class="sys-cols" style="grid-template-columns:1.4fr 1fr 1fr;">
                 <div>
                     <div class="sys-col-title">Engine</div>
                     <div class="mini-stats mini-stats-2">
@@ -207,6 +207,12 @@ th { font-size: 10px; }
                 <div>
                     <div class="sys-col-title">Risk gates</div>
                     <div class="mini-stats" id="risk-gates-panel">
+                        <div class="muted" style="text-align:center;padding:8px 0;">Waiting...</div>
+                    </div>
+                </div>
+                <div>
+                    <div class="sys-col-title">Aux jobs</div>
+                    <div class="mini-stats" id="aux-jobs-panel">
                         <div class="muted" style="text-align:center;padding:8px 0;">Waiting...</div>
                     </div>
                 </div>
@@ -517,6 +523,32 @@ function renderStrategies(data) {
             </div>
         </div>`;
     }).join('');
+}
+
+function renderAuxJobs(payload) {
+    const el = document.getElementById("aux-jobs-panel");
+    if (!el) return;
+    const jobs = (payload && payload.aux_jobs) || {};
+    const keys = ["jev_feed", "outcome_eval", "watchdogs"];
+    const rows = keys.map(k => {
+        const j = jobs[k];
+        if (!j) {
+            return '<div class="mini-row"><span class="mini-label">' + k +
+                '</span><span class="mini-value muted">—</span></div>';
+        }
+        const bad = !!j.degraded;
+        const col = bad ? "var(--down)" : "var(--up)";
+        let val = (j.age_sec != null ? fmtDur(j.age_sec) : "never") + " ago";
+        if (k === "outcome_eval" && j.run_age_sec != null) {
+            val = "persist " + val + " · run " + fmtDur(j.run_age_sec) + " ago";
+        }
+        if (bad && j.action) val += ' → ' + j.action;
+        return '<div class="mini-row"><span class="mini-label">' + j.label +
+            '</span><span class="mini-value" style="color:' + col + ';"' +
+            (j.action ? ' title="' + j.action + '"' : "") + '>' +
+            (bad ? "⚠ " : "") + val + "</span></div>";
+    });
+    el.innerHTML = rows.join("");
 }
 
 function renderFeedSilence(payload) {
@@ -1033,7 +1065,7 @@ socket.on("funding_update", (data) => {
     _fundingPred = data || {};
     if (_lastLiveRows) renderLiveData(_lastLiveRows);
 });
-socket.on("market_data_health", (data) => renderFeedSilence(data));
+socket.on("market_data_health", (data) => { renderFeedSilence(data); renderAuxJobs(data); });
 socket.on("strategies", (data) => renderStrategies(data));
 socket.on("jev_verdicts", (data) => renderJevVerdicts(data));
 socket.on("logs", (data) => renderLogs(data));
@@ -1048,7 +1080,7 @@ pollAll = function pollAll() {
         statusEl.className = "badge " + (d.running ? "badge-green" : "badge-red");
     }).catch(() => {});
     if (!socket || !socket.connected) {
-        authFetch("/api/market_data_health").then(r => r.json()).then(d => renderFeedSilence(d)).catch(() => {});
+        authFetch("/api/market_data_health").then(r => r.json()).then(d => { renderFeedSilence(d); renderAuxJobs(d); }).catch(() => {});
         authFetch("/api/logs").then(r => r.json()).then(d => renderLogs(d)).catch(() => {});
         authFetch("/api/engine_monitor").then(r => r.json()).then(d => { renderEngine(d); renderRiskGates(d); }).catch(() => {});
         authFetch("/api/live_data").then(r => r.json()).then(d => { _lastLiveRows = d; renderLiveData(d); }).catch(() => {});

@@ -901,7 +901,11 @@ function renderHypotheses(payload) {
         const sealed = !!h.sealed;
         const sealTxt = sealed ? '<span style="color:var(--yellow);font-weight:700;">SEALED</span>'
                                : '<span class="up">aberto</span>';
-        const nTxt = h.indep_n != null ? h.indep_n + "/" + (h.target != null ? h.target : "?") : "—/" + (h.target != null ? h.target : "?");
+        const staleN = Number(h.stale_verdict_excluded) || 0;
+        const staleTxt = staleN > 0
+            ? ' <span style="color:var(--yellow);" title="trades com verdict >2h à entrada — marcados, excluídos do kill">(−' + staleN + ' stale)</span>'
+            : "";
+        const nTxt = (h.indep_n != null ? h.indep_n + "/" + (h.target != null ? h.target : "?") : "—/" + (h.target != null ? h.target : "?")) + staleTxt;
         const stateCls = h.state && h.state.indexOf("veredicto") === 0 ? "highlight" : "";
         const cutoffTip = h.cutoff_ms ? ' title="fronteira: ' + new Date(h.cutoff_ms).toISOString().slice(0, 10) + '"' : "";
         return `<tr>

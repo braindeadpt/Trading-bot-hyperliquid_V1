@@ -620,22 +620,30 @@ def build_hypotheses() -> Dict[str, Any]:
         from scripts.research.jev_eval import (
             GEOMETRY_BOUNDARY_MS,
             JEV_KILL_TARGET_N,
+            is_stale_verdict,
         )
 
         conn = _live_db_conn()
         jev_n: Optional[int] = None
         jev_clu: Optional[int] = None
+        jev_stale = 0
         jev_state = "confirmação"
         if conn is not None:
             rows = conn.execute(
-                "SELECT symbol, entry_time, exit_time FROM trades "
+                "SELECT symbol, entry_time, exit_time, signal_metadata "
+                "FROM trades "
                 "WHERE strategy = 'JevJudge' AND status = 'closed' "
                 "AND entry_time > ? ORDER BY entry_time",
                 (GEOMETRY_BOUNDARY_MS,),
             ).fetchall()
             busy: Dict[str, int] = {}
             kept: List[tuple] = []
-            for sym, et, xt in rows:
+            for sym, et, xt, meta in rows:
+                # stale_verdict rule (>2h verdict at entry): rows stay in the
+                # DB, flagged; they never count toward the kill criterion.
+                if is_stale_verdict(meta, int(et)):
+                    jev_stale += 1
+                    continue
                 if int(et) >= busy.get(sym, -1):
                     kept.append((int(et), int(xt or et)))
                     busy[sym] = int(xt or et)
@@ -655,6 +663,7 @@ def build_hypotheses() -> Dict[str, Any]:
             "indep_n": jev_n,
             "target": JEV_KILL_TARGET_N,
             "n_clustered": jev_clu,
+            "stale_verdict_excluded": jev_stale,
             "rate_per_day": round(rate, 3) if rate else None,
             "eta_ms": eta_ms,
             "expiry_ms": None,
@@ -858,6 +867,103 @@ def _attach_feed_silence_boot(body: Dict[str, Any]) -> None:
         st["boot_stale"] = bool(b.get("stale_since_downtime"))
         st["boot_downtime_sec"] = boot.get("downtime_sec")
         st["boot_at_ms"] = boot.get("boot_at_ms")
+
+
+# ── Aux-job heartbeats (pm2 cron jobs running OUTSIDE this process) ──────
+# Dead crons once hid behind the Feed Silence table: jev-judge lost its pm2
+# re-registration 2026-10-07 08:10 and stayed silent 50h — the alert existed
+# but nobody read it. These rows surface jev_verdicts plus the two research
+# jobs in the /ops sys-strip, red and with the corrective action inline.
+_LOGS_DIR = ROOT / "logs"
+_OUTCOME_EVAL_RUN_S = 4 * 3600    # cron every 3h, ~15min runtime
+_OUTCOME_EVAL_PERSIST_S = 5 * 3600  # boards must refresh at least this often
+_WATCHDOGS_RUN_S = 7 * 3600       # cron every 6h
+
+
+def _log_mtime_ms(name: str) -> Optional[int]:
+    try:
+        return int((_LOGS_DIR / name).stat().st_mtime * 1000)
+    except OSError:
+        return None
+
+
+def _last_board_persist_ms() -> Optional[int]:
+    """Newest persisted scoreboard batch — outcome-eval's real heartbeat."""
+    rdb = None
+    try:
+        rdb = _open_research_db()
+        row = rdb._conn().execute(
+            "SELECT MAX(evaluated_at_ms) FROM shadow_outcome_scoreboards"
+        ).fetchone()
+        return int(row[0]) if row and row[0] else None
+    except Exception:  # noqa: BLE001 — missing table/db degrades silently
+        return None
+    finally:
+        if rdb is not None:
+            try:
+                rdb.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _aux_jobs_status(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Red-flag state of the external pm2 aux jobs for the /ops sys-strip."""
+    now_ms = int(time.time() * 1000)
+    feeds = body.get("feed_silence") or {}
+
+    jobs: Dict[str, Any] = {}
+
+    jev = feeds.get("jev_verdicts") or {}
+    jev_age = jev.get("age_sec")
+    jobs["jev_feed"] = {
+        "label": "Jev feed",
+        "age_sec": jev_age,
+        "degraded": bool(jev.get("degraded")),
+        "action": "pm2 restart jev-judge",
+    }
+
+    persist_ms = _last_board_persist_ms()
+    run_ms = _log_mtime_ms("shadow_eval_cron.log")
+    eval_age_p = round((now_ms - persist_ms) / 1000.0, 1) if persist_ms else None
+    eval_age_r = round((now_ms - run_ms) / 1000.0, 1) if run_ms else None
+    jobs["outcome_eval"] = {
+        "label": "Outcome eval",
+        "age_sec": eval_age_p,
+        "run_age_sec": eval_age_r,
+        "degraded": (
+            eval_age_p is None
+            or eval_age_p > _OUTCOME_EVAL_PERSIST_S
+            or eval_age_r is None
+            or eval_age_r > _OUTCOME_EVAL_RUN_S
+        ),
+        # persist stale while runs keep firing = stale lock / crash loop
+        "action": (
+            "check .shadow_eval.lock / pm2 restart outcome-eval"
+            if eval_age_r is not None and eval_age_r <= _OUTCOME_EVAL_RUN_S
+            else "pm2 restart outcome-eval"
+        ),
+    }
+
+    wd_ms = _log_mtime_ms("watchdog_supervisor_cron.log")
+    wd_age = round((now_ms - wd_ms) / 1000.0, 1) if wd_ms else None
+    jobs["watchdogs"] = {
+        "label": "Watchdogs",
+        "age_sec": wd_age,
+        "degraded": wd_age is None or wd_age > _WATCHDOGS_RUN_S,
+        "action": "pm2 restart watchdogs",
+    }
+    return jobs
+
+
+def _attach_aux_jobs(body: Dict[str, Any]) -> None:
+    # TTL-cached: the socket emitter runs this every broadcast tick and the
+    # persist heartbeat opens the research DB — once per 15s is plenty for
+    # a cron-cadence heartbeat.
+    jobs = _ttl_get("aux_jobs")
+    if jobs is None:
+        jobs = _aux_jobs_status(body)
+        _ttl_put("aux_jobs", jobs, _MD_HEALTH_TTL_S)
+    body["aux_jobs"] = jobs
 
 
 def _feed_silence_imminent(feed_silence: Dict[str, Any]) -> bool:
@@ -1387,16 +1493,22 @@ class DashboardEmitter:
     def _emit_market_data_health(self) -> None:
         summary = getattr(_engine, "_market_data_health_summary", None)
         if summary is not None and hasattr(summary, "to_dict"):
-            self._safe_emit("market_data_health", summary.to_dict())
-            return
-        health = getattr(_engine, "_market_data_health", {}) or {}
-        rows = [h.to_dict() for h in health.values()]
-        overall = "red"
-        if rows and all(r.get("status") == "green" for r in rows):
-            overall = "green"
-        elif rows and not any(r.get("status") == "red" for r in rows):
-            overall = "yellow"
-        self._safe_emit("market_data_health", {"overall": overall, "symbols": {r["symbol"]: r for r in rows}})
+            body = summary.to_dict()
+        else:
+            health = getattr(_engine, "_market_data_health", {}) or {}
+            rows = [h.to_dict() for h in health.values()]
+            overall = "red"
+            if rows and all(r.get("status") == "green" for r in rows):
+                overall = "green"
+            elif rows and not any(r.get("status") == "red" for r in rows):
+                overall = "yellow"
+            body = {"overall": overall, "symbols": {r["symbol"]: r for r in rows}}
+        silence = getattr(_engine, "_feed_silence", None)
+        if silence is not None and "feed_silence" not in body:
+            body["feed_silence"] = silence.snapshot()
+            body["feed_silence_degraded"] = bool(silence.any_degraded)
+        _attach_aux_jobs(body)
+        self._safe_emit("market_data_health", body)
 
     def _emit_funding_update(self) -> None:
         """Merged funding/OI + feed status for dashboard cards."""
@@ -1897,7 +2009,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
         if cached is not None:
             return jsonify(cached)
         if _engine is None:
-            return jsonify({"feeds": [], "overall": "red"})
+            body = {"feeds": [], "overall": "red"}
+            _attach_aux_jobs(body)
+            return jsonify(body)
         summary = getattr(_engine, "_market_data_health_summary", None)
         if summary is not None and hasattr(summary, "to_dict"):
             body = summary.to_dict()
@@ -1919,6 +2033,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 body.get("feed_silence", {})
             )
             _attach_feed_silence_boot(body)
+            _attach_aux_jobs(body)
             return jsonify(_ttl_put("market_data_health", body, _MD_HEALTH_TTL_S))
         health = getattr(_engine, "_market_data_health", {}) or {}
         rows = [h.to_dict() for h in health.values()]
@@ -1945,6 +2060,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
             body.get("feed_silence", {})
         )
         _attach_feed_silence_boot(body)
+        _attach_aux_jobs(body)
         return jsonify(_ttl_put("market_data_health", body, _MD_HEALTH_TTL_S))
 
     @app.route("/api/live_data")

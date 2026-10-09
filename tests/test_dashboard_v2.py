@@ -199,10 +199,27 @@ class TestOpsPage(_DashCase):
             'id="eng-exposure"',
             'id="strategies-panel"',
             'id="jev-list"',
+            'id="aux-jobs-panel"',
+            "renderAuxJobs",
         ):
             assert frag in html, frag
         # Auth flag still injected
         assert "AUTH_REQUIRED" in html
+
+    def test_aux_jobs_in_market_data_health(self) -> None:
+        """The sys-strip aux jobs must ride the market_data_health payload —
+        jev feed, outcome-eval persist heartbeat, watchdogs run heartbeat."""
+        r = self.client.get("/api/market_data_health")
+        assert r.status_code == 200
+        aux = r.get_json().get("aux_jobs") or {}
+        for key in ("jev_feed", "outcome_eval", "watchdogs"):
+            assert key in aux, key
+            assert "degraded" in aux[key]
+            assert "action" in aux[key]
+        # Fixture has no scoreboards and no cron logs -> eval is degraded,
+        # and the action must name the corrective step.
+        assert aux["outcome_eval"]["degraded"] is True
+        assert "outcome-eval" in aux["outcome_eval"]["action"]
 
     def test_ops_auth_same_as_index(self) -> None:
         """/ops and / must carry the same auth_required contract."""
@@ -313,6 +330,39 @@ class TestHypotheses(_DashCase):
         assert jev["n_clustered"] == 1
         # the frontier stays visible for tooltips
         assert jev["cutoff_ms"] == 1791124780000
+        assert jev["stale_verdict_excluded"] == 0
+
+    def test_jev_stale_verdict_excluded_from_kill(self) -> None:
+        """A trade opened on a >2h verdict stays in the DB but is excluded
+        from the kill count — the row is flagged stale_verdict=1, never
+        deleted, and reported via stale_verdict_excluded."""
+        conn = _conn(self._live)
+        boundary_plus = 1791124780000 + 86_400_000
+        conn.execute(
+            "INSERT INTO trades (id, symbol, side, strategy, status, "
+            "entry_time, exit_time, entry_price, exit_price, size, "
+            "pnl_usd, pnl_pct, signal_metadata) VALUES "
+            "(9, 'SOL', 'long', 'JevJudge', 'closed', ?, ?, 50.0, 51.0, "
+            "0.1, 0.05, 0.002, ?)",
+            (
+                boundary_plus,
+                boundary_plus + 3_600_000,
+                json.dumps({
+                    # verdict issued >2h before the trade opened
+                    "jev_decision_ts_ms": boundary_plus - (3 * 3_600_000),
+                }),
+            ),
+        )
+        conn.commit()
+        conn.close()
+        web._ttl_clear()
+        r = self.client.get("/api/hypotheses")
+        jev = next(
+            h for h in r.get_json()["hypotheses"]
+            if h["id"] == "JevJudge::oos_kill"
+        )
+        assert jev["indep_n"] == 1          # stale trade did NOT count
+        assert jev["stale_verdict_excluded"] == 1
 
     def test_sealed_counter_zero_without_board(self) -> None:
         """No persisted confirm board + 0 post-cutoff decisions => the

@@ -249,6 +249,40 @@ def test_lock_blocks_second_run_and_release_clears(tmp_path: Path, monkeypatch) 
     assert not lock.exists()
 
 
+def test_lock_takeover_when_holder_pid_is_dead(tmp_path: Path, monkeypatch) -> None:
+    """REGRESSION 2026-10-09: a lock whose holder pid is gone must be taken
+    over — the old ``except OSError`` path reported a dead holder as 'still
+    running' and silently deadlocked the eval cron (~14h of skipped runs)."""
+    import scripts.research.evaluate_shadow_outcomes as cli
+
+    lock = tmp_path / ".shadow_eval.lock"
+    monkeypatch.setattr(cli, "LOCK_PATH", lock)
+
+    # Spawn + reap a child so its pid is provably dead. On Windows the
+    # Popen object keeps a process handle — OpenProcess would still open
+    # the dead pid — so release it before probing liveness.
+    holder = subprocess.Popen([sys.executable, "-c", "pass"])
+    holder.wait()
+    if sys.platform == "win32" and getattr(holder, "_handle", None):
+        holder._handle.Close()  # subprocess Handle — idempotent close
+        holder._handle = None
+    lock.write_text(str(holder.pid), encoding="utf-8")
+
+    assert cli._lock_acquired() is True  # stale lock taken over
+    assert lock.read_text(encoding="utf-8") == str(os.getpid())
+    cli._lock_release()
+
+
+def test_lock_unreadable_content_treated_as_stale(tmp_path: Path, monkeypatch) -> None:
+    import scripts.research.evaluate_shadow_outcomes as cli
+
+    lock = tmp_path / ".shadow_eval.lock"
+    monkeypatch.setattr(cli, "LOCK_PATH", lock)
+    lock.write_text("garbage-not-a-pid", encoding="utf-8")
+    assert cli._lock_acquired() is True
+    cli._lock_release()
+
+
 # ── 5. Age metadata surfaces in the payload ──────────────────────────────────
 
 def test_eval_age_metadata_present(tmp_path: Path) -> None:

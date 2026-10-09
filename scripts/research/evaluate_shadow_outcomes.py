@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from src.data.research_database import ResearchDatabase
+from src.utils.instance_lock import _pid_alive
 from src.research.shadow_outcome_evaluator import (
     IDEALIZED_FILL_DISCLAIMER,
     LIVE_DB_DEFAULT,
@@ -40,12 +41,23 @@ LOCK_PATH = ROOT / "data" / "research" / ".shadow_eval.lock"
 
 
 def _lock_acquired() -> bool:
-    """Best-effort PID lockfile — a missed stale lock only risks overlap."""
+    """Best-effort PID lockfile — a missed stale lock only risks overlap.
+
+    A lock whose recorded pid no longer exists is stale and is taken over;
+    the previous version let ``os.kill`` raise into ``except OSError``,
+    which reported a dead holder as "still running" and deadlocked the
+    cron after any hard kill (2026-10-09: 105 early-exits, boards frozen
+    ~14h). Only a *live* holder may refuse us.
+    """
     try:
         if LOCK_PATH.exists():
-            pid = int(LOCK_PATH.read_text(encoding="utf-8").strip() or 0)
-            if pid and pid != os.getpid():
-                os.kill(pid, 0)  # raises if the pid is gone
+            try:
+                pid = int(
+                    LOCK_PATH.read_text(encoding="utf-8").strip() or 0
+                )
+            except (OSError, ValueError):
+                pid = 0  # unreadable lockfile — treat as stale
+            if pid and pid != os.getpid() and _pid_alive(pid):
                 return False
         LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
         LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")

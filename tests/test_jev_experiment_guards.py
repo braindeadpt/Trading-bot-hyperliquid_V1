@@ -354,3 +354,45 @@ def test_jev_verdict_beat_noop_when_not_contracted(tmp_path) -> None:
     now = int(time.time() * 1000)
     # Feed disabled -> check() never iterates it, no alerts possible.
     assert mon.check(now_ms=now) == []
+
+
+# ---------------------------------------------------------------------------
+# 5. Stale-verdict consumption guard — visible, fail-closed (2026-10-09)
+# ---------------------------------------------------------------------------
+# While the jev-judge cron was dead (10-07 08:10 → 10-09 10:31 UTC) the TTL
+# refused every verdict — but silently. The guard now logs a WARNING with the
+# verdict age; trades opened on a >2h verdict are excluded from the kill
+# count via is_stale_verdict (see scripts/research/jev_eval.py).
+
+@pytest.mark.unit
+def test_stale_verdict_refuses_and_logs(tmp_path, caplog) -> None:
+    """A verdict older than DECISION_TTL_MS produces no signal AND a warning
+    naming the age — a silent refusal is how the dead feeder went unnoticed."""
+    now = int(time.time() * 1000)
+    strat = _geometry_strategy(tmp_path, {
+        "BTC": {"ts_ms": now - 3 * 3_600_000, "action": "long",
+                "confidence": 0.9, "atr_pct_15m": 0.3},
+    })
+    with caplog.at_level("WARNING", logger="src.strategies.jev_judge"):
+        sig = _signal_for(strat, "BTC", now)
+    assert sig is None
+    assert any(
+        "stale verdict" in r.message and "BTC" in r.message
+        for r in caplog.records
+    ), "stale refusal must be visible in the log"
+
+
+@pytest.mark.unit
+def test_stale_verdict_log_is_throttled(tmp_path, caplog) -> None:
+    """Every tick re-checks the verdict — the warning must throttle to
+    warmup_log_ms, not spam once per market event."""
+    now = int(time.time() * 1000)
+    strat = _geometry_strategy(tmp_path, {
+        "BTC": {"ts_ms": now - 3 * 3_600_000, "action": "long",
+                "confidence": 0.9, "atr_pct_15m": 0.3},
+    })
+    with caplog.at_level("WARNING", logger="src.strategies.jev_judge"):
+        for _ in range(5):
+            _signal_for(strat, "BTC", now)
+    stale = [r for r in caplog.records if "stale verdict" in r.message]
+    assert len(stale) == 1
