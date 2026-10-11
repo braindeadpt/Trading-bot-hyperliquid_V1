@@ -144,6 +144,17 @@ def count_windows(window: Dict[str, Any]) -> int:
 
 def _write_status(payload: Dict[str, Any]) -> None:
     STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # ``last_ok_ms`` means "last completed rc==0 session" — the watchdog's
+    # authoritative freshness signal. Carry it forward across non-run writes
+    # (lock-skip, REFUSED, dry-run, runner failure): if a skip write dropped
+    # the field, a fresh ``generated_ms`` would again mask a missed night.
+    if "last_ok_ms" not in payload:
+        try:
+            _old = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
+            if isinstance(_old.get("last_ok_ms"), (int, float)):
+                payload["last_ok_ms"] = int(_old["last_ok_ms"])
+        except Exception:  # noqa: BLE001 — missing/corrupt old file
+            pass
     STATUS_PATH.write_text(
         json.dumps(payload, indent=2, default=str), encoding="utf-8"
     )
@@ -402,8 +413,11 @@ def main() -> int:
         result = run_session(sel, symbols)
         reason = "session complete" if result["returncode"] == 0 else \
             f"runner exit {result['returncode']}"
-        _write_status(build_nightly_status(ran=result, reason=reason,
-                                           queue_path=queue_path))
+        payload = build_nightly_status(ran=result, reason=reason,
+                                       queue_path=queue_path)
+        if result["returncode"] == 0:
+            payload["last_ok_ms"] = int(time.time() * 1000)
+        _write_status(payload)
         print(result["summary_tail"] or f"runner exit {result['returncode']}")
         # Weekly ledger digest — idempotent, at most one entry per ISO
         # week (state file inside the script). Best-effort: a digest

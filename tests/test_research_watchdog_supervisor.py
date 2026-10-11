@@ -705,3 +705,79 @@ class TestOvernightStale:
         monkeypatch.setattr(sup, "build_alert_notifier", lambda: None)
         assert sup.check_overnight_stale(shared) is True
         assert shared["overnight_stale"]["alerted_since_ms"] is not None
+
+    def _status_v2(self, tmp_path: Path, *, gen_age_h=None, ok_age_h=None,
+                   reason=None) -> None:
+        """Status writer with the post-upgrade fields."""
+        payload: dict = {}
+        if gen_age_h is not None:
+            payload["generated_ms"] = int(
+                (time.time() - gen_age_h * 3600) * 1000)
+        if ok_age_h is not None:
+            payload["last_ok_ms"] = int(
+                (time.time() - ok_age_h * 3600) * 1000)
+        if reason is not None:
+            payload["reason"] = reason
+        (tmp_path / "NIGHTLY_STATUS.json").write_text(json.dumps(payload))
+
+    def test_fresh_generated_does_not_mask_stale_last_ok(
+        self, monkeypatch, tmp_path
+    ):
+        """The hole this change closes: a skip/failed write refreshed
+        generated_ms but the last rc==0 run is >26h old — still alerts."""
+        shared = sup.fresh_state()
+        self._stub(monkeypatch, tmp_path)
+        self._status_v2(tmp_path, gen_age_h=0.2, ok_age_h=30.0,
+                        reason="another nightly run holds the lock")
+        monkeypatch.setattr(sup, "build_alert_notifier", lambda: None)
+        assert sup.check_overnight_stale(shared) is True
+        assert shared["overnight_stale"]["alerted_since_ms"] is not None
+
+    def test_last_ok_ms_wins_over_stale_generated(
+        self, monkeypatch, tmp_path
+    ):
+        """Authoritative signal: rc==0 finished 1h ago even if generated_ms
+        is somehow old — must stay ok."""
+        shared = sup.fresh_state()
+        self._stub(monkeypatch, tmp_path)
+        self._status_v2(tmp_path, gen_age_h=30.0, ok_age_h=1.0)
+        monkeypatch.setattr(sup, "build_alert_notifier", lambda: None)
+        assert sup.check_overnight_stale(shared) is False
+
+    def test_legacy_file_falls_back_and_marks_source(
+        self, monkeypatch, tmp_path
+    ):
+        """Pre-upgrade file (generated_ms only): fallback works and the
+        source is visible in the log line."""
+        shared = sup.fresh_state()
+        self._stub(monkeypatch, tmp_path)
+        self._status(tmp_path, 2.0)   # legacy shape
+        monkeypatch.setattr(sup, "build_alert_notifier", lambda: None)
+        lines: list = []
+        monkeypatch.setattr(sup, "log", lines.append)
+        assert sup.check_overnight_stale(shared) is False
+        assert any("generated_ms(fallback)" in ln for ln in lines)
+
+    def test_alert_includes_last_status_reason(
+        self, monkeypatch, tmp_path
+    ):
+        """The Telegram alert must carry the file's reason so the page is
+        diagnosable without opening files."""
+        shared = sup.fresh_state()
+        self._stub(monkeypatch, tmp_path)
+        self._status_v2(tmp_path, ok_age_h=30.0,
+                        reason="another nightly run holds the lock")
+        sent: list = []
+
+        class _FakeNotifier:
+            async def send(self, msg, level="info", *, force=False):
+                sent.append((level, msg))
+
+        monkeypatch.setattr(sup, "build_alert_notifier",
+                            lambda: _FakeNotifier())
+        assert sup.check_overnight_stale(shared) is True
+        assert sent and sent[0][0] == "warning"
+        assert "another nightly run holds the lock" in sent[0][1]
+        run = shared["overnight_stale"]["runs"][-1]
+        assert run["source"] == "last_ok_ms"
+        assert run["reason"] == "another nightly run holds the lock"

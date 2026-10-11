@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -291,3 +292,126 @@ class TestRecentSessions:
         assert sessions[0]["verdicts"] == ["DISCARD", "DISCARD"]
         assert sessions[0]["windows"] == 4
         assert all("NIGHTLY_STATUS" not in s["artifact"] for s in sessions)
+
+
+def _run_main_real_write(monkeypatch, tmp_path, status_file, queue_text, argv):
+    """_run_main minus the ``_write_status`` stub — exercises the real
+    writer's last_ok_ms carry-forward (STATUS_PATH still tmp-redirected)."""
+    q = tmp_path / "QUEUE.md"
+    q.write_text(queue_text, encoding="utf-8")
+    monkeypatch.setattr(nw, "STATUS_PATH", status_file)
+    monkeypatch.setattr(sys, "argv", ["overnight_nightly.py",
+                                      "--queue", str(q)] + argv)
+    return nw.main()
+
+
+class _FakeProc:
+    returncode = 1
+    stdout = ""
+    stderr = ""
+
+
+def _skip_digest(monkeypatch):
+    """Neutralise the post-run weekly-digest subprocess (best-effort,
+    irrelevant here) so the suite never spawns it."""
+    import types
+    monkeypatch.setattr(nw, "subprocess", types.SimpleNamespace(
+        run=lambda *a, **k: _FakeProc()))
+
+
+class TestLastOkMs:
+    """``last_ok_ms`` = the last COMPLETED rc==0 session — the watchdog's
+    authoritative staleness signal. Only the success path stamps it; every
+    other writer path carries the previous value forward (or omits it)."""
+
+    @staticmethod
+    def _ok(*_a):
+        return {"family": "vwap_thresholds", "started": "2026-10-11 05:00 UTC",
+                "duration_s": 1.0, "returncode": 0, "timed_out": False,
+                "log": "logs/x.log", "summary_tail": "", "verdicts": []}
+
+    @staticmethod
+    def _fail(*_a):
+        r = TestLastOkMs._ok()
+        r["returncode"] = 1
+        return r
+
+    def test_ok_run_stamps_last_ok_ms(self, monkeypatch, tmp_path):
+        sf = tmp_path / "NIGHTLY_STATUS.json"
+        _skip_digest(monkeypatch)
+        monkeypatch.setattr(nw, "run_session", self._ok)
+        monkeypatch.setattr(nw, "_lock_acquired", lambda: True)
+        rc = _run_main_real_write(monkeypatch, tmp_path, sf, READY_QUEUE, [])
+        st = json.loads(sf.read_text(encoding="utf-8"))
+        assert rc == 0 and st["reason"] == "session complete"
+        assert abs(st["last_ok_ms"] - time.time() * 1000) < 60_000
+
+    def test_lock_skip_preserves_last_ok_ms(self, monkeypatch, tmp_path):
+        """Real lock-skip path through main(): the write refreshes
+        generated_ms but must carry last_ok_ms forward."""
+        sf = tmp_path / "NIGHTLY_STATUS.json"
+        _skip_digest(monkeypatch)
+        monkeypatch.setattr(nw, "_lock_acquired", lambda: False)
+        monkeypatch.setattr(nw, "STATUS_PATH", sf)
+        nw._write_status({"generated_ms": 1, "last_ok_ms": 12345})
+        rc = _run_main_real_write(monkeypatch, tmp_path, sf, READY_QUEUE, [])
+        st = json.loads(sf.read_text(encoding="utf-8"))
+        assert rc == 0
+        assert st["reason"] == "another nightly run holds the lock"
+        assert st["last_ok_ms"] == 12345
+        assert st["generated_ms"] > 1000   # still refreshed, as before
+
+    def test_refused_and_empty_queue_preserve_last_ok(self, monkeypatch,
+                                                      tmp_path):
+        """REFUSED (K-floor) and nothing-READY writes must also carry the
+        field forward — a refused night must not hide the last real run."""
+        for queue_text, expected_reason in (
+            (K3_QUEUE, "windows < K=4"),
+            (NO_READY_QUEUE, "nothing READY in queue"),
+        ):
+            sf = tmp_path / "NIGHTLY_STATUS.json"
+            _skip_digest(monkeypatch)
+            monkeypatch.setattr(nw, "STATUS_PATH", sf)
+            nw._write_status({"generated_ms": 1, "last_ok_ms": 777})
+            rc = _run_main_real_write(monkeypatch, tmp_path, sf,
+                                      queue_text, [])
+            st = json.loads(sf.read_text(encoding="utf-8"))
+            assert rc == 0
+            assert expected_reason in st["reason"]
+            assert st["last_ok_ms"] == 777
+            assert st["generated_ms"] > 1000
+            sf.unlink()
+
+    def test_runner_failure_preserves_last_ok_ms(self, monkeypatch, tmp_path):
+        """rc!=0 still refreshes generated_ms (diagnostics) but must NOT
+        touch last_ok_ms — a failed night stays stale for the watchdog."""
+        sf = tmp_path / "NIGHTLY_STATUS.json"
+        _skip_digest(monkeypatch)
+        monkeypatch.setattr(nw, "STATUS_PATH", sf)
+        nw._write_status({"generated_ms": 1, "last_ok_ms": 888})
+        monkeypatch.setattr(nw, "run_session", self._fail)
+        monkeypatch.setattr(nw, "_lock_acquired", lambda: True)
+        rc = _run_main_real_write(monkeypatch, tmp_path, sf, READY_QUEUE, [])
+        st = json.loads(sf.read_text(encoding="utf-8"))
+        assert rc == 1 and st["reason"].startswith("runner exit")
+        assert st["last_ok_ms"] == 888
+        assert st["generated_ms"] > 1000
+
+    def test_upgrade_path_stamps_then_preserves(self, monkeypatch, tmp_path):
+        """Legacy file (no last_ok_ms): first rc==0 run stamps it, a
+        following lock-skip keeps it."""
+        sf = tmp_path / "NIGHTLY_STATUS.json"
+        _skip_digest(monkeypatch)
+        monkeypatch.setattr(nw, "STATUS_PATH", sf)
+        nw._write_status({"generated_ms": 1})          # pre-upgrade shape
+        monkeypatch.setattr(nw, "run_session", self._ok)
+        monkeypatch.setattr(nw, "_lock_acquired", lambda: True)
+        assert _run_main_real_write(monkeypatch, tmp_path, sf,
+                                    READY_QUEUE, []) == 0
+        stamped = json.loads(sf.read_text(encoding="utf-8"))["last_ok_ms"]
+        monkeypatch.setattr(nw, "_lock_acquired", lambda: False)
+        assert _run_main_real_write(monkeypatch, tmp_path, sf,
+                                    READY_QUEUE, []) == 0
+        st = json.loads(sf.read_text(encoding="utf-8"))
+        assert st["last_ok_ms"] == stamped
+        assert st["reason"] == "another nightly run holds the lock"

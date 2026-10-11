@@ -872,11 +872,14 @@ def check_nightly_keepalive(
 # tighter tripwire for the cron-window guard (2026-10-09): if the Mac
 # sleeps through the 05:00 boundary the delayed pm2 fire *skips* by
 # design, so a missed night pages by the 12:45 watchdogs run.
-# Signal = NIGHTLY_STATUS.json ``generated_ms`` only — written by every
-# real run, even all-blocked ones, and unreachable by the guard's skip
-# path (which exits before python). Experiment artifacts are deliberately
-# NOT consulted: their mtime can be bumped by any rsync/regen/touch and
-# would mask a missed night. Missing/unreadable status counts as stale.
+# Signal = NIGHTLY_STATUS.json ``last_ok_ms`` — written only by a session
+# that completed rc==0 (carry-forward survives lock-skip/REFUSED/failed
+# writes). ``generated_ms`` is touched by EVERY writer path including
+# failures, so it is only the legacy fallback until the first post-upgrade
+# write; the source is suffixed in the log line while the fallback lasts.
+# Experiment artifacts are deliberately NOT consulted: their mtime can be
+# bumped by any rsync/regen/touch and would mask a missed night.
+# Missing/unreadable status counts as stale.
 # Edge-triggered both ways: alert on ok->stale, recovery note on stale->ok.
 
 OVERNIGHT_STALE_MS = 26 * 3_600_000
@@ -891,12 +894,21 @@ def check_overnight_stale(
     sub = shared["overnight_stale"]
     now_ms = int(time.time() * 1000)
     age_ms: Optional[int] = None
+    src = "none"
+    last_reason = ""
     try:
         if NIGHTLY_STATUS_PATH.exists():
             payload = json.loads(NIGHTLY_STATUS_PATH.read_text(encoding="utf-8"))
-            gen = payload.get("generated_ms")
-            if isinstance(gen, (int, float)):
-                age_ms = now_ms - int(gen)
+            last_reason = str(payload.get("reason") or "")
+            ok_ms = payload.get("last_ok_ms")
+            if isinstance(ok_ms, (int, float)):
+                age_ms = now_ms - int(ok_ms)
+                src = "last_ok_ms"
+            else:
+                gen = payload.get("generated_ms")
+                if isinstance(gen, (int, float)):
+                    age_ms = now_ms - int(gen)
+                    src = "generated_ms(fallback)"
     except Exception as exc:
         log(f"overnight_stale: status unreadable: {exc}")
 
@@ -909,6 +921,8 @@ def check_overnight_stale(
             sub["runs"].append({
                 "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "status_age_h": round(age_h, 1) if age_ms is not None else None,
+                "source": src,
+                "reason": last_reason or None,
             })
             save_shared_state(shared)
             notifier = build_alert_notifier()
@@ -918,12 +932,14 @@ def check_overnight_stale(
                         "⚠️ <b>OVERNIGHT STALE</b>\n"
                         f"NIGHTLY_STATUS.json tem <b>{age_h:.1f}h</b> "
                         f"(limiar {OVERNIGHT_STALE_MS // 3_600_000}h) — a "
-                        "corrida das 05:00 não produziu output. Verificar "
-                        "cron guard / Mac sleep / pm2.", "warning"),
-                        timeout=15))
+                        "corrida das 05:00 não produziu output. "
+                        f"Último estado: <code>{last_reason or 'n/d'}</code> "
+                        f"[{src}]. Verificar cron guard / Mac sleep / pm2.",
+                        "warning"), timeout=15))
                 except Exception as exc:  # noqa: BLE001
                     log(f"overnight_stale: notify failed (best-effort): {exc}")
-            log(f"overnight_stale: ALERT — sem output há {age_h:.1f}h")
+            log(f"overnight_stale: ALERT — sem output há {age_h:.1f}h "
+                f"[{src}] reason={last_reason!r}")
             return True
         log("overnight_stale: episódio em curso — já alertado")
         return False
@@ -942,7 +958,7 @@ def check_overnight_stale(
         log("overnight_stale: overnight retomou — episódio fechado, re-armado")
         return False
     log(f"overnight_stale: ok (último output há "
-        f"{(age_ms or 0) / 3_600_000:.1f}h)")
+        f"{(age_ms or 0) / 3_600_000:.1f}h) [{src}]")
     return False
 
 
