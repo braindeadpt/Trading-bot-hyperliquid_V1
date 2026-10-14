@@ -16,8 +16,10 @@ from pathlib import Path
 import pytest
 
 from src.research.unlock_shadow import spec
+from src.research.unlock_shadow import calendar_snapshot as cs
 from src.research.unlock_shadow.calendar_snapshot import (
-    RawUnlock, classify_event, normalize_defillama, sha256_payload)
+    RawUnlock, build_symbol_map, classify_event, fetch_defillama_index,
+    normalize_defillama, sha256_payload, unlocked_denominator)
 from src.research.unlock_shadow.eligibility import (
     ResolvedEvent, Seen, day_floor, eligibility_cutoff_ms, events_match,
     merge_clusters, pct_of_unlocked, resolve_events, window_bounds_ms)
@@ -81,7 +83,7 @@ def test_unlock_shadow_imports_only_research_siblings() -> None:
     allowed = ("src.research.unlock_shadow", "scripts.research")
     stdlib_ok = ("__future__", "asyncio", "collections", "dataclasses",
                  "hashlib", "json", "logging", "os", "pathlib", "random",
-                 "sqlite3", "time", "typing", "urllib")
+                 "re", "sqlite3", "time", "typing", "urllib")
     for fname, mod in _pkg_imports():
         root = mod.split(".")[0]
         assert (mod.startswith(allowed[0]) or mod.startswith(allowed[1])
@@ -374,12 +376,22 @@ class _StubFetch:
         return [{"name": "AAA"}, {"name": "BTC"}]
 
     def cal_index(self):
-        return [{"token": "AAA", "slug": "aaa-proto"}]
+        return [{"tokenPrice": [{"symbol": "AAA"}],
+                 "protocolSlug": "aaa-proto"}]
 
     def cal_a(self, slug):
-        return {"unlockedSupply": 1000.0,
+        return {
+            "metadata": {
                 "events": [{"timestamp": T // 1000, "noOfTokens": [100.0],
-                            "description": "team allocation cliff"}]}
+                            "description": "unlocked from Team on {ts}",
+                            "category": "insiders", "unlockType": "cliff"}],
+                "notes": []},
+            "documentedData": {"data": [
+                {"label": "x", "data": [
+                    {"timestamp": T // 1000 - 30 * 86400,
+                     "unlocked": 1000.0},
+                    {"timestamp": T // 1000 - 86400,
+                     "unlocked": 1000.0}]}]}}
 
     def cal_b(self, slug):
         return ({"unlockedSupply": 1000.0,
@@ -465,18 +477,143 @@ class TestDaemonLifecycle:
         assert sha256_payload(p) == sha256_payload(dict(p))
 
 
+def _dl_payload(events, *, notes=None, denom=1000.0):
+    """DefiLlama emissions-payload shape: declared events live in
+    metadata.events; the realized 'unlocked' series in documentedData is
+    the % denominator (never an event source)."""
+    return {
+        "metadata": {"events": events, "notes": notes or []},
+        "documentedData": {"data": [
+            {"label": "a", "data": [
+                {"timestamp": T // 1000 - 30 * 86400, "unlocked": denom / 2},
+                {"timestamp": T // 1000 - 86400, "unlocked": denom / 2}]},
+            {"label": "b", "data": [
+                {"timestamp": T // 1000 - 30 * 86400, "unlocked": denom / 2},
+                {"timestamp": T // 1000 - 86400, "unlocked": denom / 2}]}]}}
+
+
+class TestIndexAndMap:
+    def test_index_dict_wrap(self, monkeypatch) -> None:
+        """The live endpoint answers {"data": [...]} — unwrap it; a bare
+        list keeps working too."""
+        monkeypatch.setattr(cs, "fetch_json",
+                            lambda url, **kw: {"data": [{"x": 1}]})
+        assert fetch_defillama_index() == [{"x": 1}]
+        monkeypatch.setattr(cs, "fetch_json",
+                            lambda url, **kw: [{"y": 2}])
+        assert fetch_defillama_index() == [{"y": 2}]
+
+    def test_symbol_map_backtest_rule(self) -> None:
+        univ = {"AAA", "kBBB", "BTC", "ETH", "AI"}
+        rows = [
+            {"tokenPrice": [{"symbol": "AAA"}], "protocolSlug": "aaa-p"},
+            {"tokenPrice": [{"symbol": "BBB"}], "protocolSlug": "bbb-p"},
+            {"tokenPrice": [{"symbol": "BTC"}], "protocolSlug": "btc-p"},
+            {"tokenPrice": [{"symbol": "AI"}], "protocolSlug": "ai-p"},
+            {"tokenPrice": [{"symbol": "ZZZ"}], "protocolSlug": "zzz-p"},
+            {"protocolSlug": "no-tp"},                      # no tokenPrice
+        ]
+        mp, misses = build_symbol_map(rows, univ)
+        assert mp == {"AAA": "aaa-p", "kBBB": "bbb-p"}   # 'k'+s fallback
+        reasons = sorted(m["reason"] for m in misses)
+        assert reasons == ["excluded", "excluded", "no_symbol_or_slug",
+                           "not_on_hl"]
+
+    def test_symbol_map_rebuilt_payload_hashable(self) -> None:
+        mp, _m = build_symbol_map(
+            [{"tokenPrice": [{"symbol": "AAA"}], "protocolSlug": "aaa-p"}],
+            {"AAA"})
+        assert sha256_payload(mp) == sha256_payload(dict(mp))
+
+
 class TestNormalization:
-    def test_defillama_payload_walks_events(self) -> None:
-        payload = {"unlockedSupply": 1000.0,
-                   "events": [
-                       {"timestamp": T // 1000, "noOfTokens": [30.0],
-                        "description": "investors cliff"},
-                       {"timestamp": T // 1000 + MS_D // 1000,
-                        "noOfTokens": [5.0],
-                        "description": "staking rewards linear"}]}
+    def test_metadata_events_cliff_vs_linear_vs_excluded(self) -> None:
+        payload = _dl_payload([
+            {"timestamp": T // 1000, "noOfTokens": [30.0],
+             "category": "insiders", "unlockType": "cliff",
+             "description": "x"},
+            {"timestamp": T // 1000 + 86400, "noOfTokens": [5.0],
+             "category": "staking", "unlockType": "cliff",
+             "description": "staking rewards"},
+            {"timestamp": T // 1000 + 2 * 86400, "noOfTokens": [7.0],
+             "category": "community", "unlockType": "linear",
+             "description": "drip"}])
         raws = normalize_defillama("AAA", payload)
-        kinds = {r.kind for r in raws}
-        assert "cliff" in kinds and "excluded" in kinds   # staking -> excluded
+        kinds = sorted(r.kind for r in raws)
+        assert kinds == ["cliff", "excluded", "linear"]
         cliff = [r for r in raws if r.kind == "cliff"][0]
         assert cliff.amount_tokens == 30.0
-        assert pct_of_unlocked(cliff) == pytest.approx(0.03)
+        assert pct_of_unlocked(cliff) == pytest.approx(0.03)   # 30/1000
+
+    def test_cliff_events_aggregate_per_utc_day(self) -> None:
+        payload = _dl_payload([
+            {"timestamp": T // 1000, "noOfTokens": [10.0],
+             "category": "insiders", "unlockType": "cliff", "description": "a"},
+            {"timestamp": T // 1000 + 3600, "noOfTokens": [20.0],
+             "category": "privateSale", "unlockType": "cliff",
+             "description": "b"}])
+        cliffs = [r for r in normalize_defillama("AAA", payload)
+                  if r.kind == "cliff"]
+        assert len(cliffs) == 1
+        assert cliffs[0].amount_tokens == 30.0
+        assert cliffs[0].event_ms == day_floor(T)
+        assert "insiders" in cliffs[0].category
+
+    def test_documented_data_is_never_an_event(self) -> None:
+        payload = {"documentedData": {"data": [
+            {"label": "x", "data": [
+                {"timestamp": T // 1000, "unlocked": 1000.0,
+                 "rawEmission": 1000.0}]}]}}
+        assert normalize_defillama("AAA", payload) == []
+
+    def test_recipient_tracked_onchain_excluded(self) -> None:
+        notes = ["The DAO treasury tracks the Team vault: "
+                 "all claim and onchain outflows are reconciled."]
+        payload = _dl_payload([
+            {"timestamp": T // 1000, "noOfTokens": [30.0],
+             "category": "insiders", "unlockType": "cliff",
+             "description": "unlocked from Team on {timestamp}"}],
+            notes=notes)
+        raws = normalize_defillama("AAA", payload)
+        assert [r.kind for r in raws] == ["excluded"]
+
+    def test_recipient_without_tracking_note_stays_cliff(self) -> None:
+        payload = _dl_payload([
+            {"timestamp": T // 1000, "noOfTokens": [30.0],
+             "category": "insiders", "unlockType": "cliff",
+             "description": "unlocked from Team on {timestamp}"}],
+            notes=["Most vesting completes by 2028."])
+        raws = normalize_defillama("AAA", payload)
+        assert [r.kind for r in raws] == ["cliff"]
+
+    def test_denominator_last_point_and_pct(self) -> None:
+        assert unlocked_denominator(_dl_payload([], denom=2000.0)) == 2000.0
+        assert unlocked_denominator({"metadata": {"events": []}}) is None
+        ev = {"timestamp": T // 1000, "noOfTokens": [50.0],
+              "category": "insiders", "unlockType": "cliff",
+              "description": "x"}
+        big = normalize_defillama("AAA", _dl_payload([ev], denom=1000.0))
+        assert pct_of_unlocked(big[0]) == pytest.approx(0.05)   # >=2%
+        small = normalize_defillama("AAA", _dl_payload([ev], denom=10000.0))
+        assert pct_of_unlocked(small[0]) == pytest.approx(0.005)  # <2%
+
+    def test_real_fixtures_future_cliffs(self) -> None:
+        """Recorded payloads: ARB has future INCL cliffs; HYPE's declared
+        events are all past (and 'noncirculating' is excluded)."""
+        fix = Path(__file__).resolve().parents[1] / "tests" / "fixtures" \
+            / "unlock_shadow"
+        captured = ms(2026, 10, 14)
+        arb = json.loads((fix / "fixture_arbitrum-foundation.json")
+                         .read_text(encoding="utf-8"))
+        raws = normalize_defillama("ARB", arb)
+        fut = [r for r in raws if r.kind == "cliff"
+               and r.event_ms > captured]
+        assert len(fut) >= 1
+        assert all(r.unlocked_supply and r.unlocked_supply > 0
+                   for r in raws)
+        hype = json.loads((fix / "fixture_hyperliquid.json")
+                          .read_text(encoding="utf-8"))
+        hraws = normalize_defillama("HYPE", hype)
+        assert any(r.kind == "excluded" for r in hraws)   # noncirculating
+        assert not [r for r in hraws if r.kind == "cliff"
+                    and r.event_ms > captured]

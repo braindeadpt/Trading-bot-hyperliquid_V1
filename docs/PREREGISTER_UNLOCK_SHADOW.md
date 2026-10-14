@@ -76,6 +76,42 @@ orders, hypothetical ledger only (`src/research/unlock_shadow/`).
 - Fewer than 15 eligible events at expiry → **INCONCLUSIVE**.
 - A single trade below **−3000 bps net** triggers a manual review flag.
 
+## 6a. Implementation notes (2026-10-14, source-shape fixes)
+
+Normative details of how the frozen rules map onto the live DefiLlama
+payload shapes (verified against `notes/unlocks/02_events.py`
+semantics). These pin *how* §1–§2 read the declared sources; they do not
+change the rules themselves.
+
+- `emissionsIndex` answers `{"data": [...]}` — the index rows are the
+  `data` array (a bare list is also tolerated).
+- **Token map** (per `02_events.py`): `s = tokenPrice[0].symbol` (upper);
+  `coin = s` when `s` is an HL perp, else `"k"+s` when that is an HL perp,
+  else a miss. `{BTC, ETH, AI}` are excluded (DefiLlama's `AI` is Gensyn,
+  not HL's `AI`). `slug = protocolSlug`. The map is rebuilt inside every
+  daily snapshot and stored with its sha256; misses are written to the
+  ledger log.
+- **Source-A events come only from `metadata.events`** of
+  `/emissions/{slug}`: `unlockType == "cliff"` **and** `category` inside
+  the whitelist `{insiders, privateSale, publicSale, airdrop, ecosystem,
+  liquidity, community, Uncategorized, other, launch}` (all other
+  categories — noncirculating, farming, staking, burned, … — are
+  recorded as `excluded`, never eligible). Amount = sum of `noOfTokens`
+  (nulls ignored), aggregated per UTC day. `documentedData` is the
+  realized history — **never** an event source.
+- **Ex-post on-chain exclusion** (§2 "allocations followed on-chain"):
+  the recipient is taken from the event description
+  (`unlocked from (.+?) on {` or `} of (.+?) tokens`); the event is
+  excluded when a `metadata.notes` entry names that recipient and also
+  documents tracking (`track` + `transfer|claim|onchain|on-chain|
+  outflow|event`, case-insensitive).
+- **2% denominator**: sum `unlocked` across all
+  `documentedData.data[*].data[*]` per timestamp and take the **last
+  available point** in the stored snapshot (in forward operation no
+  later point exists). `supplyMetrics.adjustedSupply` is deliberately
+  not used — it would move the threshold off the backtest baseline.
+  Denominator 0/missing ⇒ `pct = None` ⇒ event ineligible, logged.
+
 ## 7. Isolation contract (tested)
 
 - Package imports nothing from `src.core` / `src.strategies` /

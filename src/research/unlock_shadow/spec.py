@@ -15,6 +15,17 @@ CRYPTORANK_VESTING = "https://api.cryptorank.io/v0/coins/{}/vesting"
 TOKENOMIST_VESTING = "https://api.tokenomist.ai/api/v1/unlocks/{}"  # fallback
 CRYPTORANK_ENV_KEY = "CRYPTORANK_API_KEY"
 
+# ─── §1/§2 source-A parsing (backtest parity — notes/unlocks/02_events.py)
+MAP_EXCLUDED_SYMBOLS = frozenset({"BTC", "ETH", "AI"})  # DefiLlama 'AI' = Gensyn
+INCL_CATEGORIES = frozenset({
+    "insiders", "privatesale", "publicsale", "airdrop", "ecosystem",
+    "liquidity", "community", "uncategorized", "other", "launch"})
+RECIPIENT_RES = (
+    r"unlocked from (.+?) on \{",
+    r"\} of (.+?) tokens",
+)
+NOTES_ONCHAIN_RE = r"transfer|claim|onchain|on-chain|outflow|event"
+
 # ─── §2 eligibility ──────────────────────────────────────────────────────────
 MIN_CLIFF_PCT_UNLOCKED = 0.02        # >= 2% of unlocked supply
 SOURCES_REQUIRED = 2                 # must appear in BOTH sources

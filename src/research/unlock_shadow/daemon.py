@@ -20,8 +20,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from src.research.unlock_shadow import spec
 from src.research.unlock_shadow.calendar_snapshot import (
-    RawUnlock, fetch_defillama_emissions, fetch_defillama_index,
-    fetch_source_b, index_symbol_slug, normalize_defillama,
+    RawUnlock, build_symbol_map, fetch_defillama_emissions,
+    fetch_defillama_index, fetch_source_b, normalize_defillama,
     normalize_source_b, sha256_payload)
 from src.research.unlock_shadow.eligibility import (
     ResolvedEvent, Seen, day_floor, merge_clusters, resolve_events,
@@ -125,13 +125,15 @@ class UnlockShadowDaemon:
 
     def _snapshot_pass(self, now_ms: int) -> None:
         index = self.fetch["cal_index"]() or []
-        universe = {str(u.get("name")).upper()
-                    for u in (self.fetch["perp_universe"]() or [])}
-        tracked: List[tuple] = []
-        for row in index:
-            sym, slug = index_symbol_slug(row)
-            if sym and slug and sym in universe:
-                tracked.append((sym, slug))
+        universe = [str(u.get("name"))
+                    for u in (self.fetch["perp_universe"]() or [])]
+        smap, misses = build_symbol_map(index, universe)
+        self.ledger.snapshot_write(
+            now_ms, "defillama_map", "*", sha256_payload(smap),
+            json.dumps(smap, sort_keys=True), 0)
+        for m in misses:
+            self.ledger.log("map_miss", m)
+        tracked: List[tuple] = sorted(smap.items())
         logger.info("snapshot: %d tracked unlock tokens", len(tracked))
         self.ledger.log("snapshot", {"tracked": len(tracked)})
         for sym, slug in tracked:
@@ -161,9 +163,13 @@ class UnlockShadowDaemon:
 
     def _seen(self, raw: RawUnlock, seen_ms: int) -> None:
         from src.research.unlock_shadow.eligibility import pct_of_unlocked
+        p = pct_of_unlocked(raw)
         self.ledger.calendar_seen(
             raw.token, raw.event_ms, raw.amount_tokens,
-            pct_of_unlocked(raw), raw.category, raw.kind, raw.source, seen_ms)
+            p, raw.category, raw.kind, raw.source, seen_ms)
+        if raw.kind == "cliff" and p is None:
+            self.ledger.log("pct_missing", {"token": raw.token,
+                                            "event_ms": raw.event_ms})
 
     def _calendar_seen_sets(self) -> tuple:
         seen_a: List[Seen] = []
@@ -221,9 +227,11 @@ class UnlockShadowDaemon:
                                          "event_ms": e.event_ms}, event_id)
 
     def _guard_unlocks(self, token: str) -> List[int]:
-        """All known same-token unlocks >=0.5% — the placebo guard set."""
+        """All known same-token unlocks >=0.5% — the placebo guard set.
+        Any recorded kind counts: the prereg says 'no unlock >=0.5%',
+        not 'no eligible unlock'."""
         return [int(r["event_ms"]) for r in self.ledger.calendar_rows()
-                if r["token"] == token and r["kind"] == "cliff"
+                if r["token"] == token
                 and (r["pct_unlocked"] or 0) >= spec.PLACEBO_UNLOCK_PCT]
 
     def _invalidate_placebos(self) -> None:
