@@ -153,6 +153,10 @@ _SUPPRESSION_RE: re.Pattern[str] = re.compile(r"#\s*audit-ok:\s*([A-Z]+-\d+)\b")
 # documented in the baseline, not only via an in-code marker).
 ACCEPTED_HIGH_BASELINE: FrozenSet[Tuple[str, str]] = frozenset({
     ("AUDIT-005", "utils/crash_recovery.py"),
+    # unlock_shadow/calendar_snapshot.py — the frozen prereg's two declared
+    # public calendar endpoints (DefiLlama + CryptoRank/Tokenomist) are
+    # module constants; urlopen targets are never caller-controlled.
+    ("AUDIT-003", "research/unlock_shadow/calendar_snapshot.py"),
 })
 
 
@@ -186,6 +190,13 @@ _ALLOWED_DOMAINS: Tuple[str, ...] = (
     # dependency is explicit in the inventory). Auth key comes from the
     # TYPESAFE_API_KEY environment variable, never from settings.yaml.
     "api.typesafe.ai",
+    # defillama-datasets.llama.fi, api.cryptorank.io, api.tokenomist.ai —
+    # the unlock-shadow prereg's two declared calendar sources (docs/
+    # PREREGISTER_UNLOCK_SHADOW.md §1). Public read-only GETs; the
+    # CryptoRank key arrives via CRYPTORANK_API_KEY env, never settings.
+    "defillama-datasets.llama.fi",
+    "api.cryptorank.io",
+    "api.tokenomist.ai",
     "127.0.0.1",
     "localhost",
 )
