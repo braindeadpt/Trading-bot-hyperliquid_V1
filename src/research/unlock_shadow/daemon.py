@@ -381,7 +381,10 @@ class UnlockShadowDaemon:
         last_hb = 0.0
         while not self._shutdown:
             try:
-                await asyncio.to_thread(self.tick)
+                # synchronous tick: the ledger's sqlite connection lives
+                # on this thread (to_thread would trip check_same_thread);
+                # the loop is REST-polled, nothing else needs the loop
+                self.tick()
             except asyncio.CancelledError:
                 return
             except Exception:  # noqa: BLE001

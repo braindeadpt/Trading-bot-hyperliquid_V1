@@ -9,7 +9,9 @@ reproducibility, and the counts-only status board (no PnL leak).
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -475,6 +477,29 @@ class TestDaemonLifecycle:
     def test_hash_stability_of_snapshots(self) -> None:
         p = {"events": [{"timestamp": 1, "noOfTokens": [1.0]}]}
         assert sha256_payload(p) == sha256_payload(dict(p))
+
+    def test_run_loop_tick_uses_ledger_thread(
+            self, tmp_path: Path, caplog, monkeypatch) -> None:
+        """Regression: tick() must run on the ledger's own thread — the
+        earlier asyncio.to_thread(tick) tripped sqlite check_same_thread
+        and every pass failed (found by the deploy smoke, not by the
+        synchronous tick tests)."""
+        monkeypatch.setattr(spec, "TICK_S", 0.05)
+        d = UnlockShadowDaemon(db_path=str(tmp_path / "u.db"),
+                               fetch=_stub_fetch(_StubFetch()))
+
+        async def once() -> None:
+            async def stopper() -> None:
+                await asyncio.sleep(0.05)
+                d._shutdown = True
+            await asyncio.gather(d.run(), stopper())
+
+        with caplog.at_level(logging.ERROR, logger="unlock_shadow"):
+            asyncio.run(once())
+        assert not [r for r in caplog.records
+                    if "thread" in r.getMessage().lower()]
+        assert d.ledger.meta_get("hb_ts_ms")
+        d.shutdown()
 
 
 def _dl_payload(events, *, notes=None, denom=1000.0):
