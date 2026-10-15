@@ -23,7 +23,8 @@ from typing import Any, Dict, List, Optional
 from src.boros_shadow import spec
 
 HTTP_TIMEOUT_S = 20
-_UA = {"User-Agent": "boros-shadow-research"}
+_UA = {"User-Agent": "boros-shadow-research",
+       "Content-Type": "application/json"}   # HL info POST needs JSON CT
 
 
 def fetch_json(url: str, body: Optional[bytes] = None) -> Any:

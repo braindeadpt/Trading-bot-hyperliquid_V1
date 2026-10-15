@@ -533,6 +533,21 @@ class TestRealFixture:
         assert all(spec.MIN_MATURITY_D <= c.ttm_days
                    <= spec.MAX_MATURITY_D for c in out)
 
+    def test_fetch_json_sends_json_content_type(self, monkeypatch) -> None:
+        """Regression: HL /info rejects POSTs without application/json —
+        the Mac smoke caught all-HL books unavailable for exactly this."""
+        import src.boros_shadow.boros_client as bc
+        seen = {}
+        class _Resp:
+            def read(self):
+                return b"{}"
+        def fake_urlopen(req, timeout=None):
+            seen["ct"] = req.get_header("Content-type")
+            return _Resp()
+        monkeypatch.setattr(bc.urllib.request, "urlopen", fake_urlopen)
+        bc.fetch_json("https://api.hyperliquid.xyz/info", body=b"{}")
+        assert seen["ct"] == "application/json"
+
     def test_pagination_collects_all_pages(self, monkeypatch) -> None:
         import src.boros_shadow.boros_client as bc
         pages = iter([{"results": [{"x": i} for i in range(100)]},
