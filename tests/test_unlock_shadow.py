@@ -411,6 +411,33 @@ class TestStatusBoard:
         assert b["counts"]["events_b_confirmed"] == 1
         assert b["counts"]["sims_closed"] == 1
         assert b["read_gate"]["mode"] == "counts_only"
+        assert b["read_gate"]["interim_due"] is False   # 1 < 8 closed
+        led.close()
+
+    def test_interim_due_at_eight_closed_eligible(self, tmp_path: Path) -> None:
+        """Emenda 2: the sole interim peek flags at n=8 closed *event*
+        sims — placebo closes and open sims don't count, and the flag
+        carries no PnL."""
+        led = UnlockLedger(tmp_path / "u.db")
+        for i in range(7):
+            led.sim_insert({"kind": "event", "parent_event_id": i + 1,
+                            "token": "AAA", "window_start_ms": T + i,
+                            "window_end_ms": T + i + 1, "state": "closed"})
+        led.sim_insert({"kind": "placebo", "parent_event_id": 99,
+                        "token": "AAA", "window_start_ms": T + 7,
+                        "window_end_ms": T + 8, "state": "closed"})
+        led.sim_insert({"kind": "event", "parent_event_id": 8,
+                        "token": "AAA", "window_start_ms": T + 8,
+                        "window_end_ms": T + 9, "state": "open"})
+        assert board(led)["read_gate"]["interim_due"] is False   # 7 < 8
+        led.sim_insert({"kind": "event", "parent_event_id": 9,
+                        "token": "AAA", "window_start_ms": T + 9,
+                        "window_end_ms": T + 10, "state": "closed"})
+        b = board(led)
+        assert b["read_gate"]["interim_due"] is True             # 8 events
+        blob = json.dumps(b).lower()
+        for needle in ("pnl", "bps", "profit", "return_pct", "usd"):
+            assert needle not in blob
         led.close()
 
 

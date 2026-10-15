@@ -141,3 +141,16 @@ gate would yield zero eligible events forever.
 - Everything else is unchanged: ADV, the T−5→T+2 window, beta [0.5; 2],
   costs, the 3× placebo, the read at n ≥ 15 or 2027-10-14, the PASS
   criteria, and the −3000 bps review trigger.
+
+## Emenda 2 (2026-10-15)
+
+Approved by the owner before any eligible event existed. Single interim
+read when **n = 8 closed eligible events** — PnL is only computed at
+that moment.
+
+- **Early PASS** iff ALL hold: mean net > 0; PF > 1.5;
+  mean(events) − mean(placebos) > 0; profit excluding top-3 > 0.
+- **Early KILL** iff mean net ≤ 0 AND mean(events) − mean(placebos) ≤ 0.
+- In every other case the study continues blind to the final read
+  (n ≥ 15 or 2027-10-14) under the original criteria. There are no
+  other peeks.

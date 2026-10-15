@@ -61,6 +61,7 @@ PLACEBO_HORIZON_MAX_D = 75           # live L2 pricing path applies (§5)
 
 # ─── §6 read gate ────────────────────────────────────────────────────────────
 READ_MIN_CLOSED = 15                 # n>=15 eligible closed, or expiry
+INTERIM_READ_MIN_CLOSED = 8          # Emenda 2: single interim peek at n=8
 EXPIRY_ISO = "2027-10-14"
 REVIEW_NET_BPS = -3000.0             # single-trade manual-review trigger
 

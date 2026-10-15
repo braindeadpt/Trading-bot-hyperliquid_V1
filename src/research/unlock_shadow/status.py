@@ -57,6 +57,9 @@ def board(ledger: UnlockLedger, now_ms: int | None = None) -> Dict[str, Any]:
             "min_closed": spec.READ_MIN_CLOSED,
             "closed_so_far": n_closed_eligible,
             "expiry": spec.EXPIRY_ISO,
+            # Emenda 2: sole interim peek at n=8 closed eligible — a
+            # boolean flag only; no PnL is computed or exposed here.
+            "interim_due": n_closed_eligible >= spec.INTERIM_READ_MIN_CLOSED,
             "mode": "counts_only",   # no PnL until the gate opens (§6)
         },
     }
