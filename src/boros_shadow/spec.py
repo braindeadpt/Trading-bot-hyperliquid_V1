@@ -32,6 +32,8 @@ GATE_FUNDING = "https://api.gateio.ws/api/v4/futures/usdt/funding_rate"
 OKX_FUNDING = ("https://www.okx.com/api/v5/public/funding-rate-history")
 BYBIT_FUNDING = "https://api.bybit.com/v5/market/funding/history"
 KUCOIN_FUNDING = "https://api-futures.kucoin.com/api/v1/contract/funding-rates"
+LIGHTER_RATES = ("https://mainnet.zklighter.elliot.ai/api/v1/"
+                 "funding-rates")
 # HL reuses HL_INFO (fundingHistory); Lighter has no public funding
 # history (probed 2026-10-15) -> source 'unavailable', contribution 0.
 # Boros settlement history is not public (probed 2026-10-15) -> the

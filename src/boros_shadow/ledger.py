@@ -108,6 +108,15 @@ CREATE TABLE IF NOT EXISTS boros_close (
     cluster_id INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS boros_rates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms INTEGER NOT NULL,
+    asset TEXT NOT NULL,
+    rate REAL NOT NULL,            -- sampled venue rate (Lighter, /hour)
+    UNIQUE(ts_ms, asset)
+);
+CREATE INDEX IF NOT EXISTS ix_brates ON boros_rates(asset, ts_ms);
+
 CREATE TABLE IF NOT EXISTS boros_flags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     flag TEXT NOT NULL,
@@ -308,6 +317,23 @@ class BorosLedger:
             " VALUES (?,?,?,?)",
             (flag, trade_id, ts_ms, json.dumps(data or {})))
         self._con.commit()
+
+    def rate_insert(self, ts_ms: int, asset: str, rate: float) -> None:
+        self._con.execute(
+            "INSERT OR IGNORE INTO boros_rates (ts_ms, asset, rate)"
+            " VALUES (?,?,?)", (ts_ms, asset, rate))
+        self._con.commit()
+
+    def rates_at(self, ts_ms: int) -> Dict[str, float]:
+        """Latest sampled rate per asset at-or-before ts (backfill)."""
+        out: Dict[str, float] = {}
+        for asset, rate in self._con.execute(
+                "SELECT asset, rate FROM boros_rates r"
+                " WHERE ts_ms = (SELECT MAX(ts_ms) FROM boros_rates"
+                "               WHERE asset=r.asset AND ts_ms<=?)"
+                " ORDER BY asset", (ts_ms,)):
+            out[asset] = rate
+        return out
 
     def flag_get(self, flag: str) -> List[Dict[str, Any]]:
         cur = self._con.execute(

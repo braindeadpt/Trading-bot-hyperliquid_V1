@@ -137,9 +137,18 @@ Medição fixada ex ante; a produção tinha 0 entradas quando escrito.
   `market/funding/history`, KuCoin `contract/funding-rates`. Incremental
   desde a entrada (cursor = último evento gravado; UNIQUE(trade_id, leg,
   ts_ms)). Sinal: short recebe quando rate>0; cash = ±rate×N por evento.
-  Lighter não expõe histórico público (sondado 2026-10-15) →
-  `funding_source='unavailable'`, contributo 0 — nunca um número
-  inventado.
+- **Lighter** (emendado 2026-10-15, entries=0): sem histórico público
+  de funding. A rate corrente é amostrada a cada passe (`funding-rates`
+  público, rows `exchange='lighter'` para os market_ids BTC=1, ETH=0,
+  HYPE=24) e gravada em `boros_rates` — série própria acumulada
+  forward desde a entrada: cash = sinal × rate × N × Δt(horas) por
+  intervalo de passe (convenção por-hora, mesmo regime do HL),
+  `funding_source='lighter_sampled'`. Numa perna Lighter sem amostra
+  no intervalo, e em qualquer venue cujo histórico falhe no intervalo,
+  o funding da perna é proxied ao floating Boros medido —
+  `funding_source='venue_proxy'`, descasamento da perna 0 por
+  construção. Nunca funding=0 com o floating a contar (enviesaria o
+  medido).
 - **Floating liquidado pelo Boros**: a open-api não expõe histórico de
   settlement por marketId (sondado 2026-10-15: `/markets/{id}/*`,
   `/settlements`, historical-data.boros.finance é portal de downloads,

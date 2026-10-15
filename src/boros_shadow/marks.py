@@ -122,10 +122,20 @@ def _mark_yu_leg(yl: Dict[str, Any], row: Optional[BorosMarket],
 def mark_trade(ledger, trade: Dict[str, Any],
                markets_by_id: Dict[int, BorosMarket],
                books: Dict, now_ms: int, on_schedule: bool,
-               funding_fetch: Optional[FetchFn] = None) -> Dict[str, Any]:
+               funding_fetch: Optional[FetchFn] = None,
+               rate_samples: Optional[Dict[str, float]] = None
+               ) -> Dict[str, Any]:
     """Build + persist one mark row; returns it for the caller's
-    liquidation/close checks. `funding_fetch(venue, asset, t0, t1)` is
-    injectable; the daemon passes funding.fetch_funding."""
+    liquidation/close checks. `funding_fetch(venue, asset, t0, t1)` and
+    `rate_samples` (Lighter current-rate series, asset -> hourly rate)
+    are injectable; the daemon wires the real fetchers.
+
+    Funding/floating measurement contract (prereg Phase-2, amended
+    2026-10-15): an interval where a leg's funding cannot be measured
+    (venue history failure, or Lighter with no rate sample) contributes
+    ZERO mismatch — its funding is proxied to the measured Boros
+    floating (`funding_source='venue_proxy'`). Never funding=0 with the
+    floating leg still counting."""
     from src.boros_shadow.funding import fetch_funding
     fetch = funding_fetch or fetch_funding
     tid = trade["id"]
@@ -140,46 +150,82 @@ def mark_trade(ledger, trade: Dict[str, Any],
     # ── perp legs + funding events (cursor = last stored event ts) ──
     legs_out: Dict[str, Any] = {}
     interval_cash = {"hl": 0.0, "b": 0.0}
+    funding_ok = {"hl": False, "b": False}
     for key, leg in legs["perp"].items():
         legs_out[key] = _mark_perp_leg(
             leg, books.get((leg["venue"], trade["asset"])),
             prev_legs.get(key) or {}, now_ms)
         t0 = ledger.funding_cursor(tid, key)
         t0 = int(t0) if t0 is not None else int(trade["entry_ms"])
-        evs = fetch(leg["venue"], trade["asset"], t0, now_ms)
-        legs_out[key]["funding_source"] = (
-            "venue" if evs is not None else "unavailable")
-        for ts, rate in evs or []:
-            if ts <= t0:
-                continue
-            cash = _funding_cash(leg["side"], rate)
-            ledger.funding_insert({
-                "trade_id": tid, "leg": key, "venue": leg["venue"],
-                "ts_ms": ts, "rate": rate, "cash_usd": cash,
-                "source": "venue"})
-            interval_cash[key] += cash
+        if leg["venue"] == "lighter":
+            # no public history -> own sampled series, weighted by the
+            # pass interval (rate is per-hour like HL's)
+            r = (rate_samples or {}).get(trade["asset"])
+            if r is not None:
+                dt_h = max(0.0, (now_ms - prev_ts) / spec.MS_H)
+                cash = _funding_cash(leg["side"], r) * dt_h
+                ledger.funding_insert({
+                    "trade_id": tid, "leg": key, "venue": "lighter",
+                    "ts_ms": now_ms, "rate": r, "cash_usd": cash,
+                    "source": "lighter_sampled"})
+                interval_cash[key] += cash
+                funding_ok[key] = True
+                legs_out[key]["funding_source"] = "lighter_sampled"
+        else:
+            evs = fetch(leg["venue"], trade["asset"], t0, now_ms)
+            if evs is not None:
+                funding_ok[key] = True
+                legs_out[key]["funding_source"] = "venue"
+            for ts, rate in evs or []:
+                if ts <= t0:
+                    continue
+                cash = _funding_cash(leg["side"], rate)
+                ledger.funding_insert({
+                    "trade_id": tid, "leg": key, "venue": leg["venue"],
+                    "ts_ms": ts, "rate": rate, "cash_usd": cash,
+                    "source": "venue"})
+                interval_cash[key] += cash
 
-    funding_net = ledger.funding_sum(tid)      # cumulative, all legs
-
-    # ── Boros legs: mid rate + floating integration ──
+    # ── Boros legs: mid rate + floating integration + proxies ──
     yu_out: List[Dict[str, Any]] = []
     floating_delta = 0.0
     for yl in legs["yu"]:
         prev_leg = prev_yu.get(yl["market_id"]) or {}
         row = markets_by_id.get(yl["market_id"])
         m = _mark_yu_leg(yl, row, prev_leg, now_ms)
+        underlying = yl["underlying"]
         if m["alive"] and row.floating_apr is not None:
+            fl = _floating_cash(yl["side"], row.floating_apr, dt_years)
             m["floating_source"] = "boros_floating_apr"
-            floating_delta += _floating_cash(
-                yl["side"], row.floating_apr, dt_years)
+            floating_delta += fl
+            failed = [k for k in underlying if not funding_ok[k]]
+            if failed:
+                # measured floating + unmeasurable funding -> the
+                # interval mismatch is 0 by construction (amendment
+                # 2026-10-15): failed legs absorb the residual
+                resid = fl + sum(interval_cash[k] for k in underlying
+                                 if funding_ok[k])
+                share = -resid / len(failed)
+                for k in failed:
+                    ledger.funding_insert({
+                        "trade_id": tid, "leg": k,
+                        "venue": legs["perp"][k]["venue"],
+                        "ts_ms": now_ms, "rate": 0.0,
+                        "cash_usd": share, "source": "venue_proxy"})
+                    interval_cash[k] += share
+                    legs_out[k]["funding_source"] = "venue_proxy"
         else:
-            # venue_proxy: float leg = the underlying venue funding on
-            # the same interval — mismatch 0 by construction (prereg §3)
+            # no floating measurement -> floating = -underlying funding
+            # (venue_proxy); a failed leg contributes 0 on both sides
             m["floating_source"] = "venue_proxy"
-            for pk in yl["underlying"]:
-                floating_delta += -interval_cash[pk]
+            for k in underlying:
+                if funding_ok[k]:
+                    floating_delta += -interval_cash[k]
+                else:
+                    legs_out[k]["funding_source"] = "venue_proxy"
         yu_out.append(m)
 
+    funding_net = ledger.funding_sum(tid)      # cumulative, all legs
     floating_net = (float(prev["floating_usd"]) if prev else 0.0) \
         + floating_delta
 

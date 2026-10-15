@@ -429,6 +429,9 @@ class _StubFetch:
     def funding(self, venue, asset, t0, t1):
         return []                                  # hermetic — no net
 
+    def rates(self):
+        return {}                                  # no Lighter sample
+
 
 class TestDaemonLifecycle:
     def _daemon(self, tmp_path, stub=None):
@@ -436,7 +439,7 @@ class TestDaemonLifecycle:
         return BorosShadowDaemon(
             db_path=str(tmp_path / "b.db"),
             fetch={"markets": stub.markets, "book": stub.book,
-                   "funding": stub.funding})
+                   "funding": stub.funding, "rates": stub.rates})
 
     def test_snapshot_registers_entry(self, tmp_path: Path) -> None:
         d = self._daemon(tmp_path)
@@ -842,16 +845,81 @@ class TestPhase2Funding:
         assert m["funding_usd"] + m["floating_usd"] == pytest.approx(0.0)
         led.close()
 
-    def test_funding_unavailable_source(self, tmp_path: Path) -> None:
+    def test_venue_failure_proxies_to_zero_mismatch(
+            self, tmp_path: Path) -> None:
+        """Venue history fails in an interval -> the leg's funding is
+        proxied to cancel the measured floating (venue_proxy): mismatch
+        contribution exactly 0, never funding=0 with floating counted."""
         led = BorosLedger(tmp_path / "b.db")
-        t = _open_trade(led)
+        t = _open_trade(led)                          # hl short, b long
+        evs = {"hyperliquid": [(NOW + 10, 0.0001)]}   # b fetch fails
+        fund = lambda v, a, t0, t1: evs.get(v) if v == "hyperliquid" \
+            else None
         books = _books_for(("hyperliquid", "BTC"), ("binance", "BTC"))
         m = mark_trade(led, t, _markets_by_id(), books,
-                       NOW + spec.MS_H, False, lambda *a: None)
+                       NOW + spec.MS_H, False, fund)
         legs = json.loads(m["legs_json"])
-        assert all(l["funding_source"] == "unavailable"
-                   for l in legs.values())
-        assert m["funding_usd"] == 0.0
+        assert legs["b"]["funding_source"] == "venue_proxy"
+        assert legs["hl"]["funding_source"] == "venue"
+        dt = spec.MS_H / spec.MS_YEAR
+        fl_b = 0.02 * 10_000 * dt                     # long YU receives
+        rows = led._con.execute(
+            "SELECT leg, cash_usd, source FROM boros_funding"
+            " WHERE leg='b'").fetchall()
+        assert rows[0][2] == "venue_proxy"
+        # proxy cash exactly cancels that leg's floating -> mismatch 0
+        assert rows[0][1] == pytest.approx(-fl_b, rel=1e-6)
+        led.close()
+
+    def test_lighter_leg_uses_sampled_series(self, tmp_path: Path) -> None:
+        """Lighter has no public history: the daemon samples the current
+        rate per pass; the leg accumulates rate x N x dt_hours forward,
+        source='lighter_sampled'."""
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led, venue="lighter")          # b leg = lighter
+        books = _books_for(("hyperliquid", "BTC"), ("lighter", "BTC"))
+        m = mark_trade(led, t, _markets_by_id(), books,
+                       NOW + spec.MS_H, False, _NO_FUNDING,
+                       {"BTC": 0.0001})
+        legs = json.loads(m["legs_json"])
+        assert legs["b"]["funding_source"] == "lighter_sampled"
+        # long perp pays rate>0: -0.0001 x $10k x 1h
+        rows = led._con.execute(
+            "SELECT leg, cash_usd, source FROM boros_funding"
+            " WHERE leg='b'").fetchall()
+        assert rows[0][2] == "lighter_sampled"
+        assert rows[0][1] == pytest.approx(-1.0)       # -rate*N*1h
+        led.close()
+
+    def test_lighter_no_sample_zero_mismatch(self,
+                                             tmp_path: Path) -> None:
+        """Interval without a Lighter sample -> leg funding proxied to
+        the measured floating: the leg's mismatch is exactly 0."""
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led, venue="lighter")
+        books = _books_for(("hyperliquid", "BTC"), ("lighter", "BTC"))
+        m = mark_trade(led, t, _markets_by_id(), books,
+                       NOW + spec.MS_H, False, _NO_FUNDING,
+                       {})                            # no sample
+        legs = json.loads(m["legs_json"])
+        assert legs["b"]["funding_source"] == "venue_proxy"
+        dt = spec.MS_H / spec.MS_YEAR
+        fl_b = 0.02 * 10_000 * dt                     # b YU floating leg
+        rows = led._con.execute(
+            "SELECT cash_usd, source FROM boros_funding"
+            " WHERE leg='b'").fetchall()
+        assert rows[0][1] == "venue_proxy"
+        assert rows[0][0] == pytest.approx(-fl_b, rel=1e-6)
+        led.close()
+
+    def test_rates_table_roundtrip(self, tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        led.rate_insert(NOW, "BTC", 0.0001)
+        led.rate_insert(NOW + spec.MS_H, "BTC", -0.0002)
+        led.rate_insert(NOW + spec.MS_H, "ETH", 0.0003)
+        assert led.rates_at(NOW + spec.MS_H // 2) == {"BTC": 0.0001}
+        assert led.rates_at(NOW + spec.MS_H) == {
+            "BTC": pytest.approx(-0.0002), "ETH": 0.0003}
         led.close()
 
 

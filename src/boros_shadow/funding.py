@@ -9,7 +9,7 @@ guessed number. Endpoint shapes verified 2026-10-15 against live APIs.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.boros_shadow import spec
 from src.boros_shadow.boros_client import fetch_json
@@ -105,6 +105,29 @@ _FUNDING = {
     "kucoin": _kucoin,
     # lighter: no public funding-history endpoint (2026-10-15) -> None
 }
+
+
+def fetch_lighter_rates(fetch_fn: Optional[FetchFn] = None
+                        ) -> Dict[str, float]:
+    """Lighter current funding rates, sampled per pass: the public
+    `funding-rates` table carries one row per (market_id, exchange);
+    exchange='lighter' is the venue's own rate (per-hour convention,
+    same regime as HL). Returns {asset: rate} — {} on failure."""
+    f = fetch_fn or fetch_json
+    try:
+        d = f(f"{spec.LIGHTER_RATES}?limit=500")
+    except Exception:  # noqa: BLE001
+        return {}
+    inv = {v: k for k, v in spec.LIGHTER_MARKET_ID.items()}
+    out: Dict[str, float] = {}
+    for r in (d.get("funding_rates") or []):
+        if r.get("exchange") != "lighter":
+            continue
+        asset = inv.get(r.get("market_id"))
+        rate = _f(r.get("rate"))
+        if asset and rate is not None:
+            out[asset] = rate
+    return out
 
 
 def fetch_funding(venue: str, asset: str, start_ms: int, end_ms: int,

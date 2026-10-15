@@ -67,7 +67,8 @@ def backfill(ledger: BorosLedger, funding_fetch=None,
             if last and int(last["ts_ms"]) >= ts:
                 continue                     # already marked this pass
             mark = mark_trade(ledger, trade, by_id, books, ts,
-                              on_sched, funding_fetch)
+                              on_sched, funding_fetch,
+                              ledger.rates_at(ts))
             stats["marks"] += 1
             closed = check_trade_fate(ledger, trade, by_id, books, ts,
                                       on_sched, mark)

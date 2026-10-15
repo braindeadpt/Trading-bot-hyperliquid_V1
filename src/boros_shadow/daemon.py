@@ -84,9 +84,10 @@ class BorosShadowDaemon:
         self.ledger = BorosLedger(db_path)
         if fetch is None:
             from src.boros_shadow.books import fetch_perp_book as _fpb
-            from src.boros_shadow.funding import fetch_funding as _ff
+            from src.boros_shadow.funding import (
+                fetch_funding as _ff, fetch_lighter_rates as _flr)
             fetch = {"markets": fetch_boros_markets, "book": _fpb,
-                     "funding": _ff}
+                     "funding": _ff, "rates": _flr}
         self.fetch = fetch
         self._shutdown = False
 
@@ -146,9 +147,17 @@ class BorosShadowDaemon:
                   "on_schedule": on_schedule,
                   "minute_utc": minute})
 
+        # Lighter current-rate sample (Phase-2 amended 2026-10-15): no
+        # public funding history, so we build our own series — one
+        # sample per pass, weighted by interval when a leg consumes it
+        rates = self.fetch["rates"]()
+        for asset, rate in (rates or {}).items():
+            self.ledger.rate_insert(now_ms, asset, rate)
+
         cands = evaluate(markets, books, now_ms)
         self._register(cands, now_ms, on_schedule=on_schedule)
-        self._mark_and_settle(markets, books, now_ms, on_schedule)
+        self._mark_and_settle(markets, books, now_ms, on_schedule,
+                              rates or {})
         # an off-schedule pass never consumes the hour — only an
         # on-schedule pass sets last_snapshot_hour; both stamp
         # last_pass_hour so descriptive passes run at most once/hour
@@ -238,14 +247,17 @@ class BorosShadowDaemon:
 
     def _mark_and_settle(self, markets: List[Any],
                          books: Dict[Tuple[str, str], Any],
-                         now_ms: int, on_schedule: bool) -> None:
+                         now_ms: int, on_schedule: bool,
+                         rates: Optional[Dict[str, float]] = None
+                         ) -> None:
         """One mark per open trade per pass (prereg: every pass marks).
         Then fate checks — liquidation/delist on any pass, maturity
         close only inside the window."""
         by_id = {m.market_id: m for m in markets}
         for trade in self.ledger.trades_by_state("open"):
             mark = mark_trade(self.ledger, trade, by_id, books,
-                              now_ms, on_schedule, self.fetch["funding"])
+                              now_ms, on_schedule, self.fetch["funding"],
+                              rates)
             reason = check_trade_fate(self.ledger, trade, by_id, books,
                                       now_ms, on_schedule, mark)
             if reason:
