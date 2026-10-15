@@ -28,7 +28,8 @@ NOTES_ONCHAIN_RE = r"transfer|claim|onchain|on-chain|outflow|event"
 
 # ─── §2 eligibility ──────────────────────────────────────────────────────────
 MIN_CLIFF_PCT_UNLOCKED = 0.02        # >= 2% of unlocked supply
-SOURCES_REQUIRED = 2                 # must appear in BOTH sources
+SOURCES_REQUIRED = 1                 # Emenda 1 (2026-10-15): DefiLlama only;
+                                     # source B is descriptive (b_confirmed)
 SEEN_CUTOFF_D = 6                    # present in the snapshot of T-6 or before
 DATE_TOL_MS = 1 * MS_D               # cross-source date match +-1 day
 AMOUNT_TOL = 0.25                    # cross-source amount match +-25%

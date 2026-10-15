@@ -49,9 +49,10 @@ CREATE TABLE IF NOT EXISTS unlock_events (
     event_ms INTEGER NOT NULL,     -- canonical = source-A date
     amount_tokens REAL NOT NULL,
     pct_unlocked REAL,
-    state TEXT NOT NULL,           -- pending|eligible|single
+    state TEXT NOT NULL,           -- pending|eligible|not_eligible (Emenda 1)
     seen_a_ms INTEGER, seen_b_ms INTEGER,
     amt_b REAL, dt_b_ms INTEGER,
+    b_confirmed INTEGER NOT NULL DEFAULT 0,  -- descriptive only (Emenda 1)
     cluster_head_ms INTEGER,       -- self when head; head's date when merged
     adv7d_usd REAL,                -- measured at T-5 (None = not measured)
     adv_gated INTEGER NOT NULL DEFAULT 0,  -- 1 = filtered out by ADV < $10M
@@ -104,7 +105,17 @@ class UnlockLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._con = sqlite3.connect(str(self.path))
         self._con.executescript(_SCHEMA)
+        self._migrate()
         self._con.commit()
+
+    def _migrate(self) -> None:
+        """Additive migrations for DBs created before Emenda 1."""
+        cols = {r[1] for r in self._con.execute(
+            "PRAGMA table_info(unlock_events)")}
+        if "b_confirmed" not in cols:
+            self._con.execute(
+                "ALTER TABLE unlock_events ADD COLUMN b_confirmed"
+                " INTEGER NOT NULL DEFAULT 0")
 
     # ─── primitives ──────────────────────────────────────────────────────
 

@@ -1,9 +1,10 @@
 """UnlockShadow tests — frozen-rule semantics + isolation guards.
 
-Covers docs/PREREGISTER_UNLOCK_SHADOW.md §2-§6: cliff-vs-linear
-classification, the two-source match (±1d / ±25%) and SINGLE fallback,
-the T-6 snapshot cutoff, <14d merge, beta bounds, the full PnL formula
-(fees + funding + slip) on a synthetic window, placebo seed
+Covers docs/PREREGISTER_UNLOCK_SHADOW.md §2-§6 + Emenda 1:
+cliff-vs-linear classification, the single-source T-6 snapshot gate
+(pending / eligible / not_eligible, frozen canonical values), the
+descriptive b_confirmed flag, <14d merge, beta bounds, the full PnL
+formula (fees + funding + slip) on a synthetic window, placebo seed
 reproducibility, and the counts-only status board (no PnL leak).
 """
 from __future__ import annotations
@@ -134,53 +135,114 @@ class TestCrossSourceMatch:
         b = _raw(event_ms=T, amount=140.0, source="cryptorank")
         assert not events_match(a, b)
 
-    def test_single_when_only_source_a_lists(self) -> None:
+    def test_eligible_on_source_a_alone(self) -> None:
+        """Emenda 1: source A alone gates — no B match required."""
         a = _raw(event_ms=T, amount=100.0)
-        seen_a = [Seen(ev=a, first_seen_ms=T - 20 * MS_D)]
+        seen_a = [Seen(ev=a, first_seen_ms=T - 20 * MS_D,
+                       last_seen_ms=T - 5 * MS_D)]
         out = resolve_events(seen_a, [], now_ms=T - 5 * MS_D)
-        assert len(out) == 1 and out[0].state == "single"
+        assert len(out) == 1 and out[0].state == "eligible"
+        assert out[0].b_confirmed == 0
 
     def test_event_seen_only_after_t6_rejected(self) -> None:
-        """B first lists the event at T-5 — past the T-6 snapshot cutoff:
-        the pair can never be eligible, even though both eventually see it."""
+        """A first lists the event at T-5 — past the T-6 snapshot cutoff:
+        seen late -> not_eligible, even though the cliff qualifies."""
         a = _raw(event_ms=T, amount=100.0)
-        b = _raw(event_ms=T, amount=100.0, source="cryptorank")
-        seen_a = [Seen(ev=a, first_seen_ms=T - 20 * MS_D)]
-        seen_b = [Seen(ev=b, first_seen_ms=T - 5 * MS_D)]   # late!
-        out = resolve_events(seen_a, seen_b, now_ms=T - 5 * MS_D)
-        assert out[0].state == "single"
-        assert out[0].seen_b_ms == T - 5 * MS_D
+        seen_a = [Seen(ev=a, first_seen_ms=T - 5 * MS_D,
+                       last_seen_ms=T - 5 * MS_D)]
+        out = resolve_events(seen_a, [], now_ms=T - 5 * MS_D)
+        assert out[0].state == "not_eligible"
+        assert out[0].seen_a_ms == T - 5 * MS_D
 
     def test_pending_before_cutoff(self) -> None:
         a = _raw(event_ms=T, amount=100.0)
-        seen_a = [Seen(ev=a, first_seen_ms=T - 20 * MS_D)]
+        seen_a = [Seen(ev=a, first_seen_ms=T - 20 * MS_D,
+                       last_seen_ms=T - 10 * MS_D)]
         out = resolve_events(seen_a, [], now_ms=T - 10 * MS_D)
         assert out[0].state == "pending"
 
-    def test_eligible_when_both_seen_by_t6(self) -> None:
+    def test_pending_reresolves_to_eligible_at_cutoff(self) -> None:
+        """Re-resolution across the freeze: pending while the T-6
+        snapshot is still ahead, eligible once it has landed and
+        re-listed the row."""
         a = _raw(event_ms=T, amount=100.0)
-        b = _raw(event_ms=T + 6 * 3_600_000, amount=104.0,
-                 source="cryptorank")
-        seen_a = [Seen(ev=a, first_seen_ms=T - 20 * MS_D)]
-        seen_b = [Seen(ev=b, first_seen_ms=T - 8 * MS_D)]   # <= T-6 ok
-        out = resolve_events(seen_a, seen_b, now_ms=T - 6 * MS_D)
+        cutoff = eligibility_cutoff_ms(T)
+        early = Seen(ev=a, first_seen_ms=T - 20 * MS_D,
+                     last_seen_ms=T - 8 * MS_D)
+        assert resolve_events([early], [],
+                              now_ms=T - 8 * MS_D)[0].state == "pending"
+        confirmed = Seen(ev=a, first_seen_ms=T - 20 * MS_D,
+                         last_seen_ms=cutoff + 60_000)
+        out = resolve_events([confirmed], [], now_ms=cutoff + 60_000)
         assert out[0].state == "eligible"
-        assert out[0].amt_b == 104.0
 
-    def test_sub_2pct_never_eligible(self) -> None:
+    def test_dropped_before_t6_not_eligible(self) -> None:
+        """Seen early but no longer listed at the T-6 snapshot
+        (last_seen < cutoff) — 'presente no snapshot de T-6' fails."""
+        a = _raw(event_ms=T, amount=100.0)
+        s = Seen(ev=a, first_seen_ms=T - 20 * MS_D,
+                 last_seen_ms=T - 8 * MS_D)        # delisted by T-8
+        out = resolve_events([s], [], now_ms=T - 5 * MS_D)
+        assert out[0].state == "not_eligible"
+
+    def test_later_source_edit_does_not_rewrite_frozen_event(self) -> None:
+        """DefiLlama moves the event T -> T+1d after the T-6 cutoff: the
+        original row stays eligible on the frozen date; the edit arrives
+        as a new row seen after its own cutoff -> not_eligible."""
+        orig = _raw(event_ms=T, amount=100.0)
+        moved = _raw(event_ms=T + MS_D, amount=100.0)
+        seen_a = [
+            Seen(ev=orig, first_seen_ms=T - 20 * MS_D,
+                 last_seen_ms=T - 5 * MS_D),
+            Seen(ev=moved, first_seen_ms=T - 5 * MS_D,
+                 last_seen_ms=T - 5 * MS_D),
+        ]
+        out = resolve_events(seen_a, [], now_ms=T - 5 * MS_D)
+        st = {e.event_ms: e for e in out}
+        assert st[T].state == "eligible" and st[T].event_ms == T
+        assert st[T + MS_D].state == "not_eligible"
+
+    def test_b_confirmed_never_changes_state(self) -> None:
+        """b_confirmed is descriptive: matched, unmatched and late-seen
+        B rows all leave the single-source verdict untouched."""
+        a = _raw(event_ms=T, amount=100.0)
+        b = _raw(event_ms=T + 3 * 3_600_000, amount=110.0,
+                 source="cryptorank")
+        sa = Seen(ev=a, first_seen_ms=T - 20 * MS_D,
+                  last_seen_ms=T - 5 * MS_D)
+        now = T - 5 * MS_D
+        with_b = resolve_events(
+            [sa], [Seen(ev=b, first_seen_ms=T - 8 * MS_D,
+                        last_seen_ms=T - 5 * MS_D)], now_ms=now)[0]
+        without_b = resolve_events([sa], [], now_ms=now)[0]
+        assert with_b.state == without_b.state == "eligible"
+        assert (with_b.b_confirmed, without_b.b_confirmed) == (1, 0)
+        assert with_b.amt_b == 110.0
+        late_b = resolve_events(
+            [sa], [Seen(ev=b, first_seen_ms=T - 5 * MS_D,
+                        last_seen_ms=T - 5 * MS_D)], now_ms=now)[0]
+        assert late_b.state == "eligible" and late_b.b_confirmed == 0
+
+    def test_sub_2pct_not_eligible(self) -> None:
         a = _raw(event_ms=T, amount=10.0, supply=1000.0)    # 1%
-        seen_a = [Seen(ev=a, first_seen_ms=T - 20 * MS_D)]
-        out = resolve_events(seen_a, [], now_ms=T - 10 * MS_D)
-        assert out == []    # fails the cliff-size floor, dropped entirely
+        seen_a = [Seen(ev=a, first_seen_ms=T - 20 * MS_D,
+                       last_seen_ms=T - 5 * MS_D)]
+        out = resolve_events(seen_a, [], now_ms=T - 5 * MS_D)
+        assert len(out) == 1 and out[0].state == "not_eligible"
 
-    def test_unprovable_pct_never_eligible(self) -> None:
+    def test_unprovable_pct_not_eligible(self) -> None:
         a = _raw(event_ms=T, amount=100.0, supply=None)
         seen_a = [Seen(ev=a, first_seen_ms=T - 20 * MS_D)]
         out = resolve_events(seen_a, [], now_ms=T - 10 * MS_D)
-        assert out == []
+        assert len(out) == 1 and out[0].state == "not_eligible"
 
     def test_linear_events_skipped(self) -> None:
         a = _raw(event_ms=T, amount=100.0, kind="linear")
+        seen_a = [Seen(ev=a, first_seen_ms=T - 20 * MS_D)]
+        assert resolve_events(seen_a, [], now_ms=T - 10 * MS_D) == []
+
+    def test_excluded_kind_never_an_event(self) -> None:
+        a = _raw(event_ms=T, amount=100.0, kind="excluded")
         seen_a = [Seen(ev=a, first_seen_ms=T - 20 * MS_D)]
         assert resolve_events(seen_a, [], now_ms=T - 10 * MS_D) == []
 
@@ -329,6 +391,12 @@ class TestStatusBoard:
         led.event_upsert({"token": "AAA", "event_ms": T,
                           "amount_tokens": 100.0, "pct_unlocked": 0.05,
                           "state": "eligible"})
+        led.event_upsert({"token": "BBB", "event_ms": T + MS_D,
+                          "amount_tokens": 50.0, "pct_unlocked": 0.01,
+                          "state": "not_eligible"})
+        led.event_upsert({"token": "CCC", "event_ms": T + 2 * MS_D,
+                          "amount_tokens": 80.0, "pct_unlocked": 0.04,
+                          "state": "pending", "b_confirmed": 1})
         led.sim_insert({"kind": "event", "parent_event_id": 1,
                         "token": "AAA", "window_start_ms": T - 5 * MS_D,
                         "window_end_ms": T + 2 * MS_D, "state": "closed",
@@ -338,6 +406,9 @@ class TestStatusBoard:
         for needle in ("pnl", "bps", "profit", "return_pct", "usd"):
             assert needle not in blob, f"status leaks {needle}"
         assert b["counts"]["events_eligible"] == 1
+        assert b["counts"]["events_not_eligible"] == 1
+        assert b["counts"]["events_pending"] == 1
+        assert b["counts"]["events_b_confirmed"] == 1
         assert b["counts"]["sims_closed"] == 1
         assert b["read_gate"]["mode"] == "counts_only"
         led.close()
@@ -434,7 +505,14 @@ class TestDaemonLifecycle:
         snap_t = T - 10 * MS_D + 30 * 60_000     # 00:30 of day T-10
         d.tick(snap_t)
         evs = d.ledger.all_events()
-        assert len(evs) == 1 and evs[0]["state"] == "eligible"
+        assert len(evs) == 1 and evs[0]["state"] == "pending"
+        assert d.ledger.sims_by_state("scheduled") == []   # nothing yet
+
+        cutoff = eligibility_cutoff_ms(T)
+        d.tick(cutoff + 60_000)               # the T-6 snapshot lands
+        evs = d.ledger.all_events()
+        assert evs[0]["state"] == "eligible"   # re-resolved at the freeze
+        assert evs[0]["b_confirmed"] == 1      # stub's B row matched
 
         sims = d.ledger.sims_by_state("scheduled")
         kinds = sorted(s["kind"] for s in sims)
@@ -464,6 +542,7 @@ class TestDaemonLifecycle:
         d = UnlockShadowDaemon(db_path=str(tmp_path / "u.db"),
                                fetch=_stub_fetch(stub))
         d.tick(T - 10 * MS_D + 30 * 60_000)
+        d.tick(eligibility_cutoff_ms(T) + 60_000)   # T-6 snapshot -> eligible
         ws, _we = window_bounds_ms(T)
         d.tick(ws + 60_000)
         ev_sim = [s for s in d.ledger.sims_by_state("gated_out")

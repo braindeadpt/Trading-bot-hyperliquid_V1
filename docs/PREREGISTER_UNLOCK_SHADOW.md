@@ -121,3 +121,23 @@ change the rules themselves.
   (the CryptoRank key is read straight from `os.getenv`, never loaded
   through the config layer).
 - Places zero orders — hypothetical ledger rows only.
+
+## Emenda 1 (2026-10-15)
+
+Approved by the owner before any sim/PnL existed. Reason: source B only
+exists paid (CryptoRank Pro; Tokenomist answers 401) — the dual-source
+gate would yield zero eligible events forever.
+
+- The gate becomes **single-source**: DefiLlama, point-in-time via our
+  frozen snapshots.
+- **ELEGIBLE** = cliff ≥ 2% (rule A unchanged), present in the DefiLlama
+  00:30 UTC snapshot of **T−6**, with `first_seen ≤` that snapshot.
+- Canonical date and amount = the ones in the T−6 snapshot. Later
+  DefiLlama edits are ignored: the trade runs on the frozen date.
+- Source B keeps being attempted, as the descriptive flag
+  **`b_confirmed`**, and never enters the gate.
+- Events whose T−6 predates the first real snapshot (2026-10-14) are not
+  eligible. The first possible eligible T is **2026-10-21**.
+- Everything else is unchanged: ADV, the T−5→T+2 window, beta [0.5; 2],
+  costs, the 3× placebo, the read at n ≥ 15 or 2027-10-14, the PASS
+  criteria, and the −3000 bps review trigger.

@@ -72,10 +72,20 @@ def events_match(a: RawUnlock, b: RawUnlock) -> bool:
 @dataclass
 class Seen:
     """A RawUnlock plus when its source first listed it; `pct` carries a
-    persisted pct_unlocked when the raw supply basis wasn't preserved."""
+    persisted pct_unlocked when the raw supply basis wasn't preserved.
+    `last_seen_ms` is the latest snapshot that still listed the row —
+    presence at a cutoff = first_seen <= cutoff <= last_seen (Emenda 1)."""
     ev: RawUnlock
     first_seen_ms: int
+    last_seen_ms: Optional[int] = None
     pct: Optional[float] = None
+
+
+def visible_at(s: Seen, cutoff_ms: int) -> bool:
+    """The row was in the source's payload at the `cutoff_ms` snapshot:
+    listed on/before it and still listed at/after it."""
+    last = s.last_seen_ms if s.last_seen_ms is not None else s.first_seen_ms
+    return s.first_seen_ms <= cutoff_ms <= last
 
 
 @dataclass
@@ -84,25 +94,33 @@ class ResolvedEvent:
     event_ms: int                    # canonical date = source A's
     amount_tokens: float             # canonical amount = source A's
     pct_unlocked: Optional[float]
-    state: str                       # eligible|single|pending
+    state: str                       # eligible|pending|not_eligible (Emenda 1)
     seen_a_ms: Optional[int] = None
     seen_b_ms: Optional[int] = None
     amt_b: Optional[float] = None
     dt_b_ms: Optional[int] = None
     merged_into_ms: Optional[int] = None
+    b_confirmed: int = 0             # source-B descriptive match (Emenda 1)
     # populated by merge_clusters()
     cluster_head_ms: Optional[int] = None
 
 
 def resolve_events(seen_a: List[Seen], seen_b: List[Seen],
                    now_ms: int) -> List[ResolvedEvent]:
-    """Fold both sources' seen-sets into per-event verdicts.
+    """Emenda 1 (2026-10-15): single-source gate — DefiLlama only.
 
-    eligible — cliff + >=2% in A, a matching cliff row in B, and BOTH
-               first-seen timestamps <= the T-6 snapshot cutoff.
-    single   — past the cutoff with no matching B row (recorded,
-               descriptive, outside the gate).
-    pending  — cutoff not reached yet; may still resolve either way.
+    eligible     — cliff + >=2% (rule A unchanged) AND the calendar row's
+                   first_seen <= the T-6 00:30 UTC cutoff AND now >= that
+                   cutoff. The canonical date/amount are the row's frozen
+                   values: if DefiLlama later edits the event, the edit
+                   arrives as a NEW calendar row (different event_ms or
+                   amount) seen after the cutoff -> not_eligible; the
+                   frozen row keeps its date and the trade runs on it.
+    pending      — qualifies and already seen, but the T-6 snapshot is
+                   still in the future (awaits the frozen confirmation).
+    not_eligible — fails rule A, or first seen after the cutoff (logged).
+    b_confirmed  — descriptive flag: a source-B row matched +-1d/+-25%
+                   with first_seen <= the same cutoff. Never gates.
     """
     out: List[ResolvedEvent] = []
     by_tok_b: Dict[str, List[Seen]] = {}
@@ -111,34 +129,31 @@ def resolve_events(seen_a: List[Seen], seen_b: List[Seen],
 
     for sa in seen_a:
         ev = sa.ev
+        if ev.kind != "cliff":
+            continue                       # only declared cliffs are events
         pct = sa.pct if sa.pct is not None else pct_of_unlocked(ev)
-        if ev.kind == "excluded" or not qualifies_cliff(ev, pct):
-            continue
         cutoff = eligibility_cutoff_ms(ev.event_ms)
-        match: Optional[Seen] = None
+        b_match: Optional[Seen] = None
         for sb in by_tok_b.get(ev.token, []):
-            if events_match(ev, sb.ev):
-                match = sb
+            if visible_at(sb, cutoff) and events_match(ev, sb.ev):
+                b_match = sb
                 break
-        if match is not None:
-            ok = (sa.first_seen_ms <= cutoff
-                  and match.first_seen_ms <= cutoff)
-            out.append(ResolvedEvent(
-                token=ev.token, event_ms=ev.event_ms,
-                amount_tokens=ev.amount_tokens,
-                pct_unlocked=pct,
-                state="eligible" if ok else "single",
-                seen_a_ms=sa.first_seen_ms,
-                seen_b_ms=match.first_seen_ms,
-                amt_b=match.ev.amount_tokens,
-                dt_b_ms=match.ev.event_ms))
+        if not qualifies_cliff(ev, pct) or sa.first_seen_ms > cutoff:
+            state = "not_eligible"
+        elif now_ms < cutoff:
+            state = "pending"              # awaits the T-6 snapshot
+        elif visible_at(sa, cutoff):
+            state = "eligible"
         else:
-            out.append(ResolvedEvent(
-                token=ev.token, event_ms=ev.event_ms,
-                amount_tokens=ev.amount_tokens,
-                pct_unlocked=pct,
-                state="pending" if now_ms <= cutoff else "single",
-                seen_a_ms=sa.first_seen_ms))
+            state = "not_eligible"         # absent from the T-6 snapshot
+        out.append(ResolvedEvent(
+            token=ev.token, event_ms=ev.event_ms,
+            amount_tokens=ev.amount_tokens, pct_unlocked=pct,
+            state=state, seen_a_ms=sa.first_seen_ms,
+            seen_b_ms=b_match.first_seen_ms if b_match else None,
+            amt_b=b_match.ev.amount_tokens if b_match else None,
+            dt_b_ms=b_match.ev.event_ms if b_match else None,
+            b_confirmed=1 if b_match is not None else 0))
     return out
 
 

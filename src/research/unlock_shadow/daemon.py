@@ -180,7 +180,7 @@ class UnlockShadowDaemon:
                            category=r["category"] or "", kind=r["kind"],
                            unlocked_supply=None, source=r["source"])
             s = Seen(ev=ev, first_seen_ms=r["first_seen_ms"],
-                     pct=r["pct_unlocked"])
+                     last_seen_ms=r["last_seen_ms"], pct=r["pct_unlocked"])
             (seen_a if r["source"] == "defillama" else seen_b).append(s)
         return seen_a, seen_b
 
@@ -200,6 +200,7 @@ class UnlockShadowDaemon:
                 "pct_unlocked": e.pct_unlocked, "state": e.state,
                 "seen_a_ms": e.seen_a_ms, "seen_b_ms": e.seen_b_ms,
                 "amt_b": e.amt_b, "dt_b_ms": e.dt_b_ms,
+                "b_confirmed": e.b_confirmed,
                 "cluster_head_ms": e.cluster_head_ms,
                 "registered_ms": now_ms})
             if newly:

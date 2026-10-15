@@ -22,8 +22,10 @@ def board(ledger: UnlockLedger, now_ms: int | None = None) -> Dict[str, Any]:
             "unlock_events", "WHERE state='pending'"),
         "events_eligible": ledger.count(
             "unlock_events", "WHERE state='eligible'"),
-        "events_single": ledger.count(
-            "unlock_events", "WHERE state='single'"),
+        "events_not_eligible": ledger.count(
+            "unlock_events", "WHERE state='not_eligible'"),
+        "events_b_confirmed": ledger.count(
+            "unlock_events", "WHERE b_confirmed=1"),
         "events_merged": ledger.count(
             "unlock_events",
             "WHERE cluster_head_ms IS NOT NULL"
