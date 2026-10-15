@@ -12,7 +12,8 @@ MS_H = 3_600_000
 # ─── §1 sources ──────────────────────────────────────────────────────────────
 BOROS_MARKETS = "https://api.boros.finance/open-api/v1/markets"
 BOROS_PAGE_LIMIT = 100
-SNAPSHOT_UTC_MINUTE = 5          # hourly snapshot at :05 UTC
+SNAPSHOT_UTC_MINUTE = 5          # hourly snapshot window opens at :05 UTC
+SNAPSHOT_WINDOW_END_MIN = 10     # on-schedule window: 5 <= minute < 10 UTC
 
 HL_INFO = "https://api.hyperliquid.xyz/info"
 BINANCE_DEPTH = "https://fapi.binance.com/fapi/v1/depth"

@@ -511,6 +511,51 @@ class TestDaemonLifecycle:
             "SELECT meta_json FROM boros_snapshots WHERE kind='markets'"
             " ORDER BY id DESC LIMIT 1").fetchone()[0]
         assert json.loads(meta)["on_schedule"] is False
+        # the off-schedule pass did NOT consume the hour
+        assert d.ledger.meta_get("last_snapshot_hour") is None
+        assert d.ledger.meta_get("last_pass_hour") is not None
+        d.shutdown()
+
+    def test_restart_at_02_descriptive_then_05_enters(self,
+                                                      tmp_path: Path) -> None:
+        """Restart at :02 runs a descriptive pass; the real :05 window
+        pass of the SAME hour still runs and can open trades."""
+        d = self._daemon(tmp_path)
+        d.tick(hour_floor(NOW) + 2 * 60_000)         # :02 — descriptive
+        assert not d.ledger.trades_by_state("open")
+        assert d.ledger.count("boros_opportunities",
+                              "WHERE block_reason='off_schedule'") == 2
+        assert d.ledger.meta_get("last_snapshot_hour") is None
+        d.tick(hour_floor(NOW) + 5 * 60_000)         # :05 — on-schedule
+        assert len(d.ledger.trades_by_state("open")) == 1
+        assert d.ledger.meta_get("last_snapshot_hour") is not None
+        d.shutdown()
+
+    def test_minute_07_is_on_schedule(self, tmp_path: Path) -> None:
+        d = self._daemon(tmp_path)
+        d.tick(hour_floor(NOW) + 7 * 60_000)         # :07 — inside window
+        assert len(d.ledger.trades_by_state("open")) == 1
+        meta = json.loads(d.ledger._con.execute(
+            "SELECT meta_json FROM boros_snapshots WHERE kind='markets'"
+            " ORDER BY id DESC LIMIT 1").fetchone()[0])
+        assert meta["on_schedule"] is True and meta["minute_utc"] == 7
+        d.shutdown()
+
+    def test_minute_12_is_off_schedule(self, tmp_path: Path) -> None:
+        d = self._daemon(tmp_path)
+        d.tick(hour_floor(NOW) + 12 * 60_000)        # :12 — past window
+        assert not d.ledger.trades_by_state("open")
+        assert d.ledger.count("boros_opportunities",
+                              "WHERE block_reason='off_schedule'") == 2
+        d.shutdown()
+
+    def test_two_window_ticks_count_once(self, tmp_path: Path) -> None:
+        d = self._daemon(tmp_path)
+        d.tick(hour_floor(NOW) + 5 * 60_000)
+        d.tick(hour_floor(NOW) + 8 * 60_000)         # still in window
+        # one pass only: 2 snapshot rows total (markets + books)
+        assert d.ledger.count("boros_snapshots") == 2
+        assert len(d.ledger.trades_by_state("open")) == 1
         d.shutdown()
 
     def test_venue_down_still_snapshots(self, tmp_path: Path) -> None:

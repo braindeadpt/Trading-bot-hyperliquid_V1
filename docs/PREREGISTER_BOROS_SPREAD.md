@@ -113,3 +113,11 @@ Sem outras espreitadelas ao PnL. Contagens de entradas e de quase-entradas
   para o dia em que um book exista).
 - Ativos fora do gate {BTC,ETH,HYPE}: avaliados e gravados com
   `block_reason=off_gate_asset` (descritivos), nunca elegíveis.
+- Janela on-schedule = minuto UTC ∈ [5,10): tolera o atraso do loop
+  (TICK_S=60 s). Passes fora da janela são descritivos (candidatos
+  avaliados, `block_reason=off_schedule`, nunca abrem) e NÃO consomem a
+  hora — o passe da janela corre à mesma. Dentro da janela, no máx. um
+  passe por hora (`last_snapshot_hour`); descritivos idem
+  (`last_pass_hour`). O meta do snapshot grava `on_schedule` e o
+  `minute_utc` real. Medição operacional da cadência — não altera as
+  regras.

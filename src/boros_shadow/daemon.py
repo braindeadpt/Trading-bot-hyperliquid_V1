@@ -44,23 +44,35 @@ class BorosShadowDaemon:
 
     # ─── snapshot pass (Phase 1.1-1.4) ───────────────────────────────────
 
+    @staticmethod
+    def _schedule(now_ms: int) -> Tuple[bool, int]:
+        """(on_schedule, minute_utc). Entries only ever price off a book
+        read inside the :05-:09 UTC window (loop-delay tolerance)."""
+        minute = (now_ms % spec.MS_H) // 60_000
+        on = spec.SNAPSHOT_UTC_MINUTE <= minute < spec.SNAPSHOT_WINDOW_END_MIN
+        return on, minute
+
     def _snapshot_due(self, now_ms: int) -> bool:
         hour = hour_floor(now_ms)
-        due = hour + spec.SNAPSHOT_UTC_MINUTE * 60_000
-        last = int(self.ledger.meta_get("last_snapshot_hour") or 0)
-        return now_ms >= due and last < hour
+        on_sched, _ = self._schedule(now_ms)
+        last_snap = int(self.ledger.meta_get("last_snapshot_hour") or 0)
+        if last_snap >= hour:
+            return False                       # hour already consumed
+        if on_sched:
+            return True                        # the real :05-:09 pass
+        # off-schedule: one descriptive pass per hour, never consumes it —
+        # the window pass can still run and open this same hour
+        last_pass = int(self.ledger.meta_get("last_pass_hour") or 0)
+        return last_pass < hour
 
     def _snapshot_pass(self, now_ms: int) -> None:
-        # A catch-up/restart snapshot outside the :05 minute is recorded
-        # as descriptive only — it must NEVER open a trade (prereg: the
-        # snapshot is at :05 UTC; entries price off that book read).
-        minute = (now_ms % spec.MS_H) // 60_000
-        on_schedule = minute == spec.SNAPSHOT_UTC_MINUTE
+        on_schedule, minute = self._schedule(now_ms)
 
         rows = self.fetch["markets"]()
         self.ledger.snapshot_write(now_ms, "markets", rows,
                                    n_rows=len(rows),
-                                   meta={"on_schedule": on_schedule})
+                                   meta={"on_schedule": on_schedule,
+                                         "minute_utc": minute})
         markets = parse_markets(rows)
 
         # perp books for exactly the pairs evaluate() will consume
@@ -77,11 +89,18 @@ class BorosShadowDaemon:
             {f"{v}:{a}": b for (v, a), b in books.items()},
             n_rows=len(books),
             meta={"venues_unavailable": unavailable,
-                  "on_schedule": on_schedule})
+                  "on_schedule": on_schedule,
+                  "minute_utc": minute})
 
         cands = evaluate(markets, books, now_ms)
         self._register(cands, now_ms, on_schedule=on_schedule)
-        self.ledger.meta_set("last_snapshot_hour", str(hour_floor(now_ms)))
+        # an off-schedule pass never consumes the hour — only an
+        # on-schedule pass sets last_snapshot_hour; both stamp
+        # last_pass_hour so descriptive passes run at most once/hour
+        self.ledger.meta_set("last_pass_hour", str(hour_floor(now_ms)))
+        if on_schedule:
+            self.ledger.meta_set("last_snapshot_hour",
+                                 str(hour_floor(now_ms)))
         n_eligible = sum(1 for c in cands if c.eligible)
         logger.info("boros snapshot: %d markets -> %d candidates "
                     "(%d eligible), books unavailable=%s",
@@ -89,7 +108,7 @@ class BorosShadowDaemon:
         self.ledger.log("snapshot", {
             "markets": len(markets), "candidates": len(cands),
             "eligible": n_eligible, "books_unavailable": unavailable,
-            "on_schedule": on_schedule},
+            "on_schedule": on_schedule, "minute_utc": minute},
             ts_ms=now_ms)
 
     def _register(self, cands: List[Candidate], now_ms: int,
