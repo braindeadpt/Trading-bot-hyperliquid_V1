@@ -121,3 +121,74 @@ Sem outras espreitadelas ao PnL. Contagens de entradas e de quase-entradas
   (`last_pass_hour`). O meta do snapshot grava `on_schedule` e o
   `minute_utc` real. Medição operacional da cadência — não altera as
   regras.
+
+## Notas de implementação — Fase 2 (fixadas 2026-10-15, antes de qualquer trade)
+
+Medição fixada ex ante; a produção tinha 0 entradas quando escrito.
+
+- **Marcação**: todos os passes (descritivo :00 e on-schedule :05–:09)
+  gravam uma linha `boros_marks` por trade aberto: mid + VWAP de saída
+  por perna perp, mid YU por perna Boros (`(bestBid+bestAsk)/2` do mesmo
+  marketId), funding acumulado, floating acumulado, `on_schedule`. Perna
+  sem book reusa o último mid (`stale=1`); stale > 6 h → `data_gap=1`.
+- **Funding real**: HL `info fundingHistory` (POST), Binance
+  `fapi/v1/fundingRate`, Gate `futures/usdt/funding_rate` (t em
+  segundos), OKX `public/funding-rate-history`, Bybit
+  `market/funding/history`, KuCoin `contract/funding-rates`. Incremental
+  desde a entrada (cursor = último evento gravado; UNIQUE(trade_id, leg,
+  ts_ms)). Sinal: short recebe quando rate>0; cash = ±rate×N por evento.
+  Lighter não expõe histórico público (sondado 2026-10-15) →
+  `funding_source='unavailable'`, contributo 0 — nunca um número
+  inventado.
+- **Floating liquidado pelo Boros**: a open-api não expõe histórico de
+  settlement por marketId (sondado 2026-10-15: `/markets/{id}/*`,
+  `/settlements`, historical-data.boros.finance é portal de downloads,
+  não API). A fonte primária é `data.floatingApr` do próprio payload de
+  markets — o índice que o Boros liquida a cada `paymentPeriod` (3600 s)
+  — integrado por intervalo entre marcas: `fl × N × Δt/ano`, sinal da
+  posição YU (long recebe, short paga). `floating_source =
+  'boros_floating_apr'`. Se a row do marketId faltar/estalecer num
+  intervalo → `floating_source='venue_proxy'`: o funding real da venue
+  subjacente no mesmo intervalo com sinal oposto — descasamento 0 por
+  construção nesse intervalo, como o pré-registo manda.
+- **Spread markets**: a perna Boros única flutua o diferencial
+  (funding_HL − funding_B); proxy = soma dos fundings das duas pernas
+  perp com sinal oposto → também cancela a 0.
+- **Settle fee Boros**: acumula pro rata ao vencimento — componente
+  Boros dos custos = `costs_usd` gravado na Fase 1 menos a parte perp
+  estimada ((taker+slip)·N·2). Em custos reais no fecho, a parte Boros
+  é a mesma (taker+settle+1 bp/ano por perna — sem book, sempre).
+- **Liquidações hipotéticas** (verificadas em cada passe, marks frescos
+  ou stale — marcação a stale é o conservador):
+  - POOLED: `equity = 0,2·N + uPnL_perps(mid) + funding_líquido`;
+    morte se `equity ≤ 0,005·N × 2` (MM ~0,5%/perna).
+  - BOROS: por perna, `MTM = sinal·(YU_mid − fixo_entrada)·N·T_rest`;
+    morte se `MTM ≤ −0,1·N`.
+  - SPLIT (descritivo): excursão adversa máxima de qualquer perna perp
+    ≥ 30% desde a entrada → flag `split_liq` (nunca kill).
+  - Morte POOLED/BOROS: `boros_flags.liquidation` + trade `liquidated`,
+    realizado = −margem da camada (−0,2·N ou −0,1·N × nº pernas Boros).
+- **Fecho**: primeiro passe ON-SCHEDULE com ts ≥ vencimento; perps a
+  taker+VWAP real; YU expira sem custo. Book em falta → retry nos passes
+  on-schedule até 24 h → depois mid com slippage = 2× slip de entrada
+  (`close_fallback=true`). Market Boros fora do universo/state≠Normal
+  antes do vencimento → fecho nesse passe, último mid conhecido,
+  `anomaly` no flags.
+- **PnL realizado** (`boros_close`, selado até ao gate): `fixed =
+  fixo·N·T_held`, `floating = funding + floating_signed`,
+  `basis = Σ sinal·(exit−entry)·qty` (VWAP entrada→saída),
+  `costs = entrada real + saída real + fees Boros`, `realized = soma`,
+  `realized_apy_cap = realized/capital × ano/dias`, `locked = net_apy à
+  entrada × capital × T_plan`, `ratio = realized/locked`.
+- **Clusters**: union-find sobre trades fechados — mesmo ativo e janelas
+  [entrada, fecho] sobrepostas fundem; `cluster_id` = menor trade_id do
+  componente (determinístico, recalculado a cada fecho).
+- **KILL n=5**: a 5 fechados, mediana interna de `ratio` < 0,5 →
+  `kill_flags.n5_kill = true`. Só o booleano é exposto; a mediana
+  permanece selada.
+- **Leitura** (`read.py`): recusa antes de 10 clusters fechados ou
+  2027-06-30; depois reporta média `realized_apy_cap`, mediana `ratio`,
+  PF por trade, nº de liquidações e os 4 critérios PASS/FAIL.
+- **Backfill**: trades abertos antes deste deploy são re-marcados passe
+  a passe a partir dos snapshots comprimidos (mesma pipeline live) antes
+  de o daemon retomar — corre no `boot()`.

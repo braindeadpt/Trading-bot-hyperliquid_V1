@@ -1,9 +1,10 @@
-"""BorosLockedShadow daemon — hourly collector + paper entries.
+"""BorosLockedShadow daemon — hourly collector + paper lifecycle.
 
-Pure REST + SQLite. At :05 UTC each hour: fetch the Boros markets page
-chain, fetch perp L2 books for the hedge legs, evaluate opportunities
-per the frozen rules, register entries honoring the dedup + daily-cap
-limits. Zero orders. All fetchers are injectable for tests.
+Pure REST + SQLite. At :05 UTC each hour (window :05-:09): fetch Boros
+markets, fetch perp L2 books, evaluate + register entries; then Phase-2
+— mark every open trade (every pass, descriptive included), ingest
+funding, check hypothetical liquidations, close at maturity/delist.
+Zero orders. All fetchers are injectable for tests.
 """
 from __future__ import annotations
 
@@ -18,8 +19,13 @@ from src.boros_shadow.books import fetch_perp_book
 from src.boros_shadow.boros_client import (
     fetch_boros_markets, parse_markets)
 from src.boros_shadow.ledger import BorosLedger
+from src.boros_shadow.marks import (
+    liquidation_hits, mark_trade, split_flags, trade_legs)
 from src.boros_shadow.opportunity import (
     Candidate, evaluate, needed_books, pick_winner)
+from src.boros_shadow.settle import (
+    CLOSE_DELISTED, CLOSE_LIQ_BOROS, CLOSE_LIQ_POOLED, CLOSE_MATURITY,
+    close_trade, n5_kill)
 
 logger = logging.getLogger("boros_shadow")
 
@@ -32,13 +38,55 @@ def hour_floor(ms: int) -> int:
     return ms - (ms % spec.MS_H)
 
 
+def check_trade_fate(ledger: BorosLedger, trade: Dict[str, Any],
+                     markets_by_id: Dict[int, Any], books: Dict,
+                     now_ms: int, on_schedule: bool,
+                     mark: Optional[Dict[str, Any]] = None) -> str:
+    """Liquidations (any pass), delisted-market anomaly close (any
+    pass), maturity close (on-schedule only). Returns the close reason
+    or ''."""
+    tid = trade["id"]
+    hits = liquidation_hits(trade, mark, now_ms) if mark else []
+    for leg in split_flags(trade, mark) if mark else []:
+        known = {(f["trade_id"], json.loads(f["data_json"]).get("leg"))
+                 for f in ledger.flag_get("split_liq")}
+        if (tid, leg) not in known:
+            ledger.flag_set("split_liq", tid, now_ms, {"leg": leg})
+    if hits:
+        reason = (CLOSE_LIQ_POOLED if "pooled" in hits
+                  else CLOSE_LIQ_BOROS)
+        ledger.flag_set("liquidation", tid, now_ms,
+                        {"layer": reason})
+        close_trade(ledger, trade, books, markets_by_id, now_ms,
+                    reason, mark)
+        logger.warning("boros-shadow HYPOTHETICAL LIQUIDATION "
+                       "trade=%d layer=%s", tid, reason)
+        return reason
+    yu_legs = trade_legs(trade)["yu"]
+    known = [yl["market_id"] for yl in yu_legs if yl.get("market_id")]
+    yu_alive = all(
+        markets_by_id.get(mid) is not None
+        and markets_by_id[mid].state == "Normal" for mid in known)
+    if known and not yu_alive and now_ms < int(trade["maturity_ms"]):
+        close_trade(ledger, trade, books, markets_by_id, now_ms,
+                    CLOSE_DELISTED, mark)
+        return CLOSE_DELISTED
+    if on_schedule and now_ms >= int(trade["maturity_ms"]):
+        if close_trade(ledger, trade, books, markets_by_id, now_ms,
+                       CLOSE_MATURITY, mark) is not None:
+            return CLOSE_MATURITY
+    return ""
+
+
 class BorosShadowDaemon:
     def __init__(self, db_path: str = spec.DB_PATH,
                  fetch: Optional[Dict[str, Any]] = None) -> None:
         self.ledger = BorosLedger(db_path)
         if fetch is None:
             from src.boros_shadow.books import fetch_perp_book as _fpb
-            fetch = {"markets": fetch_boros_markets, "book": _fpb}
+            from src.boros_shadow.funding import fetch_funding as _ff
+            fetch = {"markets": fetch_boros_markets, "book": _fpb,
+                     "funding": _ff}
         self.fetch = fetch
         self._shutdown = False
 
@@ -75,10 +123,16 @@ class BorosShadowDaemon:
                                          "minute_utc": minute})
         markets = parse_markets(rows)
 
-        # perp books for exactly the pairs evaluate() will consume
+        # perp books for the pairs evaluate() consumes PLUS every pair
+        # an open trade marks/closes on (a trade near maturity can drop
+        # out of needed_books while still open)
+        need = set(needed_books(markets, now_ms))
+        for t in self.ledger.trades_by_state("open"):
+            need |= {("hyperliquid", t["asset"]),
+                     (t["venue_b"], t["asset"])}
         books: Dict[Tuple[str, str], Any] = {}
         unavailable: List[str] = []
-        for venue, asset in needed_books(markets, now_ms):
+        for venue, asset in sorted(need):
             book = self.fetch["book"](venue, asset)
             if book is None:
                 unavailable.append(f"{venue}:{asset}")
@@ -94,6 +148,7 @@ class BorosShadowDaemon:
 
         cands = evaluate(markets, books, now_ms)
         self._register(cands, now_ms, on_schedule=on_schedule)
+        self._mark_and_settle(markets, books, now_ms, on_schedule)
         # an off-schedule pass never consumes the hour — only an
         # on-schedule pass sets last_snapshot_hour; both stamp
         # last_pass_hour so descriptive passes run at most once/hour
@@ -179,23 +234,32 @@ class BorosShadowDaemon:
                     "block_reason": c.block_reason,
                     "legs_json": json.dumps(c.legs, default=str)})
 
-    # ─── lifecycle (Phase 2 settles PnL later; maturity flips state) ─────
+    # ─── Phase 2: marks + funding + liquidation + close ────────────────
 
-    def _mature_pass(self, now_ms: int) -> None:
-        for t in self.ledger.trades_by_state("open"):
-            if int(t["maturity_ms"]) <= now_ms:
-                self.ledger.trade_update(t["id"], state="matured")
-                self.ledger.log("matured", {"asset": t["asset"],
-                                            "venue_b": t["venue_b"]},
-                                t["id"], now_ms)
+    def _mark_and_settle(self, markets: List[Any],
+                         books: Dict[Tuple[str, str], Any],
+                         now_ms: int, on_schedule: bool) -> None:
+        """One mark per open trade per pass (prereg: every pass marks).
+        Then fate checks — liquidation/delist on any pass, maturity
+        close only inside the window."""
+        by_id = {m.market_id: m for m in markets}
+        for trade in self.ledger.trades_by_state("open"):
+            mark = mark_trade(self.ledger, trade, by_id, books,
+                              now_ms, on_schedule, self.fetch["funding"])
+            reason = check_trade_fate(self.ledger, trade, by_id, books,
+                                      now_ms, on_schedule, mark)
+            if reason:
+                logger.warning("boros-shadow close: trade=%d reason=%s",
+                               trade["id"], reason)
+                if n5_kill(self.ledger):
+                    self.ledger.flag_set("n5_kill", None, now_ms)
 
     # ─── loop ────────────────────────────────────────────────────────────
 
     def tick(self, now_ms: Optional[int] = None) -> None:
         now_ms = now_ms or _now_ms()
         for name, fn in (
-                ("snapshot", lambda: self._snapshot_if_due(now_ms)),
-                ("mature", lambda: self._mature_pass(now_ms))):
+                ("snapshot", lambda: self._snapshot_if_due(now_ms)),):
             try:
                 fn()
             except Exception:  # noqa: BLE001 — one bad pass never kills loop
@@ -216,6 +280,12 @@ class BorosShadowDaemon:
     async def boot(self) -> None:
         self.ledger.meta_incr("restart_count")
         self._heartbeat()
+        # prereg §7: trades opened before this deploy get their marks
+        # rebuilt from stored snapshots before live passes resume
+        from src.boros_shadow.backfill import backfill
+        stats = backfill(self.ledger, self.fetch["funding"])
+        if stats["marks"]:
+            logger.warning("boros-shadow backfill: %s", stats)
 
     async def run(self) -> None:
         await self.boot()

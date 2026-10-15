@@ -1,9 +1,9 @@
 """Counts-only status board — feeds a future /api/hypotheses row.
 
 The read gate is the contract: until n>=10 closed clusters or
-2027-06-30, this board exposes counts and kill-flag placeholders ONLY —
-no PnL, no bps, no returns, no APY. (Kill flags are a Phase-2 surface;
-they sit at zero until liquidations go live.)
+2027-06-30, this board exposes counts and kill-flag booleans ONLY —
+no PnL, no bps, no returns, no APY. Kill flags are permitted by the
+prereg: a hypothetical liquidation shows KILL immediately.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Any, Dict
 
 from src.boros_shadow import spec
 from src.boros_shadow.ledger import BorosLedger
+from src.boros_shadow.settle import closed_clusters
 
 
 def board(ledger: BorosLedger, now_ms: int | None = None) -> Dict[str, Any]:
@@ -26,13 +27,23 @@ def board(ledger: BorosLedger, now_ms: int | None = None) -> Dict[str, Any]:
         "open": ledger.count("boros_trades", "WHERE state='open'"),
         "matured": ledger.count("boros_trades", "WHERE state='matured'"),
         "closed": ledger.count("boros_trades", "WHERE state='closed'"),
+        "liquidated": ledger.count(
+            "boros_trades", "WHERE state='liquidated'"),
+        "marks": ledger.count("boros_marks"),
+        "closed_clusters": closed_clusters(ledger),
+    }
+    kill_flags = {
+        # booleans only — prereg permits kill surfacing pre-gate
+        "liquidation": bool(ledger.flag_get("liquidation")),
+        "n5_kill": bool(ledger.flag_get("n5_kill")),
+        "split_liq": bool(ledger.flag_get("split_liq")),
     }
     return {
         "hypothesis": "BorosLockedSpread",
         "spec": "docs/PREREGISTER_BOROS_SPREAD.md",
         "generated_ms": now_ms,
         "counts": counts,
-        "kill_flags": {},          # Phase 2 — liquidation watches not live
+        "kill_flags": kill_flags,
         "read_gate": {
             "min_clusters": spec.READ_MIN_CLUSTERS,
             "expiry": spec.EXPIRY_ISO,

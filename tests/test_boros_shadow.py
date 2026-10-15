@@ -34,6 +34,7 @@ FORBIDDEN_PREFIXES = (
     "src.data.database", "src.utils.config", "src.research", "main",
 )
 MS_D = spec.MS_D
+MS_H = spec.MS_H
 
 
 def ms(y: int, mo: int, d: int, h: int = 0, mi: int = 0) -> int:
@@ -111,8 +112,9 @@ def test_boros_shadow_never_imports_execution_surface() -> None:
 def test_boros_shadow_imports_only_boros_siblings() -> None:
     allowed = ("src.boros_shadow", "scripts.research")
     stdlib_ok = ("__future__", "asyncio", "collections", "dataclasses",
-                 "hashlib", "json", "logging", "pathlib", "sqlite3",
-                 "time", "typing", "urllib", "zlib")
+                 "datetime", "hashlib", "json", "logging", "pathlib",
+                 "sqlite3", "statistics", "time", "typing", "urllib",
+                 "zlib")
     for fname, mod in _pkg_imports():
         root = mod.split(".")[0]
         assert (mod.startswith(allowed[0]) or mod.startswith(allowed[1])
@@ -424,13 +426,17 @@ class _StubFetch:
             return None
         return _deep_book()
 
+    def funding(self, venue, asset, t0, t1):
+        return []                                  # hermetic — no net
+
 
 class TestDaemonLifecycle:
     def _daemon(self, tmp_path, stub=None):
         stub = stub or _StubFetch()
         return BorosShadowDaemon(
             db_path=str(tmp_path / "b.db"),
-            fetch={"markets": stub.markets, "book": stub.book})
+            fetch={"markets": stub.markets, "book": stub.book,
+                   "funding": stub.funding})
 
     def test_snapshot_registers_entry(self, tmp_path: Path) -> None:
         d = self._daemon(tmp_path)
@@ -485,16 +491,34 @@ class TestDaemonLifecycle:
         assert capped == 2                                  # bn + okx winners
         d.shutdown()
 
-    def test_maturity_flips_state(self, tmp_path: Path) -> None:
-        led = BorosLedger(tmp_path / "b.db")
+    def test_maturity_closes_on_window_pass(self, tmp_path: Path) -> None:
+        """Phase-2: at/after maturity the trade CLOSES on the first
+        on-schedule pass (real VWAP exit + PnL row), not just a state
+        flip. An off-schedule pass only marks it."""
         d = self._daemon(tmp_path)
-        led.trade_insert({"asset": "BTC", "venue_b": "binance",
-                          "maturity_ms": NOW - MS_D, "structure": "simple",
-                          "direction": "x", "state": "open",
-                          "entry_ms": NOW - 40 * MS_D})
-        d.tick(NOW)
-        assert d.ledger.trades_by_state("matured")
+        d.ledger.trade_insert({
+            "asset": "BTC", "venue_b": "binance", "maturity_ms": MAT,
+            "structure": "simple", "direction": "short_hl_long_b",
+            "state": "open", "entry_ms": MAT - 30 * MS_D,
+            "fixed_bruto": 0.18, "net_apy": 0.4, "capital_usd": 4000.0,
+            "costs_usd": 20.0,
+            "prices_json": json.dumps({
+                "hl_yu": 1, "b_yu": 2,
+                "hl_perp_side": "sell", "b_perp_side": "buy",
+                "hl_perp_mid": 100.0, "b_perp_mid": 100.0,
+                "hl_perp_px": 99.99, "b_perp_px": 100.01,
+                "slip_hl_bps": 1.0, "slip_b_bps": 1.0,
+                "hl_bid": 0.20, "hl_ask": 0.21,
+                "b_bid": 0.01, "b_ask": 0.02})})
+        d.tick(MAT + MS_H)                            # :00 descriptive
+        assert d.ledger.trades_by_state("open")       # marked, not closed
+        d.tick(hour_floor(MAT + MS_H) + 5 * 60_000)   # :05 on-schedule
         assert not d.ledger.trades_by_state("open")
+        closed = d.ledger.trades_by_state("closed")
+        assert len(closed) == 1
+        close = d.ledger.closes()[0]
+        assert close["reason"] == "maturity"
+        assert close["realized_usd"] is not None
         d.shutdown()
 
     def test_off_schedule_snapshot_never_enters(self,
@@ -616,3 +640,406 @@ class TestRealFixture:
                       {"results": []}])
         monkeypatch.setattr(bc, "fetch_json", lambda url, **kw: next(pages))
         assert len(fetch_boros_markets()) == 101
+
+
+# ─── Phase 2: marks / funding / liquidation / close / read ────────────────────
+
+from src.boros_shadow.marks import (
+    liquidation_hits, mark_trade, split_flags, trade_legs)
+from src.boros_shadow.settle import (
+    close_trade, closed_clusters, n5_kill)
+from src.boros_shadow.read import run_read
+from src.boros_shadow.backfill import backfill
+from src.boros_shadow import risk
+
+
+def _open_trade(led, venue="binance", direction="short_hl_long_b",
+                structure="simple", entry=NOW, mat=MAT, fixed=0.18,
+                net_apy=0.4, capital=4000.0, costs=23.0,
+                entry_px=100.0, asset="BTC"):
+    """Open paper trade with a full legs_json — every entry price."""
+    legs = {
+        "hl_yu": 1, "b_yu": 2,
+        "hl_perp_side": "sell" if direction == "short_hl_long_b" else "buy",
+        "b_perp_side": "buy" if direction == "short_hl_long_b" else "sell",
+        "hl_perp_mid": entry_px, "b_perp_mid": entry_px,
+        "hl_perp_px": entry_px - 0.01
+        if direction == "short_hl_long_b" else entry_px + 0.01,
+        "b_perp_px": entry_px + 0.01
+        if direction == "short_hl_long_b" else entry_px - 0.01,
+        "slip_hl_bps": 1.0, "slip_b_bps": 1.0,
+        "hl_bid": 0.20, "hl_ask": 0.21, "b_bid": 0.01, "b_ask": 0.02,
+        "sp_bid": 0.20, "sp_ask": 0.21,
+    }
+    if structure == "spread":
+        legs["spread"] = 9
+        legs["hl_perp_side"] = ("sell" if direction == "short_spread"
+                                else "buy")
+        legs["b_perp_side"] = ("buy" if direction == "short_spread"
+                               else "sell")
+    tid = led.trade_insert({
+        "asset": asset, "venue_b": venue, "maturity_ms": mat,
+        "structure": structure, "direction": direction, "state": "open",
+        "entry_ms": entry, "fixed_bruto": fixed, "net_apy": net_apy,
+        "capital_usd": capital, "costs_usd": costs,
+        "prices_json": json.dumps(legs)})
+    return led.trades_by_state("open")[-1]
+
+
+def _markets_by_id(hl_apr=0.10, b_apr=0.02, sp_apr=0.05, state="Normal"):
+    hl = _market(1, "Hyperliquid BTC 14 Nov 2026", "hyperliquid", "BTC",
+                 bid=0.20, ask=0.21, state=state)
+    b = _market(2, "Binance BTCUSDT 14 Nov 2026", "binance", "BTC",
+                bid=0.01, ask=0.02, state=state)
+    sp = _market(9, "Hyperliquid BTC - Binance BTCUSDT 14 Nov 2026",
+                 "hl-binance", "BTC", spread=True, venue_b="binance",
+                 bid=0.20, ask=0.21, state=state)
+    hl.floating_apr, b.floating_apr, sp.floating_apr = hl_apr, b_apr, sp_apr
+    return {1: hl, 2: b, 9: sp}
+
+
+_NO_FUNDING = lambda *a, **k: []      # noqa: E731 — hermetic tests
+
+
+class TestPhase2Marks:
+    def test_mark_records_mids_vwap_funding(self, tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led)
+        books = _books_for(("hyperliquid", "BTC"), ("binance", "BTC"))
+        m = mark_trade(led, t, _markets_by_id(), books,
+                       NOW + spec.MS_H, False, _NO_FUNDING)
+        legs = json.loads(m["legs_json"])
+        assert legs["hl"]["mid"] == pytest.approx(100.0)
+        assert legs["hl"]["exit_px"]                      # close px priced
+        assert legs["hl"]["stale"] == 0
+        yu = json.loads(m["yu_json"])["legs"]
+        assert {y["market_id"] for y in yu} == {1, 2}
+        assert all(y["floating_source"] == "boros_floating_apr"
+                   for y in yu)
+        # floating: short HL pays 10%/yr, long B receives 2%/yr
+        dt = spec.MS_H / spec.MS_YEAR
+        assert m["floating_usd"] == pytest.approx(
+            (-0.10 + 0.02) * 10_000 * dt, rel=1e-6)
+        assert m["on_schedule"] == 0
+        led.close()
+
+    def test_stale_carry_and_data_gap(self, tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led)
+        books = _books_for(("hyperliquid", "BTC"), ("binance", "BTC"))
+        mark_trade(led, t, _markets_by_id(), books, NOW + spec.MS_H,
+                   False, _NO_FUNDING)
+        # next pass: books missing -> stale carry of last mid
+        m = mark_trade(led, t, _markets_by_id(), {}, NOW + 2 * spec.MS_H,
+                       False, _NO_FUNDING)
+        legs = json.loads(m["legs_json"])
+        assert legs["hl"]["stale"] == 1
+        assert legs["hl"]["mid"] == pytest.approx(100.0)  # carried
+        assert m["data_gap"] == 0
+        # >6h stale -> data_gap
+        m2 = mark_trade(led, t, _markets_by_id(), {},
+                        NOW + 9 * spec.MS_H, False, _NO_FUNDING)
+        assert m2["data_gap"] == 1
+        led.close()
+
+
+class TestPhase2Liquidation:
+    def _pooled_equity_edge(self, tmp_path, mid_move_pct):
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led)                          # hl short, b long
+        books = {
+            ("hyperliquid", "BTC"):
+                ([(100 * (1 + mid_move_pct) * 0.9999, 500.0)],
+                 [(100 * (1 + mid_move_pct) * 1.0001, 500.0)]),
+            ("binance", "BTC"): _deep_book()}
+        m = mark_trade(led, t, _markets_by_id(), books,
+                       NOW + spec.MS_H, False, _NO_FUNDING)
+        return led, t, m
+
+    def test_pooled_death_at_threshold(self, tmp_path: Path) -> None:
+        # hl short loses ~19% => equity 2000-1900=100 = floor -> dead
+        led, t, m = self._pooled_equity_edge(tmp_path, 0.19)
+        assert m["equity_pooled"] <= spec.MM_FLOOR_PER_LEG * 10_000 * 2 + 1
+        assert "pooled" in liquidation_hits(t, m, NOW + spec.MS_H)
+        led.close()
+
+    def test_pooled_alive_just_above(self, tmp_path: Path) -> None:
+        led, t, m = self._pooled_equity_edge(tmp_path, 0.15)
+        assert m["equity_pooled"] > spec.MM_FLOOR_PER_LEG * 10_000 * 2
+        assert liquidation_hits(t, m, NOW + spec.MS_H) == []
+        led.close()
+
+    def test_boros_leg_death(self, tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led)
+        mkts = _markets_by_id()
+        mkts[1].best_bid, mkts[1].best_ask = 1.40, 1.44   # mid 1.42 vs 0.20
+        books = _books_for(("hyperliquid", "BTC"), ("binance", "BTC"))
+        m = mark_trade(led, t, mkts, books, NOW + spec.MS_H,
+                       False, _NO_FUNDING)
+        hits = liquidation_hits(t, m, NOW + spec.MS_H)
+        assert "boros" in hits
+        led.close()
+
+    def test_spread_counts_one_boros_leg(self, tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led, structure="spread",
+                        direction="short_spread")
+        legs = trade_legs(t)
+        assert len(legs["yu"]) == 1
+        assert legs["yu"][0]["market_id"] == 9
+        led.close()
+
+    def test_split_flag_at_30pct(self, tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led)                          # hl short
+        books = {
+            ("hyperliquid", "BTC"):
+                ([(129.0, 500.0)], [(131.0, 500.0)]),  # mid ~130 (+30%)
+            ("binance", "BTC"): _deep_book()}
+        m = mark_trade(led, t, _markets_by_id(), books,
+                       NOW + spec.MS_H, False, _NO_FUNDING)
+        legs_hit = split_flags(t, m)
+        assert "hl" in legs_hit and "b" not in legs_hit
+        led.close()
+
+
+class TestPhase2Funding:
+    def test_funding_sign_per_leg(self, tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led)                          # hl short, b long
+        evs = {"hyperliquid": [(NOW + 10, 0.0001)],
+               "binance": [(NOW + 10, 0.0001)]}
+        fund = lambda v, a, t0, t1: evs.get(v, [])
+        books = _books_for(("hyperliquid", "BTC"), ("binance", "BTC"))
+        m = mark_trade(led, t, _markets_by_id(), books,
+                       NOW + spec.MS_H, False, fund)
+        rows = led._con.execute(
+            "SELECT leg, cash_usd FROM boros_funding ORDER BY leg") \
+            .fetchall()
+        # short perp receives rate>0; long pays
+        assert dict(rows)["b"] == pytest.approx(-1.0)
+        assert dict(rows)["hl"] == pytest.approx(+1.0)
+        assert m["funding_usd"] == pytest.approx(0.0)
+        led.close()
+
+    def test_venue_proxy_cancels_mismatch(self, tmp_path: Path) -> None:
+        """Market row absent -> floating_source=venue_proxy and the
+        interval's floating exactly cancels the leg's funding cash."""
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led)
+        evs = {"hyperliquid": [(NOW + 10, 0.0001)],
+               "binance": [(NOW + 10, -0.0002)]}
+        fund = lambda v, a, t0, t1: evs.get(v, [])
+        books = _books_for(("hyperliquid", "BTC"), ("binance", "BTC"))
+        m = mark_trade(led, t, {}, books, NOW + spec.MS_H, False, fund)
+        yu = json.loads(m["yu_json"])["legs"]
+        assert all(y["floating_source"] == "venue_proxy" for y in yu)
+        # perp cash: hl short +1.0 (recv), b long -(-0.0002)*N = +2.0;
+        # floating proxy = -(hl cash) -(b cash) = -3.0 -> cancels to 0
+        assert m["floating_usd"] == pytest.approx(-3.0)
+        # mismatch = funding + floating = 0 exactly
+        assert m["funding_usd"] + m["floating_usd"] == pytest.approx(0.0)
+        led.close()
+
+    def test_funding_unavailable_source(self, tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led)
+        books = _books_for(("hyperliquid", "BTC"), ("binance", "BTC"))
+        m = mark_trade(led, t, _markets_by_id(), books,
+                       NOW + spec.MS_H, False, lambda *a: None)
+        legs = json.loads(m["legs_json"])
+        assert all(l["funding_source"] == "unavailable"
+                   for l in legs.values())
+        assert m["funding_usd"] == 0.0
+        led.close()
+
+
+class TestPhase2Close:
+    def test_fallback_close_after_24h(self, tmp_path: Path) -> None:
+        """Book still missing >24h after maturity -> closes at the last
+        known mid with slip = 2x entry slip, close_fallback flag."""
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led)
+        books = _books_for(("hyperliquid", "BTC"), ("binance", "BTC"))
+        mark_trade(led, t, _markets_by_id(), books, MAT - spec.MS_H,
+                   False, _NO_FUNDING)               # fresh mids on record
+        mark = mark_trade(led, t, _markets_by_id(), {}, MAT + spec.MS_H,
+                          True, _NO_FUNDING)         # stale carry mid=100
+        cid = close_trade(led, t, {}, _markets_by_id(),
+                          MAT + 25 * spec.MS_H, "maturity", mark)
+        assert cid is not None
+        row = led.closes()[0]
+        flags = json.loads(row["flags_json"])
+        assert flags.get("close_fallback") is True
+        assert flags["exit"]["hl"]["exit_slip_bps"] == pytest.approx(2.0)
+        led.close()
+
+    def test_maturity_close_waits_for_book(self, tmp_path: Path) -> None:
+        """Inside the 24h grace, a missing book defers the close."""
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led)
+        mark = mark_trade(led, t, _markets_by_id(), {}, MAT + spec.MS_H,
+                          True, _NO_FUNDING)
+        assert close_trade(led, t, {}, _markets_by_id(),
+                           MAT + spec.MS_H, "maturity", mark) is None
+        assert led.trades_by_state("open")               # still open
+        led.close()
+
+    def test_pnl_components_hand_computed(self, tmp_path: Path) -> None:
+        """Flat books at exit, no funding, floatingApr None -> proxy=0:
+        realized = fixed + basis - costs, component by component."""
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led)                          # entry ~100 both
+        mkts = _markets_by_id(hl_apr=None, b_apr=None)
+        books = _books_for(("hyperliquid", "BTC"), ("binance", "BTC"))
+        mark = mark_trade(led, t, mkts, books, MAT + spec.MS_H,
+                          True, _NO_FUNDING)
+        cid = close_trade(led, t, books, mkts, MAT + spec.MS_H,
+                          "maturity", mark)
+        row = [c for c in led.closes() if c["id"] == cid][0]
+        t_held = (MAT - NOW) / spec.MS_YEAR
+        assert row["fixed_usd"] == pytest.approx(0.18 * 10_000 * t_held)
+        assert row["floating_usd"] == pytest.approx(0.0)
+        # basis: both legs re-buy/re-sell ~2c worse than entry x qty~100
+        assert row["basis_usd"] == pytest.approx(-4.0, abs=0.6)
+        # costs: entry (4.5+1)+(5+1)=11.5, exit ~11.5, boros = 23-23 = 0
+        assert row["costs_usd"] == pytest.approx(23.0, abs=1.0)
+        assert row["realized_usd"] == pytest.approx(
+            row["fixed_usd"] + row["basis_usd"] - row["costs_usd"],
+            rel=1e-6)
+        assert row["locked_usd"] == pytest.approx(0.4 * 4000 * t_held)
+        assert row["ratio"] == pytest.approx(
+            row["realized_usd"] / row["locked_usd"], rel=1e-6)
+        led.close()
+
+    def test_liquidated_close_loses_layer_margin(self,
+                                                 tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led)
+        books = _books_for(("hyperliquid", "BTC"), ("binance", "BTC"))
+        mark = mark_trade(led, t, _markets_by_id(), books,
+                          NOW + spec.MS_H, False, _NO_FUNDING)
+        close_trade(led, t, books, _markets_by_id(), NOW + spec.MS_H,
+                    "liquidated_pooled", mark)
+        row = led.closes()[0]
+        assert row["realized_usd"] == pytest.approx(-2000.0)  # -0.2*N
+        assert led.trades_by_state("liquidated")
+        led.close()
+
+
+class TestPhase2ClustersAndGates:
+    def _closed(self, led, asset="BTC", entry=NOW, close=MAT):
+        t = _open_trade(led, asset=asset, entry=entry, mat=close)
+        books = _books_for(("hyperliquid", asset), ("binance", asset))
+        mark = mark_trade(led, t, _markets_by_id(), books,
+                          close + spec.MS_H, True, _NO_FUNDING)
+        close_trade(led, t, books, _markets_by_id(),
+                    close + spec.MS_H, "maturity", mark)
+
+    def test_overlapping_windows_share_cluster(self,
+                                               tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        self._closed(led, entry=NOW, close=MAT)
+        self._closed(led, entry=NOW + 5 * MS_D, close=MAT + 5 * MS_D)
+        self._closed(led, entry=NOW, close=MAT + 20 * MS_D)
+        ids = [c["cluster_id"] for c in led.closes()]
+        assert len(set(ids)) == 1                     # chained overlap
+        led.close()
+
+    def test_disjoint_windows_split_clusters(self, tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        self._closed(led, entry=NOW, close=NOW + 10 * MS_D)
+        self._closed(led, entry=NOW + 60 * MS_D, close=NOW + 90 * MS_D)
+        self._closed(led, asset="ETH", entry=NOW, close=NOW + 10 * MS_D)
+        ids = [c["cluster_id"] for c in led.closes()]
+        assert len(set(ids)) == 3                     # gap + diff asset
+        assert closed_clusters(led) == 3
+        led.close()
+
+    def test_n5_flag_on_bad_median(self, tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        for i in range(5):
+            t = _open_trade(led, entry=NOW + i, mat=MAT + i)
+            led.close_insert({
+                "trade_id": t["id"], "ts_ms": MAT + spec.MS_H,
+                "reason": "maturity", "flags_json": "{}",
+                "fixed_usd": 10, "floating_usd": 0, "basis_usd": -50,
+                "costs_usd": 20, "realized_usd": -60,
+                "realized_apy_cap": -0.5, "locked_usd": 130,
+                "ratio": -0.46, "cluster_id": t["id"]})
+        assert n5_kill(led) is True                   # median < 0.5
+        led.close()
+
+    def test_n5_not_triggered_on_good_median(self, tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        for i in range(5):
+            t = _open_trade(led, entry=NOW + i, mat=MAT + i)
+            led.close_insert({
+                "trade_id": t["id"], "ts_ms": MAT + spec.MS_H,
+                "reason": "maturity", "flags_json": "{}",
+                "fixed_usd": 130, "floating_usd": 0, "basis_usd": -10,
+                "costs_usd": 20, "realized_usd": 100,
+                "realized_apy_cap": 0.30, "locked_usd": 130,
+                "ratio": 0.77, "cluster_id": t["id"]})
+        assert n5_kill(led) is False
+        led.close()
+
+    def test_read_refuses_before_gate(self, tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        self._closed(led)
+        out = run_read(led, NOW)
+        assert out["refused"] is True
+        assert out["closed_clusters"] == 1
+        led.close()
+
+    def test_read_reports_after_expiry(self, tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        self._closed(led)
+        out = run_read(led, ms(2027, 7, 1))           # past expiry
+        assert out["refused"] is False
+        assert out["n_closed_trades"] == 1
+        assert out["verdict"] in ("PASS", "FAIL")
+        assert "criteria" in out and "profit_factor" in out
+        led.close()
+
+    def test_status_counts_only_with_kill_flags(self,
+                                                tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        self._closed(led)
+        led.flag_set("liquidation", 1, NOW, {"layer": "x"})
+        b = board(led)
+        assert b["counts"]["closed"] == 1
+        assert b["counts"]["closed_clusters"] == 1
+        assert b["kill_flags"]["liquidation"] is True
+        assert b["kill_flags"]["n5_kill"] is False
+        blob = json.dumps(b).lower()
+        for needle in ("pnl", "bps", "profit", "return_pct", "usd",
+                       "apy", "fixed", "ratio"):
+            assert needle not in blob, f"status leaks {needle}"
+        led.close()
+
+    def test_backfill_replays_stored_snapshots(self,
+                                               tmp_path: Path) -> None:
+        """A trade opened before deploy gets marks rebuilt from the
+        compressed snapshot pairs, pass by pass, idempotently."""
+        led = BorosLedger(tmp_path / "b.db")
+        rows = [_raw_row(1, "Hyperliquid BTC 14 Nov 2026", "Hyperliquid",
+                         "BTC", bid=0.20, ask=0.21),
+                _raw_row(2, "Binance BTCUSDT 14 Nov 2026", "Binance",
+                         "BTC", bid=0.01, ask=0.02)]
+        for ts in (NOW + spec.MS_H, NOW + 2 * spec.MS_H):
+            led.snapshot_write(ts, "markets", rows, n_rows=2,
+                               meta={"on_schedule": True})
+            led.snapshot_write(ts, "books",
+                               {"hyperliquid:BTC": _deep_book(),
+                                "binance:BTC": _deep_book()},
+                               n_rows=2, meta={"on_schedule": True})
+        t = _open_trade(led, entry=NOW)
+        stats = backfill(led, _NO_FUNDING)
+        assert stats["marks"] == 2
+        last = led.last_mark(t["id"])
+        assert last["ts_ms"] == NOW + 2 * spec.MS_H
+        stats2 = backfill(led, _NO_FUNDING)          # idempotent
+        assert stats2["marks"] == 0
+        led.close()
