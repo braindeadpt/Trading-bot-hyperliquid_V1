@@ -497,6 +497,22 @@ class TestDaemonLifecycle:
         assert not d.ledger.trades_by_state("open")
         d.shutdown()
 
+    def test_off_schedule_snapshot_never_enters(self,
+                                                tmp_path: Path) -> None:
+        """Prereg: snapshots are at :05 UTC. A catch-up/restart pass at
+        :23 records everything descriptively but can never open a trade."""
+        d = self._daemon(tmp_path)
+        d.tick(hour_floor(NOW) + 23 * 60_000)          # :23 — off-schedule
+        assert not d.ledger.trades_by_state("open")    # zero entries
+        off = d.ledger.count(
+            "boros_opportunities", "WHERE block_reason='off_schedule'")
+        assert off == 2                                # both venue winners
+        meta = d.ledger._con.execute(
+            "SELECT meta_json FROM boros_snapshots WHERE kind='markets'"
+            " ORDER BY id DESC LIMIT 1").fetchone()[0]
+        assert json.loads(meta)["on_schedule"] is False
+        d.shutdown()
+
     def test_venue_down_still_snapshots(self, tmp_path: Path) -> None:
         d = self._daemon(tmp_path, _StubFetch(binance_down=True))
         d.tick(hour_floor(NOW) + 5 * 60_000)

@@ -51,9 +51,16 @@ class BorosShadowDaemon:
         return now_ms >= due and last < hour
 
     def _snapshot_pass(self, now_ms: int) -> None:
+        # A catch-up/restart snapshot outside the :05 minute is recorded
+        # as descriptive only — it must NEVER open a trade (prereg: the
+        # snapshot is at :05 UTC; entries price off that book read).
+        minute = (now_ms % spec.MS_H) // 60_000
+        on_schedule = minute == spec.SNAPSHOT_UTC_MINUTE
+
         rows = self.fetch["markets"]()
         self.ledger.snapshot_write(now_ms, "markets", rows,
-                                   n_rows=len(rows))
+                                   n_rows=len(rows),
+                                   meta={"on_schedule": on_schedule})
         markets = parse_markets(rows)
 
         # perp books for exactly the pairs evaluate() will consume
@@ -68,10 +75,12 @@ class BorosShadowDaemon:
         self.ledger.snapshot_write(
             now_ms, "books",
             {f"{v}:{a}": b for (v, a), b in books.items()},
-            n_rows=len(books), meta={"venues_unavailable": unavailable})
+            n_rows=len(books),
+            meta={"venues_unavailable": unavailable,
+                  "on_schedule": on_schedule})
 
         cands = evaluate(markets, books, now_ms)
-        self._register(cands, now_ms)
+        self._register(cands, now_ms, on_schedule=on_schedule)
         self.ledger.meta_set("last_snapshot_hour", str(hour_floor(now_ms)))
         n_eligible = sum(1 for c in cands if c.eligible)
         logger.info("boros snapshot: %d markets -> %d candidates "
@@ -79,10 +88,12 @@ class BorosShadowDaemon:
                     len(markets), len(cands), n_eligible, unavailable)
         self.ledger.log("snapshot", {
             "markets": len(markets), "candidates": len(cands),
-            "eligible": n_eligible, "books_unavailable": unavailable},
+            "eligible": n_eligible, "books_unavailable": unavailable,
+            "on_schedule": on_schedule},
             ts_ms=now_ms)
 
-    def _register(self, cands: List[Candidate], now_ms: int) -> None:
+    def _register(self, cands: List[Candidate], now_ms: int,
+                  on_schedule: bool = True) -> None:
         """Group by (asset, venue_b, maturity): the winner is the max
         gross-fixed candidate; it enters iff eligible and the dedup +
         daily-cap rules allow. The day's single slot per asset goes to
@@ -103,6 +114,9 @@ class BorosShadowDaemon:
         entered_keys = set()
         for key in ranked:
             winner = winners[key]
+            if not on_schedule:
+                winner.block_reason = "off_schedule"
+                continue
             if (self.ledger.entries_today_for_asset(
                     key[0], day_ms) >= spec.MAX_NEW_PER_ASSET_PER_DAY):
                 winner.block_reason = "daily_cap"
