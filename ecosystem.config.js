@@ -205,6 +205,27 @@ module.exports = {
       // No max_restarts cap (same rationale as carry-shadow).
     },
 
+    // BorosLockedSpread daemon — forward-registered cross-venue
+    // fixed-funding carry study (docs/PREREGISTER_BOROS_SPREAD.md,
+    // frozen 2026-10-15). Hourly Boros markets + perp-L2 snapshots at
+    // :05 UTC + paper entries in data/research/boros_shadow.db. Zero
+    // orders, zero API keys. Registered 2026-10-15, DEPLOY GATED: no
+    // pm2 start until the owner approves it explicitly.
+    {
+      name: 'boros-shadow',
+      script: 'deploy/macos/run_boros_shadow.sh',
+      cwd: CWD,
+      interpreter: 'bash',
+      exec_mode: 'fork',
+      instances: 1,
+      autorestart: true,
+      merge_logs: true,
+      out_file: `${LOGS}/boros-shadow-out.log`,
+      error_file: `${LOGS}/boros-shadow-error.log`,
+      restart_delay: 60000,
+      kill_timeout: 15000,
+    },
+
     cron('watchdogs', 'deploy/macos/run_watchdogs.sh', '45 */6 * * *'),
     cron('overnight', 'deploy/macos/run_overnight.sh', '0 5 * * *'),
     cron('backup-monthly', 'deploy/macos/run_backup_monthly.sh', '0 4 1 * *'),

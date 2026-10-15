@@ -157,6 +157,11 @@ ACCEPTED_HIGH_BASELINE: FrozenSet[Tuple[str, str]] = frozenset({
     # public calendar endpoints (DefiLlama + CryptoRank/Tokenomist) are
     # module constants; urlopen targets are never caller-controlled.
     ("AUDIT-003", "research/unlock_shadow/calendar_snapshot.py"),
+    # boros_shadow/boros_client.py — the frozen prereg's declared public
+    # market endpoints (Boros markets index + per-venue perp L2 books)
+    # are module constants in spec.py; urlopen targets are never
+    # caller-controlled.
+    ("AUDIT-003", "boros_shadow/boros_client.py"),
 })
 
 
@@ -197,6 +202,13 @@ _ALLOWED_DOMAINS: Tuple[str, ...] = (
     "defillama-datasets.llama.fi",
     "api.cryptorank.io",
     "api.tokenomist.ai",
+    # api.boros.finance + the perp-L2 venues — the boros-shadow prereg's
+    # declared public market-data endpoints (docs/PREREGISTER_BOROS_SPREAD.md
+    # Phase-1.1/1.2). Public read-only GETs, no keys.
+    "api.boros.finance",
+    "api.gateio.ws",
+    "api-futures.kucoin.com",
+    "mainnet.zklighter.elliot.ai",
     "127.0.0.1",
     "localhost",
 )
