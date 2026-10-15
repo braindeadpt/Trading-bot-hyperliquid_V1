@@ -141,8 +141,10 @@ Medição fixada ex ante; a produção tinha 0 entradas quando escrito.
   de funding. A rate corrente é amostrada a cada passe (`funding-rates`
   público, rows `exchange='lighter'` para os market_ids BTC=1, ETH=0,
   HYPE=24) e gravada em `boros_rates` — série própria acumulada
-  forward desde a entrada: cash = sinal × rate × N × Δt(horas) por
-  intervalo de passe (convenção por-hora, mesmo regime do HL),
+  forward desde a entrada: cash = sinal × rate × N × Δt/8h por
+  intervalo de passe — a rate do endpoint é por período de 8h
+  (pin empírico 2026-10-15: rate × 1095 == floatingApr Boros, exacto
+  para BTC e ETH; guardado por teste network com tolerância 30%),
   `funding_source='lighter_sampled'`. Numa perna Lighter sem amostra
   no intervalo, e em qualquer venue cujo histórico falhe no intervalo,
   o funding da perna é proxied ao floating Boros medido —

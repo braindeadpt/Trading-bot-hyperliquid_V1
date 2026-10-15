@@ -34,6 +34,11 @@ BYBIT_FUNDING = "https://api.bybit.com/v5/market/funding/history"
 KUCOIN_FUNDING = "https://api-futures.kucoin.com/api/v1/contract/funding-rates"
 LIGHTER_RATES = ("https://mainnet.zklighter.elliot.ai/api/v1/"
                  "funding-rates")
+# Empirically pinned 2026-10-15 (entries=0): the funding-rates table is
+# expressed per 8-hour period — 9.6e-5 x 1095 = 0.1051 == Boros
+# floatingApr for the Lighter BTC/ETH YU markets, exact. Accumulate the
+# sampled series per 8h interval, not per hour.
+LIGHTER_RATE_PERIOD_H = 8
 # HL reuses HL_INFO (fundingHistory); Lighter has no public funding
 # history (probed 2026-10-15) -> source 'unavailable', contribution 0.
 # Boros settlement history is not public (probed 2026-10-15) -> the

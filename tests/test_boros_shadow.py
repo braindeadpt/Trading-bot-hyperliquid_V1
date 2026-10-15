@@ -883,12 +883,13 @@ class TestPhase2Funding:
                        {"BTC": 0.0001})
         legs = json.loads(m["legs_json"])
         assert legs["b"]["funding_source"] == "lighter_sampled"
-        # long perp pays rate>0: -0.0001 x $10k x 1h
+        # long perp pays rate>0: -0.0001 x $10k x 1/8 of an 8h period
+        # (endpoint rate is per-8h — pinned vs Boros floatingApr)
         rows = led._con.execute(
             "SELECT leg, cash_usd, source FROM boros_funding"
             " WHERE leg='b'").fetchall()
         assert rows[0][2] == "lighter_sampled"
-        assert rows[0][1] == pytest.approx(-1.0)       # -rate*N*1h
+        assert rows[0][1] == pytest.approx(-0.125)
         led.close()
 
     def test_lighter_no_sample_zero_mismatch(self,

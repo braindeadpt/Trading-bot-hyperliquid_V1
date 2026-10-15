@@ -111,8 +111,9 @@ def fetch_lighter_rates(fetch_fn: Optional[FetchFn] = None
                         ) -> Dict[str, float]:
     """Lighter current funding rates, sampled per pass: the public
     `funding-rates` table carries one row per (market_id, exchange);
-    exchange='lighter' is the venue's own rate (per-hour convention,
-    same regime as HL). Returns {asset: rate} — {} on failure."""
+    exchange='lighter' is the venue's own rate — expressed per 8-hour
+    period (pinned 2026-10-15: rate x 1095 == Boros floatingApr).
+    Returns {asset: rate} — {} on failure."""
     f = fetch_fn or fetch_json
     try:
         d = f(f"{spec.LIGHTER_RATES}?limit=500")

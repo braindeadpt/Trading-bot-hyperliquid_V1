@@ -158,12 +158,14 @@ def mark_trade(ledger, trade: Dict[str, Any],
         t0 = ledger.funding_cursor(tid, key)
         t0 = int(t0) if t0 is not None else int(trade["entry_ms"])
         if leg["venue"] == "lighter":
-            # no public history -> own sampled series, weighted by the
-            # pass interval (rate is per-hour like HL's)
+            # no public history -> own sampled series; the endpoint's
+            # rate is per-8h (pinned vs Boros floatingApr), so weight by
+            # pass interval in 8h units
             r = (rate_samples or {}).get(trade["asset"])
             if r is not None:
-                dt_h = max(0.0, (now_ms - prev_ts) / spec.MS_H)
-                cash = _funding_cash(leg["side"], r) * dt_h
+                dt_8h = max(0.0, (now_ms - prev_ts)
+                          / (spec.LIGHTER_RATE_PERIOD_H * spec.MS_H))
+                cash = _funding_cash(leg["side"], r) * dt_8h
                 ledger.funding_insert({
                     "trade_id": tid, "leg": key, "venue": "lighter",
                     "ts_ms": now_ms, "rate": r, "cash_usd": cash,
