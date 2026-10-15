@@ -74,10 +74,14 @@ def _perp_cost_usd(venue: str, side: str, slip_bps: float) -> float:
     return (spec.TAKER_BPS[venue] + slip_bps) / 1e4 * spec.NOTIONAL_USD * 2
 
 
-def _boros_cost_usd(m: BorosMarket, t_years: float) -> float:
+def _boros_cost_usd(m: BorosMarket, t_years: float,
+                    has_book: bool = False) -> float:
     """Boros taker + settle fee pro-rata to maturity, plus 1 bp/yr
-    slippage per Boros leg."""
-    rate = m.taker_fee + m.settle_fee + spec.BOROS_SLIP_RATE
+    slippage per Boros leg — prereg makes the slip conditional on no
+    Boros book existing; the public API exposes none, so has_book stays
+    False until a book fetcher lands (forward amendment territory)."""
+    slip = 0.0 if has_book else spec.BOROS_SLIP_RATE
+    rate = m.taker_fee + m.settle_fee + slip
     return rate * spec.NOTIONAL_USD * t_years
 
 
@@ -107,8 +111,6 @@ def evaluate(markets: List[BorosMarket],
     for asset, mat in sorted(keys):
         hl = hl_yu.get((asset, mat))
         ttm_d = (mat - now_ms) / spec.MS_D
-        if asset not in spec.ASSETS:
-            continue
         if not (spec.MIN_MATURITY_D <= ttm_d <= spec.MAX_MATURITY_D):
             continue
         for venue_b in spec.B_VENUES:
@@ -172,8 +174,16 @@ def _price_candidate(c: Candidate, hl: BorosMarket,
     perp_cost = (_perp_cost_usd("hyperliquid", hl_side, slip_hl)
                  + _perp_cost_usd(c.venue_b, b_side, slip_b))
     c.costs_usd = perp_cost + boros_cost
+    mid_hl = book_mid(book_hl)
+    mid_b = book_mid(book_b)
     c.legs.update({
         "hl_perp_side": hl_side, "b_perp_side": b_side,
+        # all entry prices (prereg: "guardar o trade com todos os preços")
+        "hl_perp_mid": mid_hl, "b_perp_mid": mid_b,
+        "hl_perp_px": mid_hl * (1 + slip_hl / 1e4) if hl_side == "buy"
+        else mid_hl * (1 - slip_hl / 1e4),
+        "b_perp_px": mid_b * (1 + slip_b / 1e4) if b_side == "buy"
+        else mid_b * (1 - slip_b / 1e4),
         "slip_hl_bps": slip_hl, "slip_b_bps": slip_b,
         **({"hl_bid": hl.best_bid, "hl_ask": hl.best_ask} if hl else {}),
         **({"b_bid": b.best_bid, "b_ask": b.best_ask} if b else {}),
@@ -182,7 +192,11 @@ def _price_candidate(c: Candidate, hl: BorosMarket,
     fixed_usd = c.fixed_bruto * spec.NOTIONAL_USD * t_years
     c.net_apy = ((fixed_usd - c.costs_usd) / c.capital_usd / t_years
                  if t_years > 0 else None)
-    if c.net_apy is not None and c.net_apy >= spec.NET_APY_MIN:
+    if c.asset not in spec.ASSETS:
+        # prereg: assets outside {BTC,ETH,HYPE} are descriptive — priced
+        # and recorded, never eligible
+        c.block_reason = "off_gate_asset"
+    elif c.net_apy is not None and c.net_apy >= spec.NET_APY_MIN:
         c.eligible = True
     else:
         c.block_reason = (f"net_apy "
@@ -199,8 +213,9 @@ def needed_books(markets: List[BorosMarket], now_ms: int
              and m.state == "Normal"}
     out = set()
     for m in markets:
-        if m.asset not in spec.ASSETS or m.state != "Normal":
+        if m.state != "Normal":
             continue
+        # off-gate assets are descriptive — still priced, so still need books
         ttm_d = (m.maturity_ms - now_ms) / spec.MS_D
         if not (spec.MIN_MATURITY_D <= ttm_d <= spec.MAX_MATURITY_D):
             continue

@@ -149,13 +149,19 @@ class TestUniverse:
         assert fees.taker_fee == pytest.approx(0.0005)     # 5e14/1e18
         assert fees.settle_fee == pytest.approx(0.001)
 
-    def test_off_whitelist_assets_never_evaluated(self) -> None:
+    def test_off_whitelist_assets_are_descriptive_only(self) -> None:
+        """Prereg: assets outside {BTC,ETH,HYPE} are DESCRIPTIVE — priced
+        and recorded with real math, never eligible to enter."""
         hl = _market(1, "Hyperliquid SOL 14 Nov 2026", "hyperliquid",
                      "SOL", bid=0.20, ask=0.21)
         b = _market(2, "Binance SOLUSDT 14 Nov 2026", "binance", "SOL",
                     bid=0.01, ask=0.02)
         books = _books_for(("hyperliquid", "SOL"), ("binance", "SOL"))
-        assert evaluate([hl, b], books, NOW) == []
+        out = evaluate([hl, b], books, NOW)
+        assert len(out) == 2                       # recorded, not dropped
+        assert all(not c.eligible for c in out)
+        assert all(c.block_reason == "off_gate_asset" for c in out)
+        assert all(c.net_apy is not None for c in out)   # priced for real
 
     def test_maturity_outside_window_skipped(self) -> None:
         for days in (5, 120):                       # outside [14,90]
@@ -440,6 +446,10 @@ class TestDaemonLifecycle:
         legs = json.loads(t["prices_json"])
         assert legs["hl_perp_side"] == "sell" and legs["b_perp_side"] == "buy"
         assert "hl_bid" in legs and "b_ask" in legs
+        # prereg: "guardar o trade com todos os preços de entrada"
+        assert legs["hl_perp_mid"] and legs["b_perp_mid"]
+        assert legs["hl_perp_px"] < legs["hl_perp_mid"]   # sell below mid
+        assert legs["b_perp_px"] > legs["b_perp_mid"]     # buy above mid
         opps = d.ledger.count("boros_opportunities")
         assert opps == 4                            # 2 venues x 2 directions
         capped = d.ledger.count(
@@ -514,7 +524,12 @@ class TestRealFixture:
             books[(venue, asset)] = _deep_book()
         out = evaluate(markets, books, ms(2026, 10, 15))
         assert out                                     # candidates produced
-        assert all(c.asset in spec.ASSETS for c in out)
+        for c in out:
+            if c.asset not in spec.ASSETS:             # descriptive layer
+                assert not c.eligible
+                assert c.block_reason in ("off_gate_asset",
+                                          "book_thin") or \
+                    c.block_reason.startswith("book_unavailable")
         assert all(spec.MIN_MATURITY_D <= c.ttm_days
                    <= spec.MAX_MATURITY_D for c in out)
 
