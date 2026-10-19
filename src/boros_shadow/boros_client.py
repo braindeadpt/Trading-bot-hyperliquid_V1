@@ -11,6 +11,21 @@ with skip). Real shapes verified 2026-10-15:
 - config.takerFee / extConfig.settleFeeRate are scaled by 1e18
 - metadata.platformName is the venue ("Hyperliquid", "Binance",
   "HL-GATE" on spread markets); metadata.assetSymbol is the asset.
+
+Spread markets (launched 2026-10-15; live example marketId 232,
+fetched 2026-10-19 — verbatim fields):
+  imData.name    "Hyperliquid ETH - Gate ETHUSDT 27 Nov 2026"
+  imData.symbol  "HYPERLIQUID-ETH-GATE-ETHUSDT-27NOV2026"
+  imData.maturity 1795737600
+  metadata.assetSymbol   "ETH"
+  metadata.platformName  "HL-GATE"     (sign: HL leg - B leg)
+  metadata.isSpreadMarket true
+  extConfig.paymentPeriod 28800        (8h settlements, vs 3600 on YU)
+  extConfig.settleFeeRate  "2000000000000000"  (0.2%/yr)
+  config.takerFee        "1000000000000000"    (0.1%/yr)
+  data.bestBid/bestAsk   0.0335/0.0345 (the tradeable fixed spread)
+  data.floatingApr       0.02847       (realized HL - Gate differential)
+  state "Normal"
 """
 from __future__ import annotations
 

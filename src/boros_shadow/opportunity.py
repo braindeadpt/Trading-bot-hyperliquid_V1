@@ -228,7 +228,11 @@ def needed_books(markets: List[BorosMarket], now_ms: int
 
 
 def pick_winner(cands: List[Candidate]) -> Optional[Candidate]:
-    """The prereg's 'fixo bruto = melhor de YU-simples ou spread' — the
-    opportunity is defined by the largest fixed capture. The entry then
-    runs on that candidate's own net."""
-    return max(cands, key=lambda c: c.fixed_bruto, default=None)
+    """Winner = the structure/direction with the largest NET return on
+    committed capital (conformance note 2026-10-19: 'usa-se o melhor dos
+    dois' binds on net-on-capital, not gross fixed — the spread leg pays
+    one set of Boros fees on 0.3N, so gross and net can rank
+    differently). Only priced candidates compete; an unpriced one can
+    never enter."""
+    priced = [c for c in cands if c.net_apy is not None]
+    return max(priced, key=lambda c: c.net_apy, default=None)

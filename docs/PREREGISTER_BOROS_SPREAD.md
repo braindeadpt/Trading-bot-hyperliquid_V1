@@ -203,3 +203,16 @@ Medição fixada ex ante; a produção tinha 0 entradas quando escrito.
 - **Backfill**: trades abertos antes deste deploy são re-marcados passe
   a passe a partir dos snapshots comprimidos (mesma pipeline live) antes
   de o daemon retomar — corre no `boot()`.
+
+- **Nota de conformidade 2026-10-19** (spread markets ao vivo desde
+  2026-10-15): (a) a open-api expoe os spread markets com
+  `metadata.isSpreadMarket=true`, `platformName='HL-GATE'`,
+  `extConfig.paymentPeriod=28800` (8h) e taxas proprias (taker
+  0,1%/ano, settle 0,2%/ano); exemplo real marketId 232 documentado em
+  `boros_client.py`. (b) O colector ja os lia desde 2026-10-15; a
+  correcao de hoje fixa a escolha da estrutura pelo **maior liquido
+  sobre o capital** (nao pelo fixo bruto) — interpretacao vinculativa de
+  "usa-se o melhor dos dois", porque as taxas e o capital diferem por
+  estrutura. (c) O status expoe contagens por estrutura (oportunidades,
+  quase-entradas, entradas); zero PnL antes do read gate. Nenhuma regra
+  de entrada, janela, capital ou gate foi alterada.

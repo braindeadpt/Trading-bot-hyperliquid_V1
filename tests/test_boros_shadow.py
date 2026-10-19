@@ -301,8 +301,11 @@ class TestEntryLimits:
         b = _market(2, venue="binance", bid=0.01, ask=0.02)
         thin = ([(99.0, 0.001)], [(101.0, 0.001)])    # $200 total depth
         books = {("hyperliquid", "BTC"): thin, ("binance", "BTC"): thin}
-        c = pick_winner(evaluate([hl, b], books, NOW))
-        assert not c.eligible and c.block_reason == "book_thin"
+        out = evaluate([hl, b], books, NOW)
+        # unpriced candidates are recorded blocked and can never win
+        assert all(not c.eligible and c.block_reason == "book_thin"
+                   for c in out)
+        assert pick_winner(out) is None
 
     def test_venue_unavailable_marks_and_skips(self) -> None:
         """A venue without a book this snapshot is marked unavailable —
@@ -1111,4 +1114,147 @@ class TestPhase2ClustersAndGates:
         assert last["ts_ms"] == NOW + 2 * spec.MS_H
         stats2 = backfill(led, _NO_FUNDING)          # idempotent
         assert stats2["marks"] == 0
+        led.close()
+
+
+# ─── spread-market conformance (2026-10-19) ──────────────────────────────────
+
+# Trimmed verbatim live row — marketId 232 fetched from
+# open-api/v1/markets on 2026-10-19 (ETH HL-Gate spread, 27 Nov 2026).
+_SPREAD_232_ROW = {
+    "marketId": 232,
+    "imData": {"name": "Hyperliquid ETH - Gate ETHUSDT 27 Nov 2026",
+               "symbol": "HYPERLIQUID-ETH-GATE-ETHUSDT-27NOV2026",
+               "maturity": 1795737600},
+    "metadata": {"name": "ETH Spread", "assetSymbol": "ETH",
+                 "platformName": "HL-GATE", "isSpreadMarket": True},
+    "config": {"takerFee": "1000000000000000"},
+    "extConfig": {"settleFeeRate": "2000000000000000",
+                  "paymentPeriod": 28800},
+    "data": {"bestBid": 0.03354968659088388,
+             "bestAsk": 0.03448027674701263,
+             "floatingApr": 0.02847000000000001,
+             "notionalOI": 1172.6353400355586},
+    "state": "Normal",
+}
+
+
+class TestSpreadConformance:
+    def test_real_spread_row_parses(self) -> None:
+        """The verbatim 232 payload must decode to a spread market on
+        the gate venue with its own fee regime (0.1%/yr taker,
+        0.2%/yr settle — not the YU 0.05%/0.1%)."""
+        out = parse_markets([_SPREAD_232_ROW])
+        assert len(out) == 1
+        m = out[0]
+        assert m.is_spread and m.asset == "ETH" and m.venue_b == "gate"
+        assert m.market_id == 232
+        assert m.maturity_ms == 1795737600 * 1000
+        assert m.best_bid == pytest.approx(0.03354968659088388)
+        assert m.floating_apr == pytest.approx(0.02847)
+        assert m.taker_fee == pytest.approx(0.001)
+        assert m.settle_fee == pytest.approx(0.002)
+
+    def test_winner_is_highest_net_not_highest_fixed(self) -> None:
+        """2026-10-19 binding: 'usa-se o melhor' = largest NET on
+        capital. A spread quoting slightly below the simple gross
+        still wins — one Boros leg of fees on 0.3N."""
+        hl = _market(bid=0.10, ask=0.11)
+        b = _market(2, venue="gate", bid=0.04, ask=0.05)
+        sp = _market(9, "Hyperliquid BTC - Gate BTCUSDT 14 Nov 2026",
+                     "hl-gate", "BTC", spread=True, venue_b="gate",
+                     bid=0.049, ask=0.051,     # < 0.05 simple gross
+                     taker=1e15, settle=2e15)
+        books = _books_for(("hyperliquid", "BTC"), ("gate", "BTC"))
+        out = evaluate([hl, b, sp], books, NOW)
+        simple = [c for c in out if c.structure == "simple"
+                  and c.direction == "short_hl_long_b"][0]
+        spr = [c for c in out if c.direction == "short_spread"][0]
+        assert simple.fixed_bruto > spr.fixed_bruto      # 0.05 > 0.049
+        assert spr.net_apy > simple.net_apy              # but cheaper
+        win = pick_winner(out)
+        assert win.structure == "spread"
+        # sanity: the numbers really do diverge
+        assert spr.capital_usd == pytest.approx(0.3 * spec.NOTIONAL_USD)
+        assert simple.capital_usd == pytest.approx(0.4 * spec.NOTIONAL_USD)
+
+    def test_winner_ignores_unpriced(self) -> None:
+        """A candidate that could not price (no book) must never win,
+        even with the highest fixed."""
+        hl = _market(bid=0.10, ask=0.11)
+        b = _market(2, venue="gate", bid=0.04, ask=0.05)
+        sp = _market(9, "Hyperliquid BTC - Gate BTCUSDT 14 Nov 2026",
+                     "hl-gate", "BTC", spread=True, venue_b="gate",
+                     bid=0.50, ask=0.51)
+        out = evaluate([hl, b, sp], {}, NOW)    # no books at all
+        assert all(c.net_apy is None for c in out)
+        assert pick_winner(out) is None
+        # spread priced, simple unpriced: only spread in contention
+        books = _books_for(("hyperliquid", "BTC"), ("gate", "BTC"))
+        out2 = evaluate([hl, b, sp], books, NOW)
+        assert pick_winner(out2).structure == "spread"
+
+    def test_spread_boros_costs_one_leg(self) -> None:
+        """Fees: Boros taker+settle+slip once — not x2 like simple."""
+        t = 30 / 365.0
+        sp = _market(9, "Hyperliquid BTC - Gate BTCUSDT 14 Nov 2026",
+                     "hl-gate", "BTC", spread=True, venue_b="gate",
+                     bid=0.20, ask=0.21, taker=1e15, settle=2e15)
+        books = _books_for(("hyperliquid", "BTC"), ("gate", "BTC"))
+        c = [x for x in evaluate([sp], books, NOW)
+             if x.direction == "short_spread"][0]
+        slip = (abs(100 * 0.9999 - 100) / 100) * 1e4    # ~1bp
+        perp = ((4.5 + slip) + (5.0 + slip)) / 1e4 * 10_000 * 2
+        boros_1leg = (0.001 + 0.002 + 0.0001) * 10_000 * t
+        assert c.costs_usd == pytest.approx(perp + boros_1leg, abs=0.5)
+
+    def test_spread_mark_floating_differential(self,
+                                               tmp_path: Path) -> None:
+        """Spread trade: the single Boros leg floats the market's own
+        floatingApr (the HL - B differential); when the market row is
+        gone the proxy cancels BOTH perp fundings (sum, not one leg)."""
+        led = BorosLedger(tmp_path / "b.db")
+        t = _open_trade(led, structure="spread", direction="short_spread")
+        books = _books_for(("hyperliquid", "BTC"), ("binance", "BTC"))
+        mkts = _markets_by_id(sp_apr=0.03)
+        fund = lambda v, a, t0, t1: [(NOW + 1, 0.0001)]   # noqa: E731
+        m = mark_trade(led, t, mkts, books, NOW + spec.MS_H, False, fund)
+        yu = json.loads(m["yu_json"])["legs"]
+        assert len(yu) == 1 and yu[0]["market_id"] == 9
+        assert yu[0]["floating_source"] == "boros_floating_apr"
+        dt = spec.MS_H / spec.MS_YEAR
+        # short spread pays the differential: -0.03 * N * dt
+        assert m["floating_usd"] == pytest.approx(-0.03 * 10_000 * dt,
+                                                rel=1e-6)
+        # market row gone -> floating proxies BOTH perp fundings
+        m2 = mark_trade(led, t, {}, books, NOW + 2 * spec.MS_H,
+                        False, fund)
+        yu2 = json.loads(m2["yu_json"])["legs"]
+        assert yu2[0]["floating_source"] == "venue_proxy"
+        led.close()
+
+    def test_status_counts_split_by_structure(self,
+                                              tmp_path: Path) -> None:
+        led = BorosLedger(tmp_path / "b.db")
+        led.opportunity_insert({
+            "ts_ms": NOW, "asset": "BTC", "venue_b": "gate",
+            "maturity_ms": MAT, "structure": "simple",
+            "direction": "x", "fixed_bruto": 0.1, "net_apy": 0.06,
+            "capital_usd": 4000, "costs_usd": 10, "ttm_days": 30,
+            "eligible": 0, "entered": 0, "block_reason": "",
+            "legs_json": "{}"})
+        led.opportunity_insert({
+            "ts_ms": NOW, "asset": "BTC", "venue_b": "gate",
+            "maturity_ms": MAT, "structure": "spread",
+            "direction": "x", "fixed_bruto": 0.09, "net_apy": 0.07,
+            "capital_usd": 3000, "costs_usd": 8, "ttm_days": 30,
+            "eligible": 0, "entered": 0, "block_reason": "",
+            "legs_json": "{}"})
+        b = board(led)
+        c = b["counts"]
+        assert (c["opportunities_spread"], c["opportunities_simple"]) \
+            == (1, 1)
+        assert (c["near_entries_spread"], c["near_entries_simple"]) \
+            == (1, 1)
+        assert (c["entries_spread"], c["entries_simple"]) == (0, 0)
         led.close()

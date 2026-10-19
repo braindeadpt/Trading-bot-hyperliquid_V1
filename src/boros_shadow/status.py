@@ -31,6 +31,23 @@ def board(ledger: BorosLedger, now_ms: int | None = None) -> Dict[str, Any]:
             "boros_trades", "WHERE state='liquidated'"),
         "marks": ledger.count("boros_marks"),
         "closed_clusters": closed_clusters(ledger),
+        # per-structure (conformance 2026-10-19): counts only
+        "opportunities_spread": ledger.count(
+            "boros_opportunities", "WHERE structure='spread'"),
+        "opportunities_simple": ledger.count(
+            "boros_opportunities", "WHERE structure='simple'"),
+        "near_entries_spread": ledger.count(
+            "boros_opportunities",
+            "WHERE structure='spread' AND entered=0 AND net_apy >= ?",
+            (spec.NEAR_MISS_APY,)),
+        "near_entries_simple": ledger.count(
+            "boros_opportunities",
+            "WHERE structure='simple' AND entered=0 AND net_apy >= ?",
+            (spec.NEAR_MISS_APY,)),
+        "entries_spread": ledger.count(
+            "boros_trades", "WHERE structure='spread'"),
+        "entries_simple": ledger.count(
+            "boros_trades", "WHERE structure='simple'"),
     }
     kill_flags = {
         # booleans only — prereg permits kill surfacing pre-gate
