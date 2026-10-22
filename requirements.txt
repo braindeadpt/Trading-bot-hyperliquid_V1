@@ -16,6 +16,7 @@ aiosignal==1.4.0          # Required by aiohttp (>=1.4.0 for aiohttp 3.14)
 propcache==0.5.2          # Required by aiohttp 3.14 (response payload caching)
 requests==2.34.2          # Sync HTTP fallback — CVE sweep: .netrc leak + temp-file reuse fixed
 urllib3==2.7.0           # Required by requests — CVE sweep: 12 advisories fixed (2.5.0-2.7.0)
+certifi==2026.10.19       # CA bundle — distrusts compromised eMudhra intermediates (Oct 2026)
 charset-normalizer==3.4.2 # Required by requests / aiohttp
 idna==3.18                # Required by requests / aiohttp — CVE sweep: crafted-input DoS fixed in 3.15
 frozenlist==1.6.0         # Required by aiohttp
