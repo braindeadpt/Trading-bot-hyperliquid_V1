@@ -57,7 +57,7 @@ echo "jev-judge: loop start pid=$$ sleep=${SLEEP_S}s pass-timeout=${PASS_TIMEOUT
 while :; do
     echo "jev-judge: pass start $(date -u +%H:%M:%SZ)"
     ./.venv/bin/python -u -X utf8 scripts/research/jev_shadow_judge.py \
-        --once --max-tokens 4000000 &
+        --once --max-tokens 8000000 &
     CHILD_PID=$!
     # bounded wait: watcher kills a wedged pass so the loop never stalls
     ( sleep "$PASS_TIMEOUT_S"; kill -KILL "$CHILD_PID" 2>/dev/null ) &
