@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+
+from src.utils.pause_flag import collectors_paused
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -341,6 +343,9 @@ class ResearchDatabase(Database):
         meta: SeriesMetadata,
     ) -> None:
         """Persist candles with provenance metadata."""
+        if collectors_paused():
+            return
+
         if not candles:
             return
         table = self._resolve_table(timeframe)
@@ -401,6 +406,9 @@ class ResearchDatabase(Database):
 
         Returns ``(inserted, skipped_protected)``.
         """
+        if collectors_paused():
+            return
+
         if not candles:
             return 0, 0
         from src.data.series_metadata import PROTECTED_OFFICIAL_SOURCES
@@ -431,6 +439,9 @@ class ResearchDatabase(Database):
         *,
         freshness_ms: Optional[int] = None,
     ) -> None:
+        if collectors_paused():
+            return
+
         if not records:
             return
         sql = """
@@ -460,6 +471,9 @@ class ResearchDatabase(Database):
         *,
         freshness_ms: Optional[int] = None,
     ) -> None:
+        if collectors_paused():
+            return
+
         if not records:
             return
         sql = """
@@ -483,6 +497,9 @@ class ResearchDatabase(Database):
             conn.commit()
 
     def save_l2_snapshots(self, records: List[L2SnapshotRecord]) -> None:
+        if collectors_paused():
+            return
+
         if not records:
             return
         sql = """
@@ -505,6 +522,9 @@ class ResearchDatabase(Database):
             conn.commit()
 
     def save_trade_tape(self, records: List[TradeTapeRecord]) -> None:
+        if collectors_paused():
+            return
+
         if not records:
             return
         sql = """
@@ -534,6 +554,9 @@ class ResearchDatabase(Database):
         *,
         detail: Optional[Dict[str, Any]] = None,
     ) -> None:
+        if collectors_paused():
+            return
+
         gap_ms = max(0, gap_end_ms - gap_start_ms)
         detected = int(time.time() * 1000)
         detail_json = json.dumps(detail, sort_keys=True) if detail else None
@@ -593,6 +616,9 @@ class ResearchDatabase(Database):
         rows: List[Dict[str, Any]],
     ) -> int:
         """Insert zone rows into ``liquidation_map_snapshots``. Returns row count."""
+        if collectors_paused():
+            return 0
+
         if not rows:
             return 0
         sql = """
@@ -625,6 +651,9 @@ class ResearchDatabase(Database):
 
     def save_dvol_daily(self, rows: List[Tuple[str, int, float]]) -> int:
         """Upsert daily DVOL closes. ``rows`` = (currency, timestamp_ms, close)."""
+        if collectors_paused():
+            return 0
+
         if not rows:
             return 0
         ingested = int(time.time() * 1000)
@@ -661,6 +690,9 @@ class ResearchDatabase(Database):
 
     def save_deribit_snapshot(self, row: Dict[str, Any]) -> None:
         """Upsert one Deribit market snapshot (perp basis + ATM IV)."""
+        if collectors_paused():
+            return
+
         sql = """
             INSERT OR REPLACE INTO deribit_snapshot (
                 currency, timestamp_ms, index_price, perp_price, basis_bps,

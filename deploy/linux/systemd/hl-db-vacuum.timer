@@ -1,0 +1,9 @@
+[Unit]
+Description=Monthly VACUUM at 04:30 UTC day 2 (outside :05-:10 and 01:02-01:05 UTC windows)
+
+[Timer]
+OnCalendar=*-*-02 04:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,8 @@
+[Unit]
+Description=Hyperliquid disk guard (80% warn / 85% PAUSE_COLLECTORS)
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/hyperliquid/bot.env
+Environment=DISK_GUARD_FS=/srv/hl/data
+ExecStart=/usr/local/sbin/hl-disk-guard.sh

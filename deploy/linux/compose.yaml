@@ -1,0 +1,117 @@
+# bots-01 — Hyperliquid paper bot, one container per pm2 process.
+# Shares the host with Meridian (untouched): HL dashboard = 8091,
+# Meridian = 8092 (Tailscale serve /hl and /meridian already mapped).
+# Data budget: HL ~20 GB under /srv/hl, Meridian ~10 GB elsewhere.
+#
+# First boot on the host (once):
+#   sudo mkdir -p /srv/hl/data/{research,l2_books,live,backups} /srv/hl/logs /etc/hyperliquid
+#   sudo cp deploy/linux/bot.env.example /etc/hyperliquid/bot.env
+#   sudoedit /etc/hyperliquid/bot.env && sudo chmod 600 /etc/hyperliquid/bot.env
+#   sudo chown -R 101000:101000 /srv/hl            # userns-remap: bot uid 1000
+#   docker compose -f deploy/linux/compose.yaml up -d
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-base: &base
+  image: hyperliquid-bot:local
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  user: "1000:1000"
+  env_file: /etc/hyperliquid/bot.env
+  restart: unless-stopped
+  stop_grace_period: 25s
+  logging: *default-logging
+  volumes:
+    - /srv/hl/data:/data
+    - /srv/hl/logs:/opt/hyperliquid/logs
+    - /home/admin/.aws:/home/bot/.aws:ro   # profile `reservoir`, read-only
+
+services:
+  hyperliquid:
+    <<: *base
+    container_name: hl-paper
+    ports:
+      - "127.0.0.1:8091:5000"   # dashboard; tailscale serve /hl -> :8091
+    command: python -u -X utf8 main.py --config config/settings.yaml --mode paper
+
+  jev-judge:
+    <<: *base
+    container_name: hl-jev-judge
+    command: >
+      sh -c 'while :; do
+        python -u -X utf8 scripts/research/jev_shadow_judge.py --once --max-tokens 8000000;
+        python -u -m src.utils.cron_loop 300;
+      done'
+
+  carry-shadow:
+    <<: *base
+    container_name: hl-carry-shadow
+    command: python -u -X utf8 scripts/research/run_carry_shadow.py
+
+  outcome-eval:
+    <<: *base
+    container_name: hl-outcome-eval
+    command: >
+      sh -c 'while :; do
+        python -u -X utf8 scripts/research/evaluate_shadow_outcomes.py --persist --since-days 14;
+        python -u -m src.utils.cron_loop 10800 1200;
+      done'
+
+  # DEPLOY GATED (same as on the Mac): start explicitly with
+  #   docker compose -f deploy/linux/compose.yaml --profile gated up -d
+  unlock-shadow:
+    <<: *base
+    container_name: hl-unlock-shadow
+    profiles: ["gated"]
+    command: python -u -X utf8 scripts/research/run_unlock_shadow.py
+
+  boros-shadow:
+    <<: *base
+    container_name: hl-boros-shadow
+    profiles: ["gated"]
+    command: python -u -X utf8 scripts/research/run_boros_shadow.py
+
+  # pm2 cron jobs -> aligned sleep loops via src.utils.cron_loop
+  watchdogs:
+    <<: *base
+    container_name: hl-watchdogs
+    command: >
+      sh -c 'while :; do
+        python -u -X utf8 scripts/research/research_watchdog_supervisor.py --once;
+        python -u -m src.utils.cron_loop 21600 2700;
+      done'                                   # 45 */6 * * *
+
+  overnight:
+    <<: *base
+    container_name: hl-overnight
+    command: >
+      sh -c 'while :; do
+        python -u -X utf8 scripts/research/overnight_nightly.py;
+        python -u -m src.utils.cron_loop 86400 18000;
+      done'                                   # 0 5 * * *
+
+  backup-monthly:
+    <<: *base
+    container_name: hl-backup-monthly
+    command: >
+      sh -c 'while :; do
+        python -u -X utf8 scripts/ops/backup_research_data.py --tag monthly --backup-root /data/backups;
+        python -u -m src.utils.cron_loop 2592000 14400;
+      done'                                   # ~monthly (30d aligned); host restic is the real backup
+
+  disk-guard:
+    <<: *base
+    container_name: hl-disk-guard
+    restart: unless-stopped
+    volumes:
+      - /srv/hl/data:/data
+    command: >
+      sh -c 'while :; do
+        sh deploy/linux/disk_guard.sh || true;
+        sleep 600;
+      done'

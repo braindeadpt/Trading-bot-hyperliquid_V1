@@ -1,0 +1,10 @@
+# /srv/hl/logs/*.log — app log files written inside the containers.
+# Install: sudo cp deploy/linux/logrotate/hyperliquid /etc/logrotate.d/hyperliquid
+/srv/hl/logs/*.log {
+    size 20M
+    rotate 5
+    compress
+    missingok
+    notifempty
+    copytruncate
+}

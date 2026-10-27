@@ -20,6 +20,7 @@ import asyncio
 import gzip
 import json
 import logging
+import os
 import shutil
 import time
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from src.data.orderbook_metrics import PriceLevel, calculate_metrics
+from src.utils.pause_flag import collectors_paused
 from src.exchanges.hyperliquid_ws import DataBus
 from src.utils.helpers import (
     is_windows_absolute_syntax,
@@ -172,13 +174,16 @@ def config_from_mapping(md: Any, project_root: Path) -> L2BookRecorderConfig:
                 ),
             }
     path = str(raw.get("path", "data/research/l2_books"))
+    env_retention = os.environ.get("L2_BOOKS_RETENTION_DAYS")
+    if env_retention is not None:
+        raw["retention_days"] = env_retention
     return L2BookRecorderConfig(
         enabled=bool(raw.get("enabled", True)),
         interval_sec=float(raw.get("interval_sec", 2.0)),
         depth_levels=max(1, int(raw.get("depth_levels", 10))),
         min_mid_change_bps=float(raw.get("min_mid_change_bps", 1.0)),
         path=path,
-        retention_days=max(1, int(raw.get("retention_days", 90))),
+        retention_days=max(0, int(raw.get("retention_days", 90))),
         prune_interval_sec=max(60.0, float(raw.get("prune_interval_sec", 3600.0))),
         queue_max=max(100, int(raw.get("queue_max", 5_000))),
         flush_interval_sec=max(0.2, float(raw.get("flush_interval_sec", 1.0))),
@@ -520,6 +525,8 @@ class L2BookRecorder:
                 )
 
     def _write_batch(self, batch: List[Dict[str, Any]]) -> Tuple[int, int]:
+        if collectors_paused():
+            return 0, 0
         by_file: Dict[Path, List[str]] = {}
         for row in batch:
             sym = row["symbol"]
