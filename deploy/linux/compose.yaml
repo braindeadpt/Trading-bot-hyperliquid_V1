@@ -30,6 +30,11 @@ x-base: &base
     - /srv/hl/data:/data
     - /srv/hl/logs:/opt/hyperliquid/logs
     - /home/admin/.aws:/home/bot/.aws:ro   # profile `reservoir`, read-only
+    # Preregister manifests MUST come from the repo (read-only) — a data
+    # volume over data/ would hide them and persist_* would mint a fresh
+    # manifest without the JevJudge EXPERIMENT gate entry.
+    - ../../data/research/phase08_preregister.json:/opt/hyperliquid/data/research/phase08_preregister.json:ro
+    - ../../data/research/phase10:/opt/hyperliquid/data/research/phase10:ro
 
 services:
   hyperliquid:
@@ -77,6 +82,7 @@ services:
     command: python -u -X utf8 scripts/research/run_boros_shadow.py
 
   # pm2 cron jobs -> aligned sleep loops via src.utils.cron_loop
+  # watchdogs = 45 */6 * * * | overnight = 0 5 * * * | backup-monthly ~30d (restic e o backup real)
   watchdogs:
     <<: *base
     container_name: hl-watchdogs
@@ -84,7 +90,7 @@ services:
       sh -c 'while :; do
         python -u -X utf8 scripts/research/research_watchdog_supervisor.py --once;
         python -u -m src.utils.cron_loop 21600 2700;
-      done'                                   # 45 */6 * * *
+      done'
 
   overnight:
     <<: *base
@@ -93,7 +99,7 @@ services:
       sh -c 'while :; do
         python -u -X utf8 scripts/research/overnight_nightly.py;
         python -u -m src.utils.cron_loop 86400 18000;
-      done'                                   # 0 5 * * *
+      done'
 
   backup-monthly:
     <<: *base
@@ -102,7 +108,7 @@ services:
       sh -c 'while :; do
         python -u -X utf8 scripts/ops/backup_research_data.py --tag monthly --backup-root /data/backups;
         python -u -m src.utils.cron_loop 2592000 14400;
-      done'                                   # ~monthly (30d aligned); host restic is the real backup
+      done'
 
   disk-guard:
     <<: *base
