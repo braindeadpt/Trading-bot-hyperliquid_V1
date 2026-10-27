@@ -177,6 +177,9 @@ def config_from_mapping(md: Any, project_root: Path) -> L2BookRecorderConfig:
     env_retention = os.environ.get("L2_BOOKS_RETENTION_DAYS")
     if env_retention is not None:
         raw["retention_days"] = env_retention
+    env_enabled = os.environ.get("L2_BOOKS_ENABLED")
+    if env_enabled is not None:
+        raw["enabled"] = env_enabled.strip().lower() in ("1", "true", "yes", "on")
     return L2BookRecorderConfig(
         enabled=bool(raw.get("enabled", True)),
         interval_sec=float(raw.get("interval_sec", 2.0)),

@@ -139,3 +139,24 @@ Weekly cron alternative for prune if systemd timers are skipped: see timer.
 
 CI note: `docker-arm64` job builds `linux/arm64` on every PR — the same
 image the host runs. Pin versions; no `latest` tags anywhere.
+
+## trade_tape — runtime readers & windows (report for the retention decision)
+
+Current growth **~110 MB/day (~3.3 GB/mo)** — hits the 20 GB HL budget in
+~6 months alone. Retention untouched this phase; the readers and the window
+each needs, for the post-migration decision:
+
+| module | role | window needed |
+|---|---|---|
+| `src/backtest/data_contract.py` | feed coverage check for backtests | the full requested backtest window (arbitrary — gates on `window_start/end_ms`) |
+| `src/backtest/strategy_feed_requirements.py` | declares TRADE_TAPE as required feed per strategy over replay window | the replay window being evaluated |
+| `src/data/research_microstructure.py` | microstructure features from tape | sampling window (short — hours/days) |
+| `src/data/research_sampler.py` | tape sampling for research feeds | sampling window (short) |
+| `src/data/hl_research_backfill.py` | fills gaps, writes `save_trade_tape` | default `days=7` backfill window |
+
+**Implication**: readers need either short sampling windows (microstructure,
+sampler, backfill default 7d) or the *arbitrary backtest window*
+(data_contract/requirements — which drives Jev evaluations). A time-bounded
+retention (e.g. keep-N-months) would cap disk at N×3.3 GB; decide N from the
+longest backtest horizon Jev v2 actually replays — revisit after migration.
+

@@ -12,6 +12,7 @@ FS="${DISK_GUARD_FS:-/data}"
 WARN="${DISK_WARN_PCT:-80}"
 STOP="${DISK_STOP_PCT:-85}"
 FLAG="$FS/PAUSE_COLLECTORS"
+PAUSE_LOG="${DISK_GUARD_PAUSE_LOG:-$FS/collector_pauses.log}"
 TAG="hl-disk-guard"
 
 USE_PCT=$(df -P "$FS" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
@@ -21,7 +22,11 @@ if [ -z "$USE_PCT" ]; then
 fi
 
 if [ "$USE_PCT" -ge "$STOP" ]; then
-    [ -f "$FLAG" ] || : > "$FLAG"
+    if [ ! -f "$FLAG" ]; then
+        : > "$FLAG"
+        mkdir -p "$(dirname "$PAUSE_LOG")" 2>/dev/null || true
+        echo "$(date -u +%FT%TZ) pause-start fs=$FS use=${USE_PCT}%" >> "$PAUSE_LOG" 2>/dev/null || true
+    fi
     echo "$TAG: CRITICAL ${USE_PCT}% >= ${STOP}% on $FS — PAUSE_COLLECTORS set"
     if [ -n "${DISK_GUARD_HC_URL:-}" ]; then
         curl -fsS -m 10 --retry 2 "${DISK_GUARD_HC_URL}/fail" >/dev/null 2>&1 || true
@@ -34,6 +39,7 @@ elif [ "$USE_PCT" -ge "$WARN" ]; then
 else
     if [ -f "$FLAG" ]; then
         rm -f "$FLAG"
+        echo "$(date -u +%FT%TZ) pause-end fs=$FS use=${USE_PCT}%" >> "$PAUSE_LOG" 2>/dev/null || true
         echo "$TAG: ${USE_PCT}% back under ${WARN}% — PAUSE_COLLECTORS removed"
     fi
 fi

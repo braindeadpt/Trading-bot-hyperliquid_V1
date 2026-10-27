@@ -9,8 +9,6 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-
-from src.utils.pause_flag import collectors_paused
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from src.data.database import Candle, Database, FundingRecord, OIRecord
 from src.data.series_metadata import SeriesMetadata
 from src.utils.helpers import is_windows_absolute_syntax
+from src.utils.pause_flag import collectors_paused
 
 logger = logging.getLogger(__name__)
 
@@ -407,7 +406,7 @@ class ResearchDatabase(Database):
         Returns ``(inserted, skipped_protected)``.
         """
         if collectors_paused():
-            return
+            return 0, 0
 
         if not candles:
             return 0, 0
