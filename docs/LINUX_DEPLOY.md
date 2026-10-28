@@ -164,3 +164,25 @@ sampler, backfill default 7d) or the *arbitrary backtest window*
 retention (e.g. keep-N-months) would cap disk at N×3.3 GB; decide N from the
 longest backtest horizon Jev v2 actually replays — revisit after migration.
 
+## Backups (restic → OCI Object Storage)
+
+- Repo: `s3:https://nrvzdf8mxxoc.compat.objectstorage.ap-tokyo-1.oraclecloud.com/hl-backups/hl`
+  (prefixo `hl/`; credenciais OCI Customer Secret Key em `/srv/hl/secrets/oci-keys` 0600)
+- Password restic: `/srv/hl/secrets/restic-password` (0600) — guardada no gestor de passwords
+- `hl-backup.timer` diário 04:00 UTC → `backup.sh`: sqlite `.backup` para staging,
+  integrity_check na cópia, `restic backup` de staging+manifests+bot.env+pauses.log
+- Retenção: `hl-backup-prune.timer` Dom 04:20 — keep-daily 7/weekly 4/monthly 6 + `restic check --read-data-subset 5%`
+- Restore testado: `restic restore <id> --target /srv/hl/restore-test` → integrity_check ok,
+  contagens iguais à origem (delta ~linhas/min por escrita ao vivo). 419.9 MiB → 110 MiB no bucket.
+
+## Healthchecks.io
+
+| check | período | grace | gatilho |
+|---|---|---|---|
+| `hl-backup-daily` | 24h | 2h | fim do backup OK; /fail em erro |
+| `hl-disk-guard` | 10min | 20min | cada run OK; /fail ≥80% |
+| `hl-heartbeat` | 5min | 15min | dashboard 8091 + feed <10min |
+| `hl-boros` | 1h | 30min | após passagem das :05 |
+
+URLs em `/srv/hl/secrets/hc-*.url` (0600), lidas pelos scripts (nunca no repo).
+
