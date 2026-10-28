@@ -32,6 +32,20 @@ case "$name" in
     docker exec hl-paper python -c \
       "import socket; s = socket.create_connection(('api.hyperliquid.xyz', 443), 5); s.close()" \
       >/dev/null 2>&1 && ok=1 ;;
+  resmom)
+    # resmom-shadow: container alive AND ledger heartbeat < 2h old
+    DB="${HL_RESMOM_DB:-/srv/hl/data/research/resmom_shadow.db}"
+    hb=$(sqlite3 "$DB" -readonly "SELECT v FROM resmom_meta WHERE k='hb_ts_ms'" 2>/dev/null || echo 0)
+    now_ms=$(( $(date +%s) * 1000 ))
+    docker inspect -f '{{.State.Running}}' hl-resmom-shadow 2>/dev/null | grep -q true \
+      && [ $(( now_ms - ${hb:-0} )) -lt 7200000 ] && ok=1 ;;
+  latency)
+    # latency-probe: container alive AND collector heartbeat < 2h old
+    DB="${HL_LATENCY_DB:-/srv/hl/data/research/latency_probe.db}"
+    hb=$(sqlite3 "$DB" -readonly "SELECT v FROM probe_meta WHERE k='hb_ts_ms'" 2>/dev/null || echo 0)
+    now_ms=$(( $(date +%s) * 1000 ))
+    docker inspect -f '{{.State.Running}}' hl-latency-probe 2>/dev/null | grep -q true \
+      && [ $(( now_ms - ${hb:-0} )) -lt 7200000 ] && ok=1 ;;
   *)
     ok=1 ;;
 esac

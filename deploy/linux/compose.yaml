@@ -94,6 +94,22 @@ services:
     profiles: ["gated"]
     command: python -u -X utf8 scripts/research/run_boros_shadow.py
 
+  # Post-cutover package (prereg 2026-10-28): ResidualMomentum forward
+  # shadow — paper-only, weekly Mon 00:05 UTC rebalance, own ledger at
+  # /data/research/resmom_shadow.db. Places zero orders.
+  resmom-shadow:
+    <<: *base
+    container_name: hl-resmom-shadow
+    command: python -u -X utf8 scripts/research/run_resmom_shadow.py
+
+  # Post-cutover package (prereg 2026-10-28): passive latency probe,
+  # trade.xyz vs Binance during US-close windows. Collector only — no
+  # orders, no paper trades. Events at /data/research/latency_probe.db.
+  latency-probe:
+    <<: *base
+    container_name: hl-latency-probe
+    command: python -u -X utf8 scripts/research/run_latency_probe.py
+
   # pm2 cron jobs -> aligned sleep loops via src.utils.cron_loop
   # watchdogs = 45 */6 * * * | overnight = 0 5 * * * | backup-monthly ~30d (restic e o backup real)
   watchdogs:

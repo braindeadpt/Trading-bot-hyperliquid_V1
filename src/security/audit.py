@@ -162,6 +162,11 @@ ACCEPTED_HIGH_BASELINE: FrozenSet[Tuple[str, str]] = frozenset({
     # are module constants in spec.py; urlopen targets are never
     # caller-controlled.
     ("AUDIT-003", "boros_shadow/boros_client.py"),
+    # resmom_shadow/prices.py — the frozen prereg's declared public
+    # endpoints (HL /info candles+funding, Binance fapi klines) are
+    # module constants in spec.py; urlopen targets are never
+    # caller-controlled.
+    ("AUDIT-003", "resmom_shadow/prices.py"),
 })
 
 
