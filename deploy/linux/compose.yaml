@@ -22,7 +22,10 @@ x-base: &base
     context: ../..
     dockerfile: Dockerfile
   user: "1000:1000"
-  env_file: /etc/hyperliquid/bot.env
+  env_file:
+    - path: /srv/hl/secrets/bot-data.env
+      required: false   # data-only keys (Coinalyze/Binance/Telegram); host-managed, never in repo
+    - /etc/hyperliquid/bot.env
   restart: unless-stopped
   stop_grace_period: 25s
   logging: *default-logging
@@ -41,8 +44,10 @@ services:
     <<: *base
     container_name: hl-paper
     ports:
-      - "127.0.0.1:8091:5000"   # dashboard; tailscale serve /hl -> :8091
-    command: python -u -X utf8 main.py --config config/settings.yaml --mode paper
+      - "127.0.0.1:8091:8091"   # dashboard via loopback relay; tailscale /hl -> :8091
+    command: >
+      sh -c 'python -u /opt/hyperliquid/deploy/linux/dashboard_proxy.py 8091 5000 &
+             exec python -u -X utf8 main.py --config config/settings.yaml --mode paper' 
 
   jev-judge:
     <<: *base
