@@ -103,6 +103,11 @@ services:
   overnight:
     <<: *base
     container_name: hl-overnight
+    volumes:
+      # research queue — tracked in the repo checkout (image omits data/);
+      # single-file ro mount: NIGHTLY_STATUS.json/.nightly.lock siblings
+      # land in the container layer next to it.
+      - ../../data/research/overnight_experiments/QUEUE.md:/opt/hyperliquid/data/research/overnight_experiments/QUEUE.md:ro
     command: >
       sh -c 'while :; do
         python -u -X utf8 scripts/research/overnight_nightly.py;
@@ -115,7 +120,7 @@ services:
     command: >
       sh -c 'while :; do
         python -u -X utf8 scripts/ops/backup_research_data.py --tag monthly --backup-root /data/backups;
-        python -u -m src.utils.cron_loop 2592000 14400;
+        sh deploy/linux/monthly_loop.sh;
       done'
 
   disk-guard:

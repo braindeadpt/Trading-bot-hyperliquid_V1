@@ -35,9 +35,13 @@ fi
 
 trap 'rm -f "$STAGING"/*.db "$STAGING"/*.db-*' EXIT
 
-# Online .backup of each DB + integrity_check on the COPY (never hot-copy)
+# Expected sources are mandatory: a missing DB is a failure, not a skip —
+# a silent continue would produce a green snapshot missing a DB.
 for db in "$HL_DATA/research/hyperliquid.db" "$LIVE_DB"; do
-    [ -f "$db" ] || continue
+    if [ ! -f "$db" ]; then
+        echo "$LOG_TAG: FAIL missing expected source $db" >&2
+        hc "${HL_BACKUP_HC_URL:-}/fail"; exit 1
+    fi
     name=$(basename "$db")
     echo "$LOG_TAG: sqlite3 .backup $name"
     sqlite3 "$db" ".backup '$STAGING/$name'"
