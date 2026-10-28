@@ -47,5 +47,5 @@ for db in "$HL_DATA/research/hyperliquid.db" "$APP_DATA/live/bot.db"; do
 done
 
 restic backup "$STAGING"     "$HL_DATA/collector_pauses.log"     /srv/hl/app/repo/data/research/phase08_preregister.json     /srv/hl/app/repo/data/research/phase10     /etc/hyperliquid/bot.env     --tag daily 2>&1 | tail -3
-hc "$HL_BACKUP_HC_URL"
+hc "${HL_BACKUP_HC_URL:-}"
 echo "$LOG_TAG: done"
