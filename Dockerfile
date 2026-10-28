@@ -7,6 +7,7 @@ FROM python:3.12-slim
 ENV PYTHONIOENCODING=utf-8     PYTHONUTF8=1     PYTHONDONTWRITEBYTECODE=1     PIP_NO_CACHE_DIR=1
 
 RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin bot
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/hyperliquid
 COPY requirements.txt ./
