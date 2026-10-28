@@ -16,6 +16,7 @@ Covers:
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sqlite3
@@ -179,6 +180,9 @@ class _DashCase:
         web._engine = self._orig_engine
         web._ttl_clear()
         self._env.stop()
+        # Endpoint handlers may leave an unreferenced ro-conn to research.db
+        # alive — reclaim it before unlinking on Windows (flaky teardown).
+        gc.collect()
         self._tmp.cleanup()
 
 
