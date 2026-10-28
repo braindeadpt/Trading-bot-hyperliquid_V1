@@ -4,12 +4,16 @@
 # hl-backup.timer (04:00 UTC daily, outside the :05-:10 and 01:02-01:05
 # collector windows and before the 05:00 overnight job).
 #
-# Env (from /etc/hyperliquid/backup.env, 0600):
+# Env (from /etc/hyperliquid/backup.env, 0644 — sem segredos):
 #   RESTIC_REPOSITORY   s3:https://<ns>.compat.objectstorage.<region>.oraclecloud.com/<bucket>
-#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY   (Customer Secret Key, bucket-scoped)
 #   RESTIC_PASSWORD_FILE  /srv/hl/secrets/restic-password
 #   HL_BACKUP_HC_URL  optional healthchecks.io ping URL
+# Credentials: /srv/hl/secrets/oci-keys (0600) with
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  (OCI Customer Secret Key)
 set -euo pipefail
+
+[ -f /srv/hl/secrets/oci-keys ] && . /srv/hl/secrets/oci-keys
+export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
 HL_DATA="${HL_DATA:-/srv/hl/data}"
 APP_DATA="${APP_DATA:-/srv/hl/app-data}"
