@@ -80,8 +80,11 @@ never in repo/image/logs. Rotate with
 
 ## Sharing with Meridian
 
-- Ports: HL dashboard `127.0.0.1:8091` (tailscale serve `/hl`);
-  Meridian `8092` (`/meridian`) — untouched.
+- Ports: HL dashboard `127.0.0.1:8091` — tailnet HTTPS at
+  `https://bots-01.tail3cb15a.ts.net/` (root :443, tailnet-only; the app
+  binds loopback so `deploy/linux/dashboard_proxy.py` relays 0.0.0.0:8091).
+  Dedicated :8443 is configured but blocked by the tailnet ACL until the
+  policy allows the port. Meridian `8092` at `/meridian` — untouched.
 - Data budgets: HL ~20 GB (`/srv/hl`), Meridian ~10 GB — the disk guard
   only covers `/srv/hl/data`; a full disk stops HL collectors while the
   Meridian bot keeps writing (its own fs usage is Meridian's concern).

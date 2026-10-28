@@ -12,7 +12,9 @@ URL=$(tr -d "[:space:]" < "$URL_FILE")
 ok=0
 case "$name" in
   heartbeat)
-    # dashboard answers AND feed-health wrote in the last 10 min
+    # dashboard answers on the serve target AND feed-health wrote in the last 10 min
+    # public access: https://bots-01.tail3cb15a.ts.net/ (tailnet only, root :443) —
+    # probing the ts.net name from the host itself hairpins (000), so probe local
     code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:8091/ 2>/dev/null || echo 000)
     latest=$(sqlite3 /srv/hl/data/research/hyperliquid.db -readonly       "SELECT MAX(created_at_ms) FROM feed_health_snapshots;" 2>/dev/null || echo 0)
     now_ms=$(( $(date +%s) * 1000 ))
