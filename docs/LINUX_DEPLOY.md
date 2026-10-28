@@ -11,7 +11,7 @@ branch `feat/vps` (paths, `docs/VPS_MIGRATION.md`, backup scripts) — not merge
 /srv/hl/
 ├── data/
 │   ├── research/hyperliquid.db      # BOT_RESEARCH_DATABASE_PATH
-│   ├── live/bot.db                  # BOT_DATABASE_PATH
+│   ├── live/bot.db                  # yaml default data/live/bot.db, bind -> /opt/hyperliquid/data/live
 │   ├── l2_books/                    # unused — L2 off (see below)
 │   ├── backups/                     # staging; host restic is the real backup
 │   └── PAUSE_COLLECTORS             # created by disk_guard at >=85%
@@ -83,6 +83,11 @@ never in repo/image/logs. Rotate with
 - Ports: HL dashboard `127.0.0.1:8091` — tailnet HTTPS at
   `https://bots-01.tail3cb15a.ts.net/` (root :443, tailnet-only; the app
   binds loopback so `deploy/linux/dashboard_proxy.py` relays 0.0.0.0:8091).
+  Dashboard auth is ON (`DASHBOARD_AUTH_ENABLED=true`): set a stable
+  `BOT_DASHBOARD_TOKEN` in `/srv/hl/secrets/bot-data.env` (0600).
+  The TCP relay makes every hit look loopback to Flask, so host-local
+  requests (e.g. `hl-heartbeat`) bypass the token; tailnet traffic via
+  `tailscale serve` carries `X-Forwarded-*` and is always gated.
   Meridian `8092` at `/meridian` — untouched. (A :8443
   alias was tried and dropped: blocked by the tailnet ACL and redundant —
   root :443 covers it.)

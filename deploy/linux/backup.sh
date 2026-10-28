@@ -17,14 +17,14 @@ set -euo pipefail
 export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
 HL_DATA="${HL_DATA:-/srv/hl/data}"
-APP_DATA="${APP_DATA:-/srv/hl/app-data}"
+LIVE_DB="${LIVE_DB:-$HL_DATA/live/bot.db}"
 STAGING="${STAGING:-/srv/hl/backup-staging}"
 LOG_TAG="hl-backup"
 
 hc() { [ -n "${HL_BACKUP_HC_URL:-}" ] && curl -fsS -m 10 --retry 2 "$1" >/dev/null 2>&1 || true; }
 
 # Free space: need ~1x total DB size on the staging fs
-db_kb=$(du -ck "$HL_DATA"/research/hyperliquid.db "$APP_DATA"/live/bot.db 2>/dev/null | tail -1 | cut -f1)
+db_kb=$(du -ck "$HL_DATA"/research/hyperliquid.db "$LIVE_DB" 2>/dev/null | tail -1 | cut -f1)
 free_kb=$(df -Pk "$STAGING" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
 mkdir -p "$STAGING"
 free_kb=$(df -Pk "$STAGING" | awk 'NR==2 {print $4}')
@@ -36,7 +36,7 @@ fi
 trap 'rm -f "$STAGING"/*.db "$STAGING"/*.db-*' EXIT
 
 # Online .backup of each DB + integrity_check on the COPY (never hot-copy)
-for db in "$HL_DATA/research/hyperliquid.db" "$APP_DATA/live/bot.db"; do
+for db in "$HL_DATA/research/hyperliquid.db" "$LIVE_DB"; do
     [ -f "$db" ] || continue
     name=$(basename "$db")
     echo "$LOG_TAG: sqlite3 .backup $name"

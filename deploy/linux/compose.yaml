@@ -31,6 +31,9 @@ x-base: &base
   logging: *default-logging
   volumes:
     - /srv/hl/data:/data
+    # Repo-relative data/live (database.path default, jev_latest.json, bot.lock)
+    # shared by every service — scripts resolve it from ROOT, not from env.
+    - /srv/hl/data/live:/opt/hyperliquid/data/live
     - /srv/hl/logs:/opt/hyperliquid/logs
     - /home/admin/.aws:/home/bot/.aws:ro   # profile `reservoir`, read-only
     # Preregister manifests MUST come from the repo (read-only) — a data

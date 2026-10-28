@@ -5,7 +5,6 @@ Description=Hyperliquid daily restic backup (sqlite .backup + integrity_check)
 Type=oneshot
 EnvironmentFile=/etc/hyperliquid/backup.env
 Environment=HL_DATA=/srv/hl/data
-Environment=APP_DATA=/srv/hl/app-data
 ExecStart=/usr/local/sbin/hl-backup.sh
 Nice=19
 IOSchedulingClass=idle
