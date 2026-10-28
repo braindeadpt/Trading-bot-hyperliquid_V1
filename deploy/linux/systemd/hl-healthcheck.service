@@ -1,0 +1,7 @@
+[Unit]
+Description=HL healthchecks.io ping (heartbeat + boros)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hl-healthcheck.sh heartbeat
+ExecStart=/usr/local/sbin/hl-healthcheck.sh boros
