@@ -205,12 +205,20 @@ def build_trades_message(db: Any, limit: int = 10) -> str:
     return "\n".join(lines)
 
 
-def build_strategy_message(db: Any, *, since_ms: Optional[int] = None) -> str:
+def build_strategy_message(db: Any, *, since_ms: Optional[int] = None,
+                           period_label: Optional[str] = None) -> str:
     rows = db.get_strategy_pnl(since_ms=since_ms)
     if not rows:
         return "<b>Strategy PnL</b>\n<i>No closed trades yet</i>"
 
-    period_label = "last 24h" if since_ms is not None else "all time"
+    if period_label is None:
+        if since_ms is None:
+            period_label = "all time"
+        else:
+            span_ms = int(time.time() * 1000) - int(since_ms)
+            days = round(span_ms / 86_400_000)
+            period_label = ("last 24h" if days <= 1
+                            else f"last {days} days")
     lines = [f"<b>Strategy PnL</b> ({period_label})"]
     for row in rows[:12]:
         name = _esc(row.get("strategy", "?"))
@@ -247,7 +255,8 @@ async def build_digest_message(engine: Any, db: Any, *, period: str) -> str:
     status = await build_status_message(
         engine, db=db, since_ms=since_ms, window_label=window_label,
     )
-    strategy = build_strategy_message(db, since_ms=since_ms)
+    strategy = build_strategy_message(
+        db, since_ms=since_ms, period_label=window_label)
     parts = [header, status, "", pnl, "", strategy]
     text = "\n".join(parts)
     if len(text) > 4000:

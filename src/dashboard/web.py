@@ -2605,6 +2605,23 @@ def create_app(config: Dict[str, Any]) -> tuple:
             payload = {"hypotheses": [], "error": str(exc)[:200]}
         return jsonify(_ttl_put("hypotheses", payload, _RESEARCH_CACHE_TTL_S))
 
+    @app.route("/api/paper_ledger")
+    def api_paper_ledger():
+        """Unified paper ledger — every strategy/experiment, one schema:
+        prereg state, n vs readout n, readout date, net PnL."""
+        cached = _ttl_get("paper_ledger")
+        if cached is not None:
+            return jsonify(cached)
+        try:
+            from src.research.paper_ledger import (
+                build_paper_ledger_payload)
+            payload = build_paper_ledger_payload()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("paper_ledger failed: %s", exc)
+            payload = {"rows": [], "error": str(exc)[:200]}
+        return jsonify(_ttl_put(
+            "paper_ledger", payload, _RESEARCH_CACHE_TTL_S))
+
     @app.route("/api/execution_pnl")
     def api_execution_pnl():
         """Net-PnL decomposition (gross/fees/slippage/funding/net) for the

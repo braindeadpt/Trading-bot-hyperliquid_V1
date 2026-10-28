@@ -307,6 +307,25 @@ th { font-size: 10px; }
                         <tr><td colspan="8" class="muted">Waiting...</td></tr>
                     </tbody>
                 </table>
+                <details class="fold" id="ledger-fold" style="margin-top:8px;">
+                    <summary>Paper ledger <span class="dim" id="ledger-count"></span> <span class="dim" title="todas as estratégias paper, mesmo esquema — leituras seladas mostram só counts">unificado</span></summary>
+                    <div class="fold-inner" style="padding:6px 2px;">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Estratégia</th>
+                                    <th>Prereg</th>
+                                    <th class="num" title="n actual vs n de leitura">n</th>
+                                    <th title="data de leitura / revisão">readout</th>
+                                    <th class="num" title="PnL líquido (unidade na coluna)">net</th>
+                                </tr>
+                            </thead>
+                            <tbody id="ledger-tbody">
+                                <tr><td colspan="5" class="muted">Waiting...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </details>
                 <details class="fold" id="shadow-fold" style="margin-top:8px;">
                     <summary>Shadow board <span class="dim" id="shadow-count"></span> <span class="dim" id="shadow-eval-age" title="Idade do lote de avaliação persistido (a análise pesada corre fora do processo, de hora em hora)"></span></summary>
                     <div class="fold-inner" style="padding:6px 2px;">
@@ -885,6 +904,40 @@ function renderShadowPanel(payload) {
             <td class="num">${wr}</td>
             <td class="num ${pfCls}">${pf}</td>
             <td class="num" style="font-size:9px;">${ci}</td>
+        </tr>`;
+    }).join("");
+}
+
+// ── Paper ledger unificado (uma linha por estratégia/experimento) ──
+function renderPaperLedger(payload) {
+    const tbody = document.getElementById("ledger-tbody");
+    if (!tbody) return;
+    const rows = (payload && payload.rows) || [];
+    document.getElementById("ledger-count").textContent = rows.length ? "(" + rows.length + ")" : "";
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="muted">Sem linhas</td></tr>';
+        return;
+    }
+    const fd = t => t ? new Date(t).toLocaleDateString("pt-PT", {year:"numeric", month:"short", day:"numeric"}) : "—";
+    const fmtNet = (v, u) => {
+        if (v == null) return '<span class="dim">selado</span>';
+        const cls = v >= 0 ? "up" : "down";
+        const txt = u === "pct" ? (v * 100).toFixed(2) + "%"
+                  : u === "bps" ? v.toFixed(1) + " bps"
+                  : "$" + v.toFixed(2);
+        return `<span class="${cls}">${txt}</span>`;
+    };
+    tbody.innerHTML = rows.map(r => {
+        const nTxt = (r.n != null ? r.n : "—") + "/" + (r.n_readout != null ? r.n_readout : "—");
+        const st = r.prereg_state || "—";
+        const stCls = /KILL|DEAD|FAIL/i.test(st) ? "down" : (/sealed|PASS|WORTH/i.test(st) ? "dim" : "");
+        const det = r.detail ? `<div class="dim" style="font-size:9px;font-weight:400;">${r.detail}</div>` : "";
+        return `<tr>
+            <td class="highlight">${r.name}<div class="dim" style="font-size:9px;font-weight:400;">${r.kind}</div>${det}</td>
+            <td class="${stCls}">${st}</td>
+            <td class="num">${nTxt}</td>
+            <td>${fd(r.readout_ms)}</td>
+            <td class="num">${fmtNet(r.net, r.net_unit)}</td>
         </tr>`;
     }).join("");
 }
@@ -1607,6 +1660,7 @@ pollAll = function pollAll() {
 };
 pollResearch = function pollResearch() {
     authFetch("/api/hypotheses").then(r => r.json()).then(d => renderHypotheses(d)).catch(() => {});
+    authFetch("/api/paper_ledger").then(r => r.json()).then(d => renderPaperLedger(d)).catch(() => {});
     authFetch("/api/execution_pnl").then(r => r.json()).then(d => renderExecPnl(d)).catch(() => {});
     authFetch("/api/execution_divergence").then(r => r.json()).then(d => renderDivergence(d)).catch(() => {});
     authFetch("/api/shadow_panel?evaluate=1").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
