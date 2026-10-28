@@ -9,6 +9,10 @@
 set -u
 
 FS="${DISK_GUARD_FS:-/data}"
+# ping URL: env wins; else /srv/hl/secrets/hc-hl-disk-guard.url (0600, off-repo)
+if [ -z "${DISK_GUARD_HC_URL:-}" ] && [ -f /srv/hl/secrets/hc-hl-disk-guard.url ]; then
+    DISK_GUARD_HC_URL=$(tr -d "[:space:]" < /srv/hl/secrets/hc-hl-disk-guard.url)
+fi
 WARN="${DISK_WARN_PCT:-80}"
 STOP="${DISK_STOP_PCT:-85}"
 FLAG="$FS/PAUSE_COLLECTORS"
@@ -37,6 +41,7 @@ elif [ "$USE_PCT" -ge "$WARN" ]; then
         curl -fsS -m 10 --retry 2 "${DISK_GUARD_HC_URL}/fail" >/dev/null 2>&1 || true
     fi
 else
+    [ -n "${DISK_GUARD_HC_URL:-}" ] && curl -fsS -m 10 --retry 2 "$DISK_GUARD_HC_URL" >/dev/null 2>&1 || true
     if [ -f "$FLAG" ]; then
         rm -f "$FLAG"
         echo "$(date -u +%FT%TZ) pause-end fs=$FS use=${USE_PCT}%" >> "$PAUSE_LOG" 2>/dev/null || true

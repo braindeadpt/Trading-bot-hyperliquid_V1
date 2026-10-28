@@ -13,6 +13,7 @@
 set -euo pipefail
 
 [ -f /srv/hl/secrets/oci-keys ] && . /srv/hl/secrets/oci-keys
+[ -z "${HL_BACKUP_HC_URL:-}" ] && [ -f /srv/hl/secrets/hc-hl-backup-daily.url ] &&     HL_BACKUP_HC_URL=$(tr -d "[:space:]" < /srv/hl/secrets/hc-hl-backup-daily.url)
 export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
 HL_DATA="${HL_DATA:-/srv/hl/data}"
