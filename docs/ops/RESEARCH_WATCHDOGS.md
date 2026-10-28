@@ -8,9 +8,9 @@ nothing here trades or touches the OMS.
 
 | Gate | Trigger | Probe re-run | Report |
 |---|---|---|---|
-| Top-trader bias screening | `top_trader_bias_samples` ≥ **20 datas** | `scripts/research/feature_screening_top_trader_bias.py --json-out` | `docs/TOP_TRADER_BIAS_RECHECK_RESULT.md` |
-| Liquidation flush recheck | real feed (okx/bybit) ≥ **30 dias** | `scripts/research/liquidation_flush_shadow.py` | `docs/LIQUIDATION_FLUSH_RECHECK_RESULT.md` |
-| IV gate shadow recheck | **≥ 30 closed trades** com decisão IV | `scripts/research/iv_gate_shadow_recheck.py` (join + slices via `scripts/research/iv_gate_shadow_vs_pnl.py`) | `docs/IV_GATE_SHADOW_RECHECK_RESULT.md` |
+| Top-trader bias screening | `top_trader_bias_samples` ≥ **20 datas** | `scripts/research/feature_screening_top_trader_bias.py --json-out` | `../archive/TOP_TRADER_BIAS_RECHECK_RESULT.md` |
+| Liquidation flush recheck | real feed (okx/bybit) ≥ **30 dias** | `scripts/research/liquidation_flush_shadow.py` | `../archive/LIQUIDATION_FLUSH_RECHECK_RESULT.md` |
+| IV gate shadow recheck | **≥ 30 closed trades** com decisão IV | `scripts/research/iv_gate_shadow_recheck.py` (join + slices via `scripts/research/iv_gate_shadow_vs_pnl.py`) | `../archive/IV_GATE_SHADOW_RECHECK_RESULT.md` |
 
 All gates share **one** gitignored state file
 (`data/research/research_watchdogs_state.json`) with a per-gate subtree
@@ -33,16 +33,16 @@ never disagree about what counts as a matched IV decision.
 
 * **Bias screening** — `survives_strict` requires ≥20 datas for the date-block
   bootstrap; below that `p_boot` is undefined and FDR cannot reject. An early
-  run is directional evidence only (see `docs/FEATURE_SCREENING_TOP_TRADER_BIAS.md`).
+  run is directional evidence only (see `../archive/FEATURE_SCREENING_TOP_TRADER_BIAS.md`).
 * **Flush recheck** — the v2 baseline (n=46, PF 2.35) was ~4 days of real feed;
   the decision rule says re-run at 30 days before promoting/killing
-  (see `docs/LIQUIDATION_FLUSH_SHADOW_LIVE.md`).
+  (see `../archive/LIQUIDATION_FLUSH_SHADOW_LIVE.md`).
 * **IV gate shadow** — the IV gate is shadow-only (the router records the
   high/low-IV class per routed trade but never blocks); the backtest evidence
   (high_iv-only at threshold 66.7, +42.99 USD) was n=13, below the n≥30
   evidence gate. The watchdog re-runs the live comparison once ≥30 closed
   trades carry an IV decision and decides **shadow vs enforcement**
-  (see `docs/IV_HIGH_ONLY_AB_SPLIT.md`).
+  (see `../archive/IV_HIGH_ONLY_AB_SPLIT.md`).
 
 ## Running
 

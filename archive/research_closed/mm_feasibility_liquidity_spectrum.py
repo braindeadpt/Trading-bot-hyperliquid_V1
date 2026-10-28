@@ -33,7 +33,7 @@ sys.path.insert(0, str(ROOT))
 
 INFO_URL = "https://api.hyperliquid.xyz/info"
 OUT_JSON = ROOT / "data" / "backtests" / "mm_feasibility_liquidity_spectrum.json"
-OUT_DOC = ROOT / "docs" / "MARKET_MAKING_FEASIBILITY_LIQUIDITY_SPECTRUM.md"
+OUT_DOC = ROOT / "docs" / "archive" / "MARKET_MAKING_FEASIBILITY_LIQUIDITY_SPECTRUM.md"
 MAKER_FEE_BPS = 1.5  # HL perps tier-0 base 0.015%
 AS_HORIZON_MS = 10_000
 BOOT_N = 600
@@ -399,7 +399,7 @@ def write_report(path: Path, payload: Dict[str, Any]) -> None:
     lines.append("## Why this addendum")
     lines.append("")
     lines.append(
-        "The primary study (`docs/MARKET_MAKING_FEASIBILITY.md`) concluded **(C)** "
+        "The primary study (`docs/archive/MARKET_MAKING_FEASIBILITY.md`) concluded **(C)** "
         "on BTC/ETH/SOL/HYPE — the most liquid perps, where spreads are tightest. "
         "This addendum asks whether a **less liquid** region of the HL perp universe "
         "flips `half_spread − AS − fee` positive."

@@ -105,7 +105,7 @@ risk:
 # ═══════════════════════════════════════════════════════════
 strategy:
   trend_follow:
-    enabled: false                  # OFF v3.1.42: 2/10 wins desde 26/06 — VWAPDeviation cobre melhor este espaço
+    enabled: false                  # OFF v3.1.42: 2/10 wins since 26/06 — VWAPDeviation covers this space better
     timeframe: "15m"
     confirmation_timeframe: "5m"
     volume_surge_multiplier: 1.5
@@ -143,7 +143,7 @@ strategy:
     stop_loss_atr_multiplier: 2.0      # wider stop — fewer whipsaw exits post-squeeze (was 1.5)
     take_profit_atr_multiplier: 6.0    # v3.1.39: was 4.0 — let winners run further (walk-forward winner)
     max_hold_hours: 6
-    min_confidence: 0.55            # Phase 1: subir de 0.45 — menos trades, mais qualidade
+    min_confidence: 0.55            # Phase 1: raised from 0.45 — fewer trades, more quality
     signal_throttle_ms: 1800000    # 30 min between signals per symbol
     require_trend_alignment: true  # long only in uptrend (EMA20>EMA50), short in downtrend
     trend_ema_fast: 20
@@ -331,7 +331,7 @@ strategy:
     stop_loss_atr_multiplier: 2.0   # ATR-based stop
     take_profit_r_multiple: 2.0     # 2R TP
     max_hold_hours: 4               # mean reversion is quick or wrong
-    min_confidence: 0.70            # Phase 1: subir de 0.65 — menos trades, mais qualidade
+    min_confidence: 0.70            # Phase 1: raised from 0.65 — fewer trades, more quality
     confidence_extreme: 0.85        # v3.1.18: was 0.65 — restore original
     signal_throttle_ms: 300000      # 5 min between signals (v3.1.18: was 3 min)
     # --- v3.1.26 walk-forward winners (activated) ---
@@ -672,7 +672,7 @@ strategy:
   # Strategy: Trend Pyramid (EMA20 pullback + Chandelier)  v3.1.20
   # ═══════════════════════════════════════════════════════════
   trend_pyramid:
-    enabled: false                  # OFF v3.1.42: 0/6 wins, −$15.77 desde 26/06 — re-avaliar só com novo walk-forward
+    enabled: false                  # OFF v3.1.42: 0/6 wins, -$15.77 since 26/06 — re-evaluate only with a new walk-forward
     ema_fast: 20
     ema_slow: 50
     min_adx: 25
@@ -800,7 +800,7 @@ strategy:
       # ChecklistMeta 0.63/157 (−905USD/184t live), VWAPDeviation 0.52/28
       # (−221USD/44t live). Historical shadow_decisions rows are preserved.
       # VWAPDeviation re-added 2026-10-08 for the preregistered iv_gate_shadow
-      # confirmation sample only — see docs/PREREGISTER_VWAP_IV_GATE_2026-10-08.md.
+      # confirmation sample only — see docs/ops/PREREGISTER_VWAP_IV_GATE_2026-10-08.md.
       - VWAPDeviation
       - VolatilityBreakout
       - FundingMomentum
@@ -823,12 +823,12 @@ strategy:
   # Ensemble Configuration
   # ═══════════════════════════════════════════════════════════
   ensemble:
-    # Phase 1 (2026-06-29): só VolatilityBreakout + VWAPDeviation, sem consenso ensemble.
-    enabled: false                    # sub-estratégias correm directas no engine
+    # Phase 1 (2026-06-29): VolatilityBreakout + VWAPDeviation only, no ensemble consensus.
+    enabled: false                    # sub-strategies run directly in the engine
     threshold: 0.40                   # se reativar: exigir 40%+ peso combinado
-    min_agreeing: 2                   # se reativar: 2+ estratégias concordando
+    min_agreeing: 2                   # if re-enabled: 2+ agreeing strategies
     high_conviction_threshold: 0.65
-    high_conviction_enabled: false    # Phase 1: sem bypass de alta convicção
+    high_conviction_enabled: false    # Phase 1: no high-conviction bypass
     high_conviction_exclude: []
 
   # ═══════════════════════════════════════════════════════════
@@ -885,11 +885,11 @@ execution:
   trailing_stop:
     enabled: true
     activation_pct: 0.01            # v3.1.41: was 0.02 — trail at +1% (57700 bounce: CL had +1% but trail never fired)
-    trail_pct: 0.008                # Phase 1: subir de 0.5% para 0.8%
+    trail_pct: 0.008                # Phase 1: raised from 0.5% to 0.8%
     # Strategies with explicit TP/exit logic — skip engine trailing (avoids early winner cuts)
     exclude_strategies:
       - VolatilityBreakout
-      - VWAPDeviation           # Phase 1: TP próprio 2R
+      - VWAPDeviation           # Phase 1: own TP at 2R
       - SmartMoneyFlow
       - TrendPyramid
   maker_orders:
@@ -937,12 +937,12 @@ market_data:
   block_entries_on_stale: true           # block new entries when feed health is red/stale
   block_entries_on_ws_unhealthy: true    # block entries when HL WS is unhealthy
   max_venue_spread: 0.001           # max HL Bin/Bybit/HlPerp 8h spread (0.1%) per symbol
-  # Research L2 levels (NOT operational bot.db). See docs/L2_BOOK_RECORDING.md
+  # Research L2 levels (NOT operational bot.db). See docs/ops/L2_BOOK_RECORDING.md
   # Path is on HDD E: — sequential gzip appends; keeps SSD for bot.db random I/O.
   l2_recording:
     enabled: true
     # 2026-08-10: raised resolution — past cannot be re-sampled denser.
-    # Measured ~23 MB/day at 2s/10; expected ~48–101 MB/day at 1s/25. See docs/DATA_ARCHITECTURE.md
+    # Measured ~23 MB/day at 2s/10; expected ~48–101 MB/day at 1s/25. See docs/ops/DATA_ARCHITECTURE.md
     interval_sec: 1.0
     depth_levels: 25
     min_mid_change_bps: 1.0
@@ -950,9 +950,9 @@ market_data:
     # the hot path suit a HDD, and this keeps ~10 GB/year of research data off the
     # system SSD (wear + C: space + trivial VPS migration). l2_recording is
     # hash-neutral (see _sanitize_config_for_hash), so relocating it never trips
-    # the frozen Fase-10 drift assert. See docs/DATA_ARCHITECTURE.md
+    # the frozen Fase-10 drift assert. See docs/ops/DATA_ARCHITECTURE.md
     path: "E:/hyperliquid_research/l2_books"
-    allow_external_path: true       # opt-in explícito p/ destino fora do repo (audit 2026-08-14)
+    allow_external_path: true       # explicit opt-in for destination outside the repo (audit 2026-08-14)
     retention_days: 365
     prune_interval_sec: 3600        # retention actually runs (start + hourly + stop)
     queue_max: 5000                 # adequate at 1s/25; watch recorder dropped after restart
@@ -1039,7 +1039,7 @@ database:
 research:
   database:
     # 2026-08-14: moved to the E: HDD (466 GB free) — 3.8 GB of tape/L2 research
-    # data off the system SSD, matching docs/DATA_ARCHITECTURE.md. Skipped from
+    # data off the system SSD, matching docs/ops/DATA_ARCHITECTURE.md. Skipped from
     # the config hash BY PATH (research.database) in _sanitize_config_for_hash:
     # a bare `database` key also exists at top level for the operational DB and
     # must stay frozen. The rest of `research` (strict_mode, min_coverage_pct,

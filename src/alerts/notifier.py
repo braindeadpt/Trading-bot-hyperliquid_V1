@@ -321,7 +321,7 @@ class AlertNotifier:
             (hi.get("n_closed") or 0) + (lo.get("n_closed") or 0)
         )
         threshold = verdict.get("threshold", 66.7)
-        report_path = verdict.get("report_path") or "docs/IV_GATE_SHADOW_RECHECK_RESULT.md"
+        report_path = verdict.get("report_path") or "docs/archive/IV_GATE_SHADOW_RECHECK_RESULT.md"
         detail = verdict.get("detail") or ""
 
         def _money(v) -> str:

@@ -1,6 +1,6 @@
 """Hypothetical episode state machine — pure logic, no I/O, no network.
 
-States per docs/PREREGISTER_CARRY_SHADOW.md:
+States per docs/ops/PREREGISTER_CARRY_SHADOW.md:
 
     pending_entry ──both legs filled──> open ──exit signal──> pending_exit ──> closed
         │                                │                       │

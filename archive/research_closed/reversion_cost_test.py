@@ -715,7 +715,7 @@ def write_report(
         )
     else:
         lines.append(
-            "Next: archive in `docs/RESEARCH_BACKLOG.md` with breakeven "
+            "Next: archive in `docs/ops/RESEARCH_BACKLOG.md` with breakeven "
             "numbers. Do **not** build a reversion strategy from this family."
         )
     lines.append("")
@@ -725,7 +725,7 @@ def write_report(
 def update_backlog_if_c(verdict: Dict[str, Any], results: List[Dict[str, Any]]) -> None:
     if verdict["verdict"] != "C":
         return
-    backlog = ROOT / "docs" / "RESEARCH_BACKLOG.md"
+    backlog = ROOT / "docs" / "ops" / "RESEARCH_BACKLOG.md"
     if not backlog.exists():
         return
     text = backlog.read_text(encoding="utf-8")
@@ -738,7 +738,7 @@ def update_backlog_if_c(verdict: Dict[str, Any], results: List[Dict[str, Any]]) 
 
 Screening found genuine short-horizon fade structure (`ret_lag_*`, IC≈−0.06,
 monotone, stable). Cost test (`scripts/research/reversion_cost_test.py`,
-`docs/REVERSION_COST_TEST.md`) verdict **(C)**:
+`docs/archive/REVERSION_COST_TEST.md`) verdict **(C)**:
 
 - Best gross breakeven RT ≈ **{verdict.get('best_breakeven_bps', float('nan')):.2f} bps**
   (combo `{best['L']}/{best['H']}`), vs bot taker RT **{verdict['taker_rt_bps']:.1f} bps**.
@@ -771,7 +771,7 @@ def main() -> int:
     ap.add_argument(
         "--report",
         type=Path,
-        default=ROOT / "docs" / "REVERSION_COST_TEST.md",
+        default=ROOT / "docs" / "archive" / "REVERSION_COST_TEST.md",
     )
     ap.add_argument("--symbols", default=",".join(SYMBOLS_DEFAULT))
     args = ap.parse_args()

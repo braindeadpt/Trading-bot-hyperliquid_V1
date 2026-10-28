@@ -15,7 +15,7 @@ applies it automatically.*
 > 1. The Fase 10 gate (`python scripts/ops/phase10_check_gate.py`) showing a real
 >    **PASS** on all four criteria — `min_trades ≥ 100`,
 >    `profit_factor ≥ 1.20`, `expectancy_r > 0.0`, `max_drawdown_pct ≤ 5.0` —
->    not "insufficient data," an actual PASS. See `docs/MAINNET_READINESS.md`
+>    not "insufficient data," an actual PASS. See `../ops/MAINNET_READINESS.md`
 >    for the current (FAIL/INSUFFICIENT_DATA on all four) status.
 > 2. Explicit human confirmation on top of that gate PASS.
 >
@@ -75,7 +75,7 @@ Both currently live-executing strategies are `paper_only: true`
 been proven out-of-sample. The canary proposal is to run **exactly one** of
 the two, not both.
 
-**Historical paper-trading data point** (`docs/BASELINE_V3_1_47.md`, table
+**Historical paper-trading data point** (`BASELINE_V3_1_47.md`, table
 dated 2026-05-25 → 2026-07-09):
 
 | Strategy | Trades | PnL USD | Win rate | Profit factor |
@@ -226,5 +226,5 @@ proposal.
 | `strategy.phase08.paper_only` | `true` | `false` | paper → live (canary capital only) |
 
 **Reminder:** none of the above is applied. Activation requires Fase 10 gate
-PASS (all 4 criteria, see `docs/MAINNET_READINESS.md`) plus explicit human
+PASS (all 4 criteria, see `../ops/MAINNET_READINESS.md`) plus explicit human
 confirmation.

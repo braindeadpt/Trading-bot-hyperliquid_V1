@@ -238,7 +238,7 @@ def build_nightly_status(ran: Optional[Dict[str, Any]] = None,
         "next_ready": None,
         "last_session": ran,
         "recent_sessions": _recent_sessions(),
-        "ledger_path": "docs/OVERNIGHT_RESEARCH_LOG.md",
+        "ledger_path": "docs/ops/OVERNIGHT_RESEARCH_LOG.md",
         # Relative display path when inside the repo; absolute otherwise
         # (tests point this at tmp_path).
         "status_path": (str(STATUS_PATH.relative_to(ROOT))

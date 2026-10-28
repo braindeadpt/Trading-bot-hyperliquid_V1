@@ -5,7 +5,7 @@
 
 ## O loop (baseline)
 
-O backtest real (docs/LIQUIDATION_CATCHER_REAL_BACKTEST.md) expôs o problema:
+O backtest real (LIQUIDATION_CATCHER_REAL_BACKTEST.md) expôs o problema:
 o LiquidationCatcher entra no **pico do flush** e o **stop-out por liquidação**
 — que valida o side da posição a partir da **mesma** janela de liquidações que
 gerou o sinal — sai ~1 minuto depois. 17/17 trades saem por

@@ -2,8 +2,8 @@
 
 > **CONTAMINATION NOTICE (2026-08-09):** Binance fstream dead since 2026-06-29.
 > Full-window BASIS/LIQ TOP exclusions in this file are **invalid** (asof
-> forward-fill / zero-fill). See `docs/FEED_CONTAMINATION_AUDIT.md` and the
-> valid-window redo `docs/FEATURE_SCREENING_BASIS_LIQ_VALID.md` (BASIS=`NO_TOP`,
+> forward-fill / zero-fill). See `FEED_CONTAMINATION_AUDIT.md` and the
+> valid-window redo `FEATURE_SCREENING_BASIS_LIQ_VALID.md` (BASIS=`NO_TOP`,
 > LIQ proxy=`NO_TOP`; real liquidations still untestable). Mean-reversion and
 > other non-fstream families in this report **stand**.
 
@@ -80,7 +80,7 @@ Full survivor set (10 feature×horizon cells): the five above plus
    z-scores, liquidations, ADX, and **CVD divergence**
    (`cvd_price_div_signed` / `cvd_div_strength` — some FDR hits but
    non-monotone / degenerate quintiles; aligns with “weak directional
-   info, not a strategy” in `docs/RESEARCH_BACKLOG.md`).
+   info, not a strategy” in `../ops/RESEARCH_BACKLOG.md`).
 
 These TOP rows justify **measurement follow-ups / simple probes**, not
 immediate `execution_strategies` additions. Next step for any chosen

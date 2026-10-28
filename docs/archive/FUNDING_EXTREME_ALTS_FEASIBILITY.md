@@ -1,6 +1,6 @@
 # A2 — Extreme-funding mean reversion in non-major HL perps
 
-Preregistration: `docs/PREREGISTER_FUNDING_EXTREME_ALTS_2026-10-06.md` (commit `d0b35fe`, frozen before data).
+Preregistration: `PREREGISTER_FUNDING_EXTREME_ALTS_2026-10-06.md` (commit `d0b35fe`, frozen before data).
 Script: `scripts/research/funding_extreme_alts_feasibility.py` — reproduce with `--skip-download` against `data/backtests/funding_mr_a2/funding_mr_a2_cache.db` (207 MB, 230 symbols × funding+2h candles).
 Raw result JSON: `data/backtests/funding_mr_a2/funding_mr_a2_results.json` (pull 2026-10-09).
 

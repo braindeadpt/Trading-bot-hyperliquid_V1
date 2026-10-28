@@ -1027,7 +1027,7 @@ Skills run in a code execution environment with filesystem access, bash commands
 * **Name files descriptively**: Use names that indicate content: `form_validation_rules.md`, not `doc2.md`
 * **Organize for discovery**: Structure directories by domain or feature
   * Good: `reference/finance.md`, `reference/sales.md`
-  * Bad: `docs/file1.md`, `docs/file2.md`
+  * Bad: `docs/archive/file1.md`, `docs/archive/file2.md`
 * **Bundle comprehensive resources**: Include complete API docs, extensive examples, large datasets; no context penalty until accessed
 * **Prefer scripts for deterministic operations**: Write `validate_form.py` rather than asking the agent to generate validation code
 * **Make execution intent clear**:

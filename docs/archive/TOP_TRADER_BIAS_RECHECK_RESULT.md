@@ -33,4 +33,4 @@ _Generated 2026-09-16T01:38:57+00:00 by `scripts/research/top_trader_bias_rechec
 
 * Trigger: `top_trader_bias_samples` cobrir ≥20 datas (≈3 semanas de polling).
 * Below 20 datas the bootstrap gate is structurally unreachable — see 
-  `docs/FEATURE_SCREENING_TOP_TRADER_BIAS.md`.
+  `FEATURE_SCREENING_TOP_TRADER_BIAS.md`.

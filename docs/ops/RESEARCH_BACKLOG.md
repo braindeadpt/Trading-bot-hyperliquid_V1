@@ -16,7 +16,7 @@ as validated.
 
 **Baseline-signal gate (2026-08-09):** new promotions to
 `execution_strategies` require three-condition PASS (B1≥p95 ∧ n≥30 ∧ PF>1).
-See `docs/BASELINE_SIGNAL_GATE.md`. Portfolio board:
+See `BASELINE_SIGNAL_GATE.md`. Portfolio board:
 `data/backtests/parity_diag/PORTFOLIO_STATUS_BOARD.md`.
 
 **First demotion:** ChecklistMeta powered FAIL → move to shadow.
@@ -42,7 +42,7 @@ that used 0.01 remain valid as optimistic lower bounds. Re-register via
 ### Archived — cross-sectional slow momentum (verdict C)
 
 `scripts/research/xs_momentum_feasibility.py` /
-`docs/XS_MOMENTUM_FEASIBILITY.md` (2026-08-10):
+`../archive/XS_MOMENTUM_FEASIBILITY.md` (2026-08-10):
 
 - **Data viability GO:** HL 1d panel 232 names (55 delisted with history),
   concurrent ≥131, ~900d depth; funding paginated to full window (cov≈1.0).
@@ -56,9 +56,9 @@ that used 0.01 remain valid as optimistic lower bounds. Re-register via
 
 ### Archived — OI backfill viability + positioning screen (verdict C)
 
-`docs/OI_BACKFILL_VIABILITY.md`, `scripts/research/backfill_oi_bybit_research.py`,
+`../archive/OI_BACKFILL_VIABILITY.md`, `scripts/research/backfill_oi_bybit_research.py`,
 `scripts/research/feature_screening_oi_positioning.py`,
-`docs/FEATURE_SCREENING_OI_POSITIONING.md` (2026-08-10):
+`../archive/FEATURE_SCREENING_OI_POSITIONING.md` (2026-08-10):
 
 - HL-native OI only ~66d → prior `oi_delta_24h` BE 19.6 / CI [−39,+39] was
   **INCONCLUSIVE for power**, not a free pass.
@@ -71,7 +71,7 @@ that used 0.01 remain valid as optimistic lower bounds. Re-register via
 ### Archived — tape-native CVD/OIR screen (verdict C)
 
 `scripts/research/feature_screening_tape_native.py` /
-`docs/FEATURE_SCREENING_TAPE_NATIVE.md` (2026-08-10):
+`../archive/FEATURE_SCREENING_TAPE_NATIVE.md` (2026-08-10):
 
 - Real `trade_tape` + real OIR (~29 dates). Expectation: stats maybe, tradable no.
 - 2 survivors (`cvd_delta_1h@1h` BE 3.64; `cvd_delta_15m@15m` BE −9.42) — both fail 11 bps.
@@ -80,7 +80,7 @@ that used 0.01 remain valid as optimistic lower bounds. Re-register via
 ### Archived — 24m candle-only feature re-screen (verdict C)
 
 `scripts/research/feature_screening_24m_candles.py` /
-`docs/FEATURE_SCREENING_24M_CANDLES.md` (2026-08-09):
+`../archive/FEATURE_SCREENING_24M_CANDLES.md` (2026-08-09):
 
 - Proxy DB 24m, **731** UTC dates, bar-level IC + **date-cluster** bootstrap.
 - Excluded funding/OI/basis/liq/CVD (empty or short on proxy).
@@ -95,7 +95,7 @@ that used 0.01 remain valid as optimistic lower bounds. Re-register via
 ### Archived — 24m price STRUCTURE features (verdict C) — candle space CLOSED
 
 `scripts/research/feature_screening_24m_structure.py` /
-`docs/FEATURE_SCREENING_24M_STRUCTURE.md` (2026-08-10):
+`../archive/FEATURE_SCREENING_24M_STRUCTURE.md` (2026-08-10):
 
 - Gap closed: continuous S/R, Donchian position, %B, breakout age/magnitude,
   confirmed pivots (k=3 lag), channel slope, range compression — N∈{20,50,100}.
@@ -113,7 +113,7 @@ without a new non-candle information source (L2 depth / queue / maker AS).
 ### Archived — maker fill + adverse selection on 24m survivors (verdict C)
 
 `scripts/research/maker_fill_adverse_selection_24m.py` /
-`docs/MAKER_FILL_ADVERSE_SELECTION_24M.md` (2026-08-10):
+`../archive/MAKER_FILL_ADVERSE_SELECTION_24M.md` (2026-08-10):
 
 - Same proxy DB (731 dates). OHLC penetration fills only (no L2/queue).
 - Models M1 touch / M2 ≥1 bps / M3 ≥2–5 bps sweep; results as **[M1..M3]** interval.
@@ -128,7 +128,7 @@ without a new non-candle information source (L2 depth / queue / maker AS).
 ### Archived — Hyperliquid MM feasibility (verdict C)
 
 `scripts/research/mm_feasibility_study.py` /
-`docs/MARKET_MAKING_FEASIBILITY.md` (2026-08-10):
+`../archive/MARKET_MAKING_FEASIBILITY.md` (2026-08-10):
 
 - 31d HL `l2_snapshots` + sampled `trade_tape` (read-only); ~1–2d depth books on E:.
 - Touch half-spread p50 **0.07–0.27 bps** ≪ retail maker fee **1.5 bps** → edge
@@ -140,7 +140,7 @@ without a new non-candle information source (L2 depth / queue / maker AS).
 ### Archived — MM liquidity-spectrum addendum (verdict C, definitive)
 
 `scripts/research/mm_feasibility_liquidity_spectrum.py` /
-`docs/MARKET_MAKING_FEASIBILITY_LIQUIDITY_SPECTRUM.md` (2026-08-10):
+`../archive/MARKET_MAKING_FEASIBILITY_LIQUIDITY_SPECTRUM.md` (2026-08-10):
 
 - 177 HL perps ranked by `dayNtlVlm`; 12 symbols REST-polled 12 min (bot untouched).
 - Top: fee > half-spread. Mid: wider spread eaten by AS (e.g. CASHCAT −0.23).
@@ -165,7 +165,7 @@ bid/ask depth USD, **OIR**) — **not** the book by levels. `trade_tape`
 
 Disk cleanup Fase 1 (2026-08-09): removed `_test_tape_*` + duplicate
 `schema_peek_*` + uncited `logs/backtest_baseline.txt` (~182 MB). **Did not**
-touch `hyperliquid.db`. See `docs/DISK_AND_CODE_INVENTORY.md`.
+touch `hyperliquid.db`. See `../archive/DISK_AND_CODE_INVENTORY.md`.
 
 ### Parked — migrate bulky research off C: SSD → E: HDD
 
@@ -184,7 +184,7 @@ recording writes to `data/research/l2_books`.
 **Keep on SSD:** `data/live/bot.db` (~210 MB) — random access on the trading hot
 path. Do not relocate operational DB with the research bulk move.
 
-Full volume map + backup procedure: **`docs/DATA_ARCHITECTURE.md`**
+Full volume map + backup procedure: **`DATA_ARCHITECTURE.md`**
 (C:=ops, E:=research, D:=verified backups, VPS=ops-only).
 
 ### Parked — L2 resolution bump — **APPLIED 2026-08-10**
@@ -192,7 +192,7 @@ Full volume map + backup procedure: **`docs/DATA_ARCHITECTURE.md`**
 Applied: `interval_sec=1.0`, `depth_levels=25`, `retention_days=365`.
 Fase 10/08 re-registered (assert kept) — reason: L2 recording resolution only;
 does not affect signal or execution. **Restart required** for the running paper
-bot to pick up the new knobs. See `docs/DATA_ARCHITECTURE.md`.
+bot to pick up the new knobs. See `DATA_ARCHITECTURE.md`.
 
 ### Feature candidate — CVD divergence (NOT a strategy reopen)
 
@@ -219,7 +219,7 @@ Enquadramento (keep this exact framing):
 `cvd_price_div_signed` / `cvd_div_strength`. Some cells clear FDR but fail
 monotonicity (degenerate quintiles) and are **not** TOP survivors — same
 enquadramento: weak/inconsistent as a *feature block*, not a strategy reopen.
-See `docs/FEATURE_SCREENING_REPORT.md`.
+See `../archive/FEATURE_SCREENING_REPORT.md`.
 
 Artifacts: `CVD_P90_CALIBRATION.md`, `baseline_gate_CVDOrderFlow_p90.json`.
 
@@ -228,7 +228,7 @@ Artifacts: `CVD_P90_CALIBRATION.md`, `baseline_gate_CVDOrderFlow_p90.json`.
 
 Screening found genuine short-horizon fade structure (`ret_lag_*`, IC≈−0.06,
 monotone, stable). Cost test (`scripts/research/reversion_cost_test.py`,
-`docs/REVERSION_COST_TEST.md`) verdict **(C)**:
+`../archive/REVERSION_COST_TEST.md`) verdict **(C)**:
 
 - Best gross breakeven RT ≈ **4.21 bps**
   (combo `4h/4h`), vs bot taker RT **11.0 bps**.
@@ -244,7 +244,7 @@ drops enough that taker RT < breakeven.
 
 ### Archived — ret_lag fade through 24h + long-horizon cost scan
 
-`scripts/research/long_horizon_cost_test.py` / `docs/LONG_HORIZON_COST_TEST.md` (2026-08-09):
+`scripts/research/long_horizon_cost_test.py` / `../archive/LONG_HORIZON_COST_TEST.md` (2026-08-09):
 
 - **`ret_lag` fade 15m→24h: CLOSED (not exploitable).** Short-horizon best BE was
   4.21 bps; at 12h/24h gross BE turns ≤0 / more negative. Do not build a fade
@@ -261,7 +261,7 @@ above — not on reversion.
 ### Archived — atr_percentile_7d@24h long revalidation
 
 Long revalidation (`scripts/research/validate_atr_percentile_long.py`,
-`docs/ATR_PERCENTILE_LONG_REVALIDATION.md`) verdict **(C)**:
+`../archive/ATR_PERCENTILE_LONG_REVALIDATION.md`) verdict **(C)**:
 
 - Short-sample BE ≈ 34.5 bps looked like (A); long sample /
   date-block inference does not sustain a clear post-cost edge across regimes.
@@ -446,7 +446,7 @@ action whenever ORB work resumes.
 
 ## 3. Liquidation map — Phase 3 gate
 
-Phases 1 and 2 are done (`docs/LIQUIDATION_MAP_PHASE2_FINDINGS.md`).
+Phases 1 and 2 are done (`../archive/LIQUIDATION_MAP_PHASE2_FINDINGS.md`).
 Verdict: **do not build a strategy yet.** Approach A found a genuine
 liquidation marker in the archive but only N=15 target-coin events from one
 hour (12/15 flush continuation, 0/15 reversal — descriptive only, not

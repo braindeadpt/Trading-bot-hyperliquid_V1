@@ -2,7 +2,7 @@
 """A1 robustness addendum — same frozen spec/data as
 carry_spot_perp_feasibility.py (PREREGISTER unchanged; X/Y untouched).
 
-Checks ordered by docs/CARRY_SPOTPERP_FEASIBILITY.md addendum:
+Checks ordered by docs/archive/CARRY_SPOTPERP_FEASIBILITY.md addendum:
  1. Censoring   — closed vs still-open episodes; open marked at last price
                   with maker exit AND worst-case taker exit (+6 bps delta);
                   days of funding at the observed pace to cover taker exit.

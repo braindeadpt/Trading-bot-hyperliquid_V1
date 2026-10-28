@@ -134,7 +134,7 @@ def main() -> int:
     ap.add_argument("--symbols", default=",".join(SYMBOLS))
     ap.add_argument("--iv-high", type=float, default=IV_HIGH_PCT)
     ap.add_argument("--iv-low", type=float, default=IV_LOW_PCT)
-    ap.add_argument("--out", type=Path, default=ROOT / "docs" / "IV_PERCENTILE_REGIME_GATE.md")
+    ap.add_argument("--out", type=Path, default=ROOT / "docs" / "archive" / "IV_PERCENTILE_REGIME_GATE.md")
     args = ap.parse_args()
 
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]

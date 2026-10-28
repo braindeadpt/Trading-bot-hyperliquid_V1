@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 from scripts.research.backtest_strategy_audit import classify_strategy, DISPLAY_NAMES
 
 CSV_PATH = "data/backtests/per_strategy_20260625_202340.csv"
-OUT_PATH = "docs/STRATEGY_AUDIT.md"
+OUT_PATH = "docs/ops/STRATEGY_AUDIT.md"
 
 # Map CSV strategy names to display names
 NAME_MAP = {

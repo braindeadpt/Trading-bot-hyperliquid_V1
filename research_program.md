@@ -24,7 +24,7 @@ automated overfitting machine.
 - NEVER re-register the Fase 10 frozen window, never disable
   `assert_config_matches_preregister`, never bypass `tests/test_config_hash_frozen.py`.
 - NEVER edit a strategy to make a variant look better. If a variant needs a
-  strategy-code change, STOP and file it in `docs/RESEARCH_BACKLOG.md` for a
+  strategy-code change, STOP and file it in `docs/ops/RESEARCH_BACKLOG.md` for a
   human (this is exactly the hash-neutral rework flow used for VB_REGIMES).
 - NEVER touch `.env`, the live DB, the OMS, or run the pre-push gate's
   `--preflight` stage against a live process.
@@ -42,7 +42,7 @@ Every experiment has, fixed **before running** (micro-preregistration):
    1 bar improves net PnL because entry at the flush extreme is the loss driver."
 2. **Family + harness** — which script runs it (table below).
 3. **Window set** — the frozen window, split into non-overlapping 30d windows
-   (same split as `docs/IV_HIGH_ONLY_AB_SPLIT.md`). The window set is chosen
+   (same split as `docs/archive/IV_HIGH_ONLY_AB_SPLIT.md`). The window set is chosen
    once per family and never per-result. Post-hoc window selection is
    forbidden (see the archived XS-momentum verdict: sensitivities that look
    better on the same window are "not a reopen license").
@@ -77,7 +77,7 @@ not write strategy code.
 
 ```
 read queue (data/research/overnight_experiments/QUEUE.md — the curated,
-  gate-checked list; docs/RESEARCH_BACKLOG.md remains the idea archive)
+  gate-checked list; docs/ops/RESEARCH_BACKLOG.md remains the idea archive)
 loop until budget exhausted or queue empty:
   1. pick top queued item; write hypothesis + windows + metrics to the ledger
      BEFORE running (append-only, one block per experiment)
@@ -86,13 +86,13 @@ loop until budget exhausted or queue empty:
   4. apply the verdict rules below → KEEP / DISCARD / INCONCLUSIVE / BLOCKED
   5. append verdict + numbers to the ledger; move/annotate the backlog item
   6. if 3 consecutive failures within one family, switch family
-write morning report → docs/OVERNIGHT_RESEARCH_LOG.md
+write morning report → docs/ops/OVERNIGHT_RESEARCH_LOG.md
 ```
 
 ## Verdict rules (the gates are the judge)
 
-Map to the standing rules in `docs/RESEARCH_BACKLOG.md` and
-`docs/RESEARCH_WATCHDOGS.md`:
+Map to the standing rules in `docs/ops/RESEARCH_BACKLOG.md` and
+`docs/ops/RESEARCH_WATCHDOGS.md`:
 
 - **KEEP** — variant becomes a *shadow candidate* (never a direct promotion):
   net improvement vs baseline holds in the **majority of non-overlapping
@@ -179,7 +179,7 @@ not a deployment pipeline.
 
 - Raw results: `data/research/overnight_experiments/<ts>_<slug>.json`
   (gitignored, machine-readable, one per experiment).
-- Ledger: `docs/OVERNIGHT_RESEARCH_LOG.md` — append-only, one block per
+- Ledger: `docs/ops/OVERNIGHT_RESEARCH_LOG.md` — append-only, one block per
   experiment: hypothesis, windows, baseline vs variant table, verdict, and
   the single sentence a human needs to audit the decision.
 - Morning report: top of the same file — session summary (runs, verdicts,

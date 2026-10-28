@@ -150,7 +150,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "1h": 2,
         },
     },
-    # Research L2 levels (not operational DB). See docs/L2_BOOK_RECORDING.md
+    # Research L2 levels (not operational DB). See docs/ops/L2_BOOK_RECORDING.md
     "market_data": {
         "l2_recording": {
             "enabled": True,

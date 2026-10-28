@@ -80,7 +80,7 @@ EXCLUDED_FAMILIES = {
     "cvd_taker": "buy/sell volume not reliable on spot kline proxy; tape feed short",
 }
 
-# 82-day TOP cells for comparison (from docs/FEATURE_SCREENING_REPORT.md)
+# 82-day TOP cells for comparison (from docs/archive/FEATURE_SCREENING_REPORT.md)
 PRIOR_82D_TOP = [
     {"feature": "dow", "horizon": "24h", "ic": 0.2190, "note": "calendar"},
     {"feature": "atr_percentile_7d", "horizon": "24h", "ic": -0.1593, "note": "revalidated (C)"},
@@ -764,7 +764,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db", type=Path, default=PROXY_DB)
     ap.add_argument("--out-dir", type=Path, default=ROOT / "data" / "backtests")
-    ap.add_argument("--doc", type=Path, default=ROOT / "docs" / "FEATURE_SCREENING_24M_CANDLES.md")
+    ap.add_argument("--doc", type=Path, default=ROOT / "docs" / "archive" / "FEATURE_SCREENING_24M_CANDLES.md")
     ap.add_argument("--symbols", default=",".join(SYMBOLS_DEFAULT))
     ap.add_argument("--n-boot", type=int, default=N_BOOT_DEFAULT)
     args = ap.parse_args()

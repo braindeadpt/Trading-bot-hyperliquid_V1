@@ -1,7 +1,7 @@
 """Shadow-only IV gate — record high/low-IV per routed trade, never enforce.
 
 The IV gate (DVOL trailing percentile > 66.7) is INCONCLUSIVE in backtest
-(n=13, docs/IV_HIGH_ONLY_AB_SPLIT.md), so it must NOT change execution.
+(n=13, docs/archive/IV_HIGH_ONLY_AB_SPLIT.md), so it must NOT change execution.
 ``TradingEngine._record_iv_gate_shadow`` classifies each routed trade and
 persists an ``iv_gate_shadow`` ShadowDecision — observability only.
 """

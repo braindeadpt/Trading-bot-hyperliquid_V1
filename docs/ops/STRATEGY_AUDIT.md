@@ -44,6 +44,24 @@ permanecem shadow-only — a evidência da demote mantém-se válida e
 inalterada. O PnL do JevJudge no `strategy_pnl` é dados de experiência,
 não evidência de promoção — promoção real continua a exigir PASS.
 
+### §0.2 Roster real — estado a 2026-10-28
+
+Lido de `config/settings.yaml` (`strategy.phase08`) e do compose Linux:
+
+- `execution_strategies`: **JevJudge** (EXPERIMENT, paper-only — ver §0.1).
+- `shadow_strategies` (telemetria, nunca executa): VWAPDeviation (só a
+  amostra selada `iv_gate_shadow` — prereg 2026-10-08), VolatilityBreakout,
+  FundingMomentum, SpotPerpCarry, LeadLag, LiquidationCatcher.
+- Prune de shadows 2026-09-29 (evidência líquida persistida, fees tier-0):
+  OrderBookScalper (pf 0.21/25k), TopTraderFlow (0.31/3.8k),
+  ChecklistMeta (0.63/157, −905 USD/184t live). Linhas históricas de
+  `shadow_decisions` preservadas.
+- Avaliações shadow preregistadas em curso (serviços próprios, fora do
+  engine): CarryA1, UnlockShort, Boros spread, ResMom forward
+  (notes/resmom-forward-prereg-2026-10-28.md), sonda de latência
+  (notes/latency-measure-prereg-2026-10-28.md). Links e datas de leitura:
+  README.md.
+
 ## ⚠️ Nota sobre audits anteriores
 
 Os audits `strategy_audit_20260629_122340.csv` e `_132320.csv` correram **antes** do backfill

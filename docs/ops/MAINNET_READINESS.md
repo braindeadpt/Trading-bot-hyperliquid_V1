@@ -129,7 +129,7 @@ readiness gap, a structural fact of what's persisted):
 
 ## 3. Testnet end-to-end scenarios
 
-`tests/test_testnet_e2e.py`, documented in `docs/TESTNET_E2E_GUIDE.md`,
+`tests/test_testnet_e2e.py`, documented in `TESTNET_E2E_GUIDE.md`,
 covers 8 scenarios against Hyperliquid's real testnet order-matching engine:
 maker order, market order, partial fill, cancel, native SL/TP trigger,
 crash/restart recovery, orphan position adoption, kill switch.
@@ -177,7 +177,7 @@ credentials.
 ## 5. GoldRush / candle-data readiness
 
 Per `AGENTS.md` §1 ("Current operational status") and
-`docs/NODE_TRADES_REBUILD.md`, verified this session:
+`NODE_TRADES_REBUILD.md`, verified this session:
 
 - **GoldRush candle-data readiness is not yet validated.** AGENTS.md
   explicitly instructs: "Do not run OOS, parameter tuning, holdout, or
@@ -319,9 +319,9 @@ the testnet_live suite; the rest are `network`-marked tests such as
 | Frozen window — expectancy_r | > 0.0 | 0.0 (no basis) | **INSUFFICIENT_DATA** | same |
 | Frozen window — max drawdown | ≤ 5.0% | 0.0 (no basis) | **INSUFFICIENT_DATA** | same |
 | Live-vs-replay drift | verdict = PASS | not meaningfully computable (0 live trades) | **NOT YET RUN** | `src/research/live_vs_replay.py`, `scripts/research/phase10_live_vs_replay.py` |
-| Testnet e2e scenarios (8) | all pass | 8/8 skipped, no credentials | **NOT YET RUN** | `python -m pytest tests/test_testnet_e2e.py -v -m testnet_live` output above; `docs/TESTNET_E2E_GUIDE.md` |
+| Testnet e2e scenarios (8) | all pass | 8/8 skipped, no credentials | **NOT YET RUN** | `python -m pytest tests/test_testnet_e2e.py -v -m testnet_live` output above; `TESTNET_E2E_GUIDE.md` |
 | Native SL/TP + kill switch real-exchange proof | scenarios 5 & 8 pass | same 8-skipped set | **NOT YET RUN** | same as above |
-| GoldRush data readiness | parity + secondary validation pass on a funded account, then rebuilt candles pass secondary validation | parity diagnostic run 2026-09-10: 16/16 cells failed `402 insufficient_credits` (billing block, not a data verdict); S3 rebuild pipeline built, not executed (no AWS creds run) | **BLOCKED (billing) + NOT YET RUN** | `data/research/goldrush_parity_diagnostic_20260910_235027.json`; `docs/NODE_TRADES_REBUILD.md` |
+| GoldRush data readiness | parity + secondary validation pass on a funded account, then rebuilt candles pass secondary validation | parity diagnostic run 2026-09-10: 16/16 cells failed `402 insufficient_credits` (billing block, not a data verdict); S3 rebuild pipeline built, not executed (no AWS creds run) | **BLOCKED (billing) + NOT YET RUN** | `data/research/goldrush_parity_diagnostic_20260910_235027.json`; `NODE_TRADES_REBUILD.md` |
 | Security audit | 0 CRITICAL/MEDIUM/LOW | 0/0/0; 2 pre-existing HIGH (subprocess, non-execution-path) | **PASS (with known exceptions)** | audit output above |
 | Default CI test suite | all pass | 679 passed, 12 deselected | **PASS** | pytest output above |
 
@@ -345,7 +345,7 @@ Fase 10 go/no-go gate itself.**
 4. `python -m pytest tests/test_testnet_e2e.py -v -m testnet_live` — 8
    skipped.
 5. Read `data/research/phase10/phase10_preregister.json`,
-   `AGENTS.md`, `docs/NODE_TRADES_REBUILD.md`, `docs/TESTNET_E2E_GUIDE.md`,
+   `AGENTS.md`, `NODE_TRADES_REBUILD.md`, `TESTNET_E2E_GUIDE.md`,
    `src/research/phase10_preregister.py`, `src/research/live_vs_replay.py`,
    `src/core/execution.py` (`kill_switch`), `src/core/engine.py`
    (`kill_switch`, `_recover_state`, `_entry_feed_block_reason`,

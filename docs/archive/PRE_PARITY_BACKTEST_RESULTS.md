@@ -85,7 +85,7 @@ Runs with `sizing_version` missing or different, or `pre_parity_results_invalid:
 | Correlation + exposure gate shared live/backtest | Done | `SignalPipeline` + `RiskManager` |
 | TCA strict rejects missing L2; proxy Tier B only | Done | `execution.tca_mode` / `backtest.tca_mode` |
 | Replay data quality / freshness gate | Done | `ReplayDataQualityGate` |
-| Entry debounce documented + reproduced | Done | `docs/ENTRY_DEBOUNCE.md`, parity tests |
+| Entry debounce documented + reproduced | Done | `ENTRY_DEBOUNCE.md`, parity tests |
 | Gate manifest documents shared vs live-only | Done | `SignalPipeline.gate_manifest()` |
 
 ### Statistics closures
@@ -116,4 +116,4 @@ was executed during consolidation.
 
 ## Live paper DB metrics (baseline)
 
-Live metrics in `data/live/bot.db` remain valid **operational** records but are not automatically comparable to backtests produced before Phase 05. See `docs/BASELINE_V3_1_47.md` for the frozen live baseline.
+Live metrics in `data/live/bot.db` remain valid **operational** records but are not automatically comparable to backtests produced before Phase 05. See `BASELINE_V3_1_47.md` for the frozen live baseline.

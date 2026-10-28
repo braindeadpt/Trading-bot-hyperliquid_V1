@@ -122,7 +122,7 @@ Same-hour proxy clusters (liquidation *print* prices, min 2 events/bucket)
 were computed for opposite-side distance metadata; with N=15 they do not
 support confluence claims.
 
-### Honesty clause (mirrors `docs/CANARY_PROPOSAL.md` discipline)
+### Honesty clause (mirrors `CANARY_PROPOSAL.md` discipline)
 
 **N = 15 from one hour is not statistically significant.** Rates above are
 sample descriptions. Do not extrapolate to other hours, regimes, or coins.
@@ -170,7 +170,7 @@ Prefer also expanding Approach A across many archived hours in parallel.
 | `src/research/liquidation_reaction_analysis.py` | Extract liq events, cluster, measure flush/reverse, forward track |
 | `scripts/research/analyze_liquidation_reactions.py` | CLI (`--dry-run` default; `--execute` for real scan) |
 | `tests/test_liquidation_reaction_analysis.py` | Offline unit tests (synthetic math) |
-| `docs/LIQUIDATION_MAP_PHASE2_FINDINGS.md` | This report |
+| `LIQUIDATION_MAP_PHASE2_FINDINGS.md` | This report |
 
 Not touched: `config/settings.yaml`, `src/strategies/`, `data/live/` writes,
 vault/credentials.

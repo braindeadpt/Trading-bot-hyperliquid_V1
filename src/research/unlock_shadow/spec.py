@@ -1,4 +1,4 @@
-"""Frozen spec constants — mirrors docs/PREREGISTER_UNLOCK_SHADOW.md.
+"""Frozen spec constants — mirrors docs/ops/PREREGISTER_UNLOCK_SHADOW.md.
 
 Anything tunable lives here and ONLY here; changing these constants
 post-freeze is a protocol violation (the prereg hash is the contract).

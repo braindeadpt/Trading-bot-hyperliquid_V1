@@ -7,7 +7,7 @@ that text, so this guard pins it:
 
   * the invariant section exists, is non-empty, and precedes the loop spec,
   * it names every pinned surface (``config/settings.yaml``, ``src/``,
-    ``main.py``, ``.env`` and the ``docs/RESEARCH_BACKLOG.md`` stop-rule),
+    ``main.py``, ``.env`` and the ``docs/ops/RESEARCH_BACKLOG.md`` stop-rule),
   * every path-bearing rule line is an absolute prohibition (contains
     "never") and carries no hedging ("avoid", "when possible", "unless", ...),
   * the frozen-window guards (``assert_config_matches_preregister``,
@@ -40,7 +40,7 @@ PINNED_PATHS = (
     "src/",
     "main.py",
     ".env",
-    "docs/RESEARCH_BACKLOG.md",
+    "docs/ops/RESEARCH_BACKLOG.md",
 )
 
 # Absolute-prohibition statements may not carry softeners. "unless" is

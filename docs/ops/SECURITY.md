@@ -343,7 +343,7 @@ the watchdog automatically starts watching `binance_perp` — no extra step.
    git log --all -p -S "OLD_KEY_FRAGMENT" --source --remotes
    ```
 6. **HARDEN** — Review host access logs (`/var/log/auth.log`, Windows Event Viewer) for intrusion indicators.
-7. **REPORT** — Document the incident in `docs/INCIDENTS.md` with timeline, impact, and remediation.
+7. **REPORT** — Document the incident in `../archive/INCIDENTS.md` with timeline, impact, and remediation.
 
 #### P1 — Audit Failure / Suspicious Code
 

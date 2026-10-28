@@ -39,7 +39,7 @@ spearman_ic_date_block = _fs24.spearman_ic_date_block
 
 DB = ROOT / "data" / "research" / "hyperliquid.db"
 OUT_JSON = ROOT / "data" / "backtests" / "feature_screening_tape_native.json"
-OUT_DOC = ROOT / "docs" / "FEATURE_SCREENING_TAPE_NATIVE.md"
+OUT_DOC = ROOT / "docs" / "archive" / "FEATURE_SCREENING_TAPE_NATIVE.md"
 SYMBOLS = ["BTC", "ETH", "SOL", "HYPE"]
 HORIZONS = {"15m": 1, "1h": 4, "4h": 16}
 TAKER_RT = 0.0011

@@ -12,7 +12,7 @@ allowed-tools:
 
 # Testnet E2E suite
 
-Canonical reference: `docs/TESTNET_E2E_GUIDE.md`. Suite: `tests/test_testnet_e2e.py`
+Canonical reference: `docs/ops/TESTNET_E2E_GUIDE.md`. Suite: `tests/test_testnet_e2e.py`
 (8 real testnet scenarios: maker rest, market fill, partial fill, cancel,
 native SL/TP triggers, crash/restart recovery, orphan adoption, kill-switch flatten).
 

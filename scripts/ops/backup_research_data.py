@@ -28,7 +28,7 @@ Usage (manual)::
     python scripts/ops/backup_research_data.py --tag annual
     python scripts/ops/backup_research_data.py --tag monthly --dry-run
 
-Windows Task Scheduler proposal is documented in ``docs/DATA_ARCHITECTURE.md``
+Windows Task Scheduler proposal is documented in ``docs/ops/DATA_ARCHITECTURE.md``
 — do **not** create the scheduled task from this script.
 """
 

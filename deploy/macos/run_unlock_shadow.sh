@@ -1,5 +1,5 @@
 #!/bin/bash
-# Unlock-shadow daemon — long-running (docs/PREREGISTER_UNLOCK_SHADOW.md).
+# Unlock-shadow daemon — long-running (docs/ops/PREREGISTER_UNLOCK_SHADOW.md).
 # Daily PIT unlock-calendar snapshots + hypothetical beta-hedged short
 # windows; zero orders, zero engine contact. Evidence lands in
 # data/research/unlock_shadow.db; CRYPTORANK_API_KEY comes via .env.

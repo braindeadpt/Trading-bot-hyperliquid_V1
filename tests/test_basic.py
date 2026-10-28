@@ -123,7 +123,7 @@ class TestAlertNotifier(unittest.TestCase):
         }
         verdict = {
             "n_closed": 30, "threshold": 66.7,
-            "report_path": "docs/IV_GATE_SHADOW_RECHECK_RESULT.md",
+            "report_path": "docs/archive/IV_GATE_SHADOW_RECHECK_RESULT.md",
         }
         sent: list = []
 
@@ -169,7 +169,7 @@ class TestAlertNotifier(unittest.TestCase):
             "n_closed": 40, "threshold": 66.7, "verdict": "REJECT",
             "detail": "high_iv -10.00 USD (n=20) e low_iv +10.00 USD (n=20) — "
                        "não confirma a direção do backtest; manter shadow.",
-            "report_path": "docs/IV_GATE_SHADOW_RECHECK_RESULT.md",
+            "report_path": "docs/archive/IV_GATE_SHADOW_RECHECK_RESULT.md",
         }
         sent: list = []
 

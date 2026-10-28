@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launcher for the boros-shadow daemon (docs/PREREGISTER_BOROS_SPREAD.md).
+"""Launcher for the boros-shadow daemon (docs/ops/PREREGISTER_BOROS_SPREAD.md).
 
 Standalone process: hourly Boros markets + perp-L2 snapshots at :05 UTC
 and hypothetical locked-spread entries in data/research/boros_shadow.db.

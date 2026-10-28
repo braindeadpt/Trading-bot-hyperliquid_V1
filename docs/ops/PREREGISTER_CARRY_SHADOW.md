@@ -174,7 +174,7 @@ equivalent to a hypothetical liquidation (§5.4).
 - Isolation test mirrors `test_g_shadow_routing_mirror_never_touches_execution`:
   identical feeds → zero engine/execution calls.
 - Logged as mid-window hash-neutral code in
-  `docs/PAPER_OOS_90D_PROTOCOL.md` code-change table at implementation.
+  `PAPER_OOS_90D_PROTOCOL.md` code-change table at implementation.
 
 ## 9. Reproducibility
 

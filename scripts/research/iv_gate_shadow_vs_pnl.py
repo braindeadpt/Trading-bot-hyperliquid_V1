@@ -2,7 +2,7 @@
 """Join ``iv_gate_shadow`` decisions with executed trade PnL — high_iv vs low_iv in production.
 
 The IV gate is shadow-only (never enforced): the backtest evidence is n=13 /
-INCONCLUSIVE (docs/IV_HIGH_ONLY_AB_SPLIT.md). This script is the live
+INCONCLUSIVE (docs/archive/IV_HIGH_ONLY_AB_SPLIT.md). This script is the live
 counterpart. Each time the regime router routes a trade it records an
 ``iv_gate_shadow`` decision (research DB) with the trailing-DVOL percentile /
 class in the snapshot metadata — *before* touching execution. This script:
@@ -54,7 +54,7 @@ MIN_N_GATE = 30
 BACKTEST_EVIDENCE = {
     "net_high_iv_only_usd": 42.99,
     "n": 13,
-    "source": "docs/IV_HIGH_ONLY_AB_SPLIT.md (janelas independentes 30d)",
+    "source": "docs/archive/IV_HIGH_ONLY_AB_SPLIT.md (janelas independentes 30d)",
 }
 
 

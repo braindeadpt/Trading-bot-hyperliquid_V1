@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A2 feasibility — extreme-funding mean reversion in non-major HL perps.
 
-Implements docs/PREREGISTER_FUNDING_EXTREME_ALTS_2026-10-06.md EXACTLY:
+Implements docs/archive/PREREGISTER_FUNDING_EXTREME_ALTS_2026-10-06.md EXACTLY:
   * universe: every HL perp except BTC/ETH/SOL/HYPE (HIP-3 ':' names out);
     PIT tradable if trailing-30d median daily notional >= $250k
   * f24(t) = mean of last 24 hourly funding rates; per-symbol percentile vs

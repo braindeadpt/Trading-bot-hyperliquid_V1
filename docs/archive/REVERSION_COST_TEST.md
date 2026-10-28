@@ -145,4 +145,4 @@ Trade only when `rvol_1h` ∈ Q1–Q3 (low/mid) vs always vs high vol Q4–Q5. N
 
 ## Continuation
 
-Next: archive in `docs/RESEARCH_BACKLOG.md` with breakeven numbers. Do **not** build a reversion strategy from this family.
+Next: archive in `../ops/RESEARCH_BACKLOG.md` with breakeven numbers. Do **not** build a reversion strategy from this family.

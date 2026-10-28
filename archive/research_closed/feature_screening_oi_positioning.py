@@ -43,7 +43,7 @@ spearman_ic_hac = _fs24.spearman_ic_hac
 OI_DB = ROOT / "data" / "research" / "hyperliquid.db"
 PX_DB = ROOT / "data" / "research" / "binance_spot_proxy.db"
 OUT_JSON = ROOT / "data" / "backtests" / "feature_screening_oi_positioning.json"
-OUT_DOC = ROOT / "docs" / "FEATURE_SCREENING_OI_POSITIONING.md"
+OUT_DOC = ROOT / "docs" / "archive" / "FEATURE_SCREENING_OI_POSITIONING.md"
 
 SYMBOLS = ["BTC", "ETH", "SOL", "HYPE"]
 HORIZONS = {"15m": 1, "1h": 4, "4h": 16, "24h": 96}

@@ -25,7 +25,7 @@ Credentials
 Set the env var ``HYPERLIQUID_PRIVATE_KEY`` (see
 ``src/exchanges/hyperliquid_live.py::ENV_KEY``) to a **TESTNET-ONLY** private
 key (64 hex chars, with or without ``0x`` prefix) before running this suite.
-See ``docs/TESTNET_E2E_GUIDE.md`` for full setup instructions. NEVER put a
+See ``docs/ops/TESTNET_E2E_GUIDE.md`` for full setup instructions. NEVER put a
 mainnet key in this variable while running this module.
 
 Run just this suite::
@@ -103,7 +103,7 @@ def _require_testnet_credentials() -> str:
         pytest.skip(
             f"Testnet credentials not configured — set {ENV_KEY} to a "
             "TESTNET-ONLY private key to run tests/test_testnet_e2e.py for "
-            "real. See docs/TESTNET_E2E_GUIDE.md."
+            "real. See docs/ops/TESTNET_E2E_GUIDE.md."
         )
     return key  # pragma: no cover - only reached with real credentials
 

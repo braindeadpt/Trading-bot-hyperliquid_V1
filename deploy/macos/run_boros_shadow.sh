@@ -1,5 +1,5 @@
 #!/bin/bash
-# Boros-shadow daemon — long-running (docs/PREREGISTER_BOROS_SPREAD.md).
+# Boros-shadow daemon — long-running (docs/ops/PREREGISTER_BOROS_SPREAD.md).
 # Hourly Boros markets + perp-L2 snapshots (:05 UTC) + hypothetical
 # locked-spread entries; zero orders, zero API keys, zero engine contact.
 # Evidence lands in data/research/boros_shadow.db.

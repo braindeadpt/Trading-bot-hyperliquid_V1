@@ -39,7 +39,7 @@ CREEP_MIN_GROWTH_FRAC = 0.15    # total growth must be >= 15% of max_silence
 CREEP_MIN_LEVEL_FRAC = 0.25     # last day max age must be >= 25% of max_silence
 CREEP_MIN_SAMPLES_PER_DAY = 2   # rows with fewer samples are excluded
 
-REPORT_PATH = ROOT / "docs" / "FEED_AGE_CREEP_RECHECK_RESULT.md"
+REPORT_PATH = ROOT / "docs" / "archive" / "FEED_AGE_CREEP_RECHECK_RESULT.md"
 
 
 def utc_day_start_ms(ts_ms: int) -> int:

@@ -1,6 +1,6 @@
 """UnlockShadow tests — frozen-rule semantics + isolation guards.
 
-Covers docs/PREREGISTER_UNLOCK_SHADOW.md §2-§6 + Emenda 1:
+Covers docs/ops/PREREGISTER_UNLOCK_SHADOW.md §2-§6 + Emenda 1:
 cliff-vs-linear classification, the single-source T-6 snapshot gate
 (pending / eligible / not_eligible, frozen canonical values), the
 descriptive b_confirmed flag, <14d merge, beta bounds, the full PnL

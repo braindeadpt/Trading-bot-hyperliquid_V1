@@ -56,7 +56,7 @@ bloqueia net +12.75; IV bloqueia/ADX mantém net −12.81.
 tudo in-sample (a mesma janela 80d que gerou ambos os gates); (b) os dois
 sinais são correlacionados (IV alto e ADX alto co-ocorrem), por isso a
 "discordância" é onde desacoplam; (c) o +42.99 do IV continua a ser n=13 e
-concentrado no pico de junho (ver `docs/IV_HIGH_ONLY_AB_SPLIT.md`). Isto é
+concentrado no pico de junho (ver `IV_HIGH_ONLY_AB_SPLIT.md`). Isto é
 uma evidência direcional de que o DVOL acrescenta informação ao gate de regime
 — não uma promoção. O teste real é out-of-sample (08-07→08-13 e shadow-live).
 

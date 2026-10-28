@@ -41,7 +41,7 @@ sys.path.insert(0, str(ROOT))
 
 OUT_DIR = ROOT / "data" / "backtests" / "xs_momentum"
 CACHE_DB = OUT_DIR / "hl_daily_panel.db"
-REPORT_MD = ROOT / "docs" / "XS_MOMENTUM_FEASIBILITY.md"
+REPORT_MD = ROOT / "docs" / "archive" / "XS_MOMENTUM_FEASIBILITY.md"
 REPORT_JSON = OUT_DIR / "xs_momentum_feasibility.json"
 
 HL_INFO = "https://api.hyperliquid.xyz/info"

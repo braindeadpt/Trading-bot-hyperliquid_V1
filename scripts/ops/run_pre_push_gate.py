@@ -19,7 +19,7 @@ keep the repo green:
                     findings; --fail-on-high also fails on HIGH; always
                     fails on NEW HIGH findings beyond the accepted baseline
                     (ACCEPTED_HIGH_BASELINE, tracked by rule/file — see
-                    docs/SECURITY.md §2.4).
+                    docs/ops/SECURITY.md §2.4).
   3. config_hash - effective `config/settings.yaml` hash must equal the
                     Fase 10 frozen manifest hash (the same assert main.py
                     runs at startup — a drift here means the bot would

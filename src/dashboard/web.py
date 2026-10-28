@@ -896,7 +896,7 @@ _CARRY_SHADOW_STALE_S = 600.0  # heartbeat cadence 60s; red past 10min
 def _carry_shadow_status() -> Optional[Dict[str, Any]]:
     """Carry-shadow daemon heartbeat — read-only against its own ledger DB.
 
-    The daemon (separate process, per docs/PREREGISTER_CARRY_SHADOW.md)
+    The daemon (separate process, per docs/ops/PREREGISTER_CARRY_SHADOW.md)
     writes meta['heartbeat_ms'] every 60s. Surfaced in the feed_silence map
     as a pseudo-feed row so the ops panel colors it like any silent feed —
     degraded past 10min without heartbeat, or when the experiment died.
@@ -2673,7 +2673,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
         Read-only research-feed data — never touches execution. BTC/ETH use
         their own Deribit index; SOL/HYPE classify against BTC (global proxy),
-        mirroring the backtest evidence (docs/IV_HIGH_ONLY_AB_SPLIT.md).
+        mirroring the backtest evidence (docs/archive/IV_HIGH_ONLY_AB_SPLIT.md).
         """
         cached = _ttl_get("dvol")
         if cached is not None:

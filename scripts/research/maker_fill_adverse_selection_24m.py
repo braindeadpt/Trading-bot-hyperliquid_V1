@@ -34,7 +34,7 @@ sys.path.insert(0, str(ROOT))
 
 DB_DEFAULT = ROOT / "data" / "research" / "binance_spot_proxy.db"
 OUT_JSON = ROOT / "data" / "backtests" / "maker_fill_adverse_selection_24m.json"
-OUT_DOC = ROOT / "docs" / "MAKER_FILL_ADVERSE_SELECTION_24M.md"
+OUT_DOC = ROOT / "docs" / "archive" / "MAKER_FILL_ADVERSE_SELECTION_24M.md"
 
 SYMBOLS_DEFAULT = ["BTC", "ETH", "SOL", "HYPE"]
 

@@ -4,7 +4,7 @@ The v2 evidence (`data/backtests/liquidation_flush_shadow_v2_20260813_043848.jso
 approached the baseline gate on the REAL source (okx+bybit) with n=46,
 PF 2.35, avg +6.98 bps — but that sample was only ~4 days old, and the
 same cell is negative on the proxy source. The decision rule in
-`docs/LIQUIDATION_FLUSH_SHADOW_LIVE.md` says: re-run when the real feed
+`docs/archive/LIQUIDATION_FLUSH_SHADOW_LIVE.md` says: re-run when the real feed
 accumulates 30 days.
 
 This watchdog makes that re-run automatic and idempotent:
@@ -23,7 +23,7 @@ This watchdog makes that re-run automatic and idempotent:
 Comparison targets (from the v2 evidence):
 
   * Baseline v2 cell: n=46, WR 50.0%, PF 2.353, avg +6.98 bps.
-  * The live/shadow evidence so far: see docs/LIQUIDATION_FLUSH_SHADOW_LIVE.md.
+  * The live/shadow evidence so far: see docs/archive/LIQUIDATION_FLUSH_SHADOW_LIVE.md.
 
 Verdict rule for the report:
 
@@ -49,7 +49,7 @@ DB_PATH = ROOT / "data" / "live" / "bot.db"
 STATE_DIR = ROOT / "data" / "research"
 STATE_PATH = STATE_DIR / "liquidation_flush_recheck_state.json"
 SIM_SCRIPT = ROOT / "scripts" / "research" / "liquidation_flush_shadow.py"
-REPORT_PATH = ROOT / "docs" / "LIQUIDATION_FLUSH_RECHECK_RESULT.md"
+REPORT_PATH = ROOT / "docs" / "archive" / "LIQUIDATION_FLUSH_RECHECK_RESULT.md"
 
 TARGET_DAYS = 30
 CHECK_HOURS = 6
@@ -64,7 +64,7 @@ BASELINE = {
     "net_bps": 321.0,
 }
 
-# current live evidence from the shadow-live harness (docs/LIQUIDATION_FLUSH_SHADOW_LIVE.md)
+# current live evidence from the shadow-live harness (docs/archive/LIQUIDATION_FLUSH_SHADOW_LIVE.md)
 LIVE_EVIDENCE = {
     "n": 47,
     "win_rate": 48.9,

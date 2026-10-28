@@ -6,7 +6,7 @@ Maker fee: **1.5 bps/side** (HL perps tier-0 base 0.015%).
 
 ## Why this addendum
 
-The primary study (`docs/MARKET_MAKING_FEASIBILITY.md`) concluded **(C)** on BTC/ETH/SOL/HYPE — the most liquid perps, where spreads are tightest. This addendum asks whether a **less liquid** region of the HL perp universe flips `half_spread − AS − fee` positive.
+The primary study (`MARKET_MAKING_FEASIBILITY.md`) concluded **(C)** on BTC/ETH/SOL/HYPE — the most liquid perps, where spreads are tightest. This addendum asks whether a **less liquid** region of the HL perp universe flips `half_spread − AS − fee` positive.
 
 ## Cautions (declared)
 

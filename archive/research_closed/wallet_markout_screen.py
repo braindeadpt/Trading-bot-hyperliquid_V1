@@ -16,7 +16,7 @@ Preregistered unlock rule (QUEUE.md Q13): Phase B wiring is justified only if
 rho >= 0.30 at >= 1 horizon, with >= 20 wallets having >= 30 taker fills in
 EACH half. Absent persistence, the wallet-flow question is dead.
 
-Usable window (pre-registered 2026-10-07, docs/Q13_PHASE_A_RESULT_*):
+Usable window (pre-registered 2026-10-07, docs/archive/Q13_PHASE_A_RESULT_*):
 per symbol, fills are restricted to
     [max(first_taker_fill, first_candle_ts),
      min(last_taker_fill,  last_candle_ts - 3_600_000)]

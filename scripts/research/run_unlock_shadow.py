@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launcher for the unlock-shadow daemon (docs/PREREGISTER_UNLOCK_SHADOW.md).
+"""Launcher for the unlock-shadow daemon (docs/ops/PREREGISTER_UNLOCK_SHADOW.md).
 
 Standalone process: daily point-in-time unlock-calendar snapshots
 (DefiLlama + CryptoRank/Tokenomist), deterministic eligibility, and

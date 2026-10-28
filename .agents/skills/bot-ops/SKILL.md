@@ -13,7 +13,7 @@ allowed-tools:
 
 # Bot operations runbook
 
-Canonical references: `docs/INCIDENT_RUNBOOK.md`, `docs/RESEARCH_WATCHDOGS.md`,
+Canonical references: `docs/ops/INCIDENT_RUNBOOK.md`, `docs/ops/RESEARCH_WATCHDOGS.md`,
 `README.md` (run modes), `scripts/ops/reset_paper_session.py`.
 
 ## Lifecycle

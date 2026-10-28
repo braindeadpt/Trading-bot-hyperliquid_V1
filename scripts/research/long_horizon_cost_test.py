@@ -621,7 +621,7 @@ def write_report(
     lines.append("")
     lines.append(
         "Measurement only — no strategy, no gates, no tuning. Extends "
-        "`docs/REVERSION_COST_TEST.md` (short-horizon fade, best BE **4.21 bps**) "
+        "`docs/archive/REVERSION_COST_TEST.md` (short-horizon fade, best BE **4.21 bps**) "
         "to 12h/24h and to the screening 24h survivors that are **not** reversion."
     )
     lines.append("")
@@ -798,7 +798,7 @@ def write_report(
         )
     else:
         lines.append(
-            "Next: archive in `docs/RESEARCH_BACKLOG.md`. Directional price "
+            "Next: archive in `docs/ops/RESEARCH_BACKLOG.md`. Directional price "
             "prediction at these costs is not exploitable (15m→24h). Next avenue: "
             "**change the cost signal** (market making / spread capture) — already "
             "on the backlog. Do **not** hunt variants of this family."
@@ -808,7 +808,7 @@ def write_report(
 
 
 def update_backlog(verdict: Dict[str, Any], results: List[Dict[str, Any]]) -> None:
-    backlog = ROOT / "docs" / "RESEARCH_BACKLOG.md"
+    backlog = ROOT / "docs" / "ops" / "RESEARCH_BACKLOG.md"
     if not backlog.exists():
         return
     text = backlog.read_text(encoding="utf-8")
@@ -837,7 +837,7 @@ def update_backlog(verdict: Dict[str, Any], results: List[Dict[str, Any]]) -> No
         block = f"""
 {marker}
 
-`scripts/research/long_horizon_cost_test.py` / `docs/LONG_HORIZON_COST_TEST.md` (2026-08-09):
+`scripts/research/long_horizon_cost_test.py` / `docs/archive/LONG_HORIZON_COST_TEST.md` (2026-08-09):
 
 - **`ret_lag` fade 15m→24h: CLOSED (not exploitable).** Short-horizon best BE was
   4.21 bps; at 12h/24h gross BE turns ≤0 / more negative. Do not build a fade
@@ -855,7 +855,7 @@ above — not on reversion.
 {marker}
 
 Long-horizon extension → combined verdict **(C)** for directional price at
-current costs (see `docs/LONG_HORIZON_COST_TEST.md`). Next avenue: market making
+current costs (see `docs/archive/LONG_HORIZON_COST_TEST.md`). Next avenue: market making
 / spread capture.
 
 """
@@ -864,7 +864,7 @@ current costs (see `docs/LONG_HORIZON_COST_TEST.md`). Next avenue: market making
 {marker}
 
 Long-horizon cost scan verdict **({verdict['verdict']})** — see
-`docs/LONG_HORIZON_COST_TEST.md`.
+`docs/archive/LONG_HORIZON_COST_TEST.md`.
 
 """
 
@@ -929,7 +929,7 @@ def main() -> int:
     out_md = (
         Path(args.out_md)
         if args.out_md
-        else ROOT / "docs" / "LONG_HORIZON_COST_TEST.md"
+        else ROOT / "docs" / "archive" / "LONG_HORIZON_COST_TEST.md"
     )
     out_json.parent.mkdir(parents=True, exist_ok=True)
 

@@ -3,7 +3,7 @@
 Package-only phase: no trading-logic changes, `config_hash` frozen at
 `4077927fec6a880c`. Host sharing contract lives in the infra repo
 (`bots-01`, A1.Flex 2 OCPU / 12 GB, userns-remap Docker). Reference only:
-branch `feat/vps` (paths, `docs/VPS_MIGRATION.md`, backup scripts) — not merged.
+branch `feat/vps` (paths, `../archive/VPS_MIGRATION.md`, backup scripts) — not merged.
 
 ## Layout on the host
 

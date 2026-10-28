@@ -2530,7 +2530,7 @@ class TradingEngine:
         """Shadow-only IV gate: record the high/low-IV decision per routed trade.
 
         Observability only — the IV gate is **not** enforced (the backtest
-        evidence is n=13, INCONCLUSIVE per docs/IV_HIGH_ONLY_AB_SPLIT.md). Each
+        evidence is n=13, INCONCLUSIVE per docs/archive/IV_HIGH_ONLY_AB_SPLIT.md). Each
         routed trade is classified against the trailing DVOL percentile and a
         ``iv_gate_shadow`` decision is persisted, so live can be compared with
         the backtest gate without touching execution. ``None`` percentile (no
@@ -3181,7 +3181,7 @@ class TradingEngine:
         """Return (notional_5m, side_5m, count_5m) from accumulator.
 
         Returns the dominant side by notional.
-        Sum across venues = cross-venue market pressure (see docs/LIQUIDATION_AGGREGATOR.md).
+        Sum across venues = cross-venue market pressure (see docs/ops/LIQUIDATION_AGGREGATOR.md).
         """
         acc = self._liquidation_acc[symbol]
         if not acc["events"]:

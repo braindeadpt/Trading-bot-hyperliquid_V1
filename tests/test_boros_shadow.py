@@ -1,6 +1,6 @@
 """BorosLockedSpread tests — frozen-rule semantics + isolation guards.
 
-Covers docs/PREREGISTER_BOROS_SPREAD.md Phase 1: market-universe
+Covers docs/ops/PREREGISTER_BOROS_SPREAD.md Phase 1: market-universe
 filtering, direction (receives the larger fixed), simple-YU vs spread
 structures, the exact cost/capital formula, entry gates (8% APY,
 14-90d, asset whitelist, dedup, daily cap), venue-unavailable

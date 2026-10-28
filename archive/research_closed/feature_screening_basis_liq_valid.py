@@ -98,7 +98,7 @@ def main() -> int:
     db = ROOT / "data" / "live" / "bot.db"
     out_dir = ROOT / "data" / "backtests"
     out_dir.mkdir(parents=True, exist_ok=True)
-    report = ROOT / "docs" / "FEATURE_SCREENING_BASIS_LIQ_VALID.md"
+    report = ROOT / "docs" / "archive" / "FEATURE_SCREENING_BASIS_LIQ_VALID.md"
 
     t0 = time.time()
     con = _connect(db)

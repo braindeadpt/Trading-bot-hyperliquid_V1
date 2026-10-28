@@ -76,8 +76,8 @@ def _bias_watchdog() -> Dict[str, Any]:
         "samples": n_samples,
         "triggered": bool(state.get("triggered")),
         "last_run": runs[-1] if runs else None,
-        "report_path": "docs/TOP_TRADER_BIAS_RECHECK_RESULT.md",
-        "probe_report_path": "docs/FEATURE_SCREENING_TOP_TRADER_BIAS.md",
+        "report_path": "docs/archive/TOP_TRADER_BIAS_RECHECK_RESULT.md",
+        "probe_report_path": "docs/archive/FEATURE_SCREENING_TOP_TRADER_BIAS.md",
     }
 
 
@@ -97,7 +97,7 @@ def _flush_watchdog() -> Dict[str, Any]:
         "samples": n_events,
         "triggered": bool(state.get("triggered")),
         "last_run": runs[-1] if runs else None,
-        "report_path": "docs/LIQUIDATION_FLUSH_RECHECK_RESULT.md",
+        "report_path": "docs/archive/LIQUIDATION_FLUSH_RECHECK_RESULT.md",
     }
 
 
@@ -149,7 +149,7 @@ def _iv_gate_watchdog() -> Dict[str, Any]:
         "concentration": concentration,
         "triggered": bool(state.get("triggered")),
         "last_run": runs[-1] if runs else None,
-        "report_path": "docs/IV_GATE_SHADOW_RECHECK_RESULT.md",
+        "report_path": "docs/archive/IV_GATE_SHADOW_RECHECK_RESULT.md",
     }
 
 
@@ -191,7 +191,7 @@ def _creeping_age_watchdog() -> Dict[str, Any]:
         "feeds": feeds,
         "triggered": bool(state.get("triggered")),
         "last_run": runs[-1] if runs else None,
-        "report_path": "docs/FEED_AGE_CREEP_RECHECK_RESULT.md",
+        "report_path": "docs/archive/FEED_AGE_CREEP_RECHECK_RESULT.md",
     }
 
 

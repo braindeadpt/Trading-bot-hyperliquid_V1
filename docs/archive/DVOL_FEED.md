@@ -52,7 +52,7 @@ gate in production reproduces the research numbers exactly.
 
 The regime router now records the high/low-IV decision for every routed trade
 via `TradingEngine._record_iv_gate_shadow`, **without changing execution** —
-the backtest gate (`docs/IV_HIGH_ONLY_AB_SPLIT.md`, high_iv = DVOL
+the backtest gate (`IV_HIGH_ONLY_AB_SPLIT.md`, high_iv = DVOL
 percentile(30d) > 66.7) is still INCONCLUSIVE (n=13), so it is observability
 only. Each executed trade gets an `iv_gate_shadow` ShadowDecision with
 `iv_percentile`, `iv_class` (`high_iv` / `low_iv` / `unknown`) and the

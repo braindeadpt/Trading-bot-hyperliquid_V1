@@ -23,7 +23,7 @@ Method (walk-forward, per contracted feed, on the production rule):
     **MISS**. Fires with no degradation later in the window are reported as
     "anticipation without confirmation".
 
-Outputs: a console table, ``docs/FEED_AGE_CREEP_LEADTIME_VALIDATION.md``
+Outputs: a console table, ``docs/archive/FEED_AGE_CREEP_LEADTIME_VALIDATION.md``
 and ``data/research/feed_age_creep_leadtime.json``. Read-only — never
 trades, never touches the OMS.
 """
@@ -51,7 +51,7 @@ from scripts.research.feed_age_creep_recheck import (  # noqa: E402
 )
 
 DAY_MS = 86_400_000
-REPORT_PATH = ROOT / "docs" / "FEED_AGE_CREEP_LEADTIME_VALIDATION.md"
+REPORT_PATH = ROOT / "docs" / "archive" / "FEED_AGE_CREEP_LEADTIME_VALIDATION.md"
 JSON_PATH = ROOT / "data" / "research" / "feed_age_creep_leadtime.json"
 
 

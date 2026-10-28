@@ -238,7 +238,7 @@ def test_tca_proxy_never_tier_a_even_with_hl_data_contract() -> None:
 
 
 def test_pre_parity_inventory_doc_exists() -> None:
-    doc = Path("docs/PRE_PARITY_BACKTEST_RESULTS.md")
+    doc = Path("docs/archive/PRE_PARITY_BACKTEST_RESULTS.md")
     text = doc.read_text(encoding="utf-8")
     assert "Pre-Parity" in text
     assert "consolidation" in text.lower() or "Pre-OOS" in text

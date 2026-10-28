@@ -1,5 +1,5 @@
 #!/bin/bash
-# Carry-shadow daemon — long-running (docs/PREREGISTER_CARRY_SHADOW.md).
+# Carry-shadow daemon — long-running (docs/ops/PREREGISTER_CARRY_SHADOW.md).
 # Own public-feed WS + REST pollers; hypothetical episodes only — zero orders,
 # zero engine contact. Evidence lands in data/research/carry_shadow.db and its
 # heartbeat is a pseudo-feed row on the /ops feed-silence panel.

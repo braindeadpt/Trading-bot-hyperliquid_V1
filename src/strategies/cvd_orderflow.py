@@ -33,7 +33,7 @@ References
 ----------
 * "Cumulative Volume Delta" — standard tape-reading concept, used by
   Bookmap, Sierra Chart, ATAS, Order Flow trading communities.
-* See docs/ARCHITECTURE.md for data flow (candle builder already
+* See docs/archive/ARCHITECTURE.md for data flow (candle builder already
   tracks buy_volume / sell_volume per 1m bar).
 """
 

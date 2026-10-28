@@ -4,7 +4,7 @@
 The IV gate is currently **shadow-only**: the regime router records an
 ``iv_gate_shadow`` decision per routed trade (research DB, IV class in the
 snapshot metadata) but never blocks execution. The backtest evidence
-(docs/IV_HIGH_ONLY_AB_SPLIT.md) suggested keeping both strategies only in
+(docs/archive/IV_HIGH_ONLY_AB_SPLIT.md) suggested keeping both strategies only in
 high_iv (threshold 66.7) with net +42.99 USD — but at n=13 it was INCONCLUSIVE
 below the n>=30 evidence gate.
 
@@ -15,7 +15,7 @@ This watchdog makes the shadow→enforcement decision automatic and idempotent:
     ``scripts/research/iv_gate_shadow_vs_pnl.py`` — the single source of truth).
   * When n >= 30 closed with a decision and no recheck has been recorded yet,
     it re-runs the full high_iv vs low_iv comparison, extracts the slices and
-    writes a decision report (docs/IV_GATE_SHADOW_RECHECK_RESULT.md).
+    writes a decision report (docs/archive/IV_GATE_SHADOW_RECHECK_RESULT.md).
   * The verdict decides **shadow vs enforcement** with threshold 66.7:
       - PROMOTE  : high_iv slice profitable AND low_iv not — enforce the gate.
       - REJECT   : the live sample contradicts the backtest direction — keep
@@ -58,7 +58,7 @@ from scripts.research.iv_gate_shadow_vs_pnl import (  # noqa: E402
 
 STATE_DIR = ROOT / "data" / "research"
 STATE_PATH = STATE_DIR / "iv_gate_shadow_recheck_state.json"
-REPORT_PATH = ROOT / "docs" / "IV_GATE_SHADOW_RECHECK_RESULT.md"
+REPORT_PATH = ROOT / "docs" / "archive" / "IV_GATE_SHADOW_RECHECK_RESULT.md"
 
 TARGET_CLOSED = MIN_N_GATE  # 30 — matches the backtest evidence gate.
 CHECK_HOURS = 6

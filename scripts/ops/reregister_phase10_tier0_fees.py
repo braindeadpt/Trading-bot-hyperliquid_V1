@@ -142,7 +142,7 @@ def main() -> int:
             "min_b1_seeds": 200,
             "mainnet_promotion": False,
         },
-        "docs": "docs/PAPER_OOS_90D_PROTOCOL.md",
+        "docs": "docs/ops/PAPER_OOS_90D_PROTOCOL.md",
         "reregistration_reason": REREG_REASON,
     }
     oos_path = oos_dir / "manifest.json"

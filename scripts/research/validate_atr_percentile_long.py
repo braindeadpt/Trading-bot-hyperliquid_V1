@@ -636,7 +636,7 @@ def write_report(path: Path, payload: Dict[str, Any]) -> None:
 
 
 def update_backlog(verdict: Dict[str, Any]) -> None:
-    backlog = ROOT / "docs" / "RESEARCH_BACKLOG.md"
+    backlog = ROOT / "docs" / "ops" / "RESEARCH_BACKLOG.md"
     if not backlog.exists():
         return
     text = backlog.read_text(encoding="utf-8")
@@ -648,7 +648,7 @@ def update_backlog(verdict: Dict[str, Any]) -> None:
 {marker}
 
 Long revalidation (`scripts/research/validate_atr_percentile_long.py`,
-`docs/ATR_PERCENTILE_LONG_REVALIDATION.md`) verdict **(C)**:
+`docs/archive/ATR_PERCENTILE_LONG_REVALIDATION.md`) verdict **(C)**:
 
 - Short-sample BE ≈ {SHORT_SAMPLE_BE_BPS:.1f} bps looked like (A); long sample /
   date-block inference does not sustain a clear post-cost edge across regimes.
@@ -661,7 +661,7 @@ Long revalidation (`scripts/research/validate_atr_percentile_long.py`,
 
 Long revalidation verdict **(B)** — survives with smaller/tighter edge than
 the 83-day {SHORT_SAMPLE_BE_BPS:.1f} bps sample. See
-`docs/ATR_PERCENTILE_LONG_REVALIDATION.md` before any strategy build.
+`docs/archive/ATR_PERCENTILE_LONG_REVALIDATION.md` before any strategy build.
 
 """
     else:
@@ -669,7 +669,7 @@ the 83-day {SHORT_SAMPLE_BE_BPS:.1f} bps sample. See
 {marker}
 
 Long revalidation verdict **(A)** — see
-`docs/ATR_PERCENTILE_LONG_REVALIDATION.md`. Next: minimal strategy →
+`docs/archive/ATR_PERCENTILE_LONG_REVALIDATION.md`. Next: minimal strategy →
 baseline-signal gate (no parameter fishing).
 
 """
@@ -807,7 +807,7 @@ def main() -> int:
     for p in (out_json, stamped):
         p.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
-    out_md = ROOT / "docs" / "ATR_PERCENTILE_LONG_REVALIDATION.md"
+    out_md = ROOT / "docs" / "archive" / "ATR_PERCENTILE_LONG_REVALIDATION.md"
     write_report(out_md, payload)
     update_backlog(verdict)
     print(f"Wrote {out_json}")

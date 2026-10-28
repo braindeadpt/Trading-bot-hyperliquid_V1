@@ -8,10 +8,10 @@
 
 This is the **Hyperliquid Premium Trading Bot** — an async Python trading bot for the Hyperliquid perpetuals exchange. It supports **paper trading** (default), **testnet**, and **mainnet** execution modes.
 
-The bot is built around a **WebSocket-first event architecture**: real-time market data from Hyperliquid (and optional Binance feeds) flows through an async pub/sub `DataBus`, gets aggregated into multi-timeframe candles, and is consumed by a modular strategy system (live registry: VWAPDeviation, VolatilityBreakout, LiquidationCatcher, OrderBookScalper, LeadLag, SpotPerpCarry, FundingMomentum, ChecklistMeta, TopTraderFlow). A central `TradingEngine` orchestrates signal generation, risk gating, position sizing, and execution.
+The bot is built around a **WebSocket-first event architecture**: real-time market data from Hyperliquid (and optional Binance feeds) flows through an async pub/sub `DataBus`, gets aggregated into multi-timeframe candles, and is consumed by a modular strategy system (execution roster: JevJudge EXPERIMENT only; shadow roster in `strategy.phase08.shadow_strategies` — see `config/settings.yaml`). A central `TradingEngine` orchestrates signal generation, risk gating, position sizing, and execution.
 
 > **Retired 2026-09-10** — removed from `_STRATEGY_REGISTRY` after documented
-> CLOSED/KILL/FAIL verdicts (`docs/RESEARCH_BACKLOG.md`, `docs/STRATEGY_AUDIT.md`):
+> CLOSED/KILL/FAIL verdicts (`docs/ops/RESEARCH_BACKLOG.md`, `docs/ops/STRATEGY_AUDIT.md`):
 > TrendFollow/SmartMoneyFlow, MeanReversion, DonchianBreakout, FundingArbitrage,
 > CVDOrderFlow(+P90), RangeGrid, TrendPyramid, SFPReversion, VARejection.
 > **Archived 2026-10-28** (post-cutover cleanup): the closed families —
@@ -53,7 +53,7 @@ The bot is built around a **WebSocket-first event architecture**: real-time mark
   `scripts/ops/reregister_jev_experiment.py`.
   All evidence-based strategies remain demoted to shadow (09-17 evidence:
   VWAPDeviation −220.84USD/44t, ChecklistMeta −905.27/184t, VB −454.30/26t;
-  every VWAP refinement family DISCARD'd — `docs/STRATEGY_AUDIT.md` §0).
+  every VWAP refinement family DISCARD'd — `docs/ops/STRATEGY_AUDIT.md` §0).
 - Shadow-mode strategies (`strategy.phase08.shadow_strategies`, signal-tracked
   but never executed): VWAPDeviation, ChecklistMeta, VolatilityBreakout,
   OrderBookScalper, FundingMomentum, SpotPerpCarry, LeadLag,
@@ -61,7 +61,7 @@ The bot is built around a **WebSocket-first event architecture**: real-time mark
 - **Fees (2026-08-10):** paper/backtest aligned to HL perps **tier-0** —
   taker **0.045%**/side, maker **0.015%**/side. Phase10 window re-registered
   via `scripts/ops/reregister_phase10_tier0_fees.py`. Protocol:
-  `docs/PAPER_OOS_90D_PROTOCOL.md`.
+  `docs/ops/PAPER_OOS_90D_PROTOCOL.md`.
 - **GoldRush candle-data readiness is not yet validated.** Do not run OOS,
   parameter tuning, holdout, or performance backtests against GoldRush-sourced
   data until this is resolved.
@@ -111,7 +111,7 @@ trading-bot-hyperliquid/
 ├── src/                       # All application code
 │   ├── core/                  # Engine, portfolio, risk, execution, Kelly sizer, correlation monitor
 │   ├── strategies/            # strategy modules + base ABC + indicators + ensemble
-│   │                          # (registry holds the 9 live names; retired classes kept for research)
+│   │                          # (registry: JevJudge executes; shadow list in config; retired classes kept for research)
 │   ├── exchanges/             # Hyperliquid WS/REST, Binance API, funding aggregator
 │   ├── data/                  # SQLite DB, candle builder, orderbook metrics, historical fetcher
 │   ├── dashboard/             # Flask + Socket.IO server + embedded HTML UI
@@ -501,7 +501,7 @@ feature with predictive power
 ```
 
 Never the inverse. Screening CLI: `python scripts/research/feature_screening.py`.
-Report: `docs/FEATURE_SCREENING_REPORT.md`. Only TOP survivors (FDR +
+Report: `docs/archive/FEATURE_SCREENING_REPORT.md`. Only TOP survivors (FDR +
 monotonicity + temporal stability + cross-symbol consistency) justify a
 strategy attempt. Pre-FDR hits alone do **not**.
 
@@ -573,14 +573,14 @@ python scripts/research/baseline_signal_gate.py --validate-harness --seeds 40
 ```
 
 Artifact board: `data/backtests/parity_diag/BASELINE_PORTFOLIO_GATE_REPORT.md`.
-Longer write-up: `docs/BASELINE_SIGNAL_GATE.md`.
+Longer write-up: `docs/ops/BASELINE_SIGNAL_GATE.md`.
 
 **Feed silence (2026-08-09):** contracted feeds
 (`liquidation_okx`, `liquidation_bybit`, `liquidation_binance`,
 `liquidation_coinalyze_check`, `binance_perp`, funding venues, `taker_split`)
 must alert if quiet beyond configured thresholds — see
-`FeedSilenceMonitor` / `docs/FEED_CONTAMINATION_AUDIT.md` /
-`docs/LIQUIDATION_AGGREGATOR.md`. A dead venue must never again go unnoticed
+`FeedSilenceMonitor` / `docs/archive/FEED_CONTAMINATION_AUDIT.md` /
+`docs/ops/LIQUIDATION_AGGREGATOR.md`. A dead venue must never again go unnoticed
 for weeks. Hyperliquid has **no** public market-wide liquidation channel;
 do not contract `liquidation_hl`.
 

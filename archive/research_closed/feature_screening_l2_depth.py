@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.research.l2_recording_audit import audit_l2  # noqa: E402
 
 OUT = ROOT / "data" / "research" / "paper_oos_90d" / "l2_depth_screen_latest.json"
-DOC = ROOT / "docs" / "FEATURE_SCREENING_L2_DEPTH.md"
+DOC = ROOT / "docs" / "archive" / "FEATURE_SCREENING_L2_DEPTH.md"
 
 
 def main() -> int:

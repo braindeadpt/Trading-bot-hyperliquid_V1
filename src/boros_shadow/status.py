@@ -57,7 +57,7 @@ def board(ledger: BorosLedger, now_ms: int | None = None) -> Dict[str, Any]:
     }
     return {
         "hypothesis": "BorosLockedSpread",
-        "spec": "docs/PREREGISTER_BOROS_SPREAD.md",
+        "spec": "docs/ops/PREREGISTER_BOROS_SPREAD.md",
         "generated_ms": now_ms,
         "counts": counts,
         "kill_flags": kill_flags,

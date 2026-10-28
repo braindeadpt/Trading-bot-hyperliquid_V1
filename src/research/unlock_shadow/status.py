@@ -50,7 +50,7 @@ def board(ledger: UnlockLedger, now_ms: int | None = None) -> Dict[str, Any]:
         "WHERE kind='event' AND state='closed'")
     return {
         "hypothesis": "UnlockShadow",
-        "spec": "docs/PREREGISTER_UNLOCK_SHADOW.md",
+        "spec": "docs/ops/PREREGISTER_UNLOCK_SHADOW.md",
         "generated_ms": now_ms,
         "counts": counts,
         "read_gate": {

@@ -12,7 +12,7 @@ allowed-tools:
 
 # Data provenance tiers
 
-Canonical references: `docs/MAINNET_READINESS.md` §5, `docs/NODE_TRADES_REBUILD.md`,
+Canonical references: `docs/ops/MAINNET_READINESS.md` §5, `docs/ops/NODE_TRADES_REBUILD.md`,
 `src/data/series_metadata.py`, `src/data/candle_providers/`.
 
 ## Tiers (decided by measured parity vs `hl_candleSnapshot`, not by marketing)

@@ -5,7 +5,7 @@ on testnet or mainnet. This is not a developer guide — it assumes you can run
 the commands below but does not require reading source code first.*
 
 As of 2026-07-13, the bot has **never been run against real testnet or
-mainnet money** (see `docs/MAINNET_READINESS.md`). This runbook is written
+mainnet money** (see `MAINNET_READINESS.md`). This runbook is written
 ahead of that so the procedures exist before they're needed under pressure.
 
 ---
@@ -243,7 +243,7 @@ invented here.*
   took effect when it didn't — and a restart at the wrong moment can compound
   an ongoing incident.
 - **Never use a mainnet private key for testnet testing**, and never do the
-  reverse. `docs/TESTNET_E2E_GUIDE.md` calls this out explicitly: the
+  reverse. `TESTNET_E2E_GUIDE.md` calls this out explicitly: the
   testnet e2e suite deliberately places real orders and flattens whatever
   it finds — using it against a mainnet-keyed account risks real financial
   exposure and unintended liquidation of unrelated positions.
@@ -259,6 +259,6 @@ invented here.*
   diagnosis.
 - **Never relax the GoldRush data-parity gate or Fase 10 gate thresholds to
   "get past" an incident.** Per project policy (see `AGENTS.md` and
-  `docs/NODE_TRADES_REBUILD.md`), these gates exist specifically so nobody
+  `NODE_TRADES_REBUILD.md`), these gates exist specifically so nobody
   — including under incident pressure — loosens tolerance to make a bad
   signal look acceptable.

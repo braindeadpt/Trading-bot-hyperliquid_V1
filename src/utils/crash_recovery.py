@@ -124,7 +124,7 @@ class CrashRecovery:
 
         SECURITY NOTE: subprocess.run is used intentionally to spawn the
         bot process — this is the core functionality of crash recovery
-        (the accepted AUDIT-005 finding, documented in docs/SECURITY.md).
+        (the accepted AUDIT-005 finding, documented in docs/ops/SECURITY.md).
         The command is validated by ``_validate_cmd`` before execution:
         ``cmd[0]`` must be ``sys.executable`` (the current interpreter) and
         the first script must be ``main.py``; ``--mode`` values are
@@ -138,7 +138,7 @@ class CrashRecovery:
         try:
             # Crash recovery's core function is respawning the bot; cmd is
             # allowlist-validated by _validate_cmd() above. Accepted finding,
-            # justification in docs/SECURITY.md §2.4:
+            # justification in docs/ops/SECURITY.md §2.4:
             # audit-ok: AUDIT-005
             result = subprocess.run(
                 cmd,

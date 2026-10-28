@@ -9,7 +9,7 @@
 3. Veredicto automático: **KEEP / WATCH / KILL / NO_DATA**.
 4. Só depois — e **só com baseline-signal gate PASS** (B1≥p95 + n≥30 + PF>1) —
    actualizar `config/settings.yaml` `execution_strategies` e paper trading.
-   Ver `docs/BASELINE_SIGNAL_GATE.md` / `AGENTS.md` §12.
+   Ver `BASELINE_SIGNAL_GATE.md` / `AGENTS.md` §12.
    INCONCLUSIVO (poucos trades) **não** autoriza kill nem promoção.
 
 ## Comandos
@@ -32,7 +32,7 @@ python scripts/research/backtest_per_strategy.py
 
 | Ficheiro | Conteúdo |
 |----------|----------|
-| `docs/STRATEGY_AUDIT.md` | Veredictos + tabelas |
+| `STRATEGY_AUDIT.md` | Veredictos + tabelas |
 | `data/backtests/strategy_audit_*.csv` | Dados brutos |
 
 ## Dados necessários na DB
@@ -46,6 +46,11 @@ python scripts/research/backtest_per_strategy.py
 | CVDOrderFlow | `buy_volume`/`sell_volume` em candles 1m |
 | SpotPerpCarry | Binance spot (não backfilled) |
 
+> Nota (2026-10-28): a tabela descreve necessidades de dados dos
+> backtests históricos, não o roster — vários nomes listados estão
+> retirados. O roster real vive em `config/settings.yaml`
+> (`strategy.phase08`) e está resumido no README.md.
+
 Backfill antes de re-testar estratégias NO_DATA:
 
 ```bash
@@ -58,7 +63,7 @@ python scripts/ops/backfill_candles.py --days 30
 
 1. Backfill dados em falta
 2. `python scripts/research/backtest_strategy_audit.py --quick`
-3. Rever `docs/STRATEGY_AUDIT.md`
+3. Rever `STRATEGY_AUDIT.md`
 4. Atualizar `settings.yaml` (só KEEP + WATCH promovidos)
 5. Paper 2 semanas → comparar live vs backtest
 6. Mainnet só com PF ≥ 1.3 em paper

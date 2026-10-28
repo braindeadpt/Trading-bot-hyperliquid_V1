@@ -5,7 +5,7 @@ WR ~7.7%, net -$66.32 — the biggest bleed slice. The liquidation stop-out
 (``liquidation_stop_out``) exits a position when the rolling 5m liquidation
 window validates the position SIDE at/above a notional floor. Its floor was
 recalibrated 2026-08-14 from a provisional 5.0M to the real multi-venue p90
-(2.5M, docs/LIQUIDATION_STOPOUT_FLOOR_CALIBRATION.md).
+(2.5M, docs/archive/LIQUIDATION_STOPOUT_FLOOR_CALIBRATION.md).
 
 This script runs the SAME VB backtest twice over the full candle history:
 

@@ -329,7 +329,7 @@ ROUTER_BLOCKED_SECTION_LABEL = (
 # Preregistered confirmation samples — the board for post-cutoff decisions
 # is SEALED: only counts are exposed until indep_n reaches the target, so an
 # interim read can never drive a stop/continue decision (no peeking rule in
-# docs/PREREGISTER_VWAP_IV_GATE_2026-10-08.md — commit a70b3cb,
+# docs/ops/PREREGISTER_VWAP_IV_GATE_2026-10-08.md — commit a70b3cb,
 # 2026-10-08 20:17:36 UTC). Discovery rows (ts <= cutoff) keep the plain
 # variant board; confirmation rows get ``variant#confirm``.
 VARIANT_CONFIRM_SUFFIX = "#confirm"

@@ -49,7 +49,7 @@ home).
 | `data/research/l2_books` | top-**K** bids/asks | Future MM / adverse selection | (this **is** the depth path) |
 | `bot.db` | trades, candles, portfolio | Live/paper ops + live-vs-replay | Research tape |
 
-See also: `docs/L2_BOOK_RECORDING.md` (role split), `docs/DISK_AND_CODE_INVENTORY.md`.
+See also: `L2_BOOK_RECORDING.md` (role split), `../archive/DISK_AND_CODE_INVENTORY.md`.
 
 ---
 

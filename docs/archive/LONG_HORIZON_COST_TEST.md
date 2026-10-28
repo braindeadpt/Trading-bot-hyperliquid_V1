@@ -7,7 +7,7 @@ Span: 83.5 days · grid: closed 15m · exit: time stop only.
 
 ## Scope
 
-Measurement only — no strategy, no gates, no tuning. Extends `docs/REVERSION_COST_TEST.md` (short-horizon fade, best BE **4.21 bps**) to 12h/24h and to the screening 24h survivors that are **not** reversion.
+Measurement only — no strategy, no gates, no tuning. Extends `REVERSION_COST_TEST.md` (short-horizon fade, best BE **4.21 bps**) to 12h/24h and to the screening 24h survivors that are **not** reversion.
 
 ### Frozen rules
 

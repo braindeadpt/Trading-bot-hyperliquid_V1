@@ -35,7 +35,7 @@ sys.path.insert(0, str(ROOT))
 DB_DEFAULT = ROOT / "data" / "research" / "hyperliquid.db"
 L2_BOOKS_DEFAULT = Path("data/research/l2_books")
 OUT_JSON = ROOT / "data" / "backtests" / "mm_feasibility.json"
-OUT_DOC = ROOT / "docs" / "MARKET_MAKING_FEASIBILITY.md"
+OUT_DOC = ROOT / "docs" / "archive" / "MARKET_MAKING_FEASIBILITY.md"
 
 SYMBOLS = ("BTC", "ETH", "SOL", "HYPE")
 AS_HORIZONS_MS = (("1s", 1_000), ("10s", 10_000), ("60s", 60_000))

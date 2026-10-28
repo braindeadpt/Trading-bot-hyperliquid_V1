@@ -1,6 +1,6 @@
 # A1 — Spot–perp funding carry feasibility (delta-neutral, maker)
 
-Preregistration: `docs/PREREGISTER_SPOTPERP_CARRY_2026-10-06.md` (commit `d0b35fe`, frozen before data).
+Preregistration: `PREREGISTER_SPOTPERP_CARRY_2026-10-06.md` (commit `d0b35fe`, frozen before data).
 Script: `scripts/research/carry_spot_perp_feasibility.py` — reproduce with `--skip-download` against `data/backtests/carry_a1/carry_a1_cache.db`.
 Raw result JSON: `data/backtests/carry_a1/carry_a1_results.json` (pull 2026-10-09).
 

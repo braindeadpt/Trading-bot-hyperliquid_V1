@@ -10,7 +10,7 @@ refused or unavailable destination DISABLES recording with an ERROR — the
 recorder never silently redirects to another path (2026-08-14 audit: the
 E: → C: silent regression).
 
-Architecture map: ``docs/DATA_ARCHITECTURE.md``.
+Architecture map: ``docs/ops/DATA_ARCHITECTURE.md``.
 Backup: ``scripts/ops/backup_research_data.py``.
 """
 

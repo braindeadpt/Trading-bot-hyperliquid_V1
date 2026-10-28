@@ -41,7 +41,7 @@ sink was wired). The script matches those real fired timestamps against
 the simulated fires to confirm the simulation reproduces what the
 monitor did where both exist.
 
-Outputs: a console table, ``docs/FEED_CADENCE_LEADTIME_VALIDATION.md``
+Outputs: a console table, ``docs/archive/FEED_CADENCE_LEADTIME_VALIDATION.md``
 and ``data/research/feed_cadence_leadtime.json`` (gitignored). Read-only
 — never trades, never touches the OMS.
 """
@@ -67,7 +67,7 @@ from src.core.engine import (  # noqa: E402
 from src.data.market_data_health import cadence_percentile  # noqa: E402
 
 DEFAULT_LIVE_DB = ROOT / "data" / "live" / "bot.db"
-REPORT_PATH = ROOT / "docs" / "FEED_CADENCE_LEADTIME_VALIDATION.md"
+REPORT_PATH = ROOT / "docs" / "archive" / "FEED_CADENCE_LEADTIME_VALIDATION.md"
 JSON_PATH = ROOT / "data" / "research" / "feed_cadence_leadtime.json"
 FEED = "liquidation_okx"
 MAX_SILENCE_DEFAULT_SEC = 6 * 3600.0

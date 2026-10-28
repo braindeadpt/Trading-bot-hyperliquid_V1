@@ -33,7 +33,7 @@ PnL, e o sinal é demasiado esparso para promover.
 
 ## Contexto
 
-* A variante veio de `docs/IV_PERCENTILE_REGIME_GATE.md` (+42.99, n=13, janela única 05-18..08-07, dominada pelo pico de DVOL de junho).
+* A variante veio de `IV_PERCENTILE_REGIME_GATE.md` (+42.99, n=13, janela única 05-18..08-07, dominada pelo pico de DVOL de junho).
 * A classificação high/low-IV é *rolling* (janela 30d) — independente do split; o split só muda a agregação dos trades.
 * DVOL é informação implícita nova, aplicada post-hoc ao nível do trade — nenhuma mudança ao settings.yaml nem à janela congelada.
 * JSON: `iv_high_only_ab_split_20260813_113227.json`.
