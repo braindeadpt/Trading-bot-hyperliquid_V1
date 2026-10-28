@@ -16,7 +16,8 @@ case "$name" in
     # public access: https://bots-01.tail3cb15a.ts.net/ (tailnet only, root :443) —
     # probing the ts.net name from the host itself hairpins (000), so probe local
     code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:8091/ 2>/dev/null || echo 000)
-    latest=$(sqlite3 /srv/hl/data/research/hyperliquid.db -readonly       "SELECT MAX(created_at_ms) FROM feed_health_snapshots;" 2>/dev/null || echo 0)
+    DB="${HL_RESEARCH_DB:-/srv/hl/data/research/hyperliquid.db}"
+    latest=$(sqlite3 "$DB" -readonly       "SELECT MAX(created_at_ms) FROM feed_health_snapshots;" 2>/dev/null || echo 0)
     now_ms=$(( $(date +%s) * 1000 ))
     [ "$code" != "000" ] && [ $(( now_ms - ${latest:-0} )) -lt 600000 ] && ok=1 ;;
   boros)
