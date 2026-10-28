@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.research.wallet_markout_screen import (  # noqa: E402
+from archive.research_closed.wallet_markout_screen import (  # noqa: E402
     N_PERM,
     PERM_SEED,
     RHO_UNLOCK,

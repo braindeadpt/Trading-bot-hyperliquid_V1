@@ -14,8 +14,8 @@ from src.exchanges.funding_normalize import (
     venue_funding_spread,
 )
 from src.strategies.base import MarketEvent
-from src.strategies.funding_arbitrage import FundingArbitrage
-from src.strategies.mean_reversion import MeanReversion
+from archive.strategies_closed.funding_arbitrage import FundingArbitrage
+from archive.strategies_closed.mean_reversion import MeanReversion
 import pytest
 
 pytestmark = pytest.mark.unit

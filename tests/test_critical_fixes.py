@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 import asyncio
 from src.core.portfolio import PortfolioState
 from src.core.risk_manager import RiskManager
-from src.strategies.funding_arbitrage import FundingArbitrage
+from archive.strategies_closed.funding_arbitrage import FundingArbitrage
 from src.utils.config import Config
 import pytest
 

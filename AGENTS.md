@@ -14,7 +14,12 @@ The bot is built around a **WebSocket-first event architecture**: real-time mark
 > CLOSED/KILL/FAIL verdicts (`docs/RESEARCH_BACKLOG.md`, `docs/STRATEGY_AUDIT.md`):
 > TrendFollow/SmartMoneyFlow, MeanReversion, DonchianBreakout, FundingArbitrage,
 > CVDOrderFlow(+P90), RangeGrid, TrendPyramid, SFPReversion, VARejection.
-> Their class files remain importable for research harnesses but the factory
+> **Archived 2026-10-28** (post-cutover cleanup): the closed families —
+> `mean_reversion`, `donchian_breakout`, `funding_arbitrage`, `range_grid`,
+> `sfp_reversion`, `va_rejection` — moved to `archive/strategies_closed/`
+> (still importable for research harnesses via `archive.strategies_closed.*`);
+> closed-family research scripts moved to `archive/research_closed/`.
+> Remaining retired classes stay in `src/strategies/` — the factory
 > never instantiates them; phase08 lists naming them log "unknown" and skip.
 > Do not re-register without a fresh baseline-signal-gate PASS (§12). All state is persisted to a local SQLite database, and a Flask + Socket.IO dashboard provides real-time monitoring.
 

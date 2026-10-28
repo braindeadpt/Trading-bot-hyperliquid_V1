@@ -335,6 +335,25 @@ class ResearchDatabase(Database):
         )
         return {}
 
+    def prune_trade_tape(self, retention_days: float,
+                         now_ms: Optional[int] = None) -> int:
+        """Delete ``trade_tape`` rows older than ``retention_days``.
+
+        Opt-in only — the store is append-only by contract, so retention is
+        never implied: callers must pass an explicit positive day count
+        (scripts/ops/prune_trade_tape.py refuses without one). Returns rows
+        deleted; 0 or negative days deletes nothing.
+        """
+        if retention_days <= 0:
+            return 0
+        ref = now_ms if now_ms is not None else int(time.time() * 1000)
+        cutoff = int(ref - retention_days * 86_400_000)
+        cur = self._conn().execute(
+            "DELETE FROM trade_tape WHERE timestamp_ms < ?", (cutoff,)
+        )
+        self._commit()
+        return cur.rowcount
+
     def save_research_candles(
         self,
         candles: List[Candle],

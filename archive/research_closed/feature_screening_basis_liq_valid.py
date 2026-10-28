@@ -26,7 +26,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.research.feature_screening import (  # noqa: E402
+from archive.research_closed.feature_screening import (  # noqa: E402
     CANDIDATE_FEATURES,
     CONTROL_NEGS,
     CONTROL_POS,

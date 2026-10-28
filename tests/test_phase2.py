@@ -11,9 +11,9 @@ sys.path.insert(0, str(ROOT))
 from src.core.tca import estimate_expected_edge_pct, passes_tca_check, round_trip_cost_pct
 from src.strategies.base import MarketEvent, Signal
 from src.strategies.factory import build_ensemble, build_sub_strategies, build_phase08_strategies, phase08_enabled
-from src.strategies.funding_arbitrage import FundingArbitrage
+from archive.strategies_closed.funding_arbitrage import FundingArbitrage
 from src.strategies.liquidation_catcher import LiquidationCatcher
-from src.strategies.mean_reversion import MeanReversion
+from archive.strategies_closed.mean_reversion import MeanReversion
 from src.utils.config import load_config
 import pytest
 

@@ -42,7 +42,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "research"))
 # Import shared cost helpers from the short-horizon script without packaging.
 _spec = importlib.util.spec_from_file_location(
     "reversion_cost_test",
-    ROOT / "scripts" / "research" / "reversion_cost_test.py",
+    ROOT / "archive" / "research_closed" / "reversion_cost_test.py",
 )
 assert _spec and _spec.loader
 _rct = importlib.util.module_from_spec(_spec)
