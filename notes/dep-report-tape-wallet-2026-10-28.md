@@ -41,7 +41,7 @@ Runtime: **nenhum**. Nota: a cadeia `top_trader_tracker → top_trader_store/vir
 `mean_reversion` (VWAPDeviation reversion), `donchian_breakout` (Donchian 4H), `range_grid` (DipGrid), `funding_arbitrage` (A2 funding-extreme), `sfp_reversion` + `va_rejection` (S/R + pivots / rejection family).
 
 **`archive/research_closed/`** (scripts folha, zero importers vivos):
-MM (`mm_feasibility_study`, `mm_feasibility_liquidity_spectrum`), candle features (`feature_screening`, `_24m_candles`, `_24m_structure`, `_basis_liq_valid`, `_l2_depth`, `_oi_positioning`, `_tape_native`), XS momentum antigo (`xs_momentum_feasibility`), A2 (`funding_extreme_alts_feasibility`), TopTraderFlow (`wallet_fills_collector`, `wallet_markout_screen`, `top_wallet_liquidation_report`), S/R+pivots research (`backtest_sfp_walkforward`, `backtest_va_walkforward`, `reversion_cost_test`).
+MM (`mm_feasibility_study`, `mm_feasibility_liquidity_spectrum`), candle features (`feature_screening_24m_structure`, `_basis_liq_valid`, `_l2_depth`, `_oi_positioning`, `_tape_native`), XS momentum antigo (`xs_momentum_feasibility`), A2 (`funding_extreme_alts_feasibility`), TopTraderFlow (`wallet_fills_collector`, `wallet_markout_screen`, `top_wallet_liquidation_report`), S/R+pivots research (`backtest_sfp_walkforward`, `backtest_va_walkforward`, `reversion_cost_test`).
 
 **`archive/deploy_macos/`**: `run_wallet_fills.sh`.
 
@@ -61,3 +61,6 @@ MM (`mm_feasibility_study`, `mm_feasibility_liquidity_spectrum`), candle feature
 
 ## Não tocado (regra explícita)
 `jev_shadow_judge`, `vwap_deviation` (iv-gate shadow vivo), `carry-shadow`, `unlock-shadow`, `boros-shadow`, `outcome-eval` + seus módulos, `lead_lag`/`funding_momentum`/`spot_perp_carry`/`volatility_breakout`/`liquidation_catcher`/`vwap_deviation`/`jev_judge` (registry vivo), `trend_follow`, `trend_pyramid`, `vwap_trend`, `opening_range_breakout`, `cvd_orderflow*` (retired mas fora da lista do pacote).
+
+
+> **Correcção 2026-10-28 (2.ª passagem):** `feature_screening.py` e `feature_screening_24m_candles.py` **não** foram arquivados — são bibliotecas partilhadas importadas por `feature_screening_top_trader_bias.py`, que está wired ao `research_watchdog_supervisor.py` (tabela §wired). Permanecem em `scripts/research/`.
