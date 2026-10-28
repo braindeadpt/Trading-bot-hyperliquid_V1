@@ -165,6 +165,20 @@ class _DashCase:
         self._env.start()
         web._engine = _make_engine(self._live)
         web._ttl_clear()
+        # Track research DB handles opened by endpoint handlers so teardown
+        # closes them deterministically — Windows can't unlink an open file.
+        self._rdbs: list = []
+        self._orig_open_research_db = web._open_research_db
+
+        def _tracking_open():
+            rdb = self._orig_open_research_db()
+            self._rdbs.append(rdb)
+            return rdb
+
+        self._open_patch = patch.object(
+            web, "_open_research_db", side_effect=_tracking_open
+        )
+        self._open_patch.start()
         self.app, self.sio, _ = web.create_app({"mode": "paper"})
         self.client = self.app.test_client()
 
@@ -177,11 +191,15 @@ class _DashCase:
                 eng._db._c.close()
         except Exception:
             pass
+        for rdb in self._rdbs:
+            try:
+                rdb.close()
+            except Exception:
+                pass
+        self._open_patch.stop()
         web._engine = self._orig_engine
         web._ttl_clear()
         self._env.stop()
-        # Endpoint handlers may leave an unreferenced ro-conn to research.db
-        # alive — reclaim it before unlinking on Windows (flaky teardown).
         gc.collect()
         self._tmp.cleanup()
 
