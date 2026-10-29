@@ -109,9 +109,11 @@ services:
     <<: *base
     container_name: hl-overnight
     volumes:
-      # research queue — tracked in the repo checkout (image omits data/);
-      # single-file ro mount: NIGHTLY_STATUS.json/.nightly.lock siblings
-      # land in the container layer next to it.
+      # research dir must be writable — NIGHTLY_STATUS.json/.nightly.lock
+      # are written as siblings of QUEUE.md (container layer parents are
+      # root-owned, so a bare file mount alone cannot work).
+      - /srv/hl/data/research:/opt/hyperliquid/data/research
+      # research queue — tracked in the repo checkout (image omits data/)
       - ../../data/research/overnight_experiments/QUEUE.md:/opt/hyperliquid/data/research/overnight_experiments/QUEUE.md:ro
     command: >
       sh -c 'while :; do
