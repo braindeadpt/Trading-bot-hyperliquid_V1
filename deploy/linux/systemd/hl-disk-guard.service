@@ -3,6 +3,8 @@ Description=Hyperliquid disk guard (80% warn / 85% PAUSE_COLLECTORS)
 
 [Service]
 Type=oneshot
-EnvironmentFile=/etc/hyperliquid/bot.env
+# No EnvironmentFile: bot.env carries the container path DISK_GUARD_FS=/data,
+# and EnvironmentFile overrides Environment= — the host service must see the
+# host path. The hc ping URL falls back to /srv/hl/secrets/hc-hl-disk-guard.url.
 Environment=DISK_GUARD_FS=/srv/hl/data
 ExecStart=/usr/local/sbin/hl-disk-guard.sh
