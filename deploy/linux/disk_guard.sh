@@ -8,7 +8,9 @@
 # Never touches Meridian paths; the flag only covers the HL data root.
 set -u
 
-FS="${DISK_GUARD_FS:-/data}"
+# Path precedence: DISK_GUARD_FS (unit override) > HL_DATA (bot.env) > target
+# layout default /srv/hl/data. Inside containers the same dir is /data.
+FS="${DISK_GUARD_FS:-${HL_DATA:-/srv/hl/data}}"
 # ping URL: env wins; else /srv/hl/secrets/hc-hl-disk-guard.url (0600, off-repo)
 if [ -z "${DISK_GUARD_HC_URL:-}" ] && [ -f /srv/hl/secrets/hc-hl-disk-guard.url ]; then
     DISK_GUARD_HC_URL=$(tr -d "[:space:]" < /srv/hl/secrets/hc-hl-disk-guard.url)
@@ -21,7 +23,8 @@ TAG="hl-disk-guard"
 
 USE_PCT=$(df -P "$FS" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
 if [ -z "$USE_PCT" ]; then
-    echo "$TAG: cannot statfs $FS" >&2
+    echo "$TAG: ERROR — cannot statfs $FS (missing or unreadable data dir; check DISK_GUARD_FS/HL_DATA vs deployed layout)" >&2
+    [ -n "${DISK_GUARD_HC_URL:-}" ] && curl -fsS -m 10 --retry 2 "${DISK_GUARD_HC_URL}/fail" >/dev/null 2>&1 || true
     exit 1
 fi
 

@@ -140,8 +140,18 @@ docker compose -f deploy/linux/compose.yaml build
 docker compose -f deploy/linux/compose.yaml up -d          # gated services need --profile gated
 sudo install -m755 deploy/linux/disk_guard.sh /usr/local/sbin/hl-disk-guard.sh
 sudo install -m755 deploy/linux/db_vacuum.sh /usr/local/sbin/hl-db-vacuum.sh
-sudo install -m644 deploy/linux/systemd/hl-*.timer /etc/systemd/system/  # optional (compose guard already runs)
-sudo systemctl daemon-reload && sudo systemctl enable --now hl-db-vacuum.timer hl-docker-prune.timer
+sudo install -m755 deploy/linux/backup.sh /usr/local/sbin/hl-backup.sh
+sudo install -m755 deploy/linux/healthcheck.sh /usr/local/sbin/hl-healthcheck.sh
+sudo install -m755 deploy/linux/metrics.sh /usr/local/sbin/hl-metrics.sh
+sudo install -m644 deploy/linux/systemd/hl-*.service deploy/linux/systemd/hl-*.timer /etc/systemd/system/
+# persist kernel forwarding for docker NAT (dockerd only asserts it at start;
+# 2026-10-28 incident: manual sysctl -w killed all container egress for 10h)
+sudo install -m644 deploy/linux/99-ipforward.conf /etc/sysctl.d/99-ipforward.conf
+sudo sysctl --system   # applies net.ipv4.ip_forward=1 immediately
+sudo systemctl daemon-reload && sudo systemctl enable --now hl-db-vacuum.timer hl-docker-prune.timer \
+    hl-disk-guard.timer hl-backup.timer hl-backup-prune.timer hl-healthcheck.timer hl-metrics.timer
+# egress canary pings hc-egress.url — create that check on healthchecks.io
+# and drop the URL into /srv/hl/secrets/hc-egress.url (0600); no-op until then
 ```
 
 Weekly cron alternative for prune if systemd timers are skipped: see timer.
