@@ -23,8 +23,24 @@ LOG_TAG="hl-backup"
 
 hc() { [ -n "${HL_BACKUP_HC_URL:-}" ] && curl -fsS -m 10 --retry 2 "$1" >/dev/null 2>&1 || true; }
 
-# Free space: need ~1x total DB size on the staging fs
-db_kb=$(du -ck "$HL_DATA"/research/hyperliquid.db "$LIVE_DB" 2>/dev/null | tail -1 | cut -f1)
+# Research DB (~9+ GB, ~95% frozen history) stages weekly only — the live
+# bot.db stages every run. Rationale: sqlite .backup on a hot WAL source
+# re-copies dirty pages and starved at ~160KB/s for 8h42m (2026-10-30);
+# VACUUM INTO does a single sequential pass (~5 min measured) and yields a
+# defragged copy.
+RESEARCH_WEEKDAY="${BACKUP_RESEARCH_WEEKDAY:-7}"   # ISO weekday, 7=Sunday
+TODAY=$(date -u +%u)
+
+DBS="$LIVE_DB"
+if [ "$TODAY" = "$RESEARCH_WEEKDAY" ]; then
+    DBS="$HL_DATA/research/hyperliquid.db $DBS"
+    echo "$LOG_TAG: weekly run — research DB included (weekday $RESEARCH_WEEKDAY)"
+else
+    echo "$LOG_TAG: daily run — research DB skipped (weekly on day $RESEARCH_WEEKDAY)"
+fi
+
+# Free space: need ~1x staged DB size on the staging fs
+db_kb=$(du -ck $DBS 2>/dev/null | tail -1 | cut -f1)
 free_kb=$(df -Pk "$STAGING" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
 mkdir -p "$STAGING"
 free_kb=$(df -Pk "$STAGING" | awk 'NR==2 {print $4}')
@@ -37,15 +53,15 @@ trap 'rm -f "$STAGING"/*.db "$STAGING"/*.db-*' EXIT
 
 # Expected sources are mandatory: a missing DB is a failure, not a skip —
 # a silent continue would produce a green snapshot missing a DB.
-for db in "$HL_DATA/research/hyperliquid.db" "$LIVE_DB"; do
+for db in $DBS; do
     if [ ! -f "$db" ]; then
         echo "$LOG_TAG: FAIL missing expected source $db" >&2
         hc "${HL_BACKUP_HC_URL:-}/fail"; exit 1
     fi
     name=$(basename "$db")
-    echo "$LOG_TAG: sqlite3 .backup $name"
-    sqlite3 "$db" ".backup '$STAGING/$name'"
-    if ! sqlite3 "$STAGING/$name" "PRAGMA integrity_check;" | grep -qx "ok"; then
+    echo "$LOG_TAG: VACUUM INTO $name"
+    sqlite3 "file:$db?mode=ro" "VACUUM INTO '$STAGING/$name'"
+    if ! sqlite3 -readonly "$STAGING/$name" "PRAGMA integrity_check;" | grep -qx "ok"; then
         echo "$LOG_TAG: integrity_check FAILED on $name — aborting" >&2
         hc "${HL_BACKUP_HC_URL:-}/fail"; exit 1
     fi
