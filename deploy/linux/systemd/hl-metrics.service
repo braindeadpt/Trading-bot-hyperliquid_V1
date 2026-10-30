@@ -1,0 +1,6 @@
+[Unit]
+Description=HL container metrics sampler (docker stats -> CSV)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hl-metrics.sh

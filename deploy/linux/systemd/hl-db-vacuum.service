@@ -1,0 +1,10 @@
+[Unit]
+Description=Monthly VACUUM of Hyperliquid SQLite DBs (after restic backup)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/hyperliquid/bot.env
+ExecStart=/usr/local/sbin/hl-db-vacuum.sh /srv/hl/data
+Nice=19
+IOSchedulingClass=idle
