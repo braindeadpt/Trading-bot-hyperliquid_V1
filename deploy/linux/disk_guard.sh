@@ -15,11 +15,21 @@ FS="${DISK_GUARD_FS:-${HL_DATA:-/srv/hl/data}}"
 if [ -z "${DISK_GUARD_HC_URL:-}" ] && [ -f /srv/hl/secrets/hc-hl-disk-guard.url ]; then
     DISK_GUARD_HC_URL=$(tr -d "[:space:]" < /srv/hl/secrets/hc-hl-disk-guard.url)
 fi
+TAG="hl-disk-guard"
 WARN="${DISK_WARN_PCT:-80}"
 STOP="${DISK_STOP_PCT:-85}"
+# systemd EnvironmentFile does not strip trailing comments — a copied
+# bot.env.example would deliver "85  # comment" and every -ge test would
+# silently fail. Refuse loudly (and alert) instead of clearing the flag.
+case "$WARN" in (*[!0-9]*|'') BAD=DISK_WARN_PCT ;; esac
+case "$STOP" in (*[!0-9]*|'') BAD=DISK_STOP_PCT ;; esac
+if [ -n "${BAD:-}" ]; then
+    echo "$TAG: ERROR — non-numeric threshold $BAD (WARN='$WARN' STOP='$STOP'; check for inline comments in env file)" >&2
+    [ -n "${DISK_GUARD_HC_URL:-}" ] && curl -fsS -m 10 --retry 2 "${DISK_GUARD_HC_URL}/fail" >/dev/null 2>&1 || true
+    exit 1
+fi
 FLAG="$FS/PAUSE_COLLECTORS"
 PAUSE_LOG="${DISK_GUARD_PAUSE_LOG:-$FS/collector_pauses.log}"
-TAG="hl-disk-guard"
 
 USE_PCT=$(df -P "$FS" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
 if [ -z "$USE_PCT" ]; then
