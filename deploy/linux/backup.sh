@@ -40,7 +40,9 @@ else
 fi
 
 # Free space: need ~1x staged DB size on the staging fs
-db_kb=$(du -ck $DBS 2>/dev/null | tail -1 | cut -f1)
+# (|| true: du exits non-zero when a DB is missing — the per-source check
+# below must stay reachable to report *which* file is absent.)
+db_kb=$(du -ck $DBS 2>/dev/null | tail -1 | cut -f1 || true)
 free_kb=$(df -Pk "$STAGING" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
 mkdir -p "$STAGING"
 free_kb=$(df -Pk "$STAGING" | awk 'NR==2 {print $4}')
@@ -59,6 +61,9 @@ for db in $DBS; do
         hc "${HL_BACKUP_HC_URL:-}/fail"; exit 1
     fi
     name=$(basename "$db")
+    # VACUUM INTO refuses an existing destination — a previous killed run can
+    # leave staged .db files the EXIT trap would have cleaned on a normal exit.
+    rm -f "$STAGING/$name"
     echo "$LOG_TAG: VACUUM INTO $name"
     sqlite3 "file:$db?mode=ro" "VACUUM INTO '$STAGING/$name'"
     if ! sqlite3 -readonly "$STAGING/$name" "PRAGMA integrity_check;" | grep -qx "ok"; then
