@@ -532,6 +532,30 @@ PF>1 net of tier-0 costs, and funding coverage ≥0.90 in the evaluator.
 
 ---
 
+### Data gaps — production feed continuity (2026-10-29)
+
+Open items flagged during the bots-01 deploy/soak review; neither blocks the
+current soak but both gate future work:
+
+- **(a) Common candle hole 2026-10-20 01:02→15:56 UTC (~894 min).** Both the
+  Mac and bots-01 live `bot.db` show the identical `candles_1m` gap — upstream
+  or shared-cause, not a host fault. Needs a one-off investigation (HL feed
+  incident? shared collector pause?) before OOS windows spanning Oct-20 are
+  treated as complete; the hole also limits Jev-verdict outcome evaluation in
+  that window.
+- **(b) `iv_thresholds` needs DVOL history.** The overnight runner refuses to
+  start: `dvol_daily has no closes — refusing to invent a span`
+  (`overnight_runner.dvol_coverage_span`). The DVOL feed must accumulate real
+  closes before that experiment family can run; check `dvol_daily` coverage
+  growth and re-check `NIGHTLY_STATUS.json` once enough days exist.
+
+Also accepted 2026-10-29: research-DB `candles_1m`/`feed_health`/`trade_tape`/
+`l2_snapshots` frozen at 2026-10-17 (deliberate `ws_microstructure_enabled:
+false` — tape/L2 cost, no live consumer). Accepted loss of redundancy; the
+live `bot.db` is the only candle source going forward.
+
+---
+
 ## Discipline note
 
 The recurring pattern this file guards against: a compelling new idea
