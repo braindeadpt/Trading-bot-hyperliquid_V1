@@ -216,3 +216,28 @@ contracted feeds fresh"**, compose diff clean (0 leftover edits).
 - [x] **Cutover Mac → bots-01 — EXECUTED 2026-11-01** (window 76min > 30min meta → Amendment 1 record)
 - [ ] Post-cutover soak #3 (24h) + 72h Mac freeze before any Mac cleanup
 - [ ] PR #6 merge — **blocked pending new Pedro OK**
+
+## Post-mortem — cutover 2026-11-01 (window 1h16m07s vs meta 30 min)
+
+A meta de 30 min falhou por três causas medidas no timeline:
+
+1. **Transferência** (~15 min): 3.1 GB comprimidos por upload caseiro
+   (~4.6 MB/s com 4 streams em paralelo — single-stream ~1 MB/s teria
+   custado ~50 min). Não havia ligação directa rápida Mac→bots-01
+   (tailscale pong 263 ms).
+2. **`PRAGMA integrity_check`** (~19 min): correu sequencialmente sobre a
+   DB de research recebida (9.4 GB) antes do swap — passo obrigatório mas
+   não orçamentado na meta.
+3. **Preflight stale** (~15 min): `hl-paper` recusou boot pós-swap — a
+   janela do cutover deixou as candles stale por definição, e a última
+   15m fechada era a do Mac às 00:00 (>30 min). O escape hatch
+   documentado `--skip-preflight` foi usado **uma vez** para bootear, e
+   revertido logo a seguir — o boot final às 01:47:33 correu o comando
+   normal com «Preflight feed check PASSED» (compose diff limpo, 0
+   edições residuais).
+
+**Lição:** num futuro cutover, o `integrity_check` da DB recebida corre
+**em paralelo com a transferência dos restantes artefactos** (ou depois
+do start, com o rollback ainda de pé) — é o maior bloco serializável que
+não precisa da janela fechada. Snapshot+sha+transfer ficam ~20 min; o
+resto da meta era realista.
