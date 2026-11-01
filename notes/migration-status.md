@@ -144,6 +144,68 @@ Run: `systemd-run` transient unit replicating `hl-backup.service`
    bounded reader (`timeout` wrapper) so a stuck probe can't block the
    healthcheck service.
 
+## Cutover Mac → bots-01 (2026-11-01) — EXECUTED, Pedro-approved
+
+**Write-stopped window: 00:13:49 → 01:29:56 UTC = 1h16m07s** — exceeds the
+<30 min meta → **record for Amendment 1 of the Jev v2 amendment** (see
+timeline below for where the time went).
+
+### Sequence
+
+| t (UTC) | Step |
+|---------|------|
+| 00:12:21 | Pre-flight bots-01: 10/10 up, hash `4077927fec6a880c`, disk 43%, repo `bf06b2d`, image `be1a1e2b5b6c` |
+| 00:13:49 | **pm2 stop** (audited wrapper) — hyperliquid, jev-judge, outcome-eval, carry-shadow, unlock-shadow, boros-shadow + crons watchdogs/overnight/backup-monthly; `pm2 save` persisted; lsof = **0 writers** — **WINDOW OPEN** |
+| 00:14–00:21 | `VACUUM INTO` on Mac: `bot.db` 6s (430,075,904 B), `hyperliquid.db` 5m26s (9,407,008,768 B — source was 14.7GB, VACUUM compacted ~5GB free pages) |
+| 00:21–00:34 | sha256 both + `gzip -1` research → 3,039,251,065 B |
+| 00:34–00:45 | Transfer Mac→Windows→bots-01 relay: bot.db.gz 108MB + research split 4× (~4.6MB/s parallel vs ~1MB/s single — home upload bound, direct tailscale pong 263ms) |
+| 00:45–00:50 | Reassemble, decompress, **sha256 match both**: bot.db `53769c10…`, hyperliquid.db `07fdcbb5…` |
+| 00:50–01:09 | `PRAGMA integrity_check` on received files: bot.db **ok** ~1min, hyperliquid.db **ok** ~19min (normal scheduling) |
+| 01:09–01:29 | Table counts verified equal to Mac (research: candles_1m 1,493,009 / jev 3,589 / shadow_decisions 169,391 / scoreboards 3,424 / trades 0 / decision_audit 0; live: trades 681 / candles_1m 824,301) → docker stop 9 writers → swap: current → `*-pre-cutover`, Mac files in, `chown 101000:101000` |
+| 01:29:47 | `docker start` 9 writers |
+| 01:29:56 | **First write** (`bot.db-wal` created) — **WINDOW CLOSED** |
+
+### Post-swap verification — PASS
+
+- `config_hash` = `4077927fec6a880c` (unchanged)
+- Candles fresh <2min on all 4 symbols continuously
+- `jev_decisions` advanced on new DB: 3,589 → 3,593 rows, latest 01:29:52
+- `shadow_decisions` 169,391 → 169,398
+- Healthchecks **5/5 up**
+- **0 ERROR/Traceback** across all 10 containers, 01:50→02:05 UTC
+- All containers r=0 post-restart
+
+### Preflight incident (designed behavior, resolved)
+
+`hl-paper` refused to boot post-swap — preflight feed check FATAL on stale
+candles (expected: the cutover gap is by definition stale data). Resolution:
+one boot with `--skip-preflight` (the documented escape hatch), then
+re-created a second time after the first 15m candle closed (01:44:59) —
+needed because last closed 15m was Mac's 00:00 (>30min stale). Third boot
+with normal command at 01:47:33: **"Preflight feed check PASSED — all
+contracted feeds fresh"**, compose diff clean (0 leftover edits).
+
+### Where the 76 min went (Amendment 1 evidence)
+
+- ~7min snapshot (VACUUM both DBs)
+- ~15min transfer (3.1GB compressed; home-upload-bound ~4.6MB/s with 4
+  parallel streams — single stream ~1MB/s would have been ~50min)
+- ~19min integrity_check on 9.4GB received research DB (required pre-swap)
+- ~20min stop+swap+start cycle (container stop grace dominates)
+- ~15min preflight resolution (not planned-for in the meta)
+
+### Rollback state
+
+- Mac: all 9 pm2 targets `stopped` (dump saved), processes intact, files
+  untouched — **frozen for 72h** rollback. Rollback = stop bots-01 writers +
+  `pm2 start` on Mac from frozen state.
+- bots-01: `bot.db-pre-cutover` (454,766,592 B) +
+  `hyperliquid.db-pre-cutover` (9,408,016,384 B) preserved at
+  `/srv/hl/data/{live,research}/`; `.gz` copies of the Mac DBs kept in
+  `/srv/hl/data/cutover-incoming/` (3.1GB).
+- Disk post-cutover: 74% (raised by preserved DBs — revisit cleanup after
+  the 72h freeze).
+
 ## Gate state
 
 - [x] Soak #1 infra validation
@@ -151,5 +213,6 @@ Run: `systemd-run` transient unit replicating `hl-backup.service`
 - [x] Post-PASS package deployed (`bf06b2d`)
 - [x] 1h smoke — **PASS**
 - [x] Manual backup + full restore + integrity — **PASS**
-- [ ] **Cutover Mac → bots-01 — AWAITING PEDRO'S EXPLICIT APPROVAL**
-- [ ] Post-cutover soak #3 (24h) before decommissioning Mac collectors
+- [x] **Cutover Mac → bots-01 — EXECUTED 2026-11-01** (window 76min > 30min meta → Amendment 1 record)
+- [ ] Post-cutover soak #3 (24h) + 72h Mac freeze before any Mac cleanup
+- [ ] PR #6 merge — **blocked pending new Pedro OK**
