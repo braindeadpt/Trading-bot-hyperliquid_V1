@@ -20,3 +20,9 @@ Leitura
 • KILL antecipado (só isto, verificado semanalmente): drawdown líquido ≤ −35%, ou erro de implementação que impeça reproduzir o sinal.
 • Caso contrário: C para HL. Sem tuning de lookbacks, quantis, universo ou dia de rebalance.
 • Ressalva: 26 semanas têm pouco poder estatístico; PASS = consistência, não prova.
+
+## Amendment 1 (operacional, sem dados)
+
+Primeiro rebalance passa de 2026-11-02 para 2026-11-09 por causa do
+cutover Mac → bots-01. Regra, parâmetros e leitura (26 rebalances)
+inalterados.
