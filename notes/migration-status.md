@@ -307,3 +307,12 @@ confirmado antes). Fica **1 run verificado local**
 Disco: 84% → **41%**. Fix proposto em `910874b` (sleep-before-run +
 `MONTHLY_KEEP=1` + testes) — deploy fica para o próximo restart
 autorizado; **até lá, nenhum container se recria sem OK**.
+
+**RESOLVIDO 2026-11-02 ~15:35 UTC** — Pedro autorizou o deploy scoped
+ao `hl-backup-monthly`: repo a `910874b`, imagem rebuild,
+`compose up -d --no-deps backup-monthly`. Verificado: o container foi
+directo a dormir («next run 2026-12-01 09:00 Europe/Lisbon, in 686h»),
+zero runs novos em `backups/runs/` (fica só `2026-11-02T133145Z`),
+disco 41%, 12/12 containers `r=0`, hc 7/7 up, hash intacto.
+**Freeze de restarts LEVANTADO** — restarts/recreates autorizados
+outra vez (o wart on-boot está corrigido).
