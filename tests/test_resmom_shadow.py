@@ -288,6 +288,22 @@ class TestDaemon:
         assert week_key(mon) == mon
         assert week_key(mon - 1) == mon - WEEK
 
+    def test_rebalance_due_respects_read_first_gate(self, tmp_path):
+        import datetime as dt
+        d = _daemon(tmp_path)
+        # Amendment 1: first scheduled rebalance moved 2026-11-02 -> 11-09.
+        # During the skipped week the scheduler must never fire, even
+        # past the Mon 00:05 mark.
+        mon_skip = int(dt.datetime(2026, 11, 2, tzinfo=dt.timezone.utc)
+                       .timestamp() * 1000)
+        assert spec.READ_FIRST == "2026-11-09"
+        assert not d._rebalance_due(mon_skip + 6 * 60_000)   # Mon 00:06
+        assert not d._rebalance_due(mon_skip + 3 * DAY)      # mid-week
+        # The READ_FIRST week itself is not blocked.
+        mon_first = mon_skip + WEEK
+        assert d._rebalance_due(mon_first + 6 * 60_000)
+        d.shutdown()
+
     def test_rebalance_pass_writes_everything(self, tmp_path):
         d = _daemon(tmp_path)
         now = week_key(int(time.time() * 1000)) + 6 * 60_000  # Mon 00:06

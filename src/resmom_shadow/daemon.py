@@ -77,6 +77,8 @@ class ResmomShadowDaemon:
 
     def _rebalance_due(self, now_ms: int) -> bool:
         wk = week_key(now_ms)
+        if wk < spec.READ_FIRST_MS:
+            return False         # Amendment 1: no rebalance before READ_FIRST
         if now_ms < wk + spec.REBALANCE_MIN_UTC * MS_MIN:
             return False
         # A/B missing -> due now; BIN (descriptive) retries hourly so a

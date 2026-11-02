@@ -5,6 +5,8 @@ post-freeze is a protocol violation — a forward amendment is required.
 """
 from __future__ import annotations
 
+import datetime as _dt
+
 MS_D = 86_400_000
 MS_H = 3_600_000
 MS_WEEK = 7 * MS_D
@@ -37,8 +39,11 @@ STOP_DESCRIBED = -0.25         # 25% stop is descriptive only — never acts
 # ─── §leitura ────────────────────────────────────────────────────────────────
 N_NULLS = 200                  # random-signal portfolios per week
 READ_REBALANCES = 26           # single read at 26 closed rebalances
-READ_FIRST = "2026-11-02"      # first scheduled rebalance (Mon)
+READ_FIRST = "2026-11-09"      # first scheduled rebalance (Mon) — Amendment 1
 READ_DATE_APPROX = "2027-05-03"
+READ_FIRST_MS = int(
+    _dt.datetime.fromisoformat(READ_FIRST)
+    .replace(tzinfo=_dt.timezone.utc).timestamp() * 1000)
 KILL_DD = -0.35                # early kill: net drawdown <= -35%
 PASS_SHARPE = 0.5              # annualized, weekly returns
 SHARPE_P75_NULLS = True        # Sharpe must beat p75 of null Sharpes
