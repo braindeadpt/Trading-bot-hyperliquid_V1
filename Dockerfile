@@ -18,7 +18,8 @@ COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY config/ ./config/
 COPY audit_all.py ./
-COPY socket.io.min.js ./   # dashboard serves it locally — 404 without this
+# dashboard serves socket.io.min.js locally — 404 without this
+COPY socket.io.min.js ./
 COPY deploy/linux/ ./deploy/linux/
 
 RUN mkdir -p /data /logs && chown -R bot:bot /data /logs /opt/hyperliquid
