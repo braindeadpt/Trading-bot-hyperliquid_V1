@@ -241,3 +241,53 @@ A meta de 30 min falhou por três causas medidas no timeline:
 do start, com o rollback ainda de pé) — é o maior bloco serializável que
 não precisa da janela fechada. Snapshot+sha+transfer ficam ~20 min; o
 resto da meta era realista.
+
+## Soak #3 pós-cutover — PASS (2026-11-02)
+
+Janela 2026-11-01 01:47:33 → 2026-11-02 01:47:33 UTC (24h, read-only):
+
+| Check | Resultado |
+|---|---|
+| Restarts/OOM | 10/10 `r=0 oom=false` na janela inteira |
+| Gaps candles_1m | **0** (exclusões do cutover nem foram precisas) |
+| jev_decisions | 3.589 → 3.728 (+139) |
+| shadow_decisions | 169.391 → 169.528 (+137) |
+| Healthchecks | 5/5 up contínuo |
+| Backup 04:00 | SUCCESS — snapshot `c9c3dcc3`, verify ≈2h03–2h17m |
+| Disco | 65–66% (<80% WARN) |
+| config_hash | `4077927fec6a880c` |
+| Erros | 0 ERROR/Traceback nos 6 writers |
+
+**Veredicto: PASS.** bots-01 confirmado como produção estável.
+
+## Freeze hardening Mac (2026-11-01 ~18:03 UTC)
+
+- `pm2 save` persistido + dump timestamped `dump.pm2.2026-11-01T1805Z`.
+- Os 3 cron apps (`watchdogs`, `overnight`, `backup-monthly`) já estavam
+  fora da lista pm2 — forense: deregistados às **18:00:58 UTC** por
+  chamada directa ao binário (fora do wrapper zsh, por isso sem linha no
+  `audit.log`), pela sessão paralela que fazia os docs. Objectivo
+  cumprido: nada ressuscita no freeze.
+- 6 writers ficam `stopped` (não deleted); meridian-* intocados;
+  research DB mtime congelado a `00:14:00`.
+- Ressalva registada: o wrapper auditado só cobre shells interactivas —
+  chamadas não-interactivas ao binário contornam-no.
+
+## Merge PR #6 + deploy pacote pós-cutover (2026-11-02)
+
+- **PR #6 merged** `613ea6d` às 13:18:17Z.
+- `feat/post-cutover` rebaseada sobre main (1 conflito aditivo em
+  `healthcheck.sh` — `egress`+`resmom`+`latency` todos mantidos).
+- Fix obrigatório encontrado em pre-deploy: `READ_FIRST` era constante
+  morta — `_rebalance_due` teria disparado rebalance hoje (11-02).
+  Guard `wk < READ_FIRST_MS` + `READ_FIRST="2026-11-09"` (Amendment 1)
+  + teste — `9ae0ab4`.
+- Segundo fix: Dockerfile inline comment partia o build — `e24470f`.
+- CI local: 2127/2128 verde; 1 erro = flake Windows de teardown em
+  `test_dashboard_v2` (passa isolado; Linux não afecta).
+- Deploy: imagem `e40ea09986a9`; 12 containers up na nova imagem
+  (inclui `hl-resmom-shadow` + `hl-latency-probe`); `resmom_rebalances=0`
+  — gate confirmado em produção.
+- hc: script actualizado + 2 ExecStarts novos; checks `hl-resmom` +
+  `hl-latency` criados e a pingar — **7/7 up**.
+- `config_hash` pós-deploy: `4077927fec6a880c` (inalterado).
