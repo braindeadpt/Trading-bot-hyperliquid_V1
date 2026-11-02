@@ -38,3 +38,26 @@ jobs:
       # config_hash-vs-Fase-10-frozen (same stages as run_pre_push_gate.py).
       - name: Run test suite (CI + security audit + config_hash)
         run: python scripts/ops/run_ci_tests.py
+
+  docker-arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build linux/arm64 image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

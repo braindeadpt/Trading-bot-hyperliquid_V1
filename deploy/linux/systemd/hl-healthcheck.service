@@ -1,0 +1,8 @@
+[Unit]
+Description=HL healthchecks.io ping (heartbeat + boros + egress canary)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hl-healthcheck.sh heartbeat
+ExecStart=/usr/local/sbin/hl-healthcheck.sh boros
+ExecStart=/usr/local/sbin/hl-healthcheck.sh egress

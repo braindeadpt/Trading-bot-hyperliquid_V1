@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily HL backup 04:00 UTC (outside :05-:10, 01:02-01:05 and before 05:00 overnight)
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

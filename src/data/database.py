@@ -6,6 +6,7 @@ for performance when backfilling historical candles.
 """
 from __future__ import annotations
 
+import os
 import json
 import sqlite3
 import threading
@@ -215,6 +216,11 @@ class Database:
             # Speed-ups for batch inserts
             self._local.connection.execute("PRAGMA journal_mode=WAL;")
             self._local.connection.execute("PRAGMA synchronous=NORMAL;")
+            jsl = os.environ.get("BOT_SQLITE_JOURNAL_LIMIT_BYTES")
+            if jsl:
+                self._local.connection.execute(
+                    f"PRAGMA journal_size_limit={int(jsl)};"
+                )
         return self._local.connection
 
     def _cursor(self) -> sqlite3.Cursor:

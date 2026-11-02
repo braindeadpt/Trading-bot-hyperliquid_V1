@@ -1,0 +1,6 @@
+[Unit]
+Description=Weekly docker prune (images dangling + build cache; NEVER volumes)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "docker image prune -f; docker builder prune -f --keep-storage=2GB"
