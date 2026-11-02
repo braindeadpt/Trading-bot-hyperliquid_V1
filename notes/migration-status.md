@@ -271,7 +271,10 @@ Janela 2026-11-01 01:47:33 → 2026-11-02 01:47:33 UTC (24h, read-only):
 - 6 writers ficam `stopped` (não deleted); meridian-* intocados;
   research DB mtime congelado a `00:14:00`.
 - Ressalva registada: o wrapper auditado só cobre shells interactivas —
-  chamadas não-interactivas ao binário contornam-no.
+  **ssh não-interactivo contorna o wrapper** (não carrega `.zshrc`).
+  Decisão: sem shim — com o HL a sair do Mac não compensa. Até à
+  decomissionação, qualquer `pm2` remoto **tem** de correr via
+  `zsh -ic` ou pelo wrapper, senão fica sem audit trail.
 
 ## Merge PR #6 + deploy pacote pós-cutover (2026-11-02)
 
@@ -291,3 +294,16 @@ Janela 2026-11-01 01:47:33 → 2026-11-02 01:47:33 UTC (24h, read-only):
 - hc: script actualizado + 2 ExecStarts novos; checks `hl-resmom` +
   `hl-latency` criados e a pingar — **7/7 up**.
 - `config_hash` pós-deploy: `4077927fec6a880c` (inalterado).
+
+### Incidente pós-deploy: disco 84% (2026-11-02)
+
+O recreate do `hl-backup-monthly` disparou um run mensal completo
+on-boot (wart conhecido, agora confirmado em produção): runs acumulados
+em `/srv/hl/data/backups/runs/` levaram o disco a **84%** (WARN 80,
+PAUSE_COLLECTORS 85). Pedro autorizou limpeza de emergência **fora** da
+Parte C: apagados 4 dos 5 runs redundantes (restic `4edee97b` ok=True
+confirmado antes). Fica **1 run verificado local**
+(`2026-11-02T133145Z`, `ok=True errors=0`, integrity ok + counts_match).
+Disco: 84% → **41%**. Fix proposto em `910874b` (sleep-before-run +
+`MONTHLY_KEEP=1` + testes) — deploy fica para o próximo restart
+autorizado; **até lá, nenhum container se recria sem OK**.
