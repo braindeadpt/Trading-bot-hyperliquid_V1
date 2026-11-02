@@ -142,8 +142,8 @@ services:
     container_name: hl-backup-monthly
     command: >
       sh -c 'while :; do
-        python -u -X utf8 scripts/ops/backup_research_data.py --tag monthly --backup-root /data/backups;
         sh deploy/linux/monthly_loop.sh;
+        python -u -X utf8 scripts/ops/backup_research_data.py --tag monthly --backup-root /data/backups;
       done'
 
   disk-guard:
