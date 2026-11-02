@@ -2086,6 +2086,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
         cors_allowed_origins=allowed_origins,
         async_mode="threading",
         ping_timeout=60,
+        allow_upgrades=False,
     )
 
     global _socketio

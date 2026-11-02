@@ -656,7 +656,7 @@ let pollResearch = function () {};
 function connectSocket() {
     if (socket && socket.connected) return;
     const token = getDashboardToken();
-    socket = io({ auth: token ? { token } : {}, transports: ["websocket", "polling"] });
+    socket = io({ auth: token ? { token } : {}, transports: ["polling"] });
     bindSocketHandlers();
 }
 
