@@ -117,8 +117,7 @@ def _base_card(sid: str, name: str, kind: str, n_readout=None,
 
 def _jev_card(now_ms: int) -> Dict[str, Any]:
     card = _base_card(
-        "jev", "JevJudge v2", "execution", n_readout=100,
-        readout_ms=int(1_798_387_200_000),   # 2026-12-31
+        "jev", "JevJudge v2", "execution",
         prereg_state="EXPERIMENT")
     con = _ro(_LIVE / "bot.db")
     if con is None:
@@ -130,7 +129,26 @@ def _jev_card(now_ms: int) -> Dict[str, Any]:
             " MAX(COALESCE(exit_time,entry_time)) last_ts"
             " FROM trades WHERE strategy='JevJudge' AND status='closed'"
         ).fetchone()
-        card["n"] = int(r["c"])
+        # n = the gated count (post-boundary, non-stale, deduped,
+        # one-open-per-symbol) — the number the kill read actually
+        # uses, not the raw closed-trade total.
+        try:
+            from scripts.research.jev_eval import (
+                GEOMETRY_BOUNDARY_MS, _independent_trades,
+                is_stale_verdict, split_duplicate_verdicts)
+            grow = con.execute(
+                "SELECT symbol, entry_time, exit_time, signal_metadata"
+                " FROM trades WHERE strategy='JevJudge' AND status='closed'"
+                " AND entry_time > ? ORDER BY entry_time",
+                (GEOMETRY_BOUNDARY_MS,)).fetchall()
+            trows = [dict(x) for x in grow]
+            trows = [t for t in trows
+                     if not is_stale_verdict(t["signal_metadata"],
+                                             int(t["entry_time"]))]
+            trows, _dupes = split_duplicate_verdicts(trows)
+            card["n"] = len(_independent_trades(trows))
+        except Exception:  # noqa: BLE001 — fall back to raw count
+            card["n"] = int(r["c"])
         card["net"] = round(float(r["pnl"]), 2)
         card["wr"] = (round(100.0 * int(r["w"]) / int(r["c"]), 1)
                       if r["c"] else None)
@@ -243,8 +261,7 @@ def _jev_detail(now_ms: int) -> Dict[str, Any]:
 
 def _carry_card(now_ms: int) -> Dict[str, Any]:
     card = _base_card(
-        "carry", "CarryA1 spot–perp", "shadow", n_readout=10,
-        readout_ms=int(1_807_142_400_000),    # 2027-04-09
+        "carry", "CarryA1 spot–perp", "shadow",
         prereg_state="in_progress")
     con = _ro(_RESEARCH / "carry_shadow.db")
     if con is None:
@@ -341,8 +358,7 @@ def _carry_detail(now_ms: int) -> Dict[str, Any]:
 
 def _unlock_card(now_ms: int) -> Dict[str, Any]:
     card = _base_card(
-        "unlock", "UnlockShort", "shadow", n_readout=15,
-        readout_ms=int(1_838_419_200_000),    # 2027-10-14
+        "unlock", "UnlockShort", "shadow",
         prereg_state="in_progress")
     con = _ro(_RESEARCH / "unlock_shadow.db")
     if con is None:
@@ -440,7 +456,7 @@ def _unlock_detail(now_ms: int) -> Dict[str, Any]:
 
 def _boros_card(now_ms: int) -> Dict[str, Any]:
     card = _base_card(
-        "boros", "Boros locked spread", "shadow", n_readout=5,
+        "boros", "Boros locked spread", "shadow",
         prereg_state="in_progress")
     con = _ro(_RESEARCH / "boros_shadow.db")
     if con is None:
@@ -539,8 +555,7 @@ def _boros_detail(now_ms: int) -> Dict[str, Any]:
 
 def _resmom_card(now_ms: int) -> Dict[str, Any]:
     card = _base_card(
-        "resmom", "ResMom forward", "shadow", n_readout=26,
-        readout_ms=int(1_840_896_000_000),    # 2027-05-03
+        "resmom", "ResMom forward", "shadow",
         prereg_state="in_progress")
     db = _RESEARCH / "resmom_shadow.db"
     if not db.exists():
@@ -667,16 +682,27 @@ def _ivgate_card(now_ms: int) -> Dict[str, Any]:
                 if board:
                     break
         if board:
+            # Seal rule (same as /api/hypotheses): while the confirmation
+            # is sealed only counts are public — net/wr stay hidden until
+            # expiry or verdict. Never leak sealed metrics onto a card.
+            sealed = bool(board.get("sealed", True)) and not board.get(
+                "confirmation_expired")
             card["n"] = (board.get("n_independent")
                          or board.get("n_evaluated"))
-            card["net"] = board.get("net_hypothetical_pnl_pct")
-            card["net_unit"] = "pct"
-            card["wr"] = (round(board["win_rate"] * 100.0, 1)
-                          if board.get("win_rate") is not None else None)
-            detail = (board.get("evaluated_ms") or board.get("batch_ms")
-                      or batch_ts)
-            card["state"], card["state_detail"] = _age_state(
-                detail, False, now_ms, _STALE_IVGATE)
+            if sealed:
+                card["prereg_state"] = "SEALED"
+                card["state_detail"] = "selado — métricas ocultas"
+                card["state"] = "no_signal"
+            else:
+                card["net"] = board.get("net_hypothetical_pnl_pct")
+                card["net_unit"] = "pct"
+                card["wr"] = (round(board["win_rate"] * 100.0, 1)
+                              if board.get("win_rate") is not None
+                              else None)
+                detail = (board.get("evaluated_ms")
+                          or board.get("batch_ms") or batch_ts)
+                card["state"], card["state_detail"] = _age_state(
+                    detail, False, now_ms, _STALE_IVGATE)
             return card
         card["state"], card["state_detail"] = "no_signal", "sem board"
         return card
@@ -731,10 +757,41 @@ def _card_or_last_good(sid: str, now_ms: int) -> Dict[str, Any]:
     return card
 
 
+# Card id -> canonical paper_ledger row id. n_readout/readout_ms come
+# from that layer (single source for the registered numbers) — never
+# hardcode them per card.
+_LEDGER_ID = {
+    "jev": "JevJudge::experiment",
+    "carry": "CarryA1::shadow",
+    "unlock": "UnlockShort::shadow",
+    "boros": "BorosLockedSpread::shadow",
+    "resmom": "ResidualMomentum::forward",
+}
+
+
 def build_strategies_payload(now_ms: Optional[int] = None
                              ) -> Dict[str, Any]:
     now = now_ms or int(time.time() * 1000)
-    rows = [_card_or_last_good(sid, now) for sid in STRATEGY_IDS]
+    ledger: Dict[str, Dict[str, Any]] = {}
+    try:
+        from src.research.paper_ledger import build_paper_ledger_payload
+        for r in build_paper_ledger_payload().get("rows", []):
+            if isinstance(r, dict) and r.get("id"):
+                ledger[str(r["id"])] = r
+    except Exception:  # noqa: BLE001 — cards still render without it
+        pass
+    rows = []
+    for sid in STRATEGY_IDS:
+        card = _card_or_last_good(sid, now)
+        lr = ledger.get(_LEDGER_ID.get(sid, ""))
+        if lr:
+            if lr.get("n_readout") is not None:
+                card["n_readout"] = lr["n_readout"]
+            if lr.get("readout_ms") is not None:
+                card["readout_ms"] = lr["readout_ms"]
+            if lr.get("prereg_state"):
+                card["prereg_state"] = lr["prereg_state"]
+        rows.append(card)
     return {"rows": rows, "generated_ms": now}
 
 
