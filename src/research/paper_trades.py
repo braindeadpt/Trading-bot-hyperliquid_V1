@@ -623,14 +623,24 @@ def _ivgate_card(now_ms: int) -> Dict[str, Any]:
         cfg = load_config(ROOT / "config" / "settings.yaml")
         latest = _load_persisted_boards(cfg)
         boards = latest[0] if latest else {}
+        batch_ts = latest[1] if latest else None
         board = None
         if isinstance(boards, dict):
-            for k, v in boards.items():
-                if not isinstance(v, dict):
-                    continue
-                name = f"{v.get('strategy','')}#{v.get('variant','')}"
-                if "iv_gate" in k or "iv_gate" in name:
+            # The card is the VWAPDeviation iv_gate confirm variant —
+            # prefer a strategy=VWAPDeviation iv_gate board; fall back to
+            # any iv_gate board only if VWAP's is absent.
+            for want_vwap in (True, False):
+                for k, v in boards.items():
+                    if not isinstance(v, dict):
+                        continue
+                    name = f"{v.get('strategy','')}#{v.get('variant','')}"
+                    if "iv_gate" not in (k + name):
+                        continue
+                    if want_vwap and "VWAP" not in str(v.get("strategy")):
+                        continue
                     board = v
+                    break
+                if board:
                     break
         if board:
             card["n"] = (board.get("n_independent")
@@ -639,7 +649,8 @@ def _ivgate_card(now_ms: int) -> Dict[str, Any]:
             card["net_unit"] = "pct"
             card["wr"] = (round(board["win_rate"] * 100.0, 1)
                           if board.get("win_rate") is not None else None)
-            detail = board.get("evaluated_ms") or board.get("batch_ms")
+            detail = (board.get("evaluated_ms") or board.get("batch_ms")
+                      or batch_ts)
             card["state"], card["state_detail"] = _age_state(
                 detail, False, now_ms, _STALE_IVGATE)
             return card
