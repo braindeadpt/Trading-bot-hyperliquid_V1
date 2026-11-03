@@ -700,16 +700,36 @@ _DETAILS = {
 }
 
 
+# Last-good card cache: a transient writer lock or a mid-write snapshot
+# blanks a whole card build. Serve the previous good card (flagged) for a
+# few minutes instead of flashing "error" on a healthy daemon.
+_LAST_GOOD: Dict[str, Tuple[int, Dict[str, Any]]] = {}
+_LAST_GOOD_MS = 15 * 60_000
+
+
+def _card_or_last_good(sid: str, now_ms: int) -> Dict[str, Any]:
+    try:
+        card = _CARDS[sid](now_ms)
+    except Exception as exc:  # noqa: BLE001 — degrade, never 500
+        logger.debug("paper_trades card %s failed: %s", sid, exc)
+        card = _base_card(sid, sid, "shadow")
+    if card.get("state") == "error" and card.get("state_detail") in (
+            "", "sem dados"):
+        prev = _LAST_GOOD.get(sid)
+        if prev and (now_ms - prev[0]) < _LAST_GOOD_MS:
+            old = dict(prev[1])
+            old["state_detail"] = (
+                (old.get("state_detail") or "") + " · cache")
+            return old
+    else:
+        _LAST_GOOD[sid] = (now_ms, card)
+    return card
+
+
 def build_strategies_payload(now_ms: Optional[int] = None
                              ) -> Dict[str, Any]:
     now = now_ms or int(time.time() * 1000)
-    rows = []
-    for sid in STRATEGY_IDS:
-        try:
-            rows.append(_CARDS[sid](now))
-        except Exception as exc:  # noqa: BLE001 — degrade, never 500
-            logger.debug("paper_trades card %s failed: %s", sid, exc)
-            rows.append(_base_card(sid, sid, "shadow"))
+    rows = [_card_or_last_good(sid, now) for sid in STRATEGY_IDS]
     return {"rows": rows, "generated_ms": now}
 
 
