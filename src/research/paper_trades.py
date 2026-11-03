@@ -38,7 +38,7 @@ _SPARK_MAX = 120          # sparkline point cap per series
 # would either false-alarm slow writers or miss dead fast ones.
 _STALE_JEV = 90 * 60_000      # judge verdicts hourly
 _STALE_CARRY = 90 * 60_000    # events arrive in ~hourly bursts
-_STALE_UNLOCK = 3 * 3_600_000 # snapshots ~hourly
+_STALE_UNLOCK = 30 * 3_600_000 # snapshots daily ~00:30 UTC
 _STALE_BOROS = 90 * 60_000    # snapshot + marks hourly (log: :00 and :05)
 _STALE_RESMOM = 30 * 3_600_000  # nav ~daily
 _STALE_IVGATE = 12 * 3_600_000  # board re-eval on demand
