@@ -2019,7 +2019,8 @@ function _smRender(d, name) {
         <td class="tiny">${t.reason || ""}</td>
     </tr>`).join("") : '<tr><td colspan="10" class="muted">Sem trades fechadas</td></tr>';
     const ttl = document.getElementById("sm-title");
-    if (ttl) ttl.textContent = name || _smSid;
+    const _card = (window._lastStratCards || []).find(r => r.id === _smSid);
+    if (ttl) ttl.textContent = name || (_card && _card.name) || _smSid;
 }
 function _smFetch() {
     if (!_smSid) return;

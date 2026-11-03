@@ -209,9 +209,7 @@ def _jev_detail(now_ms: int) -> Dict[str, Any]:
             " pnl_pct, entry_time, exit_time, exit_reason FROM trades"
             " WHERE strategy='JevJudge' AND status='closed'"
             " ORDER BY exit_time DESC LIMIT 200").fetchall()
-        cum = 0.0
-        series: List[Tuple[int, float]] = []
-        for t in reversed(rows):
+        for t in rows:
             out["closed"].append({
                 "symbol": t["symbol"], "side": t["side"], "size": t["size"],
                 "entry": t["entry_price"], "exit": t["exit_price"],
@@ -219,6 +217,9 @@ def _jev_detail(now_ms: int) -> Dict[str, Any]:
                 "funding_usd": None, "fees_usd": None,
                 "entry_ms": t["entry_time"], "exit_ms": t["exit_time"],
                 "reason": t["exit_reason"]})
+        cum = 0.0
+        series: List[Tuple[int, float]] = []
+        for t in reversed(rows):
             if t["exit_time"]:
                 cum += float(t["pnl_usd"] or 0.0)
                 series.append((int(t["exit_time"]), round(cum, 4)))
