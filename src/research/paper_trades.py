@@ -170,7 +170,7 @@ def _jev_card(now_ms: int) -> Dict[str, Any]:
                 "SELECT MAX(timestamp) ts FROM decision_audit"
                 " WHERE strategy LIKE '%Jev%'").fetchone()["ts"]
         except sqlite3.OperationalError:
-            pass
+            card["_hb_failed"] = True
         card["state"], card["state_detail"] = _age_state(
             hb or r["last_ts"], card["n_open"] > 0, now_ms, _STALE_JEV)
         return card
@@ -282,7 +282,7 @@ def _carry_card(now_ms: int) -> Dict[str, Any]:
             hb_row = con.execute("SELECT MAX(ts_ms) ts FROM events").fetchone()
             hb = hb_row["ts"] if hb_row else None
         except sqlite3.OperationalError:
-            pass
+            card["_hb_failed"] = True
         dead = con.execute(
             "SELECT value FROM meta WHERE key='dead'").fetchone()
         if dead and dead["value"]:
@@ -382,7 +382,7 @@ def _unlock_card(now_ms: int) -> Dict[str, Any]:
                 "SELECT MAX(ts_ms) ts FROM unlock_snapshots").fetchone()
             hb_ts = hb_row["ts"] if hb_row else None
         except sqlite3.OperationalError:
-            pass
+            card["_hb_failed"] = True
         card["state"], card["state_detail"] = _age_state(
             hb_ts or agg["last_ts"],
             card["n_open"] > 0, now_ms, _STALE_UNLOCK)
@@ -714,8 +714,12 @@ def _card_or_last_good(sid: str, now_ms: int) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — degrade, never 500
         logger.debug("paper_trades card %s failed: %s", sid, exc)
         card = _base_card(sid, sid, "shadow")
-    if card.get("state") == "error" and card.get("state_detail") in (
-            "", "sem dados"):
+    hb_failed = bool(card.pop("_hb_failed", False))
+    build_failed = card.get("state") == "error" and card.get(
+        "state_detail") in ("", "sem dados")
+    if hb_failed or build_failed:
+        # Transient build/heartbeat failure — serve the previous good
+        # card rather than a misleading error badge.
         prev = _LAST_GOOD.get(sid)
         if prev and (now_ms - prev[0]) < _LAST_GOOD_MS:
             old = dict(prev[1])
