@@ -50,7 +50,7 @@ STRATEGY_IDS: Tuple[str, ...] = (
 )
 
 
-def _ro(path: Path, timeout: float = 2.0) -> Optional[sqlite3.Connection]:
+def _ro(path: Path, timeout: float = 6.0) -> Optional[sqlite3.Connection]:
     if not path.exists():
         return None
     try:
@@ -102,7 +102,7 @@ def _base_card(sid: str, name: str, kind: str, n_readout=None,
                readout_ms=None, prereg_state="") -> Dict[str, Any]:
     return {
         "id": sid, "name": name, "kind": kind,
-        "state": "error", "state_detail": "",
+        "state": "error", "state_detail": "sem dados",
         "n_open": 0, "open_unreal_usd": None,
         "net": None, "net_unit": "usd",
         "apy": None, "wr": None,
@@ -164,9 +164,13 @@ def _jev_card(now_ms: int) -> Dict[str, Any]:
         card["equity"] = _downsample(series)
         # Heartbeat = last judge decision (hourly cadence), not last trade —
         # a flat market means few closes but the loop is still alive.
-        hb = con.execute(
-            "SELECT MAX(timestamp) ts FROM decision_audit"
-            " WHERE strategy LIKE '%Jev%'").fetchone()["ts"]
+        hb = None
+        try:
+            hb = con.execute(
+                "SELECT MAX(timestamp) ts FROM decision_audit"
+                " WHERE strategy LIKE '%Jev%'").fetchone()["ts"]
+        except sqlite3.OperationalError:
+            pass
         card["state"], card["state_detail"] = _age_state(
             hb or r["last_ts"], card["n_open"] > 0, now_ms, _STALE_JEV)
         return card
@@ -264,8 +268,12 @@ def _carry_card(now_ms: int) -> Dict[str, Any]:
         card["equity"] = _downsample(series)
         # Heartbeat = writer's events stream (fills/rebalances/marks) —
         # episodes stay open for days so last-episode is not a liveness sign.
-        hb_row = con.execute("SELECT MAX(ts_ms) ts FROM events").fetchone()
-        hb = hb_row["ts"] if hb_row else None
+        hb = None
+        try:
+            hb_row = con.execute("SELECT MAX(ts_ms) ts FROM events").fetchone()
+            hb = hb_row["ts"] if hb_row else None
+        except sqlite3.OperationalError:
+            pass
         dead = con.execute(
             "SELECT value FROM meta WHERE key='dead'").fetchone()
         if dead and dead["value"]:
@@ -357,10 +365,17 @@ def _unlock_card(now_ms: int) -> Dict[str, Any]:
             series.append((int(e["ts"]), round(cum, 4)))
         card["equity"] = _downsample(series)
         # Heartbeat = periodic snapshot writer, not event closes (monthly).
-        hb_row = con.execute(
-            "SELECT MAX(ts_ms) ts FROM unlock_snapshots").fetchone()
+        # Non-fatal: a transient writer lock on snapshots shouldn't blank
+        # the whole card — fall back to last sim close.
+        hb_ts = None
+        try:
+            hb_row = con.execute(
+                "SELECT MAX(ts_ms) ts FROM unlock_snapshots").fetchone()
+            hb_ts = hb_row["ts"] if hb_row else None
+        except sqlite3.OperationalError:
+            pass
         card["state"], card["state_detail"] = _age_state(
-            (hb_row["ts"] if hb_row else None) or agg["last_ts"],
+            hb_ts or agg["last_ts"],
             card["n_open"] > 0, now_ms, _STALE_UNLOCK)
         return card
     except Exception:  # noqa: BLE001
