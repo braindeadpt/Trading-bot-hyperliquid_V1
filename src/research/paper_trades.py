@@ -700,28 +700,26 @@ def _ivgate_card(now_ms: int) -> Dict[str, Any]:
                 if board:
                     break
         if board:
-            # Seal rule (same as /api/hypotheses): while the confirmation
-            # is sealed only counts are public — net/wr stay hidden until
-            # expiry or verdict. Never leak sealed metrics onto a card.
+            # The board's seal state stays on the card as information —
+            # the owner decided (2026-10-27) the dashboard shows every
+            # metric; discipline lives in only acting at the registered
+            # readout, not in hiding numbers.
             sealed = bool(board.get("sealed", True)) and not board.get(
                 "confirmation_expired")
+            card["sealed"] = sealed
+            if sealed:
+                card["prereg_state"] = "SEALED"
             card["n"] = (board.get("n_independent")
                          or board.get("n_evaluated"))
-            if sealed:
-                card["sealed"] = True
-                card["prereg_state"] = "SEALED"
-                card["state_detail"] = "selado — métricas ocultas"
-                card["state"] = "no_signal"
-            else:
-                card["net"] = board.get("net_hypothetical_pnl_pct")
-                card["net_unit"] = "pct"
-                card["wr"] = (round(board["win_rate"] * 100.0, 1)
-                              if board.get("win_rate") is not None
-                              else None)
-                detail = (board.get("evaluated_ms")
-                          or board.get("batch_ms") or batch_ts)
-                card["state"], card["state_detail"] = _age_state(
-                    detail, False, now_ms, _STALE_IVGATE)
+            card["net"] = board.get("net_hypothetical_pnl_pct")
+            card["net_unit"] = "pct"
+            card["wr"] = (round(board["win_rate"] * 100.0, 1)
+                          if board.get("win_rate") is not None
+                          else None)
+            detail = (board.get("evaluated_ms")
+                      or board.get("batch_ms") or batch_ts)
+            card["state"], card["state_detail"] = _age_state(
+                detail, False, now_ms, _STALE_IVGATE)
             return card
         card["state"], card["state_detail"] = "no_signal", "sem board"
         return card
@@ -795,36 +793,10 @@ _LEDGER_ID = {
 
 
 def _is_sealed(prereg_state: Optional[str]) -> bool:
+    """Factual prereg seal flag — surfaced on the card for context; the
+    owner decided the dashboard shows all metrics regardless."""
     return "seal" in str(prereg_state or "").lower() or "selad" in str(
         prereg_state or "").lower()
-
-
-def _seal_card(card: Dict[str, Any]) -> None:
-    """Sealed preregistrations publish counts only — strip every metric
-    field (net, wr, apy, unrealized, equity) from a built card."""
-    card["sealed"] = True
-    card["net"] = None
-    card["wr"] = None
-    card["apy"] = None
-    card["open_unreal_usd"] = None
-    card["equity"] = []
-
-
-def _seal_detail(out: Dict[str, Any]) -> Dict[str, Any]:
-    """Sealed detail: structure stays (symbols, sizes, times, counts,
-    reasons), every performance figure is masked."""
-    for t in out.get("open", []):
-        t["unreal_usd"] = None
-        t["mark"] = None
-    for t in out.get("closed", []):
-        t["pnl_usd"] = None
-        t["pnl_pct"] = None
-        t["funding_usd"] = None
-        t["fees_usd"] = None
-    out["equity"] = []
-    out["dd"] = []
-    out["sealed"] = True
-    return out
 
 
 def build_strategies_payload(now_ms: Optional[int] = None
@@ -850,7 +822,7 @@ def build_strategies_payload(now_ms: Optional[int] = None
             if lr.get("prereg_state"):
                 card["prereg_state"] = lr["prereg_state"]
         if _is_sealed(card.get("prereg_state")):
-            _seal_card(card)
+            card["sealed"] = True
         rows.append(card)
     return {"rows": rows, "generated_ms": now}
 
@@ -878,12 +850,11 @@ def build_strategy_detail(sid: str,
         out["id"] = sid
         out["generated_ms"] = now
         if sid == "ivgate":
-            # VWAP iv_gate confirmation is sealed until expiry/verdict.
-            out = _seal_detail(out)
+            out["sealed"] = True
         else:
             lr = _ledger_row_for(sid)
             if lr and _is_sealed(lr.get("prereg_state")):
-                out = _seal_detail(out)
+                out["sealed"] = True
         return out
     except Exception as exc:  # noqa: BLE001
         return {"id": sid, "error": str(exc)[:200],
@@ -904,42 +875,19 @@ def build_trades_feed(limit: int = 60,
         push([{**t, "strat": "JevJudge"} for t in d["closed"]])
     except Exception:  # noqa: BLE001
         pass
-    # Sealed strategies: the feed shows structure (time, symbol, side,
-    # size, reason) with PnL fields masked — metrics stay hidden.
-    sealed_ids = {sid for sid, lid in _LEDGER_ID.items()
-                  if _is_sealed(
-                      (_ledger_row_for(sid) or {}).get("prereg_state"))}
-
-    def _mask(rows, sid):
-        if sid not in sealed_ids:
-            return rows
-        out = []
-        for t in rows:
-            t = dict(t)
-            t["pnl_usd"] = None
-            t["pnl_pct"] = None
-            t["funding_usd"] = None
-            t["fees_usd"] = None
-            t["sealed"] = True
-            out.append(t)
-        return out
-
     try:
         d = _carry_detail(now)
-        push([{**t, "strat": "CarryA1"}
-              for t in _mask(d["closed"], "carry")])
+        push([{**t, "strat": "CarryA1"} for t in d["closed"]])
     except Exception:  # noqa: BLE001
         pass
     try:
         d = _unlock_detail(now)
-        push([{**t, "strat": "UnlockShort"}
-              for t in _mask(d["closed"], "unlock")])
+        push([{**t, "strat": "UnlockShort"} for t in d["closed"]])
     except Exception:  # noqa: BLE001
         pass
     try:
         d = _boros_detail(now)
-        push([{**t, "strat": "Boros"}
-              for t in _mask(d["closed"], "boros")])
+        push([{**t, "strat": "Boros"} for t in d["closed"]])
     except Exception:  # noqa: BLE001
         pass
     try:
