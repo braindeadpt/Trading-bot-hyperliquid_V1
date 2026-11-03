@@ -3223,4 +3223,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
     def on_disconnect(reason=None):
         logger.info("Dashboard client disconnected: %s", reason)
 
+    @socketio.on("ping")
+    def on_ping():
+        # Client measures RTT via the ack callback (latency badge).
+        return "pong"
+
     return app, socketio, emitter._emit_all
