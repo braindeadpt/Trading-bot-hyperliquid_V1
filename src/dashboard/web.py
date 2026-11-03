@@ -2714,20 +2714,29 @@ def create_app(config: Dict[str, Any]) -> tuple:
         except Exception:  # noqa: BLE001
             pass
         try:
-            api_key = os.environ.get("HC_API_KEY", "").strip()
-            if api_key:
-                import urllib.request
-                req = urllib.request.Request(
-                    "https://healthchecks.io/api/v3/checks/",
-                    headers={"X-Api-Key": api_key})
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    checks = json.loads(resp.read())["checks"]
-                hl = [c for c in checks if c.get("name", "").startswith("hl-")]
-                payload["services"] = {
-                    "ok": sum(1 for c in hl if c.get("status") == "up"),
-                    "total": len(hl)}
+            # Services = the 7 data-writing services this dashboard can
+            # observe directly: engine (tick age) + the 6 ledger writers
+            # (jev/carry/unlock/boros/resmom/ivgate card states).
+            from src.research.paper_trades import build_strategies_payload
+            cards = build_strategies_payload().get("rows", [])
+            ok = sum(1 for c in cards if c.get("state") != "error")
+            engine_ok = 0
+            if _engine is not None:
+                try:
+                    tick = getattr(_engine, "last_tick_age_sec", None)
+                    if tick is not None and float(tick) < 120.0:
+                        engine_ok = 1
+                except (TypeError, ValueError):
+                    pass
+            else:
+                # Read-only/scratch deployments: fresh candles stand in
+                # for engine liveness.
+                ca = payload.get("candle_age_s")
+                engine_ok = 1 if ca is not None and ca < 300 else 0
+            payload["services"] = {"ok": ok + engine_ok,
+                                   "total": len(cards) + 1}
         except Exception as exc:  # noqa: BLE001
-            logger.debug("topbar hc.io failed: %s", exc)
+            logger.debug("topbar services failed: %s", exc)
         try:
             if _engine is not None:
                 last_events = getattr(_engine, "_last_market_events", {})
