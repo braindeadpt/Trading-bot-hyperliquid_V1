@@ -33,8 +33,15 @@ _LIVE = ROOT / "data" / "live"
 _MS_DAY = 86_400_000
 _MS_YEAR = 365.25 * _MS_DAY
 _SPARK_MAX = 120          # sparkline point cap per series
-_STALE_MS = 3_600_000     # >1h without a ledger write -> "error"
-_WINDOW_MS = 3_600_000    # "has signal" freshness window for running mark
+# Per-ledger staleness thresholds — each writer has its own cadence
+# (hourly verdicts, minutely marks, daily nav), so one global window
+# would either false-alarm slow writers or miss dead fast ones.
+_STALE_JEV = 90 * 60_000      # judge verdicts hourly
+_STALE_CARRY = 30 * 60_000    # events stream ~minutely
+_STALE_UNLOCK = 3 * 3_600_000 # snapshots ~hourly
+_STALE_BOROS = 30 * 60_000    # marks ~minutely
+_STALE_RESMOM = 30 * 3_600_000  # nav ~daily
+_STALE_IVGATE = 12 * 3_600_000  # board re-eval on demand
 
 # Living strategies shown on the main page, in display order. `id` is the
 # stable key used by /api/paper_strategy/<id> and the frontend card click.
@@ -74,7 +81,7 @@ def _wr(rows: List[Optional[float]]) -> Optional[float]:
 
 
 def _age_state(last_write_ms: Optional[int], has_open: bool,
-               now_ms: int) -> Tuple[str, str]:
+               now_ms: int, stale_ms: int = 3_600_000) -> Tuple[str, str]:
     """running | no_signal | error — from ledger write freshness.
 
     ``last_write_ms`` is the freshest ledger timestamp (mark, episode
@@ -84,7 +91,7 @@ def _age_state(last_write_ms: Optional[int], has_open: bool,
     if last_write_ms is None:
         return "error", "sem escritas"
     age = now_ms - last_write_ms
-    if age > _STALE_MS:
+    if age > stale_ms:
         return "error", f"stale {int(age / 60_000)}m"
     if has_open:
         return "running", "em posição"
@@ -155,8 +162,13 @@ def _jev_card(now_ms: int) -> Dict[str, Any]:
             cum += float(e["pnl_usd"] or 0.0)
             series.append((int(e["ts"]), round(cum, 4)))
         card["equity"] = _downsample(series)
+        # Heartbeat = last judge decision (hourly cadence), not last trade —
+        # a flat market means few closes but the loop is still alive.
+        hb = con.execute(
+            "SELECT MAX(timestamp) ts FROM decision_audit"
+            " WHERE strategy LIKE '%Jev%'").fetchone()["ts"]
         card["state"], card["state_detail"] = _age_state(
-            r["last_ts"], card["n_open"] > 0, now_ms)
+            hb or r["last_ts"], card["n_open"] > 0, now_ms, _STALE_JEV)
         return card
     except Exception:  # noqa: BLE001
         return card
@@ -250,15 +262,17 @@ def _carry_card(now_ms: int) -> Dict[str, Any]:
             cum += float(e["p"] or 0.0)
             series.append((int(e["ts"]), round(cum, 6)))
         card["equity"] = _downsample(series)
-        last_ts = con.execute(
-            "SELECT MAX(entry_decision_ms) ts FROM episodes").fetchone()["ts"]
+        # Heartbeat = writer's events stream (fills/rebalances/marks) —
+        # episodes stay open for days so last-episode is not a liveness sign.
+        hb_row = con.execute("SELECT MAX(ts_ms) ts FROM events").fetchone()
+        hb = hb_row["ts"] if hb_row else None
         dead = con.execute(
             "SELECT value FROM meta WHERE key='dead'").fetchone()
         if dead and dead["value"]:
             card["state"], card["state_detail"] = "error", str(dead["value"])[:60]
         else:
             card["state"], card["state_detail"] = _age_state(
-                last_ts or agg["last_ts"], card["n_open"] > 0, now_ms)
+                hb or agg["last_ts"], card["n_open"] > 0, now_ms, _STALE_CARRY)
         return card
     except Exception:  # noqa: BLE001
         return card
@@ -342,8 +356,12 @@ def _unlock_card(now_ms: int) -> Dict[str, Any]:
             cum += float(e["net_usd"] or 0.0)
             series.append((int(e["ts"]), round(cum, 4)))
         card["equity"] = _downsample(series)
+        # Heartbeat = periodic snapshot writer, not event closes (monthly).
+        hb_row = con.execute(
+            "SELECT MAX(ts_ms) ts FROM unlock_snapshots").fetchone()
         card["state"], card["state_detail"] = _age_state(
-            agg["last_ts"], card["n_open"] > 0, now_ms)
+            (hb_row["ts"] if hb_row else None) or agg["last_ts"],
+            card["n_open"] > 0, now_ms, _STALE_UNLOCK)
         return card
     except Exception:  # noqa: BLE001
         return card
@@ -428,7 +446,7 @@ def _boros_card(now_ms: int) -> Dict[str, Any]:
                 series[-1][1] - float(agg["pnl"]), 4)
         card["state"], card["state_detail"] = _age_state(
             series[-1][0] if series else agg["last_ts"],
-            card["n_open"] > 0, now_ms)
+            card["n_open"] > 0, now_ms, _STALE_BOROS)
         return card
     except Exception:  # noqa: BLE001
         return card
@@ -540,9 +558,14 @@ def _resmom_card(now_ms: int) -> Dict[str, Any]:
                 * 100.0, 2)
         last_ts = con.execute(
             "SELECT MAX(entry_ms) ts FROM resmom_positions").fetchone()["ts"]
-        card["state"], card["state_detail"] = _age_state(
-            series[-1][0] if series else last_ts,
-            card["n_open"] > 0, now_ms)
+        hb = series[-1][0] if series else last_ts
+        if hb is None:
+            # Newborn shadow (first nav snapshot may lag deploy) — flag as
+            # starting, not error.
+            card["state"], card["state_detail"] = "no_signal", "a iniciar"
+        else:
+            card["state"], card["state_detail"] = _age_state(
+                hb, card["n_open"] > 0, now_ms, _STALE_RESMOM)
         return card
     except Exception:  # noqa: BLE001
         return card
@@ -618,7 +641,7 @@ def _ivgate_card(now_ms: int) -> Dict[str, Any]:
                           if board.get("win_rate") is not None else None)
             detail = board.get("evaluated_ms") or board.get("batch_ms")
             card["state"], card["state_detail"] = _age_state(
-                detail, False, now_ms)
+                detail, False, now_ms, _STALE_IVGATE)
             return card
         card["state"], card["state_detail"] = "no_signal", "sem board"
         return card
