@@ -6,7 +6,7 @@
 <title>Hyperliquid Trading Bot Dashboard</title>
 <script src="/socket.io.min.js"></script>
 <script src="/static/lightweight-charts.standalone.production.js"></script>
-<link rel="stylesheet" href="/static/dashboard.css?v=11">
+<link rel="stylesheet" href="/static/dashboard.css?v=12">
 <style>
 /* Inline fallback — guaranteed to apply */
 :root {
@@ -179,6 +179,10 @@ th { font-size: 10px; }
         <span class="badge badge-dim" id="circuit-badge">CB: OFF</span>
         <span class="badge badge-purple" id="uptime-badge">00:00:00</span>
         <span class="badge badge-blue" id="latency-badge">--ms</span>
+        <span class="view-tabs" role="tablist">
+            <button class="vtab active" id="vtab-main" onclick="switchView('main')">Principal</button>
+            <button class="vtab" id="vtab-adv" onclick="switchView('adv')">Avançado</button>
+        </span>
         <a href="/ops" class="badge badge-dim" style="text-decoration:none;" title="Logs · feeds · sistema">OPS →</a>
     </div>
 </div>
@@ -221,6 +225,86 @@ th { font-size: 10px; }
 <div id="alert-banner" class="alert-banner" style="display:none;">
     <div class="alert-items" id="alert-items"></div>
 </div>
+
+<!-- TOPBAR — saúde do sistema: preço vivo, latência feed, serviços, candle, disco -->
+<div class="panel" id="topbar-panel">
+    <div class="topbar">
+        <div class="tb-cell" title="Último close BTC (candles_1m)"><span class="tb-label">BTC</span><span class="tb-val tb-num" id="tb-px-BTC">--</span></div>
+        <div class="tb-cell" title="Último close ETH (candles_1m)"><span class="tb-label">ETH</span><span class="tb-val tb-num" id="tb-px-ETH">--</span></div>
+        <div class="tb-cell" title="Último close SOL (candles_1m)"><span class="tb-label">SOL</span><span class="tb-val tb-num" id="tb-px-SOL">--</span></div>
+        <div class="tb-cell" title="Idade do último evento de mercado processado"><span class="tb-label">Feed</span><span class="tb-val" id="tb-feed">--</span></div>
+        <div class="tb-cell" title="Idade do candle 1m mais antigo"><span class="tb-label">Candle</span><span class="tb-val" id="tb-candle">--</span></div>
+        <div class="tb-cell" title="Checks hl-* up no healthchecks.io"><span class="tb-label">Serviços</span><span class="tb-val" id="tb-svc">--</span></div>
+        <div class="tb-cell" title="Disco da partição /data"><span class="tb-label">Disco</span><span class="tb-val" id="tb-disk">--</span></div>
+    </div>
+</div>
+
+<!-- ══ VIEW: PRINCIPAL ══ -->
+<div id="view-main">
+
+<!-- ESTRATÉGIAS ATIVAS — fusão de «Hipóteses pré-registadas» + «Paper ledger» -->
+<div class="section-label">
+    <span class="bar"></span><span class="text">Estratégias ativas</span><span class="line"></span>
+</div>
+<div class="strat-grid" id="strat-grid"><span class="muted">Waiting...</span></div>
+
+<!-- FEED ÚNICO — últimas trades de todas as estratégias -->
+<div class="panel" style="margin-top:var(--gap);">
+    <div class="panel-header">
+        Trades
+        <span class="dim">feed único · todas as estratégias · últimas 60</span>
+    </div>
+    <div class="panel-body" style="padding:0;overflow:auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th><th>Strat</th><th>Sym</th><th>Side</th>
+                    <th class="num">Size</th><th class="num">Entry</th><th class="num">Exit</th>
+                    <th class="num">PnL</th><th class="num">Fund</th><th>Reason</th>
+                </tr>
+            </thead>
+            <tbody id="feed-tbody">
+                <tr><td colspan="10" class="muted">Waiting...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ARQUIVO — estratégias fechadas (shadow board histórico) -->
+<details class="fold" style="margin-top:var(--gap);">
+    <summary>Arquivo <span class="dim" id="arquivo-count"></span> <span class="dim">VWAPDeviation · VolatilityBreakout · FundingMomentum · SpotPerpCarry · LeadLag · LiquidationCatcher</span></summary>
+    <div class="fold-inner" style="padding:6px 2px;">
+        <table>
+            <thead>
+                <tr>
+                    <th>Strategy</th>
+                    <th class="num" title="decisões avaliadas (raw)">raw n</th>
+                    <th class="num" title="outcomes independentes">indep</th>
+                    <th class="num" title="episódios (janelas sobrepostas merged)">clu</th>
+                    <th class="num">WR</th>
+                    <th class="num" title="profit factor líquido (R)">net PF</th>
+                    <th class="num" title="IC 95% bootstrap">PF IC95</th>
+                </tr>
+            </thead>
+            <tbody id="arquivo-tbody">
+                <tr><td colspan="7" class="muted">Waiting...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</details>
+
+<!-- MEDIÇÕES — latency probe -->
+<details class="fold" style="margin-top:var(--gap);">
+    <summary>Medições <span class="dim">latency probe · trade.xyz vs Binance</span></summary>
+    <div class="fold-inner" style="padding:8px;">
+        <div id="medicoes-body"><span class="muted">Waiting...</span></div>
+    </div>
+</details>
+
+</div><!-- /view-main -->
+
+<!-- ══ VIEW: AVANÇADO — todo o resto ══ -->
+<div id="view-advanced" hidden>
 
 <!-- FASE 10 / MAINNET GATE — mission panel -->
 <div class="panel gate-panel" id="gate-panel">
@@ -550,6 +634,35 @@ th { font-size: 10px; }
     </div>
 </div>
 
+</div><!-- /view-advanced -->
+
+<!-- STRATEGY DETAIL MODAL -->
+<div id="strat-modal" class="modal-overlay">
+    <div class="modal-box" style="max-width:880px;">
+        <div class="modal-header">
+            <span class="modal-title" id="sm-title">Strategy</span>
+            <button class="modal-close" onclick="closeStratDetail()">×</button>
+        </div>
+        <div id="sm-stats" style="margin-bottom:10px;"></div>
+        <div class="sys-col-title">Posições abertas</div>
+        <div style="overflow:auto;max-height:180px;">
+            <table>
+                <thead><tr><th>Sym</th><th>Side</th><th class="num">Size</th><th class="num">Entry</th><th class="num">Mark</th><th class="num">Unreal</th></tr></thead>
+                <tbody id="sm-open-tbody"></tbody>
+            </table>
+        </div>
+        <div class="sys-col-title" style="margin-top:10px;">Equity + drawdown</div>
+        <div id="sm-equity" style="width:100%;height:140px;"></div>
+        <div class="sys-col-title" style="margin-top:10px;">Trades fechadas</div>
+        <div style="overflow:auto;max-height:260px;">
+            <table>
+                <thead><tr><th>Time</th><th>Sym</th><th>Side</th><th class="num">Size</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">PnL</th><th class="num">Fund</th><th class="num">Fees</th><th>Reason</th></tr></thead>
+                <tbody id="sm-closed-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
 <div id="auth-gate" class="modal-overlay">
     <div class="modal-box" style="max-width:360px;">
         <div class="modal-header">
@@ -650,6 +763,19 @@ document.getElementById("auth-submit-btn").addEventListener("click", async () =>
 });
 
 let socket = null;
+// Tab switcher — DOM only, safe at top level (no closure deps).
+function switchView(v) {
+    const main = document.getElementById("view-main");
+    const adv = document.getElementById("view-advanced");
+    const tm = document.getElementById("vtab-main");
+    const ta = document.getElementById("vtab-adv");
+    if (!main || !adv) return;
+    const isMain = v !== "adv";
+    main.hidden = !isMain;
+    adv.hidden = isMain;
+    if (tm) tm.classList.toggle("active", isMain);
+    if (ta) ta.classList.toggle("active", !isMain);
+}
 // Replaced inside bindSocketHandlers so REST poll can see nested render* fns.
 let pollAll = function () {};
 let pollResearch = function () {};
@@ -1652,6 +1778,8 @@ pollAll = function pollAll() {
             updateKPIs(d, _lastEngine);
         }
     }).catch(() => {});
+    authFetch("/api/topbar").then(r => r.json()).then(d => renderTopbar(d)).catch(() => {});
+    authFetch("/api/paper_trades_feed").then(r => r.json()).then(d => renderFeed(d)).catch(() => {});
     if (!socket || !socket.connected) {
         authFetch("/api/trades").then(r => r.json()).then(d => renderTrades(d)).catch(() => {});
         authFetch("/api/positions").then(r => r.json()).then(d => renderPositions(d)).catch(() => {});
@@ -1659,14 +1787,251 @@ pollAll = function pollAll() {
     }
 };
 pollResearch = function pollResearch() {
+    authFetch("/api/paper_strategies").then(r => r.json()).then(d => renderStrategies(d)).catch(() => {});
     authFetch("/api/hypotheses").then(r => r.json()).then(d => renderHypotheses(d)).catch(() => {});
-    authFetch("/api/paper_ledger").then(r => r.json()).then(d => renderPaperLedger(d)).catch(() => {});
+    authFetch("/api/paper_ledger").then(r => r.json()).then(d => { renderPaperLedger(d); renderMedicoes(d); }).catch(() => {});
     authFetch("/api/execution_pnl").then(r => r.json()).then(d => renderExecPnl(d)).catch(() => {});
     authFetch("/api/execution_divergence").then(r => r.json()).then(d => renderDivergence(d)).catch(() => {});
-    authFetch("/api/shadow_panel?evaluate=1").then(r => r.json()).then(d => renderShadowPanel(d)).catch(() => {});
+    authFetch("/api/shadow_panel?evaluate=1").then(r => r.json()).then(d => { renderShadowPanel(d); renderArquivo(d); }).catch(() => {});
     authFetch("/api/research_watchdogs").then(r => r.json()).then(d => renderResearchWatchdogs(d)).catch(() => {});
     authFetch("/api/dvol").then(r => r.json()).then(d => renderDvolPanel(d)).catch(() => {});
     authFetch("/api/gate").then(r => r.json()).then(d => renderGate(d)).catch(() => {});
+};
+
+// ═══ Reorganização main page — topbar / estratégias / feed / folds ═══
+
+function _tbCls(ok, warn) {
+    return ok ? "var(--up)" : (warn ? "var(--warn)" : "var(--down)");
+}
+function _fmtAgeS(s) {
+    if (s == null || isNaN(s)) return "--";
+    s = Math.max(0, Math.round(s));
+    return s < 90 ? s + "s" : (s < 5400 ? Math.round(s / 60) + "m" : Math.round(s / 3600) + "h");
+}
+function renderTopbar(d) {
+    if (!d) return;
+    const px = d.prices || {};
+    for (const sym of ["BTC", "ETH", "SOL"]) {
+        const el = document.getElementById("tb-px-" + sym);
+        if (!el) continue;
+        const p = px[sym];
+        if (p && p.close != null) {
+            el.textContent = "$" + fmtPrice(p.close);
+            el.style.color = _tbCls(p.age_s != null && p.age_s < 180, p.age_s != null && p.age_s < 600);
+        } else { el.textContent = "--"; el.style.color = "var(--dim)"; }
+    }
+    const feed = document.getElementById("tb-feed");
+    const feedMs = d.feed_age_ms != null ? d.feed_age_ms : (d.candle_age_s != null ? d.candle_age_s * 1000 : null);
+    if (feed && feedMs != null) {
+        feed.textContent = feedMs < 1000 ? Math.round(feedMs) + "ms" : _fmtAgeS(feedMs / 1000);
+        feed.style.color = _tbCls(feedMs < 5000, feedMs < 30000);
+    }
+    const cnd = document.getElementById("tb-candle");
+    if (cnd && d.candle_age_s != null) {
+        cnd.textContent = _fmtAgeS(d.candle_age_s);
+        cnd.style.color = _tbCls(d.candle_age_s < 120, d.candle_age_s < 300);
+    }
+    const svc = document.getElementById("tb-svc");
+    if (svc && d.services && d.services.total != null) {
+        svc.textContent = d.services.ok + "/" + d.services.total;
+        svc.style.color = _tbCls(d.services.ok === d.services.total, d.services.ok > 0);
+    }
+    const dsk = document.getElementById("tb-disk");
+    if (dsk && d.disk_pct != null) {
+        dsk.textContent = Math.round(d.disk_pct) + "%";
+        dsk.style.color = _tbCls(d.disk_pct < 70, d.disk_pct < 80);
+    }
+}
+
+function _sparkSVG(series, w, h) {
+    if (!series || series.length < 2) {
+        return '<div class="spark-empty muted">—</div>';
+    }
+    w = w || 120; h = h || 30;
+    const vs = series.map(p => p[1]);
+    const lo = Math.min(...vs), hi = Math.max(...vs);
+    const span = (hi - lo) || 1;
+    const step = w / (series.length - 1);
+    const pts = series.map((p, i) =>
+        (i * step).toFixed(1) + "," + (h - 2 - ((p[1] - lo) / span) * (h - 4)).toFixed(1));
+    const up = series[series.length - 1][1] >= series[0][1];
+    const col = up ? "var(--up)" : "var(--down)";
+    return '<svg class="spark" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">'
+        + '<polyline fill="none" stroke="' + col + '" stroke-width="1.2" points="' + pts.join(" ") + '"/></svg>';
+}
+
+const _STATE_BADGE = {
+    running: ["badge-green", "a correr"],
+    no_signal: ["badge-dim", "sem sinal"],
+    error: ["badge-red", "erro"],
+};
+function _fmtNet(v, unit) {
+    if (v == null) return "—";
+    const sign = v > 0 ? "+" : "";
+    if (unit === "pct") return sign + fmtNum(v, 2) + "%";
+    if (unit === "bps") return sign + fmtNum(v, 1) + "bp";
+    return sign + "$" + fmtNum(v, 2);
+}
+function renderStrategies(d) {
+    const grid = document.getElementById("strat-grid");
+    if (!grid) return;
+    const rows = (d && d.rows) || [];
+    window._lastStratCards = rows;
+    if (!rows.length) {
+        grid.innerHTML = '<span class="muted">Sem dados de estratégias</span>';
+        return;
+    }
+    grid.innerHTML = rows.map(r => {
+        const [cls, lbl] = _STATE_BADGE[r.state] || ["badge-dim", r.state || "—"];
+        const netCls = r.net == null ? "" : (r.net >= 0 ? "up" : "down");
+        const nTxt = r.n != null
+            ? r.n + (r.n_readout ? "/" + r.n_readout : "")
+            : "—";
+        const roTxt = r.readout_ms ? fmtDate(r.readout_ms) : "—";
+        return `<div class="strat-card" onclick="openStratDetail('${r.id}')" role="button" tabindex="0"
+                 onkeydown="if(event.key==='Enter')openStratDetail('${r.id}')">
+            <div class="sc-head">
+                <span class="sc-name">${r.name}</span>
+                <span class="badge ${cls}" title="${r.state_detail || ''}">${lbl}</span>
+            </div>
+            <div class="sc-spark">${_sparkSVG(r.equity, 220, 44)}</div>
+            <div class="sc-row"><span class="dim">Net</span><span class="num ${netCls}">${_fmtNet(r.net, r.net_unit)}</span>
+                <span class="dim">APY</span><span class="num">${r.apy != null ? r.apy + "%" : "—"}</span></div>
+            <div class="sc-row"><span class="dim">WR</span><span class="num">${r.wr != null ? r.wr + "%" : "—"}</span>
+                <span class="dim">Open</span><span class="num">${r.n_open || 0}${r.open_unreal_usd != null ? ' (' + _fmtNet(r.open_unreal_usd, "usd") + ')' : ''}</span></div>
+            <div class="sc-row"><span class="dim">n</span><span class="num">${nTxt}</span>
+                <span class="dim">readout</span><span class="num">${roTxt}</span></div>
+            <div class="sc-foot dim" title="${r.prereg_state || ''}">${r.prereg_state || ''}</div>
+        </div>`;
+    }).join("");
+}
+
+function renderFeed(d) {
+    const tb = document.getElementById("feed-tbody");
+    if (!tb) return;
+    const rows = (d && d.rows) || [];
+    if (!rows.length) {
+        tb.innerHTML = '<tr><td colspan="10" class="muted">Sem trades fechadas</td></tr>';
+        return;
+    }
+    tb.innerHTML = rows.map(t => {
+        const pnl = t.pnl_usd;
+        const cls = pnl == null ? "" : (pnl >= 0 ? "up" : "down");
+        return `<tr>
+            <td class="tiny">${fmtDate(t.exit_ms)}</td>
+            <td>${t.strat || "?"}</td><td>${t.symbol || "?"}</td><td>${t.side || "?"}</td>
+            <td class="num">${t.size != null ? fmtNum(t.size, 4) : "—"}</td>
+            <td class="num">${t.entry != null ? "$" + fmtPrice(t.entry) : "—"}</td>
+            <td class="num">${t.exit != null ? "$" + fmtPrice(t.exit) : "—"}</td>
+            <td class="num ${cls}">${pnl != null ? (pnl >= 0 ? "+" : "") + "$" + fmtNum(pnl, 2) : "—"}</td>
+            <td class="num">${t.funding_usd != null ? "$" + fmtNum(t.funding_usd, 2) : "—"}</td>
+            <td class="tiny">${t.reason || ""}</td>
+        </tr>`;
+    }).join("");
+}
+
+function renderArquivo(payload) {
+    const tb = document.getElementById("arquivo-tbody");
+    if (!tb) return;
+    const rows = (payload && payload.rows) || [];
+    const ac = document.getElementById("arquivo-count");
+    if (ac) ac.textContent = rows.length ? "(" + rows.length + ")" : "";
+    if (!rows.length) {
+        tb.innerHTML = '<tr><td colspan="7" class="muted">Sem estratégias arquivadas</td></tr>';
+        return;
+    }
+    tb.innerHTML = rows.map(r => {
+        const indep = r.n_independent;
+        const rawN = r.n_decisions != null ? r.n_decisions : (r.hypothetical_trades_closed || 0);
+        const powered = indep != null && indep >= 30;
+        const pf = powered && r.net_profit_factor != null
+            ? Number(r.net_profit_factor).toFixed(2) : "—";
+        const ci = powered && r.pf_ic95 ? "[" + Number(r.pf_ic95[0]).toFixed(2) + "," + Number(r.pf_ic95[1]).toFixed(2) + "]" : "—";
+        const wr = powered && r.win_rate != null ? (r.win_rate * 100).toFixed(1) + "%" : "—";
+        return `<tr><td>${r.strategy}${r.variant ? '#' + r.variant : ''}</td>
+            <td class="num">${rawN}</td><td class="num">${indep != null ? indep : "—"}</td>
+            <td class="num">${r.n_clustered != null ? r.n_clustered : "—"}</td>
+            <td class="num">${wr}</td><td class="num">${pf}</td><td class="num tiny">${ci}</td></tr>`;
+    }).join("");
+}
+
+function renderMedicoes(d) {
+    const el = document.getElementById("medicoes-body");
+    if (!el) return;
+    const row = ((d && d.rows) || []).find(r => r.id === "LatencyProbe::measure");
+    if (!row) {
+        el.innerHTML = '<span class="muted">Latency probe sem dados</span>';
+        return;
+    }
+    el.innerHTML = `<div class="mini-stats">
+        <div class="mini-row"><span class="mini-label">Eventos</span><span class="mini-value">${row.n != null ? row.n : "—"}${row.n_readout ? " / " + row.n_readout : ""}</span></div>
+        <div class="mini-row"><span class="mini-label">Net médio</span><span class="mini-value">${row.net != null ? fmtNum(row.net, 2) + " bps" : "—"}</span></div>
+        <div class="mini-row"><span class="mini-label">Readout</span><span class="mini-value">${row.readout_ms ? fmtDate(row.readout_ms) : "—"}</span></div>
+        <div class="mini-row"><span class="mini-label">Estado</span><span class="mini-value">${row.prereg_state || "—"}</span></div>
+        <div class="mini-row"><span class="mini-label">Detalhe</span><span class="mini-value tiny">${row.detail || "—"}</span></div>
+    </div>`;
+}
+
+// ── Strategy detail modal ──
+let _smTimer = null;
+let _smSid = null;
+function _smRender(d, name) {
+    const stats = document.getElementById("sm-stats");
+    const cards = (window._lastStratCards || []).find(r => r.id === _smSid);
+    stats.innerHTML = cards ? `<div class="sc-row" style="gap:18px;">
+        <span class="dim">Net</span><span class="num">${_fmtNet(cards.net, cards.net_unit)}</span>
+        <span class="dim">WR</span><span class="num">${cards.wr != null ? cards.wr + "%" : "—"}</span>
+        <span class="dim">n</span><span class="num">${cards.n != null ? cards.n : "—"}${cards.n_readout ? "/" + cards.n_readout : ""}</span>
+        <span class="dim">readout</span><span class="num">${cards.readout_ms ? fmtDate(cards.readout_ms) : "—"}</span></div>` : "";
+    const ot = document.getElementById("sm-open-tbody");
+    const opens = (d && d.open) || [];
+    ot.innerHTML = opens.length ? opens.map(o => `<tr>
+        <td>${o.symbol}</td><td>${o.side}</td>
+        <td class="num">${o.size != null ? fmtNum(o.size, 4) : "—"}</td>
+        <td class="num">${o.entry != null ? "$" + fmtPrice(o.entry) : "—"}</td>
+        <td class="num">${o.mark != null ? "$" + fmtPrice(o.mark) : "—"}</td>
+        <td class="num ${o.unreal_usd == null ? "" : (o.unreal_usd >= 0 ? "up" : "down")}">${o.unreal_usd != null ? _fmtNet(o.unreal_usd, "usd") : "—"}</td>
+    </tr>`).join("") : '<tr><td colspan="6" class="muted">Sem posições abertas</td></tr>';
+    const eq = document.getElementById("sm-equity");
+    const series = (d && d.equity) || [];
+    eq.innerHTML = _sparkSVG(series, Math.max(300, eq.clientWidth || 640), 140)
+        + ((d && d.dd && d.dd.length) ? '<div class="tiny dim">max DD ' + Math.min(...d.dd.map(p => p[1])).toFixed(1) + '%</div>' : "");
+    const ct = document.getElementById("sm-closed-tbody");
+    const closed = (d && d.closed) || [];
+    ct.innerHTML = closed.length ? closed.map(t => `<tr>
+        <td class="tiny">${fmtDate(t.exit_ms)}</td><td>${t.symbol}</td><td>${t.side}</td>
+        <td class="num">${t.size != null ? fmtNum(t.size, 4) : "—"}</td>
+        <td class="num">${t.entry != null ? "$" + fmtPrice(t.entry) : "—"}</td>
+        <td class="num">${t.exit != null ? "$" + fmtPrice(t.exit) : "—"}</td>
+        <td class="num ${t.pnl_usd == null ? "" : (t.pnl_usd >= 0 ? "up" : "down")}">${t.pnl_usd != null ? _fmtNet(t.pnl_usd, "usd") : "—"}</td>
+        <td class="num">${t.funding_usd != null ? "$" + fmtNum(t.funding_usd, 2) : "—"}</td>
+        <td class="num">${t.fees_usd != null ? fmtNum(t.fees_usd, 2) : "—"}</td>
+        <td class="tiny">${t.reason || ""}</td>
+    </tr>`).join("") : '<tr><td colspan="10" class="muted">Sem trades fechadas</td></tr>';
+    const ttl = document.getElementById("sm-title");
+    if (ttl) ttl.textContent = name || _smSid;
+}
+function _smFetch() {
+    if (!_smSid) return;
+    authFetch("/api/paper_strategy/" + _smSid).then(r => r.json())
+        .then(d => _smRender(d)).catch(() => {});
+}
+window.openStratDetail = function (sid) {
+    _smSid = sid;
+    const card = (window._lastStratCards || []).find(r => r.id === sid);
+    _smFetch();
+    document.getElementById("strat-modal").classList.add("active");
+    if (_smTimer) clearInterval(_smTimer);
+    _smTimer = setInterval(_smFetch, 5000);
+    if (card) {
+        const ttl = document.getElementById("sm-title");
+        if (ttl) ttl.textContent = card.name;
+    }
+};
+window.closeStratDetail = function () {
+    _smSid = null;
+    if (_smTimer) { clearInterval(_smTimer); _smTimer = null; }
+    document.getElementById("strat-modal").classList.remove("active");
 };
 
 if (!window.__hlDashTimers) {

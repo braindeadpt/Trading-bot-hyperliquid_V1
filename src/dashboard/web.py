@@ -2623,6 +2623,123 @@ def create_app(config: Dict[str, Any]) -> tuple:
         return jsonify(_ttl_put(
             "paper_ledger", payload, _RESEARCH_CACHE_TTL_S))
 
+    @app.route("/api/paper_strategies")
+    def api_paper_strategies():
+        """Strategy cards — unified ledger read (paper_trades layer)."""
+        cached = _ttl_get("paper_strategies")
+        if cached is not None:
+            return jsonify(cached)
+        try:
+            from src.research.paper_trades import (
+                build_strategies_payload)
+            payload = build_strategies_payload()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("paper_strategies failed: %s", exc)
+            payload = {"rows": [], "error": str(exc)[:200]}
+        return jsonify(_ttl_put(
+            "paper_strategies", payload, _RESEARCH_CACHE_TTL_S))
+
+    @app.route("/api/paper_strategy/<sid>")
+    def api_paper_strategy(sid):
+        """Per-strategy drill-down — open positions, closed trades,
+        equity + drawdown. Read-only, safe to call with no engine."""
+        cached = _ttl_get(f"paper_strategy:{sid}")
+        if cached is not None:
+            return jsonify(cached)
+        try:
+            from src.research.paper_trades import build_strategy_detail
+            payload = build_strategy_detail(sid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("paper_strategy %s failed: %s", sid, exc)
+            payload = {"id": sid, "error": str(exc)[:200],
+                       "open": [], "closed": [], "equity": [], "dd": []}
+        return jsonify(_ttl_put(
+            f"paper_strategy:{sid}", payload, _RESEARCH_CACHE_TTL_S))
+
+    @app.route("/api/paper_trades_feed")
+    def api_paper_trades_feed():
+        """Merged closed-trade feed across every strategy ledger."""
+        cached = _ttl_get("paper_trades_feed")
+        if cached is not None:
+            return jsonify(cached)
+        try:
+            limit = int(request.args.get("limit", "60"))
+        except ValueError:
+            limit = 60
+        try:
+            from src.research.paper_trades import build_trades_feed
+            payload = {"rows": build_trades_feed(limit)}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("paper_trades_feed failed: %s", exc)
+            payload = {"rows": [], "error": str(exc)[:200]}
+        return jsonify(_ttl_put(
+            "paper_trades_feed", payload, _MD_HEALTH_TTL_S))
+
+    @app.route("/api/topbar")
+    def api_topbar():
+        """Health strip — live prices + candle age, feed latency, disk
+        usage and healthchecks.io service count. DB-driven so it works
+        without a live engine (scratch/read-only deployments)."""
+        cached = _ttl_get("topbar")
+        if cached is not None:
+            return jsonify(cached)
+        import shutil
+        payload: Dict[str, Any] = {"prices": {}, "services": None,
+                                   "disk_pct": None, "candle_age_s": None}
+        try:
+            import sqlite3 as _sq
+            db_path = ROOT / "data" / "live" / "bot.db"
+            con = _sq.connect(f"file:{db_path}?mode=ro", uri=True,
+                              timeout=2.0)
+            con.row_factory = _sq.Row
+            try:
+                now_ms = int(time.time() * 1000)
+                ages = []
+                for r in con.execute(
+                        "SELECT symbol, close, MAX(timestamp_ms) ts"
+                        " FROM candles_1m GROUP BY symbol").fetchall():
+                    age_s = max(0, int((now_ms - int(r["ts"])) / 1000))
+                    ages.append(age_s)
+                    payload["prices"][r["symbol"]] = {
+                        "close": r["close"], "age_s": age_s}
+                if ages:
+                    payload["candle_age_s"] = max(ages)
+            finally:
+                con.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("topbar candles failed: %s", exc)
+        try:
+            usage = shutil.disk_usage(str(ROOT / "data"))
+            payload["disk_pct"] = round(usage.used / usage.total * 100.0, 1)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            api_key = os.environ.get("HC_API_KEY", "").strip()
+            if api_key:
+                import urllib.request
+                req = urllib.request.Request(
+                    "https://healthchecks.io/api/v3/checks/",
+                    headers={"X-Api-Key": api_key})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    checks = json.loads(resp.read())["checks"]
+                hl = [c for c in checks if c.get("name", "").startswith("hl-")]
+                payload["services"] = {
+                    "ok": sum(1 for c in hl if c.get("status") == "up"),
+                    "total": len(hl)}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("topbar hc.io failed: %s", exc)
+        try:
+            if _engine is not None:
+                last_events = getattr(_engine, "_last_market_events", {})
+                ages_ms = [
+                    int((time.time() - e.get("processed_at", 0)) * 1000)
+                    for e in last_events.values() if e.get("processed_at")]
+                if ages_ms:
+                    payload["feed_age_ms"] = min(ages_ms)
+        except Exception:  # noqa: BLE001
+            pass
+        return jsonify(_ttl_put("topbar", payload, 15))
+
     @app.route("/api/execution_pnl")
     def api_execution_pnl():
         """Net-PnL decomposition (gross/fees/slippage/funding/net) for the
