@@ -1898,20 +1898,23 @@ function renderStrategies(d) {
             ? r.n + (r.n_readout ? "/" + r.n_readout : "")
             : "—";
         const roTxt = r.readout_ms ? fmtDate(r.readout_ms) : "—";
+        const spark = r.sealed
+            ? '<div class="tiny" style="color:var(--yellow);padding:14px 0;text-align:center;">SEALED — métricas só na leitura registada</div>'
+            : _sparkSVG(r.equity, 220, 44);
         return `<div class="strat-card" onclick="openStratDetail('${r.id}')" role="button" tabindex="0"
                  onkeydown="if(event.key==='Enter')openStratDetail('${r.id}')">
             <div class="sc-head">
                 <span class="sc-name">${r.name}</span>
                 <span class="badge ${cls}" title="${r.state_detail || ''}">${lbl}</span>
             </div>
-            <div class="sc-spark">${_sparkSVG(r.equity, 220, 44)}</div>
+            <div class="sc-spark">${spark}</div>
             <div class="sc-row"><span class="dim">Net</span><span class="num ${netCls}">${_fmtNet(r.net, r.net_unit)}</span>
                 <span class="dim">APY</span><span class="num">${r.apy != null ? r.apy + "%" : "—"}</span></div>
             <div class="sc-row"><span class="dim">WR</span><span class="num">${r.wr != null ? r.wr + "%" : "—"}</span>
                 <span class="dim">Open</span><span class="num">${r.n_open || 0}${r.open_unreal_usd != null ? ' (' + _fmtNet(r.open_unreal_usd, "usd") + ')' : ''}</span></div>
             <div class="sc-row"><span class="dim">n</span><span class="num">${nTxt}</span>
                 <span class="dim">readout</span><span class="num">${roTxt}</span></div>
-            <div class="sc-foot dim" title="${r.prereg_state || ''}">${r.prereg_state || ''}</div>
+            <div class="sc-foot dim" title="${r.prereg_state || ''}">${r.sealed ? '<span style="color:var(--yellow);font-weight:700;">SEALED</span> · ' : ''}${r.prereg_state || ''}</div>
         </div>`;
     }).join("");
 }
@@ -1935,7 +1938,7 @@ function renderFeed(d) {
             <td class="num">${t.exit != null ? "$" + fmtPrice(t.exit) : "—"}</td>
             <td class="num ${cls}">${pnl != null ? (pnl >= 0 ? "+" : "") + "$" + fmtNum(pnl, 2) : "—"}</td>
             <td class="num">${t.funding_usd != null ? "$" + fmtNum(t.funding_usd, 2) : "—"}</td>
-            <td class="tiny">${t.reason || ""}</td>
+            <td class="tiny">${t.reason || ""}${t.sealed ? ' <span style="color:var(--yellow)">·selado</span>' : ""}</td>
         </tr>`;
     }).join("");
 }

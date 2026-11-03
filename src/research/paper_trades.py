@@ -690,6 +690,7 @@ def _ivgate_card(now_ms: int) -> Dict[str, Any]:
             card["n"] = (board.get("n_independent")
                          or board.get("n_evaluated"))
             if sealed:
+                card["sealed"] = True
                 card["prereg_state"] = "SEALED"
                 card["state_detail"] = "selado — métricas ocultas"
                 card["state"] = "no_signal"
@@ -769,6 +770,39 @@ _LEDGER_ID = {
 }
 
 
+def _is_sealed(prereg_state: Optional[str]) -> bool:
+    return "seal" in str(prereg_state or "").lower() or "selad" in str(
+        prereg_state or "").lower()
+
+
+def _seal_card(card: Dict[str, Any]) -> None:
+    """Sealed preregistrations publish counts only — strip every metric
+    field (net, wr, apy, unrealized, equity) from a built card."""
+    card["sealed"] = True
+    card["net"] = None
+    card["wr"] = None
+    card["apy"] = None
+    card["open_unreal_usd"] = None
+    card["equity"] = []
+
+
+def _seal_detail(out: Dict[str, Any]) -> Dict[str, Any]:
+    """Sealed detail: structure stays (symbols, sizes, times, counts,
+    reasons), every performance figure is masked."""
+    for t in out.get("open", []):
+        t["unreal_usd"] = None
+        t["mark"] = None
+    for t in out.get("closed", []):
+        t["pnl_usd"] = None
+        t["pnl_pct"] = None
+        t["funding_usd"] = None
+        t["fees_usd"] = None
+    out["equity"] = []
+    out["dd"] = []
+    out["sealed"] = True
+    return out
+
+
 def build_strategies_payload(now_ms: Optional[int] = None
                              ) -> Dict[str, Any]:
     now = now_ms or int(time.time() * 1000)
@@ -791,8 +825,22 @@ def build_strategies_payload(now_ms: Optional[int] = None
                 card["readout_ms"] = lr["readout_ms"]
             if lr.get("prereg_state"):
                 card["prereg_state"] = lr["prereg_state"]
+        if _is_sealed(card.get("prereg_state")):
+            _seal_card(card)
         rows.append(card)
     return {"rows": rows, "generated_ms": now}
+
+
+def _ledger_row_for(sid: str) -> Optional[Dict[str, Any]]:
+    try:
+        from src.research.paper_ledger import build_paper_ledger_payload
+        lid = _LEDGER_ID.get(sid)
+        for r in build_paper_ledger_payload().get("rows", []):
+            if r.get("id") == lid:
+                return r
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def build_strategy_detail(sid: str,
@@ -805,6 +853,13 @@ def build_strategy_detail(sid: str,
         out = fn(now)
         out["id"] = sid
         out["generated_ms"] = now
+        if sid == "ivgate":
+            # VWAP iv_gate confirmation is sealed until expiry/verdict.
+            out = _seal_detail(out)
+        else:
+            lr = _ledger_row_for(sid)
+            if lr and _is_sealed(lr.get("prereg_state")):
+                out = _seal_detail(out)
         return out
     except Exception as exc:  # noqa: BLE001
         return {"id": sid, "error": str(exc)[:200],
@@ -825,19 +880,42 @@ def build_trades_feed(limit: int = 60,
         push([{**t, "strat": "JevJudge"} for t in d["closed"]])
     except Exception:  # noqa: BLE001
         pass
+    # Sealed strategies: the feed shows structure (time, symbol, side,
+    # size, reason) with PnL fields masked — metrics stay hidden.
+    sealed_ids = {sid for sid, lid in _LEDGER_ID.items()
+                  if _is_sealed(
+                      (_ledger_row_for(sid) or {}).get("prereg_state"))}
+
+    def _mask(rows, sid):
+        if sid not in sealed_ids:
+            return rows
+        out = []
+        for t in rows:
+            t = dict(t)
+            t["pnl_usd"] = None
+            t["pnl_pct"] = None
+            t["funding_usd"] = None
+            t["fees_usd"] = None
+            t["sealed"] = True
+            out.append(t)
+        return out
+
     try:
         d = _carry_detail(now)
-        push([{**t, "strat": "CarryA1"} for t in d["closed"]])
+        push([{**t, "strat": "CarryA1"}
+              for t in _mask(d["closed"], "carry")])
     except Exception:  # noqa: BLE001
         pass
     try:
         d = _unlock_detail(now)
-        push([{**t, "strat": "UnlockShort"} for t in d["closed"]])
+        push([{**t, "strat": "UnlockShort"}
+              for t in _mask(d["closed"], "unlock")])
     except Exception:  # noqa: BLE001
         pass
     try:
         d = _boros_detail(now)
-        push([{**t, "strat": "Boros"} for t in d["closed"]])
+        push([{**t, "strat": "Boros"}
+              for t in _mask(d["closed"], "boros")])
     except Exception:  # noqa: BLE001
         pass
     try:
