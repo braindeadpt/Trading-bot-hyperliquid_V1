@@ -656,13 +656,31 @@ def _resmom_detail(now_ms: int) -> Dict[str, Any]:
 def _ivgate_card(now_ms: int) -> Dict[str, Any]:
     card = _base_card(
         "ivgate", "VWAP iv_gate", "shadow", prereg_state="confirm")
+    con = None
     try:
-        from src.research.shadow_panel import _load_persisted_boards
-        from src.utils.config import load_config
-        cfg = load_config(ROOT / "config" / "settings.yaml")
-        latest = _load_persisted_boards(cfg)
-        boards = latest[0] if latest else {}
-        batch_ts = latest[1] if latest else None
+        import json as _json
+        con = _ro(_RESEARCH / "hyperliquid.db")
+        boards: Dict[str, Any] = {}
+        batch_ts = None
+        if con is not None:
+            try:
+                row = con.execute(
+                    "SELECT MAX(evaluated_at_ms) AS ts "
+                    "FROM shadow_outcome_scoreboards").fetchone()
+                batch_ts = (int(row["ts"]) if row and row["ts"] is not None
+                            else None)
+                if batch_ts is not None:
+                    for r in con.execute(
+                            "SELECT metrics_json FROM "
+                            "shadow_outcome_scoreboards WHERE "
+                            "evaluated_at_ms = ?", (batch_ts,)):
+                        try:
+                            d = _json.loads(r["metrics_json"])
+                        except Exception:  # noqa: BLE001
+                            continue
+                        boards[f"{d.get('strategy')}::{d.get('variant')}"] = d
+            except Exception:  # noqa: BLE001 — table may not exist
+                pass
         board = None
         if isinstance(boards, dict):
             # The card is the VWAPDeviation iv_gate confirm variant —
@@ -709,6 +727,12 @@ def _ivgate_card(now_ms: int) -> Dict[str, Any]:
         return card
     except Exception:  # noqa: BLE001
         return card
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _ivgate_detail(now_ms: int) -> Dict[str, Any]:
