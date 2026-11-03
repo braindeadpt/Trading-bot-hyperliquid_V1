@@ -223,6 +223,14 @@ def _jev_detail(now_ms: int) -> Dict[str, Any]:
                 cum += float(t["pnl_usd"] or 0.0)
                 series.append((int(t["exit_time"]), round(cum, 4)))
         out["equity"] = series
+        # Drawdown % of the paper base ($10k initial_capital) so the modal's
+        # "max DD %" is comparable across strategies.
+        peak = 10_000.0
+        for ts, v in series:
+            eq_usd = 10_000.0 + v
+            peak = max(peak, eq_usd)
+            out["dd"].append((ts, round((eq_usd - peak) / peak * 100.0, 4)
+                              if peak else 0.0))
         return out
     except Exception:  # noqa: BLE001
         return out
