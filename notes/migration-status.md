@@ -316,3 +316,26 @@ zero runs novos em `backups/runs/` (fica só `2026-11-02T133145Z`),
 disco 41%, 12/12 containers `r=0`, hc 7/7 up, hash intacto.
 **Freeze de restarts LEVANTADO** — restarts/recreates autorizados
 outra vez (o wart on-boot está corrigido).
+
+## Incidente: dashboard socket OFFLINE via Tailscale (2026-11-03 00:10 UTC — RESOLVIDO)
+
+Sintoma: página carregava com dados mas banner «Dashboard OFFLINE —
+socket desligado» e secções em «Waiting...». Três camadas:
+
+1. **Werkzeug (threading mode) não faz WS upgrade** — o engine.io
+   anunciava `upgrades:["websocket"]` mas cada upgrade levava 400 →
+   flap de reconnect. Fix: `transports:["polling"]` no cliente +
+   `allow_upgrades=False` no SocketIO (commit `797e8ea`,
+   `feat/post-cutover`, deployed).
+2. **CORS nos POSTs** (a causa raiz, só visível com tcpdump): Chrome
+   envia `Origin: https://bots-01.tail3cb15a.ts.net` só em POSTs; o
+   engine.io rejeitava («Not an accepted origin.», 400) porque
+   `cors_allowed_origins` só tinha localhost. GETs passavam sem Origin
+   — daí a ilusão de "meio funciona". Fix: `DASHBOARD_CORS_ORIGINS=
+   https://bots-01.tail3cb15a.ts.net` em `/etc/hyperliquid/bot.env`
+   (host-managed, não commitado — contém o nome da tailnet).
+   **Rebuild note:** se bot.env for recriado, esta var é obrigatória
+   para o dashboard via Tailscale.
+
+Acesso ao dashboard: `https://bots-01.tail3cb15a.ts.net/` (tailnet)
+ou `ssh -L 8091:127.0.0.1:8091 admin@<bots-01>` → `localhost:8091`.
