@@ -4224,6 +4224,31 @@ class TradingEngine:
                 await self._execute_exit(position, current_price, reason="take_profit")
                 return
 
+        # Orphaned/demoted strategy max-hold fallback: when a strategy (e.g.
+        # JevJudge after its 2026-11-11 kill readout) is removed from the
+        # active strategy roster while open paper trades still drain, enforce its
+        # configured max_hold_hours so positions never linger past horizon.
+        owner_strat = str((position.metadata or {}).get("strategy", ""))
+        active_names = {getattr(s, "name", "") for s in self._strategies}
+        if owner_strat and owner_strat not in active_names and position.entry_time_ms > 0:
+            strat_key_map = {
+                "JevJudge": "strategy.jev_judge.max_hold_hours",
+                "VWAPDeviation": "strategy.vwap_deviation.max_hold_hours",
+                "VolatilityBreakout": "strategy.volatility_breakout.max_hold_hours",
+                "ChecklistMeta": "strategy.checklist_meta.max_hold_hours",
+            }
+            cfg_key = strat_key_map.get(owner_strat)
+            max_hold_h = float(self._config.get(cfg_key, 0.0) or 0.0) if cfg_key else 0.0
+            if max_hold_h > 0:
+                age_ms = int(time.time() * 1000) - int(position.entry_time_ms)
+                if age_ms >= int(max_hold_h * 3_600_000):
+                    await self._execute_exit(
+                        position,
+                        current_price,
+                        reason=f"max_hold_{owner_strat.lower()}_retired",
+                    )
+                    return
+
     async def _maybe_update_trailing_stop(
         self,
         position: Position,

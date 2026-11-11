@@ -57,9 +57,12 @@ services:
       sh -c 'python -u /opt/hyperliquid/deploy/linux/dashboard_proxy.py 8091 5000 &
              exec python -u -X utf8 main.py --config config/settings.yaml --mode paper' 
 
+  # KILLED 2026-11-11 at final preregistered readout (indep_n=325, net PF=0.8373 <= 1.0).
+  # Gated under profile 'killed' so `docker compose up -d` never restarts it.
   jev-judge:
     <<: *base
     container_name: hl-jev-judge
+    profiles: ["killed"]
     command: >
       sh -c 'while :; do
         python -u -X utf8 scripts/research/jev_shadow_judge.py --once --max-tokens 8000000;

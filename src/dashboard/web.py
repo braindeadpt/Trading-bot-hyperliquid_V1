@@ -2738,7 +2738,8 @@ def create_app(config: Dict[str, Any]) -> tuple:
             # (jev/carry/unlock/boros/resmom/ivgate card states).
             from src.research.paper_trades import build_strategies_payload
             cards = build_strategies_payload().get("rows", [])
-            ok = sum(1 for c in cards if c.get("state") != "error")
+            active_cards = [c for c in cards if c.get("state") != "closed"]
+            ok = sum(1 for c in active_cards if c.get("state") != "error")
             engine_ok = 0
             if _engine is not None:
                 try:
@@ -2753,7 +2754,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
                 ca = payload.get("candle_age_s")
                 engine_ok = 1 if ca is not None and ca < 300 else 0
             payload["services"] = {"ok": ok + engine_ok,
-                                   "total": len(cards) + 1}
+                                   "total": len(active_cards) + 1}
         except Exception as exc:  # noqa: BLE001
             logger.debug("topbar services failed: %s", exc)
         try:

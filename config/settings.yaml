@@ -532,13 +532,13 @@ strategy:
     wallets_path: "data/research/top_traders.json"
 
   # ═══════════════════════════════════════════════════════════
-  # Strategy: JevJudge — TypeSafe/Jev experiment (PAPER ONLY)
-  # Reads data/live/jev_latest.json written by the scheduled judge
-  # (scripts/research/jev_shadow_judge.py); one signal per new decision.
-  # Zero evidence — EXPERIMENT manifest verdict, not PASS.
+  # Strategy: JevJudge — TypeSafe/Jev experiment (KILLED 2026-11-11)
+  # Final preregistered readout on 2026-11-11 (PREREGISTER_JEV_OOS_KILL_2026-10-08.md):
+  # post-boundary indep_n = 325 (>= 100 target), net PF = 0.8373 (<= 1.0 kill threshold),
+  # net PnL = -$679.35 USD. Turned OFF permanently — no second version, no retuning.
   # ═══════════════════════════════════════════════════════════
   jev_judge:
-    enabled: true
+    enabled: false                  # KILLED 2026-11-11: indep_n=325, net PF=0.8373 <= 1.0, -$679.35
     min_confidence: 0.50            # Jev action confidence floor — lowered 2026-09-17
                                     # (owner decision): 0/24 recorded decisions reached
                                     # 0.60 (max observed 0.57) -> 0 signals, 0 trades.
@@ -788,12 +788,11 @@ strategy:
   phase08:
     enabled: true
     paper_only: true               # tier_a_hl_ohlc = data cert only; paper until Phase06 OOS
-    # JevJudge: owner-requested TypeSafe/Jev experiment (2026-09-17) —
-    # manifest gate record verdict=EXPERIMENT (no evidence claimed).
-    # Paper-only by manifest + strategy _mode guard; all other names stay
-    # shadow-only per the 09-17 demotion evidence.
-    execution_strategies:
-      - JevJudge
+    # 2026-11-11: JevJudge KILLED at final preregistered readout
+    # (indep_n=325 >= 100, net PF=0.8373 <= 1.0, net PnL=-$679.35 USD —
+    # see docs/ops/PREREGISTER_JEV_OOS_KILL_2026-10-08.md). Execution roster
+    # emptied; shadow evaluations continue independently.
+    execution_strategies: []
     shadow_strategies:
       # 2026-09-29 prune — retired on decisive persisted evidence (net pf,
       # tier-0 fees): OrderBookScalper 0.21/25k evals, TopTraderFlow 0.31/3.8k,
