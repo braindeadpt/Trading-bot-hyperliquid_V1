@@ -86,7 +86,7 @@ def test_unlock_shadow_imports_only_research_siblings() -> None:
     allowed = ("src.research.unlock_shadow", "scripts.research")
     stdlib_ok = ("__future__", "asyncio", "collections", "dataclasses",
                  "hashlib", "json", "logging", "os", "pathlib", "random",
-                 "re", "sqlite3", "time", "typing", "urllib")
+                 "re", "sqlite3", "time", "typing", "urllib", "zlib")
     for fname, mod in _pkg_imports():
         root = mod.split(".")[0]
         assert (mod.startswith(allowed[0]) or mod.startswith(allowed[1])
@@ -748,3 +748,53 @@ class TestNormalization:
         assert any(r.kind == "excluded" for r in hraws)   # noncirculating
         assert not [r for r in hraws if r.kind == "cliff"
                     and r.event_ms > captured]
+
+
+def test_snapshot_zlib_compression_and_legacy_compaction(tmp_path: Path) -> None:
+    """Verify new snapshots store zlib BLOBs with byte-exact decode & sha256,
+    and compact_snapshots() migrates legacy uncompressed TEXT rows + shrinks DB."""
+    db_file = tmp_path / "unlock_compact.db"
+    led = UnlockLedger(db_file)
+    try:
+        big_obj = {"events": [{"timestamp": 1700000000 + i, "noOfTokens": [100.0]} for i in range(500)]}
+        raw_json = json.dumps(big_obj, sort_keys=True, separators=(",", ":"))
+        expected_sha = sha256_payload(big_obj)
+
+        # 1. New write stores compressed BLOB directly
+        sid_new = led.snapshot_write(1000, "defillama", "ARB", expected_sha, raw_json, 500)
+        col_type = led._con.execute(
+            "SELECT typeof(payload_json) FROM unlock_snapshots WHERE id=?", (sid_new,)
+        ).fetchone()[0]
+        assert col_type == "blob"
+        read_back = led.snapshot_read(sid_new)
+        assert read_back is not None
+        assert read_back["payload_json"] == raw_json
+        assert sha256_payload(json.loads(read_back["payload_json"])) == expected_sha
+
+        # 2. Insert legacy uncompressed TEXT rows, then compact_snapshots(vacuum=True)
+        for idx in range(10):
+            led._con.execute(
+                "INSERT INTO unlock_snapshots (ts_ms, source, token, sha256, payload_json, n_raw)"
+                " VALUES (?, 'defillama', 'OP', ?, ?, 500)",
+                (2000 + idx, expected_sha, raw_json),
+            )
+        led._con.commit()
+        led._con.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        size_before = db_file.stat().st_size
+
+        stats = led.compact_snapshots(vacuum=True)
+        assert stats["compacted_rows"] == 10
+        assert stats["total_rows"] == 11
+        text_left = led._con.execute(
+            "SELECT COUNT(*) FROM unlock_snapshots WHERE typeof(payload_json) = 'text'"
+        ).fetchone()[0]
+        assert text_left == 0
+        size_after = db_file.stat().st_size
+        assert size_after < size_before
+
+        # Every migrated row still decodes byte-identically to expected_sha
+        for sid in range(1, 12):
+            row = led.snapshot_read(sid)
+            assert row is not None and row["payload_json"] == raw_json
+    finally:
+        led.close()
