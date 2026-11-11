@@ -500,3 +500,242 @@ class TestParityHarness:
         p1 = build_portfolio(ranked, sigs, len(uni))
         p2 = build_portfolio(ranked, sigs, len(uni))
         assert weights_equal(p1.weights, p2.weights)
+
+
+# ── HTTP 429 retry, forming 1m bar wait, 0-fill failed alert, card & backfill ─
+
+class TestFillResilienceAndAmendment2:
+    def test_fetch_json_retries_429_with_backoff_and_logs_error_on_exhaust(
+        self, monkeypatch, caplog
+    ):
+        import email.message
+        import logging
+        import urllib.error
+
+        sleeps: list[float] = []
+        attempts = {"n": 0}
+
+        def flaky_urlopen(url, body=None, headers=None):
+            attempts["n"] += 1
+            if attempts["n"] <= 2:
+                raise urllib.error.HTTPError(
+                    url, 429, "Too Many Requests", email.message.Message(), None
+                )
+            return b'{"ok": true}'
+
+        monkeypatch.setattr(prices, "_urlopen_once", flaky_urlopen)
+        res = prices.fetch_json(
+            spec.HL_INFO,
+            symbol="ARB",
+            max_attempts=5,
+            base_backoff_s=2.0,
+            max_backoff_s=30.0,
+            sleep_fn=sleeps.append,
+        )
+        assert res == {"ok": True}
+        assert sleeps == [2.0, 4.0]
+
+        # Exhaustion logs ERROR with symbol and HTTP 429 status and raises
+        def always_429(url, body=None, headers=None):
+            raise urllib.error.HTTPError(
+                url, 429, "Too Many Requests", email.message.Message(), None
+            )
+
+        monkeypatch.setattr(prices, "_urlopen_once", always_429)
+        sleeps.clear()
+        with caplog.at_level(logging.ERROR, logger="resmom_shadow"):
+            with pytest.raises(urllib.error.HTTPError):
+                prices.fetch_json(
+                    spec.HL_INFO,
+                    symbol="SOL",
+                    max_attempts=3,
+                    base_backoff_s=2.0,
+                    sleep_fn=sleeps.append,
+                )
+        err_msgs = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert any("symbol=SOL" in m and "status=429" in m for m in err_msgs)
+
+    def test_fills_waits_for_forming_0005_candle_and_uses_exact_bar_open(
+        self, tmp_path
+    ):
+        """If the 00:05 UTC 1m candle is not yet indexed at :05:05, _fills()
+        polls up to 30 min and always uses the open of that 00:05 candle (never
+        a later fetch-time price)."""
+        uni = _full_universe()
+        closes = {
+            s: list(100 + np.cumsum(np.linspace(-1, 1, 100) * (1 + i % 3)))
+            for i, s in enumerate(uni)
+        }
+        closes[spec.BTC] = list(500 + np.cumsum(np.linspace(-2, 2, 100)))
+
+        wk = spec.READ_FIRST_MS
+        t_fill = wk + spec.FILL_LAG_S * 1000
+        clock = {"now": t_fill + 2_000}
+        polls: dict[str, int] = {}
+
+        def delayed_fill(coin, not_before_ms):
+            assert not_before_ms == t_fill
+            polls[coin] = polls.get(coin, 0) + 1
+            # First 2 polls return None (1m bar still forming); 3rd poll returns
+            # the deterministic 00:05 UTC 1m bar open (222.5), even though clock advanced!
+            if polls[coin] < 3:
+                return None
+            return 222.5
+
+        def advance_sleep(sec: float) -> None:
+            clock["now"] += int(sec * 1000)
+
+        d = fake_daemon(tmp_path, uni, closes, {}, closes[spec.BTC])
+        d.fetch["fill"] = delayed_fill
+        d.fill_max_wait_ms = 30 * 60_000
+        d.fill_poll_s = 15.0
+        d._sleep = advance_sleep
+        d._clock = lambda: clock["now"]
+
+        got = d._fills(["S00", "S01"], wk, now_ms=t_fill + 2_000)
+        assert got == {"S00": 222.5, "S01": 222.5}
+        assert polls["S00"] == 3 and polls["S01"] == 3
+        d.shutdown()
+
+    def test_zero_fills_charges_zero_cost_marks_failed_and_alerts(
+        self, tmp_path
+    ):
+        """When an arm finishes with 0 fills: cost_usd == 0.0 (never charge on
+        unfilled legs!), rebalance is flagged 'failed', hb_ts_ms is poisoned to
+        '0' for healthcheck, and the alert callback fires."""
+        uni = _full_universe()
+        closes = {
+            s: list(100 + np.cumsum(np.linspace(-1, 1, 100) * (1 + i % 3)))
+            for i, s in enumerate(uni)
+        }
+        closes[spec.BTC] = list(500 + np.cumsum(np.linspace(-2, 2, 100)))
+        alerts: list[tuple[str, int, str]] = []
+
+        d = fake_daemon(tmp_path, uni, closes, {}, closes[spec.BTC])  # empty fills!
+        d.fill_max_wait_ms = 0
+        d._alert = lambda arm, wk_ms, msg: (alerts.append((arm, wk_ms, msg)) or True)
+
+        wk = spec.READ_FIRST_MS
+        stats = d.rebalance_pass(wk + 6 * 60_000)
+        ra = d.ledger.rebalance_get(wk, "A")
+        assert ra is not None
+        assert ra["turnover_usd"] == 0.0
+        assert ra["cost_usd"] == 0.0
+        assert ra["status"] == "failed"
+        assert stats["arms"]["A"]["status"] == "failed"
+        assert float(d.ledger.meta_get("costs_A") or 0.0) == 0.0
+        assert d.ledger.meta_get("hb_ts_ms") == "0"
+        assert any(a[0] == "A" and a[1] == wk for a in alerts)
+        # Subsequent _heartbeat() must keep hb_ts_ms == '0' until failure clears
+        d._heartbeat()
+        assert d.ledger.meta_get("hb_ts_ms") == "0"
+        d.shutdown()
+
+    def test_dashboard_card_filters_arm_a_and_separates_bin_descriptive(
+        self, tmp_path, monkeypatch
+    ):
+        import src.research.paper_trades as pt
+
+        db_path = tmp_path / "resmom_shadow.db"
+        ld = ResmomLedger(str(db_path))
+        wk = spec.READ_FIRST_MS
+        ld.meta_set("hb_ts_ms", str(wk + 600_000))
+        # Arm A has 2 open legs and NAV 10,050; Arm BIN has 10 open legs and NAV 10,300
+        ld.position_insert({
+            "rebalance_id": 1, "arm": "A", "symbol": "ARB", "side": "long",
+            "weight": 0.5, "qty": 100.0, "entry_px": 1.0, "entry_ms": wk + 300_000,
+        })
+        ld.position_insert({
+            "rebalance_id": 1, "arm": "A", "symbol": "SOL", "side": "short",
+            "weight": 0.5, "qty": 50.0, "entry_px": 100.0, "entry_ms": wk + 300_000,
+        })
+        for i in range(10):
+            ld.position_insert({
+                "rebalance_id": 3, "arm": "BIN", "symbol": f"T{i}USDT", "side": "long",
+                "weight": 0.1, "qty": 10.0, "entry_px": 10.0, "entry_ms": wk + 300_000,
+            })
+        ld.nav_insert(wk + 300_000, "A", 9993.5, 10_000.0, 2, 0.0)
+        ld.nav_insert(wk + 900_000, "A", 10_050.0, 10_000.0, 2, 0.0)
+        ld.nav_insert(wk + 900_000, "BIN", 10_300.0, 10_000.0, 10, 0.0)
+        ld.close()
+
+        monkeypatch.setattr(pt, "_RESEARCH", tmp_path)
+        card = pt._resmom_card(wk + 950_000)
+        detail = pt._resmom_detail(wk + 950_000)
+
+        # Primary card metrics reflect ONLY Arm A (n_open=2, NOT 12 or 10!)
+        assert card["n_open"] == 2
+        assert card["equity"][-1][1] == 10_050.0
+        assert card["descriptive_bin"]["n_open"] == 10
+        assert card["descriptive_bin"]["net_pct"] == 3.0
+        assert len(detail["open"]) == 2
+        assert len(detail["descriptive_bin"]["open"]) == 10
+
+    def test_amendment2_backfill_dry_run_diff_apply_and_idempotence(
+        self, tmp_path
+    ):
+        from src.resmom_shadow.backfill_20261109 import (
+            ENTRY_FILL_MS,
+            TARGET_WEEK_MS,
+            apply_backfill_plan,
+            build_backfill_plan,
+        )
+
+        db_path = str(tmp_path / "resmom_bf.db")
+        ld = ResmomLedger(db_path)
+        w_a = {"ARB": 0.5, "SOL": -0.5}
+        w_b = {"ETH": 0.5, "SOL": -0.5}
+        rid_a = ld.rebalance_insert({
+            "week_key_ms": TARGET_WEEK_MS, "arm": "A",
+            "created_at_ms": TARGET_WEEK_MS + 341_473,
+            "universe_json": "[]", "signals_json": "{}",
+            "weights_json": json.dumps(w_a, sort_keys=True),
+            "turnover_usd": 10_000.0, "cost_usd": 6.5,
+            "flags_json": "[]", "inputs_sha256": "sha_a",
+        })
+        ld.rebalance_insert({
+            "week_key_ms": TARGET_WEEK_MS, "arm": "B",
+            "created_at_ms": TARGET_WEEK_MS + 341_481,
+            "universe_json": "[]", "signals_json": "{}",
+            "weights_json": json.dumps(w_b, sort_keys=True),
+            "turnover_usd": 10_000.0, "cost_usd": 6.5,
+            "flags_json": "[]", "inputs_sha256": "sha_b",
+        })
+        ld.null_insert({
+            "week_key_ms": TARGET_WEEK_MS, "rebalance_id": rid_a,
+            "null_id": 0, "seed": "s0",
+            "weights_json": json.dumps({"w": w_a, "px": {}}),
+            "week_pnl_usd": None, "nav_usd": 9993.5, "cost_usd": 6.5,
+        })
+        ld.close()
+
+        prices_0005 = {"ARB": 1.25, "SOL": 100.0, "ETH": 2500.0}
+        plan = build_backfill_plan(
+            db_path,
+            fill_fn=lambda sym, ts: prices_0005[sym] if ts == ENTRY_FILL_MS else None,
+            pace_s=0.0,
+        )
+        assert plan["already_applied"] is False
+        assert plan["arms"]["A"]["after"]["n_positions"] == 2
+        assert plan["arms"]["A"]["after"]["cost_usd"] == 6.5
+
+        # Dry-run build_backfill_plan must NOT write anything
+        ld_check = ResmomLedger(db_path)
+        assert ld_check.positions_open("A") == []
+        ld_check.close()
+
+        # Apply atomically
+        res1 = apply_backfill_plan(db_path, plan)
+        assert res1["applied"] is True and res1["A_opened"] == 2 and res1["B_opened"] == 2
+
+        # Verify target weights stayed untouched and positions + null px exist
+        ld_after = ResmomLedger(db_path)
+        assert json.loads(ld_after.rebalance_get(TARGET_WEEK_MS, "A")["weights_json"]) == w_a
+        assert len(ld_after.positions_open("A")) == 2
+        null_px = json.loads(ld_after.nulls_open_week(TARGET_WEEK_MS)[0]["weights_json"])["px"]
+        assert null_px == {"ARB": 1.25, "SOL": 100.0}
+        ld_after.close()
+
+        # Second run is strictly idempotent
+        plan2 = build_backfill_plan(db_path, fill_fn=lambda s, t: 999.0, pace_s=0.0)
+        assert plan2["already_applied"] is True

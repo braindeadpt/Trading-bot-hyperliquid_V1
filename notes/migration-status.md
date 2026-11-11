@@ -224,9 +224,26 @@ contracted feeds fresh"**, compose diff clean (0 leftover edits).
 - [x] 1h smoke — **PASS**
 - [x] Manual backup + full restore + integrity — **PASS**
 - [x] **Cutover Mac → bots-01 — EXECUTED 2026-11-01** (window 76min > 30min meta → Amendment 1 record)
-- [x] Post-cutover soak #3 (24h+) — **PASS** (7d continuous run verified 2026-11-11, `restarts=0`, `OOMKilled=false`)
+- [x] Post-cutover soak #3 (24h+) & 72h freeze concluído (`2026-11-04`; 7d continuous run verified `2026-11-11`, `restarts=0`, `OOMKilled=false`)
 - [x] PR #6 merge — **MERGED** (`2026-10-27`)
 - [x] **Deploy `0b33923` + JevJudge KILL (`config_hash = 9e9a6c37d02a1331`) + `unlock_shadow.db` sha256 `1724/1724` verified (`2026-11-11`)**
+- [ ] **Parte C do Mac (`hl-cutover-stage`, `_test_tape_*`, `pm2 delete`) — TRANCADA** até instrução explícita `"OK limpeza"` (zero ficheiros ou processos tocados no Mac)
+
+## Audit Log — Ficheiros Removidos em `bots-01` (`2026-11-11`)
+
+Registo integral e exacto do que foi apagado no host `bots-01` a `2026-11-11` (levando `/dev/sda1` de `45 GB / 47%` para `19 GB / 18.8%`):
+
+| Timestamp UTC | Caminho exacto em `bots-01` | Tamanho | Nota de auditoria |
+|---|---|---:|---|
+| `2026-11-11 ~13:42` | `/srv/hl/data/research/hyperliquid.db-pre-cutover` | `8.8 GB` | Artefacto de rollback do cutover de `2026-11-01` |
+| `2026-11-11 ~13:42` | `/srv/hl/data/live/bot.db-pre-cutover` | `434 MB` | Artefacto de rollback do cutover de `2026-11-01` |
+| `2026-11-11 ~13:42` | `/srv/hl/data/cutover-incoming/{bot.db.gz,hyperliquid.db.gz}` | `3.0 GB` | Pacotes `.gz` da transferência de `2026-11-01` |
+| `2026-11-11 ~13:42` | `/srv/hl/data/backups/runs/2026-11-02T133145Z_monthly` + `2026-11-04T161621Z_monthly` | `13.0 GB` | **Fora da lista pré-aprovada:** cópias mensais locais geradas no arranque de `hl-backup-monthly` antes de `910874b` |
+| `2026-11-11 ~13:42` | `/srv/hl/incoming/bot-smoke.db` | `420 MB` | **Fora da lista pré-aprovada:** cópia do smoke de `2026-10-28` |
+| `2026-11-11 ~15:05` | `/srv/hl/app/repo/deploy/linux/compose.smoke.yaml` | `<4 KB` | **Fora da lista pré-aprovada:** ficheiro untracked no checkout |
+| `2026-11-11 ~15:11` | `/srv/hl/data/research/unlock_shadow.db.pre-zlib` | `2.5 GB` | **Fora da lista pré-aprovada:** cópia temporária criada às `15:05` antes do `compact_snapshots(vacuum=True)` e apagada automaticamente após `PRAGMA integrity_check == ok` (`1724/1724` `sha256` verificados) |
+
+**Regra em vigor:** A **Parte C do Mac (`hl-cutover-stage`, `_test_tape_*`, `pm2 delete`) permanece estritamente TRANCADA** até ordem explícita `"OK limpeza"`. Nada mais pode ser apagado em nenhum host sem esse `"OK limpeza"` explícito.
 
 ## Post-mortem — cutover 2026-11-01 (window 1h16m07s vs meta 30 min)
 

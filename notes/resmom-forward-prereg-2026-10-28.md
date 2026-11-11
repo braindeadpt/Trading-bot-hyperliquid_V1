@@ -26,3 +26,12 @@ Leitura
 Primeiro rebalance passa de 2026-11-02 para 2026-11-09 por causa do
 cutover Mac → bots-01. Regra, parâmetros e leitura (26 rebalances)
 inalterados.
+
+## Amendment 2 (2026-11-11 — medição, sem alterar a regra)
+
+Rebalance 2026-11-09: os braços A e B não tiveram fill por falha de fetch
+(429 engolido). Os pesos-alvo registados às 00:05:41 UTC mantêm-se. Os fills
+são preenchidos com o preço definido no prereg (open da 1.ª vela 1m após
+00:05 UTC de 2026-11-09), obtido depois do facto. Esse preço é determinístico
+e não depende de dados posteriores. O cost_usd é recalculado sobre os fills
+reais. Conta como o rebalance 1 de 26.

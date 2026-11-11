@@ -610,16 +610,17 @@ def _resmom_card(now_ms: int) -> Dict[str, Any]:
         return card
     try:
         nav = con.execute(
-            "SELECT ts_ms, nav_usd FROM resmom_nav ORDER BY ts_ms"
+            "SELECT ts_ms, nav_usd FROM resmom_nav"
+            " WHERE arm='A' ORDER BY ts_ms"
         ).fetchall()
         series = [(int(m["ts_ms"]), float(m["nav_usd"])) for m in nav]
         card["equity"] = _downsample(series)
         card["n_open"] = int(con.execute(
             "SELECT COUNT(*) c FROM resmom_positions"
-            " WHERE status='open'").fetchone()["c"])
+            " WHERE arm='A' AND status='open'").fetchone()["c"])
         wr_rows = con.execute(
             "SELECT pnl_usd p FROM resmom_positions"
-            " WHERE status='closed'").fetchall()
+            " WHERE arm='A' AND status='closed'").fetchall()
         card["wr"] = _wr([r["p"] for r in wr_rows])
         if len(series) >= 2 and series[-1][0] > series[0][0]:
             span = series[-1][0] - series[0][0]
@@ -627,16 +628,53 @@ def _resmom_card(now_ms: int) -> Dict[str, Any]:
             card["apy"] = round(
                 ((series[-1][1] / base) ** (_MS_YEAR / span) - 1.0)
                 * 100.0, 2)
+
+        bin_open = int(con.execute(
+            "SELECT COUNT(*) c FROM resmom_positions"
+            " WHERE arm='BIN' AND status='open'").fetchone()["c"])
+        bin_nav = con.execute(
+            "SELECT ts_ms, nav_usd FROM resmom_nav"
+            " WHERE arm='BIN' ORDER BY ts_ms").fetchall()
+        bin_last = round(float(bin_nav[-1]["nav_usd"]), 2) if bin_nav else None
+        bin_pct = (
+            round((float(bin_nav[-1]["nav_usd"]) / 10_000.0 - 1.0) * 100.0, 3)
+            if bin_nav else None
+        )
+        card["descriptive_bin"] = {
+            "arm": "BIN", "n_open": bin_open,
+            "nav_usd": bin_last, "net_pct": bin_pct,
+        }
+
+        failed_row = con.execute(
+            "SELECT v FROM resmom_meta WHERE k='rebalance_failed_A'"
+        ).fetchone()
+        if failed_row and failed_row["v"]:
+            card["state"] = "error"
+            card["state_detail"] = "rebalance A falhou (0 fills)"
+            return card
+
         last_ts = con.execute(
-            "SELECT MAX(entry_ms) ts FROM resmom_positions").fetchone()["ts"]
-        hb = series[-1][0] if series else last_ts
+            "SELECT MAX(entry_ms) ts FROM resmom_positions WHERE arm='A'"
+        ).fetchone()["ts"]
+        hb_row = con.execute(
+            "SELECT v FROM resmom_meta WHERE k='hb_ts_ms'"
+        ).fetchone()
+        hb_meta = (
+            int(hb_row["v"])
+            if hb_row and str(hb_row["v"]).isdigit() and int(hb_row["v"]) > 0
+            else None
+        )
+        hb = hb_meta or (series[-1][0] if series else last_ts)
         if hb is None:
-            # Newborn shadow (first nav snapshot may lag deploy) — flag as
-            # starting, not error.
             card["state"], card["state_detail"] = "no_signal", "a iniciar"
         else:
             card["state"], card["state_detail"] = _age_state(
                 hb, card["n_open"] > 0, now_ms, _STALE_RESMOM)
+        if bin_open > 0 and bin_pct is not None:
+            card["state_detail"] = (
+                f"{card['state_detail']} · ref BIN (desc): "
+                f"{bin_open}p ({bin_pct:+.2f}%)"
+            )
         return card
     except Exception:  # noqa: BLE001
         return card
@@ -645,7 +683,10 @@ def _resmom_card(now_ms: int) -> Dict[str, Any]:
 
 
 def _resmom_detail(now_ms: int) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"open": [], "closed": [], "equity": [], "dd": []}
+    out: Dict[str, Any] = {
+        "open": [], "closed": [], "equity": [], "dd": [],
+        "descriptive_bin": {"open": [], "nav": []},
+    }
     con = _ro(_RESEARCH / "resmom_shadow.db")
     if con is None:
         return out
@@ -653,7 +694,7 @@ def _resmom_detail(now_ms: int) -> Dict[str, Any]:
         for p in con.execute(
                 "SELECT symbol, side, weight, qty, entry_px, entry_ms,"
                 " funding_usd FROM resmom_positions"
-                " WHERE status='open'").fetchall():
+                " WHERE arm='A' AND status='open'").fetchall():
             out["open"].append({
                 "symbol": p["symbol"], "side": p["side"],
                 "size": p["qty"], "entry": p["entry_px"], "mark": None,
@@ -661,7 +702,7 @@ def _resmom_detail(now_ms: int) -> Dict[str, Any]:
         for p in con.execute(
                 "SELECT symbol, side, qty, entry_px, exit_px, pnl_usd,"
                 " funding_usd, entry_ms, exit_ms, close_reason"
-                " FROM resmom_positions WHERE status='closed'"
+                " FROM resmom_positions WHERE arm='A' AND status='closed'"
                 " ORDER BY exit_ms DESC LIMIT 200").fetchall():
             out["closed"].append({
                 "symbol": p["symbol"], "side": p["side"], "size": p["qty"],
@@ -672,10 +713,25 @@ def _resmom_detail(now_ms: int) -> Dict[str, Any]:
                 "reason": p["close_reason"]})
         nav = con.execute(
             "SELECT ts_ms, nav_usd, dd_pct FROM resmom_nav"
-            " ORDER BY ts_ms").fetchall()
+            " WHERE arm='A' ORDER BY ts_ms").fetchall()
         out["equity"] = [(int(m["ts_ms"]), float(m["nav_usd"]))
                          for m in nav]
         out["dd"] = [(int(m["ts_ms"]), float(m["dd_pct"])) for m in nav]
+
+        for p in con.execute(
+                "SELECT symbol, side, qty, entry_px, entry_ms, funding_usd"
+                " FROM resmom_positions"
+                " WHERE arm='BIN' AND status='open'").fetchall():
+            out["descriptive_bin"]["open"].append({
+                "symbol": p["symbol"], "side": p["side"],
+                "size": p["qty"], "entry": p["entry_px"],
+                "funding_usd": p["funding_usd"], "entry_ms": p["entry_ms"]})
+        bin_nav = con.execute(
+            "SELECT ts_ms, nav_usd FROM resmom_nav"
+            " WHERE arm='BIN' ORDER BY ts_ms").fetchall()
+        out["descriptive_bin"]["nav"] = [
+            (int(m["ts_ms"]), float(m["nav_usd"])) for m in bin_nav
+        ]
         return out
     except Exception:  # noqa: BLE001
         return out
