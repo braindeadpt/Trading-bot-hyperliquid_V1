@@ -76,7 +76,13 @@ class SpotPerpCarry(Strategy):
         # Throttle: don't re-enter too soon after a flat
         self.SIGNAL_THROTTLE_MS = int(cfg.get("signal_throttle_ms", 30 * 60_000))
         # Toggle
+        self._mode = str(cfg.get("_mode", "paper"))
+        self._shadow_mode = bool(cfg.get("_shadow_mode", False))
         self.MANUAL_ENABLED = bool(cfg.get("enabled", True))
+        if self._mode in ("testnet", "mainnet") and not self._shadow_mode:
+            # SpotPerpCarry inside the single-leg engine has no live spot hedge;
+            # live Spot+Perp carry must execute through src.multileg.
+            self.MANUAL_ENABLED = False
 
         self._state: Dict[str, _SpotPerpCarryState] = {}
         self._warned_synthetic = False

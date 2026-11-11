@@ -297,7 +297,19 @@ class ExecutionEngine:
 
     @staticmethod
     def _make_client_order_id(symbol: str, side: str, timestamp_ms: int) -> str:
-        return f"hlbot-{symbol.upper()}-{side}-{timestamp_ms}"
+        from src.exchanges.hyperliquid_live import make_cloid
+
+        return make_cloid(symbol.upper(), side, timestamp_ms=timestamp_ms)
+
+    def _has_inflight_order_for_symbol(self, symbol: str) -> bool:
+        sym = symbol.upper()
+        for rec in self._live_orders.values():
+            if (
+                str(rec.get("symbol", "")).upper() == sym
+                and not rec.get("terminal_handled")
+            ):
+                return True
+        return False
 
     def _map_lifecycle_to_oms_status(self, lifecycle_state: str) -> str:
         mapping = {
@@ -467,15 +479,29 @@ class ExecutionEngine:
                     reason="duplicate_position",
                     timestamp_ms=now_ms,
                 )
+            if self._mode in ("testnet", "mainnet") and self._has_inflight_order_for_symbol(signal.symbol):
+                logger.warning(
+                    "enter_position REJECTED %s — in-flight live order already active",
+                    signal.symbol,
+                )
+                return TradeResult(
+                    trade_id=0, symbol=signal.symbol, side=signal.side,
+                    entry_price=0.0, exit_price=None, size=0.0,
+                    pnl_usd=0.0, pnl_pct=0.0, status="rejected",
+                    reason="duplicate_pending_order",
+                    timestamp_ms=now_ms,
+                )
 
-        # Cross-process guard: another main.py may share this SQLite DB.
+        # Cross-process & pending-resting guard: reject if any open OR resting/partial
+        # live order exists for this symbol in SQLite.
         try:
-            db_open = self._db.get_open_trades()
+            active_fn = getattr(self._db, "get_active_trades", None)
+            db_open = active_fn() if callable(active_fn) else self._db.get_open_trades()
             for row in db_open:
                 if str(row.get("symbol", "")).upper() == signal.symbol.upper():
                     logger.warning(
-                        "enter_position REJECTED %s — open trade in DB (id=%s)",
-                        signal.symbol, row.get("id"),
+                        "enter_position REJECTED %s — active trade in DB (id=%s status=%s)",
+                        signal.symbol, row.get("id"), row.get("status"),
                     )
                     return TradeResult(
                         trade_id=0, symbol=signal.symbol, side=signal.side,
@@ -694,6 +720,16 @@ class ExecutionEngine:
                 else:
                     lifecycle_state = parsed.lifecycle_state
                     exchange_order_id = parsed.exchange_order_id
+                    if parsed.avg_fill_price and parsed.avg_fill_price > 0:
+                        fill_price = float(parsed.avg_fill_price)
+                        notional = fill_price * size
+                        entry_fee = notional * entry_fee_pct
+                    if (
+                        lifecycle_state == ORDER_FILLED
+                        and parsed.filled_size
+                        and 0.0 < parsed.filled_size < size * 0.999
+                    ):
+                        lifecycle_state = ORDER_PARTIAL
             except LiveExecutionError:
                 raise
             except AmbiguousOrderResponse:
@@ -746,45 +782,51 @@ class ExecutionEngine:
                 filled_size=float(size) if lifecycle_state == ORDER_FILLED else 0.0,
             )
 
-        if self._mode in ("testnet", "mainnet") and exchange_order_id:
-            oms_status = self._map_lifecycle_to_oms_status(lifecycle_state)
-            target_size = float(size)
-            filled = target_size if lifecycle_state == ORDER_FILLED else 0.0
-            self._live_orders[exchange_order_id] = {
-                "symbol": signal.symbol,
-                "side": signal.side,
-                "size": target_size,
-                "price": float(fill_price),
-                "filled_size": filled,
-                "remaining_size": max(0.0, target_size - filled),
-                "avg_fill_price": float(fill_price) if filled > 0 else 0.0,
-                "cumulative_fee": float(entry_fee) if filled > 0 else 0.0,
-                "status": oms_status,
-                "lifecycle_state": lifecycle_state,
-                "timestamp": time.time(),
-                "submitted_at_ms": now_ms,
-                "last_fill_at_ms": now_ms if filled > 0 else None,
-                "trade_id": int(trade_id),
-                "order_type": order_type,
-                "client_order_id": client_order_id,
-                "exchange_order_id": exchange_order_id,
-                "applied_fill_size": filled,
-                "terminal_handled": lifecycle_state in (ORDER_FILLED, ORDER_REJECTED),
-                "processed_events": [],
-            }
-            logger.info(
-                "OMS: tracking order %s state=%s (symbol=%s trade_id=%d)",
-                exchange_order_id,
-                lifecycle_state,
-                signal.symbol,
-                trade_id,
+        if self._mode in ("testnet", "mainnet"):
+            tracking_oid = exchange_order_id or (
+                f"imm-{trade_id}" if lifecycle_state == ORDER_FILLED else None
             )
-            if lifecycle_state == ORDER_FILLED:
-                self._fire_order_callbacks(
-                    exchange_order_id,
-                    ORDER_STATUS_FILLED,
-                    self._live_orders[exchange_order_id],
+            if tracking_oid:
+                oms_status = self._map_lifecycle_to_oms_status(lifecycle_state)
+                target_size = float(size)
+                filled = target_size if lifecycle_state == ORDER_FILLED else 0.0
+                record_entry = {
+                    "symbol": signal.symbol,
+                    "side": signal.side,
+                    "size": target_size,
+                    "price": float(fill_price),
+                    "filled_size": filled,
+                    "remaining_size": max(0.0, target_size - filled),
+                    "avg_fill_price": float(fill_price) if filled > 0 else 0.0,
+                    "cumulative_fee": float(entry_fee) if filled > 0 else 0.0,
+                    "status": oms_status,
+                    "lifecycle_state": lifecycle_state,
+                    "timestamp": time.time(),
+                    "submitted_at_ms": now_ms,
+                    "last_fill_at_ms": now_ms if filled > 0 else None,
+                    "trade_id": int(trade_id),
+                    "order_type": order_type,
+                    "client_order_id": client_order_id,
+                    "exchange_order_id": tracking_oid,
+                    "applied_fill_size": filled,
+                    "terminal_handled": lifecycle_state in (ORDER_FILLED, ORDER_REJECTED),
+                    "processed_events": [],
+                }
+                if lifecycle_state != ORDER_FILLED:
+                    self._live_orders[tracking_oid] = record_entry
+                logger.info(
+                    "OMS: tracking order %s state=%s (symbol=%s trade_id=%d)",
+                    tracking_oid,
+                    lifecycle_state,
+                    signal.symbol,
+                    trade_id,
                 )
+                if lifecycle_state == ORDER_FILLED:
+                    self._fire_order_callbacks(
+                        tracking_oid,
+                        ORDER_STATUS_FILLED,
+                        record_entry,
+                    )
 
         result_status = "open"
         if self._mode in ("testnet", "mainnet") and lifecycle_state not in (
@@ -908,7 +950,102 @@ class ExecutionEngine:
                 await self._protection_manager.cancel_protection(position.symbol)
             try:
                 hl_response = await self._submit_live_close(position, fill_exit)
-                parsed = parse_hyperliquid_close_response(hl_response)
+                parsed = parse_hyperliquid_close_response(
+                    hl_response, expected_size=position.size
+                )
+                if parsed.avg_fill_price and parsed.avg_fill_price > 0:
+                    fill_exit = float(parsed.avg_fill_price)
+                    exit_notional = fill_exit * position.size
+                    exit_fee = exit_notional * exit_fee_pct
+                    pnl_usd = self._compute_pnl(position, fill_exit) - exit_fee - entry_fee
+                    pnl_pct = safe_divide(pnl_usd, notional, 0.0)
+                    pnl_pct_capital = (
+                        safe_divide(pnl_usd, capital, 0.0) if capital > 0 else 0.0
+                    )
+                if parsed.lifecycle_state == ORDER_PARTIAL and parsed.filled_size:
+                    closed_sz = min(position.size, float(parsed.filled_size))
+                    residual_sz = max(0.0, position.size - closed_sz)
+                    ratio = safe_divide(closed_sz, position.size, 0.0)
+                    fee_share = entry_fee * ratio
+                    remaining_entry_fee = max(0.0, entry_fee - fee_share)
+                    slice_exit_fee = fill_exit * closed_sz * exit_fee_pct
+                    slice_gross = (
+                        (fill_exit - position.entry_price) * closed_sz
+                        if position.side == "long"
+                        else (position.entry_price - fill_exit) * closed_sz
+                    )
+                    slice_net_pnl = slice_gross - slice_exit_fee - fee_share
+                    if self._portfolio is not None and hasattr(
+                        self._portfolio, "reduce_position_partial"
+                    ):
+                        await self._portfolio.reduce_position_partial(
+                            position.symbol,
+                            closed_size=closed_sz,
+                            realized_pnl_usd=slice_net_pnl,
+                        )
+                    open_trade = TradeResult(
+                        trade_id=open_trade.trade_id,
+                        symbol=open_trade.symbol,
+                        side=open_trade.side,
+                        entry_price=open_trade.entry_price,
+                        exit_price=None,
+                        size=residual_sz,
+                        pnl_usd=0.0,
+                        pnl_pct=0.0,
+                        status="open",
+                        reason=open_trade.reason,
+                        timestamp_ms=open_trade.timestamp_ms,
+                        entry_fee=remaining_entry_fee,
+                        exchange_order_id=open_trade.exchange_order_id,
+                    )
+                    position = Position(
+                        symbol=position.symbol,
+                        side=position.side,
+                        entry_price=position.entry_price,
+                        size=residual_sz,
+                        entry_time_ms=position.entry_time_ms,
+                        stop_loss_price=position.stop_loss_price,
+                        take_profit_price=position.take_profit_price,
+                        unrealized_pnl=position.unrealized_pnl,
+                        current_price=position.current_price,
+                        metadata=position.metadata,
+                    )
+                    try:
+                        self._db.update_trade_order_tracking(
+                            int(open_trade.trade_id),
+                            size=residual_sz,
+                            filled_size=residual_sz,
+                            entry_fee=remaining_entry_fee,
+                        )
+                    except Exception:
+                        logger.debug("Partial close DB size update skipped", exc_info=True)
+                    raise LiveExecutionError(
+                        parsed.error_message or "partial_close_residual_protected"
+                    )
+                if parsed.lifecycle_state != ORDER_FILLED:
+                    # Native SL/TP trigger may have filled milliseconds before
+                    # software stop redundancy called market_close (which returns
+                    # None when exchange szi == 0). Check exchange before failing.
+                    if (
+                        self._live_client is not None
+                        and hl_response.get("raw") is None
+                        and not parsed.ambiguous
+                    ):
+                        try:
+                            ex_positions = await self._live_client.get_positions()
+                            still_open = any(
+                                str(p.get("symbol", "")).upper() == position.symbol.upper()
+                                and safe_float(p.get("size")) > 0
+                                for p in ex_positions
+                            )
+                            if not still_open:
+                                logger.info(
+                                    "Close on %s saw flat exchange book — native trigger won race",
+                                    position.symbol,
+                                )
+                                parsed = ParsedCloseResponse(lifecycle_state=ORDER_FILLED)
+                        except Exception:
+                            logger.debug("Exchange flat check after None close failed", exc_info=True)
                 if parsed.lifecycle_state != ORDER_FILLED:
                     if parsed.ambiguous:
                         self.block_symbol(
@@ -1562,6 +1699,13 @@ class ExecutionEngine:
         else:
             age_s = now_ts - safe_float(record.get("timestamp", now_ts), now_ts)
 
+        eff_timeout_s = float(self._live_order_timeout_s)
+        if (
+            record.get("order_type") == "limit_maker"
+            and getattr(self, "_maker_timeout_ms", 0) > 0
+        ):
+            eff_timeout_s = min(eff_timeout_s, float(self._maker_timeout_ms) / 1000.0)
+
         event_key = (
             f"{snapshot.status}:{snapshot.filled_size:.8f}:"
             f"{snapshot.remaining_size:.8f}"
@@ -1571,7 +1715,7 @@ class ExecutionEngine:
             ORDER_STATUS_OPEN,
             ORDER_STATUS_PARTIAL,
         ):
-            if age_s <= self._live_order_timeout_s:
+            if age_s <= eff_timeout_s:
                 return
         processed.append(event_key)
 
@@ -1611,12 +1755,12 @@ class ExecutionEngine:
         if snapshot.status == ORDER_STATUS_PARTIAL:
             self._fire_order_callbacks(order_id, ORDER_STATUS_PARTIAL, record)
             self._persist_order_record(record)
-            if age_s > self._live_order_timeout_s:
+            if age_s > eff_timeout_s:
                 await self._handle_partial_timeout(order_id, record, age_s)
             return
 
         # Still open/resting
-        if age_s > self._live_order_timeout_s:
+        if age_s > eff_timeout_s:
             await self._handle_open_timeout(order_id, record, age_s)
 
     def _apply_snapshot_to_record(
@@ -1818,6 +1962,25 @@ class ExecutionEngine:
             order_id, age_s,
         )
         await self._cancel_timed_out_order(order_id)
+        # Re-query fills after cancel RTT so a race-filled maker order is
+        # finalized rather than rolled back while live on the exchange.
+        try:
+            post_snap = await self.fetch_order_snapshot(order_id, record)
+            if post_snap.filled_size > 0:
+                self._apply_snapshot_to_record(record, post_snap)
+                fill_delta = post_snap.filled_size - safe_float(record.get("applied_fill_size"))
+                if fill_delta > 0:
+                    await self._apply_fill_delta(order_id, record, post_snap, fill_delta)
+                    record["applied_fill_size"] = post_snap.filled_size
+                if post_snap.status == ORDER_STATUS_FILLED:
+                    await self._finalize_filled_order(order_id, record, post_snap)
+                else:
+                    await self._finalize_partial_exposure(
+                        order_id, record, post_snap, reason=f"timeout_{age_s:.0f}s"
+                    )
+                return
+        except Exception:
+            logger.debug("Post-cancel fill re-check skipped for %s", order_id, exc_info=True)
         await self._rollback_order(order_id, record, reason=f"timeout_{age_s:.0f}s")
 
     async def _handle_partial_timeout(
@@ -1839,14 +2002,32 @@ class ExecutionEngine:
             safe_float(record.get("remaining_size")),
         )
         cancel_ok = await self._cancel_timed_out_order(order_id)
+        filled_sz = safe_float(record.get("filled_size"))
+        avg_px = safe_float(record.get("avg_fill_price"))
+        cum_fee = safe_float(record.get("cumulative_fee"))
+        last_ms = record.get("last_fill_at_ms")
+        try:
+            post_snap = await self.fetch_order_snapshot(order_id, record)
+            if post_snap.filled_size > filled_sz:
+                fill_delta = post_snap.filled_size - safe_float(record.get("applied_fill_size"))
+                self._apply_snapshot_to_record(record, post_snap)
+                if fill_delta > 0:
+                    await self._apply_fill_delta(order_id, record, post_snap, fill_delta)
+                    record["applied_fill_size"] = post_snap.filled_size
+                filled_sz = post_snap.filled_size
+                avg_px = post_snap.avg_fill_price or avg_px
+                cum_fee = post_snap.cumulative_fee or cum_fee
+                last_ms = post_snap.last_fill_at_ms or last_ms
+        except Exception:
+            logger.debug("Post-cancel partial fill re-check skipped for %s", order_id, exc_info=True)
         snapshot = OrderFillSnapshot(
             status=ORDER_STATUS_PARTIAL,
             lifecycle_state=ORDER_PARTIAL,
-            filled_size=safe_float(record.get("filled_size")),
+            filled_size=filled_sz,
             remaining_size=0.0,
-            avg_fill_price=safe_float(record.get("avg_fill_price")),
-            cumulative_fee=safe_float(record.get("cumulative_fee")),
-            last_fill_at_ms=record.get("last_fill_at_ms"),
+            avg_fill_price=avg_px,
+            cumulative_fee=cum_fee,
+            last_fill_at_ms=last_ms,
         )
         if not cancel_ok:
             self._emit_oms_alert("cancel_failed", order_id, record)

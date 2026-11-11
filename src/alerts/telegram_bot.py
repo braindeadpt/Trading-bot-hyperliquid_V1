@@ -8,7 +8,7 @@ from typing import Any, Callable, List, Optional, Set
 
 import aiohttp
 
-from alerts.telegram_reports import (
+from src.alerts.telegram_reports import (
     HELP_TEXT,
     build_digest_message,
     build_pnl_message,
@@ -210,6 +210,23 @@ class TelegramCommandBot:
             return build_trades_message(self._db, limit=limit)
         if cmd == "/strategy":
             return build_strategy_message(self._db)
+        if cmd == "/kill":
+            if not args or args[0] != "confirm":
+                return (
+                    "⚠️ Emergency kill switch requires explicit confirmation.\n"
+                    "Send `/kill confirm` to cancel all orders and flatten all positions."
+                )
+            kill_fn = getattr(engine, "kill_switch", None)
+            if not callable(kill_fn):
+                return "⚠️ Engine does not expose kill_switch()."
+            report = await kill_fn()
+            flat = bool(report.get("confirmed_flat")) if isinstance(report, dict) else False
+            cancelled = report.get("cancelled_orders", 0) if isinstance(report, dict) else 0
+            return (
+                f"🛑 KILL SWITCH EXECUTED\n"
+                f"Cancelled orders: {cancelled}\n"
+                f"Confirmed flat: {flat}"
+            )
         return f"Unknown command: {cmd}\n\n{HELP_TEXT}"
 
     async def _digest_loop(self) -> None:

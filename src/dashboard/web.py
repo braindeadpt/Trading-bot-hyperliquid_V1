@@ -1246,6 +1246,25 @@ def _feed_silence_imminent(feed_silence: Dict[str, Any]) -> bool:
     )
 
 
+def _is_cb_tripped(risk_obj: Any) -> bool:
+    """Resolve RiskManager circuit-breaker state safely across real/mock objects."""
+    if risk_obj is None:
+        return False
+    fn = getattr(risk_obj, "is_circuit_breaker_tripped", None)
+    if callable(fn):
+        try:
+            return bool(fn())
+        except Exception:  # noqa: BLE001
+            pass
+    return bool(
+        getattr(
+            risk_obj,
+            "circuit_breaker_tripped",
+            getattr(risk_obj, "_circuit_breaker_tripped", False),
+        )
+    )
+
+
 def _is_direct_local_request() -> bool:
     """True only for direct loopback hits — never for proxied traffic.
 
@@ -1527,7 +1546,7 @@ def _engine_monitor_payload(engine: Any) -> Dict[str, Any]:
     funding_blackout_active = bool(
         fb.is_blocked(int(time.time() * 1000)) if fb is not None else False
     )
-    circuit_breaker = bool(getattr(risk, "circuit_breaker_tripped", False)) if risk else False
+    circuit_breaker = _is_cb_tripped(risk)
 
     return {
         "ticks_per_second": stats.get("per_second", 0),
@@ -1684,7 +1703,7 @@ class DashboardEmitter:
             "mode": getattr(_engine, "_config", {}).get("mode", "paper") if hasattr(_engine, "_config") else "paper",
             "uptime_sec": getattr(_engine, "uptime_sec", 0),
             "memory_mb": getattr(_engine, "memory_mb", 0),
-            "circuit_breaker": "ON" if getattr(getattr(_engine, "_risk", None), "circuit_breaker_tripped", False) else "OFF",
+            "circuit_breaker": "ON" if _is_cb_tripped(getattr(_engine, "_risk", None)) else "OFF",
             "running": getattr(_engine, "_running", False),
             "ws_healthy": ws_healthy,
         })
@@ -2197,7 +2216,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
         body: Dict[str, Any] = {"status": "ok"}
         if _engine is not None:
             last_tick = getattr(_engine, "last_tick_age_sec", None)
-            cb = getattr(getattr(_engine, "_risk", None), "circuit_breaker_tripped", False)
+            cb = _is_cb_tripped(getattr(_engine, "_risk", None))
             running = getattr(_engine, "_running", False)
             data_bus_lag = None
             bus = getattr(_engine, "_bus", None)
@@ -2267,7 +2286,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
             "mode": getattr(_engine, "_config", {}).get("mode", "paper") if hasattr(_engine, "_config") else "paper",
             "uptime": getattr(_engine, "uptime_sec", 0),
             "memory_mb": getattr(_engine, "memory_mb", 0),
-            "circuit_breaker": "ON" if getattr(getattr(_engine, "_risk", None), "circuit_breaker_tripped", False) else "OFF",
+            "circuit_breaker": "ON" if _is_cb_tripped(getattr(_engine, "_risk", None)) else "OFF",
             "running": getattr(_engine, "_running", False),
         })
 

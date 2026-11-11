@@ -406,12 +406,12 @@ async def main() -> None:
     config_path = _resolve_path(args.config)
     try:
         from utils.config import load_config
-        cfg = load_config(str(config_path))
+        cfg = load_config(str(config_path), mode_override=args.mode)
     except ConfigError as e:
         print(f"[FATAL] Config error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Override mode from CLI if provided
+    # Effective mode after YAML + CLI mode_override + env overrides
     mode = args.mode or cfg.get("mode", "paper")
     cfg.set("mode", mode)  # HIGH-010: use setter instead of raw dict mutation
     symbols = get_trading_symbols(cfg)
