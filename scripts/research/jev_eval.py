@@ -43,7 +43,7 @@ FEE_RT = 0.0009  # tier-0 taker 0.045% x 2 sides
 # 1%→0.5%, TP 2R→1R, maker entry; the OOS window restarted there, so only
 # post-boundary trades measure the current geometry.
 GEOMETRY_BOUNDARY_MS = 1791124780000
-# Preregistered kill criterion (docs/PREREGISTER_JEV_OOS_KILL_2026-10-08.md):
+# Preregistered kill criterion (docs/ops/PREREGISTER_JEV_OOS_KILL_2026-10-08.md):
 # at indep_n >= 100 post-boundary, net PF <= 1.0 → JevJudge off, no retry.
 JEV_KILL_TARGET_N = 100
 JEV_SL_FLOOR = 0.005
@@ -54,7 +54,7 @@ JEV_MAX_HOLD_MS = 4 * 3_600_000
 JEV_FEE_RT = 0.00015 + 0.00045
 
 # Stale-verdict rule (operational deviation 2026-10-09,
-# docs/PAPER_OOS_90D_PROTOCOL.md): while the jev-judge pm2 cron was dead
+# docs/ops/PAPER_OOS_90D_PROTOCOL.md): while the jev-judge pm2 cron was dead
 # (2026-10-07 08:10 → 10-09 10:31 UTC) the strategy's 90min consumption TTL
 # refused every verdict — zero stale trades opened. The rule is fixed
 # regardless: a trade opened on a verdict older than 2h at entry is marked

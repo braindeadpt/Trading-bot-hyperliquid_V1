@@ -122,7 +122,7 @@ def main() -> int:
     ap.add_argument("--symbols", default=",".join(SYMBOLS))
     ap.add_argument("--split-days", type=int, default=30,
                     help="non-overlapping window size (default 30d)")
-    ap.add_argument("--out", type=Path, default=ROOT / "docs" / "IV_HIGH_ONLY_AB_SPLIT.md")
+    ap.add_argument("--out", type=Path, default=ROOT / "docs" / "archive" / "IV_HIGH_ONLY_AB_SPLIT.md")
     args = ap.parse_args()
 
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
@@ -239,7 +239,7 @@ def main() -> int:
         "",
         "## Contexto",
         "",
-        "* A variante veio de `docs/IV_PERCENTILE_REGIME_GATE.md` (+42.99, n=13, "
+        "* A variante veio de `docs/archive/IV_PERCENTILE_REGIME_GATE.md` (+42.99, n=13, "
         "janela única 05-18..08-07, dominada pelo pico de DVOL de junho).",
         "* A classificação high/low-IV é *rolling* (janela 30d) — independente do "
         "split; o split só muda a agregação dos trades.",

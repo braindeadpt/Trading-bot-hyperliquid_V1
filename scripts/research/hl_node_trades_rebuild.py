@@ -16,7 +16,7 @@ without ever contacting AWS. Pass ``--execute`` to perform a real download
 The GoldRush parity gate and its tolerance are unchanged by this script.
 Rebuilt data lands under source=hl_node_trades_rebuild and must still pass
 its own secondary validation before being used for OOS/tuning — see
-docs/NODE_TRADES_REBUILD.md.
+docs/ops/NODE_TRADES_REBUILD.md.
 """
 
 from __future__ import annotations

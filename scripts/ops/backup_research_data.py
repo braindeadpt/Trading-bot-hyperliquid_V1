@@ -18,7 +18,7 @@ Verification (fail loudly; never prune a failed run or replace a good prior):
 * gzip: zlib member walk (``gzip -t`` equivalent) on each newly copied ``.gz``
 * Manifest JSON written only after checks pass
 
-Retention: keep the last **3 successful monthly** runs + **1 successful annual**.
+Retention: keep the last **1 successful monthly** run + **1 successful annual**.
 Never delete the newest successful run of a tag, and never delete a run whose
 manifest marks ``ok: false``.
 
@@ -28,7 +28,7 @@ Usage (manual)::
     python scripts/ops/backup_research_data.py --tag annual
     python scripts/ops/backup_research_data.py --tag monthly --dry-run
 
-Windows Task Scheduler proposal is documented in ``docs/DATA_ARCHITECTURE.md``
+Windows Task Scheduler proposal is documented in ``docs/ops/DATA_ARCHITECTURE.md``
 — do **not** create the scheduled task from this script.
 """
 
@@ -87,7 +87,7 @@ LIVE_COUNT_TABLES = (
     "portfolio_snapshots",
 )
 
-MONTHLY_KEEP = 3
+MONTHLY_KEEP = 1
 ANNUAL_KEEP = 1
 
 

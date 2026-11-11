@@ -72,6 +72,7 @@ for db in $DBS; do
     fi
 done
 
-restic backup "$STAGING"     "$HL_DATA/collector_pauses.log"     /srv/hl/app/repo/data/research/phase08_preregister.json     /srv/hl/app/repo/data/research/phase10     /etc/hyperliquid/bot.env     --tag daily 2>&1 | tail -3
+# Never upload /etc/hyperliquid/bot.env (contains live private/API secrets) to Object Storage.
+restic backup "$STAGING"     "$HL_DATA/collector_pauses.log"     /srv/hl/app/repo/data/research/phase08_preregister.json     /srv/hl/app/repo/data/research/phase10     --tag daily 2>&1 | tail -3
 hc "${HL_BACKUP_HC_URL:-}"
 echo "$LOG_TAG: done"

@@ -57,9 +57,12 @@ services:
       sh -c 'python -u /opt/hyperliquid/deploy/linux/dashboard_proxy.py 8091 5000 &
              exec python -u -X utf8 main.py --config config/settings.yaml --mode paper' 
 
+  # KILLED 2026-11-11 at final preregistered readout (indep_n=325, net PF=0.8373 <= 1.0).
+  # Gated under profile 'killed' so `docker compose up -d` never restarts it.
   jev-judge:
     <<: *base
     container_name: hl-jev-judge
+    profiles: ["killed"]
     command: >
       sh -c 'while :; do
         python -u -X utf8 scripts/research/jev_shadow_judge.py --once --max-tokens 8000000;
@@ -94,6 +97,22 @@ services:
     profiles: ["gated"]
     command: python -u -X utf8 scripts/research/run_boros_shadow.py
 
+  # Post-cutover package (prereg 2026-10-28): ResidualMomentum forward
+  # shadow — paper-only, weekly Mon 00:05 UTC rebalance, own ledger at
+  # /data/research/resmom_shadow.db. Places zero orders.
+  resmom-shadow:
+    <<: *base
+    container_name: hl-resmom-shadow
+    command: python -u -X utf8 scripts/research/run_resmom_shadow.py
+
+  # Post-cutover package (prereg 2026-10-28): passive latency probe,
+  # trade.xyz vs Binance during US-close windows. Collector only — no
+  # orders, no paper trades. Events at /data/research/latency_probe.db.
+  latency-probe:
+    <<: *base
+    container_name: hl-latency-probe
+    command: python -u -X utf8 scripts/research/run_latency_probe.py
+
   # pm2 cron jobs -> aligned sleep loops via src.utils.cron_loop
   # watchdogs = 45 */6 * * * | overnight = 0 5 * * * | backup-monthly ~30d (restic e o backup real)
   watchdogs:
@@ -126,8 +145,8 @@ services:
     container_name: hl-backup-monthly
     command: >
       sh -c 'while :; do
-        python -u -X utf8 scripts/ops/backup_research_data.py --tag monthly --backup-root /data/backups;
         sh deploy/linux/monthly_loop.sh;
+        python -u -X utf8 scripts/ops/backup_research_data.py --tag monthly --backup-root /data/backups;
       done'
 
   disk-guard:

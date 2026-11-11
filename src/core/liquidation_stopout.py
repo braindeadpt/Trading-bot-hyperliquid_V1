@@ -37,7 +37,7 @@ from typing import Optional
 # The previous 5.0M sat ~2x above that p90 — super-calibrated, it would almost
 # never fire. 2.5M keeps the p90 gate (only the top ~10% of windows exceed it)
 # while making the stop-out effective. Full distribution and the per-symbol
-# sensitivity in docs/LIQUIDATION_STOPOUT_FLOOR_CALIBRATION.md.
+# sensitivity in docs/archive/LIQUIDATION_STOPOUT_FLOOR_CALIBRATION.md.
 LIQUIDATION_STOPOUT_MIN_NOTIONAL_USD = 2_500_000.0
 
 STOPOUT_REASON = "liquidation_stop_out"

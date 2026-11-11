@@ -10,7 +10,7 @@ Validates:
 import sys
 sys.path.insert(0, r"C:\Users\Braindead\Documents\trading-bot-hyperliquid")
 
-from src.strategies.funding_arbitrage import FundingArbitrage
+from archive.strategies_closed.funding_arbitrage import FundingArbitrage
 from src.strategies.base import MarketEvent, Position
 import pytest
 

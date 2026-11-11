@@ -121,7 +121,7 @@ def main() -> int:
     ap.add_argument("--start", default=START_ARG)
     ap.add_argument("--end", default=END_ARG)
     ap.add_argument("--symbols", default=",".join(SYMBOLS))
-    ap.add_argument("--out", type=Path, default=ROOT / "docs" / "IV_VS_ADX_DISAGREEMENT.md")
+    ap.add_argument("--out", type=Path, default=ROOT / "docs" / "archive" / "IV_VS_ADX_DISAGREEMENT.md")
     args = ap.parse_args()
 
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]

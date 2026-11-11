@@ -13,8 +13,8 @@ allowed-tools:
 
 # Strategy promotion / demotion gate
 
-Canonical references: `AGENTS.md` §12 (baseline-signal gate), `docs/RESEARCH_BACKLOG.md`,
-`docs/STRATEGY_AUDIT.md`, `src/strategies/factory.py` (`_STRATEGY_REGISTRY`).
+Canonical references: `AGENTS.md` §12 (baseline-signal gate), `docs/ops/RESEARCH_BACKLOG.md`,
+`docs/ops/STRATEGY_AUDIT.md`, `src/strategies/factory.py` (`_STRATEGY_REGISTRY`).
 
 ## Non-negotiable rule
 
@@ -38,8 +38,8 @@ sample accumulates) — it is never a promotion path.
    `scripts/ops/demote_checklist_meta_for_baseline_fail.py`). Retired
    strategies stay importable for research harnesses but are never
    instantiated by the factory.
-4. **Docs to update** — `AGENTS.md` §1 (live registry list), `docs/STRATEGY_AUDIT.md`,
-   `docs/RESEARCH_BACKLOG.md` verdict line, `docs/MAINNET_READINESS.md` if the
+4. **Docs to update** — `AGENTS.md` §1 (live registry list), `docs/ops/STRATEGY_AUDIT.md`,
+   `docs/ops/RESEARCH_BACKLOG.md` verdict line, `docs/ops/MAINNET_READINESS.md` if the
    gate table changes.
 
 ## Never do

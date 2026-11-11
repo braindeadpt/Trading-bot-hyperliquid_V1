@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launcher for the carry-shadow daemon (docs/PREREGISTER_CARRY_SHADOW.md).
+"""Launcher for the carry-shadow daemon (docs/ops/PREREGISTER_CARRY_SHADOW.md).
 
 Standalone process: subscribes public HL L2/funding feeds, tracks
 hypothetical delta-neutral carry episodes, and appends evidence to

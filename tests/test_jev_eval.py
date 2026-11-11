@@ -1,7 +1,7 @@
 """Tests for the executed-trade section of scripts/research/jev_eval.py.
 
 The bracket simulator + random baseline power the preregistered JevJudge
-kill read (docs/PREREGISTER_JEV_OOS_KILL_2026-10-08.md) — correctness here
+kill read (docs/ops/PREREGISTER_JEV_OOS_KILL_2026-10-08.md) — correctness here
 is evidence correctness.
 """
 

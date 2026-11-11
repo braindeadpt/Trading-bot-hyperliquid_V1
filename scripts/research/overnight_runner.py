@@ -10,7 +10,7 @@ window + paired delta rejecting the window sign-flip null at one-sided
 alpha=0.10 — an exact paired per-window randomization test), and writes:
 
   * per-experiment JSON artifacts -> data/research/overnight_experiments/ (gitignored)
-  * the append-only ledger        -> docs/OVERNIGHT_RESEARCH_LOG.md (morning report on top)
+  * the append-only ledger        -> docs/ops/OVERNIGHT_RESEARCH_LOG.md (morning report on top)
 
 Design constraints (research_program.md, hard rules):
   * sweep knobs are CLI/config-dict ONLY — no strategy-code edits, no
@@ -68,7 +68,7 @@ sys.path.insert(0, str(ROOT))
 # the verdict/report unit tests never pull the backtest engine stack.
 
 ARTIFACT_DIR = ROOT / "data" / "research" / "overnight_experiments"
-LEDGER_PATH = ROOT / "docs" / "OVERNIGHT_RESEARCH_LOG.md"
+LEDGER_PATH = ROOT / "docs" / "ops" / "OVERNIGHT_RESEARCH_LOG.md"
 LEDGER_HEADER = """# Overnight research ledger — append-only
 
 One block per experiment: hypothesis, window set, baseline vs variant per

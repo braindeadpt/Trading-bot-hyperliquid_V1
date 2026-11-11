@@ -84,6 +84,7 @@ class ExchangeReconciler:
         alert_callback: Optional[Any] = None,
         liquidation_reconcile_enabled: bool = True,
         fill_lookback_ms: int = 86_400_000,
+        ignored_symbols_provider: Optional[Any] = None,
     ) -> None:
         self._client = live_client
         self._portfolio = portfolio
@@ -95,6 +96,7 @@ class ExchangeReconciler:
         self._alert = alert_callback
         self._liquidation_reconcile_enabled = bool(liquidation_reconcile_enabled)
         self._fill_lookback_ms = int(fill_lookback_ms)
+        self._ignored_symbols_provider = ignored_symbols_provider
         self._health = ReconciliationHealth()
 
     @property
@@ -144,6 +146,19 @@ class ExchangeReconciler:
             triggers = parse_trigger_orders(open_orders)
             report.exchange_positions = ex_positions
 
+            # Sync real Hyperliquid accountValue into PortfolioState when exposed
+            margin_summary = (
+                user_state.get("marginSummary")
+                if isinstance(user_state, dict)
+                else None
+            )
+            if isinstance(margin_summary, dict) and hasattr(
+                self._portfolio, "sync_live_account_equity"
+            ):
+                acct_val = safe_float(margin_summary.get("accountValue"), 0.0)
+                if acct_val > 0:
+                    await self._portfolio.sync_live_account_equity(acct_val)
+
             if self._protection is not None:
                 self._protection.sync_from_open_orders(open_orders)
                 purged = await self._protection.purge_residual_triggers(
@@ -159,6 +174,17 @@ class ExchangeReconciler:
 
             ex_syms = set(ex_positions.keys())
             loc_syms = set(local.keys())
+            if callable(self._ignored_symbols_provider):
+                try:
+                    ext_syms = {
+                        str(s).upper() for s in (self._ignored_symbols_provider() or set())
+                    }
+                except Exception:  # noqa: BLE001
+                    ext_syms = set()
+                skipped = sorted((ex_syms - loc_syms) & ext_syms)
+                for sym in skipped:
+                    ex_syms.discard(sym)
+                    report.actions.append(f"skipped_external:{sym}")
 
             for sym in sorted(loc_syms - ex_syms):
                 report.orphan_local.append(sym)

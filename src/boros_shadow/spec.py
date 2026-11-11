@@ -1,4 +1,4 @@
-"""Frozen spec constants — mirrors docs/PREREGISTER_BOROS_SPREAD.md.
+"""Frozen spec constants — mirrors docs/ops/PREREGISTER_BOROS_SPREAD.md.
 
 Anything tunable lives here and ONLY here; changing these constants
 post-freeze is a protocol violation — a forward amendment is required.

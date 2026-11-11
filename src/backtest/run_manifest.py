@@ -132,7 +132,7 @@ def build_run_manifest(
         "shared_gate_order": list(GATE_ORDER),
         "live_only_gates": list(LIVE_ONLY_GATES),
         "pre_parity_results_invalid": pre_parity,
-        "pre_parity_inventory": "docs/PRE_PARITY_BACKTEST_RESULTS.md",
+        "pre_parity_inventory": "docs/archive/PRE_PARITY_BACKTEST_RESULTS.md",
     }
     if gate_manifest:
         manifest["gates"] = gate_manifest

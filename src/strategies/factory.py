@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 #   TrendPyramid                — candle trend; family closed (24m structure screen)
 #   SFPReversion / VARejection  — 24m structure screen CLOSED
 # Removed 2026-10-08 (modules deleted — decisive refuted evidence, see
-# docs/STRATEGY_AUDIT.md and the shadow dedupe recheck):
+# docs/ops/STRATEGY_AUDIT.md and the shadow dedupe recheck):
 #   OrderBookScalper — indep PF 0.18 taker / 0.43 maker over ~35k episodes
 #   TopTraderFlow    — indep n=53, PF 0.40 (Q13 Phase A FAIL closed the family)
 #   ChecklistMeta    — maker PF 0.997, edge zero
@@ -147,6 +147,17 @@ def _instantiate_from_registry(
     if shadow:
         section["_shadow_mode"] = True
         _apply_shadow_section_overrides(section, path)
+    if (
+        getattr(cls, "SYNTHETIC_SPOT_ONLY", False)
+        and not shadow
+        and str(section.get("_mode", "paper")) in ("testnet", "mainnet")
+    ):
+        logger.warning(
+            "Refusing to instantiate synthetic-spot-only strategy %s for live execution (mode=%s) — use MultiLegCoordinator",
+            cls.__name__,
+            section.get("_mode"),
+        )
+        return None
     if not force and not _should_load_strategy(section):
         return None
     inst = cls(section)

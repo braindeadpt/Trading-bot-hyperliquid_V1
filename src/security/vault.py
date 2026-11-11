@@ -95,42 +95,42 @@ def _key_from_keyring(service: str = "hyperliquid_bot_vault") -> Optional[bytes]
         return None
 
 
-def _save_key_to_keyring(key: bytes, service: str = "hyperliquid_bot_vault") -> None:
-    """Persist *key* into the OS keyring under *service*."""
+def _save_key_to_keyring(key: bytes, service: str = "hyperliquid_bot_vault") -> bool:
+    """Persist *key* into the OS keyring under *service*. Returns True on success."""
     try:
         import keyring
 
         keyring.set_password(service, "master", key.decode("utf-8"))
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to store vault key in OS keyring: %s", exc)
+        return False
 
 
-def _generate_master_key(password: Optional[str] = None) -> tuple[bytes, bytes]:
+def _generate_master_key(password: Optional[str] = None) -> tuple[bytes, bytes, bool]:
     """
     Generate or retrieve a master encryption key.
 
-    If *password* is provided, a random salt is generated and a key is
-    derived via PBKDF2.  If *password* is ``None``, the OS keyring is
-    checked first; if empty, a random 32-byte key is created and stored
-    automatically.
-
-    Returns ``(key, salt)`` where *salt* may be empty when the keyring
-    is used exclusively.
+    Returns ``(key, salt, persisted)`` where *persisted* indicates whether the
+    key can be recovered on a future process start (password-derived or stored
+    in OS keyring). On headless Linux without a keyring or password, *persisted*
+    is ``False`` so ``Vault.__init__`` will not write an undecryptable
+    ``vault.enc`` file on disk.
     """
     if password is not None:
         salt = os.urandom(SALT_LENGTH)
         key = _derive_key(password, salt)
-        return key, salt
+        return key, salt, True
 
     kr_key = _key_from_keyring()
     if kr_key is not None:
-        return kr_key, b""
+        return kr_key, b"", True
 
-    # No password, no keyring entry → auto-generate a random key
+    # No password, no keyring entry -> auto-generate a random key
     raw_key = os.urandom(32)
     key = base64.urlsafe_b64encode(raw_key)
-    _save_key_to_keyring(key)
-    return key, b""
+    saved = _save_key_to_keyring(key)
+    return key, b"", saved
 
 
 # ---------------------------------------------------------------------------
@@ -205,28 +205,30 @@ class Vault:
         )
         self._key: bytes
         self._salt: bytes
-        self._key, self._salt = _generate_master_key(password)
+        self._key_persisted: bool
+        self._key, self._salt, self._key_persisted = _generate_master_key(password)
+        self._key_buf: bytearray = bytearray(self._key)
         self._fernet: Fernet = Fernet(self._key)
         self._entries: Dict[str, str] = {}
         self._loaded: bool = False
         self._lock = threading.Lock()  # HIGH-005: thread-safe mutation
 
-        # HIGH-006: Register cleanup to zero key on object destruction
-        weakref.finalize(self, self._zero_key, self._key)
+        # HIGH-006: Register cleanup to zero mutable key buffer on GC
+        weakref.finalize(self, self._zero_key, self._key_buf)
 
         if self._vault_path.exists():
             self._load()
+        elif self._key_persisted:
+            self._save()  # Create an empty encrypted vault file only when key is recoverable
         else:
-            self._save()  # Create an empty encrypted vault file
+            self._loaded = True
 
     @staticmethod
-    def _zero_key(key_ref: bytes) -> None:
-        """Overwrite key bytes in memory (best-effort on GC)."""
-        try:
+    def _zero_key(key_ref: bytearray | bytes) -> None:
+        """Overwrite mutable key buffer bytes in memory on GC."""
+        if isinstance(key_ref, bytearray):
             for i in range(len(key_ref)):
                 key_ref[i] = 0
-        except (TypeError, IndexError):
-            pass  # bytes are immutable in Python — best effort only
 
     # -- Internal persistence ------------------------------------------------
 

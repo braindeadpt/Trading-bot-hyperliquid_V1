@@ -26,7 +26,7 @@ semantics exactly (per-symbol window, dominant = max(long, short) notional):
 The decision (which quantile to use) is deliberately NOT automated: the
 floor guards real money, so the operator reads the distribution and picks
 the value. The script's job is to make the real p90 (and the tail shape)
-unambiguous, and to pin the numbers in ``docs/LIQUIDATION_STOPOUT_FLOOR_CALIBRATION.md``.
+unambiguous, and to pin the numbers in ``docs/archive/LIQUIDATION_STOPOUT_FLOOR_CALIBRATION.md``.
 
 Usage:
   python scripts/research/calibrate_liquidation_stopout_floor.py [--db PATH] [--step-sec 60]
@@ -58,7 +58,7 @@ from src.utils.config import load_config  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = ROOT / "data" / "live" / "bot.db"
-REPORT_PATH = ROOT / "docs" / "LIQUIDATION_STOPOUT_FLOOR_CALIBRATION.md"
+REPORT_PATH = ROOT / "docs" / "archive" / "LIQUIDATION_STOPOUT_FLOOR_CALIBRATION.md"
 
 # Real venues this deployment can contract (see REAL_LIQUIDATION_SOURCES).
 REAL_SOURCES = ("okx", "bybit")
@@ -298,7 +298,7 @@ def main() -> int:
     ap.add_argument("--step-sec", type=int, default=DEFAULT_STEP_SEC,
                     help="sampling cadence in seconds (default 60)")
     ap.add_argument("--report", type=Path, default=REPORT_PATH,
-                    help="markdown report path (default docs/LIQUIDATION_STOPOUT_FLOOR_CALIBRATION.md)")
+                    help="markdown report path (default docs/archive/LIQUIDATION_STOPOUT_FLOOR_CALIBRATION.md)")
     ap.add_argument("--json", type=Path, help="write raw series as JSON")
     args = ap.parse_args()
 

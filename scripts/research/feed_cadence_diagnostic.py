@@ -60,7 +60,7 @@ from src.utils.config import load_config  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = ROOT / "data" / "live" / "bot.db"
-REPORT_PATH = ROOT / "docs" / "FEED_CADENCE_REPORT.md"
+REPORT_PATH = ROOT / "docs" / "archive" / "FEED_CADENCE_REPORT.md"
 HISTORY_PATH = ROOT / "data" / "research" / "feed_cadence_history.json"
 # Per-feed caps: the history file is gitignored and bounded; the report shows
 # the most recent rows so a feed's trend is readable without a huge table.
@@ -554,7 +554,7 @@ def record_and_save_history(
 
 
 def render_markdown_report(report: dict, history: list[dict]) -> str:
-    """Markdown for docs/FEED_CADENCE_REPORT.md: current state + the
+    """Markdown for docs/archive/FEED_CADENCE_REPORT.md: current state + the
     accumulated per-feed trend history (recent runs, newest last)."""
     lines = [
         "# Feed Cadence Report",
@@ -623,7 +623,7 @@ def write_cadence_report(
     history_path: Optional[Path] = None,
 ) -> Optional[Path]:
     """Record the run in the accumulated history and render the markdown
-    report (docs/FEED_CADENCE_REPORT.md). Best-effort — a write failure
+    report (docs/archive/FEED_CADENCE_REPORT.md). Best-effort — a write failure
     never breaks the diagnostic or the supervisor."""
     try:
         history = record_and_save_history(report, path=history_path)
@@ -739,7 +739,7 @@ def main() -> int:
                         help="minimum recorded gaps to report p95/p99 (default 50)")
     parser.add_argument("--json", action="store_true", help="emit JSON report")
     parser.add_argument("--report", type=Path, default=None,
-                        help="markdown report path (default: docs/FEED_CADENCE_REPORT.md)")
+                        help="markdown report path (default: docs/archive/FEED_CADENCE_REPORT.md)")
     parser.add_argument("--history", type=Path, default=None,
                         help="accumulated history JSON path (default: "
                              "data/research/feed_cadence_history.json)")

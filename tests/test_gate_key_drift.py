@@ -1,7 +1,7 @@
 """Drift guard: gate keys in settings.yaml must be mirrored in the parity docs.
 
 The parity contract (README "Parity contract: minimal test config vs
-production config", docs/GATES_REFERENCE.md §6) documents the gate keys the
+production config", docs/ops/GATES_REFERENCE.md §6) documents the gate keys the
 live/backtest chain reads. This file holds the canonical mirror
 (``DOCUMENTED_GATE_KEYS``) and fails when:
 
@@ -10,7 +10,7 @@ live/backtest chain reads. This file holds the canonical mirror
   * a documented key is removed/renamed in ``settings.yaml`` (reverse check —
     the "stale doc entry" case), or
   * a registry entry is not actually mentioned in README.md or
-    docs/GATES_REFERENCE.md (the "registry drifted from the docs" case).
+    docs/ops/GATES_REFERENCE.md (the "registry drifted from the docs" case).
 
 Keeping the registry exhaustive is deliberate: adding a gate key to the YAML
 is a reviewable act that must touch the parity documentation too.
@@ -42,7 +42,7 @@ pytestmark = pytest.mark.unit
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 SETTINGS_PATH = os.path.join(ROOT, "config", "settings.yaml")
 README_PATH = os.path.join(ROOT, "README.md")
-GATES_REF_PATH = os.path.join(ROOT, "docs", "GATES_REFERENCE.md")
+GATES_REF_PATH = os.path.join(ROOT, "docs", "ops", "GATES_REFERENCE.md")
 
 # Gate-bearing config prefixes/sections. A leaf key under any of these is a
 # gate key and MUST be mirrored in the registry below (and therefore in the
@@ -87,7 +87,7 @@ GATE_PREFIXES: tuple = (
 )
 
 # Canonical mirror of the gate keys documented in the parity docs.
-# MUST equal the dotted keys listed in docs/GATES_REFERENCE.md §6 registry and
+# MUST equal the dotted keys listed in docs/ops/GATES_REFERENCE.md §6 registry and
 # the README parity table. Regenerated from settings.yaml on 2026-08-13.
 DOCUMENTED_GATE_KEYS: frozenset = frozenset(
     {
@@ -162,7 +162,7 @@ DOCUMENTED_GATE_KEYS: frozenset = frozenset(
 
 
 # Canonical production VALUES for the gate keys with meaningful numeric/enum
-# pins. Mirror of the "production value" column in docs/GATES_REFERENCE.md §6
+# pins. Mirror of the "production value" column in docs/ops/GATES_REFERENCE.md §6
 # registry and the README parity table. A gate key that changes its production
 # value (e.g. max_positions 3 -> 5) must be a reviewable act touching the docs
 # too — presence alone is not enough (the frozen window guards the hash, but
@@ -241,7 +241,7 @@ GATE_KEY_VALUES: dict = {
 
 # Canonical mirror of the RUNTIME gate tables — what ``gate_manifest()``
 # returns for the production config. Pinned here so the docs (README parity
-# table, docs/GATES_REFERENCE.md §2/§3/§5) and the runtime cannot drift apart:
+# table, docs/ops/GATES_REFERENCE.md §2/§3/§5) and the runtime cannot drift apart:
 # changing ``GATE_ORDER``, ``LIVE_ONLY_GATES`` or ``replay_substitutes`` in
 # src/core/signal_pipeline.py without updating this pin (and the docs) fails.
 # Regenerated from src/core/signal_pipeline.py on 2026-08-14.
@@ -340,7 +340,7 @@ def test_new_gate_keys_must_be_documented() -> None:
         "Gate key(s) present in config/settings.yaml but NOT mirrored in the "
         "parity docs:\n  {missing}\n"
         "Add each to DOCUMENTED_GATE_KEYS in tests/test_gate_key_drift.py, the "
-        "README parity table and docs/GATES_REFERENCE.md §6 before keeping the key."
+        "README parity table and docs/ops/GATES_REFERENCE.md §6 before keeping the key."
     ).format(missing="\n  ".join(missing))
 
 
@@ -362,7 +362,7 @@ def test_registry_is_mirrored_in_docs() -> None:
     missing = sorted(DOCUMENTED_GATE_KEYS - docs_keys)
     assert not missing, (
         "Registry key(s) not mentioned anywhere in README.md / "
-        "docs/GATES_REFERENCE.md:\n  {missing}\n"
+        "docs/ops/GATES_REFERENCE.md:\n  {missing}\n"
         "The docs are the mirror of this registry — keep them in sync."
     ).format(missing="\n  ".join(missing))
 
@@ -399,7 +399,7 @@ def test_gate_key_values_match_production() -> None:
         "Gate key value(s) drifted from the production pin:\n"
         + "\n".join(f"  {k}: expected {e!r}, settings.yaml has {a!r}" for k, e, a in mismatches)
         + "\nUpdate GATE_KEY_VALUES in tests/test_gate_key_drift.py AND the parity "
-        "docs (README parity table / docs/GATES_REFERENCE.md) — a production "
+        "docs (README parity table / docs/ops/GATES_REFERENCE.md) — a production "
         "gate value change must be a reviewable act."
     )
 
@@ -431,7 +431,7 @@ def test_gate_key_values_are_mirrored_in_docs() -> None:
             missing.append((key, value))
     assert not missing, (
         "Pinned gate value(s) not on the same docs row as their key in README.md / "
-        "docs/GATES_REFERENCE.md:\n  {missing}\n"
+        "docs/ops/GATES_REFERENCE.md:\n  {missing}\n"
         "The docs are the mirror of this registry — keep values in sync."
     ).format(missing="\n  ".join(f"{k}={v!r}" for k, v in missing))
 
@@ -455,7 +455,7 @@ def test_gate_manifest_runtime_matches_pin() -> None:
         "Runtime gate_manifest() drifted from GATE_MANIFEST_PIN:\n"
         + "\n".join(f"  {k}: pin {e!r} != runtime {a!r}" for k, e, a in diffs)
         + "\nUpdate GATE_MANIFEST_PIN in tests/test_gate_key_drift.py AND the parity "
-        "docs (README parity table / docs/GATES_REFERENCE.md §2/§3/§5)."
+        "docs (README parity table / docs/ops/GATES_REFERENCE.md §2/§3/§5)."
     )
 
 
@@ -485,7 +485,7 @@ def test_gate_tables_are_mirrored_in_docs() -> None:
         if f"`{live_gate}`" not in docs or f"`{sub}`" not in docs:
             missing.append(("replay_substitutes", f"{live_gate} -> {sub}"))
     assert not missing, (
-        "Gate table member(s) missing from README.md / docs/GATES_REFERENCE.md:\n"
+        "Gate table member(s) missing from README.md / docs/ops/GATES_REFERENCE.md:\n"
         + "\n  ".join(f"[{table}] {g}" for table, g in missing)
         + "\nThe docs are the mirror of the runtime gate tables — keep them in sync."
     )

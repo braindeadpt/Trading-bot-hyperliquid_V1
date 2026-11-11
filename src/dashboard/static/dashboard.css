@@ -309,3 +309,63 @@ details.fold .panel { max-height: none; }
 .ctx-col { padding: 6px 10px; border-right: 1px solid var(--border); min-width: 0; }
 .ctx-col:last-child { border-right: none; }
 @media (max-width: 900px) { .ctx-cols { grid-template-columns: 1fr; } .ctx-col { border-right: none; border-bottom: 1px solid var(--border); } .ctx-col:last-child { border-bottom: none; } }
+
+/* ── Reorganized main page (2026-11-03) ─────────────────────────── */
+.topbar { display: flex; flex-wrap: wrap; gap: 0; }
+.tb-cell {
+    display: flex; align-items: baseline; gap: 6px;
+    padding: 6px 14px; border-right: 1px solid var(--border); min-width: 0;
+}
+.tb-cell:last-child { border-right: none; }
+.tb-label { font-size: 9px; font-weight: 700; color: var(--dim); text-transform: uppercase; letter-spacing: 0.6px; }
+.tb-val { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); }
+.tb-num { font-family: "SF Mono", Consolas, monospace; }
+#topbar-panel { margin-bottom: var(--gap); }
+#topbar-panel .panel-body, #topbar-panel > .topbar { padding: 0; }
+
+/* view tabs */
+.view-tabs { display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.vtab {
+    background: var(--panel); color: var(--muted); border: none;
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.5px; padding: 3px 10px; cursor: pointer;
+}
+.vtab.active { background: rgba(163,113,247,0.18); color: var(--accent2); }
+.vtab:hover { color: var(--text); }
+
+/* strategy cards */
+.strat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--gap); }
+.strat-card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 8px 10px; cursor: pointer;
+    display: flex; flex-direction: column; gap: 5px;
+    transition: border-color 0.15s;
+}
+.strat-card:hover { border-color: var(--accent2); }
+.sc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.sc-name { font-size: 12px; font-weight: 700; color: var(--text); }
+.sc-spark { display: flex; justify-content: center; padding: 2px 0; }
+.spark-empty { height: 44px; line-height: 44px; font-size: 14px; }
+.sc-row { display: flex; gap: 8px; align-items: baseline; font-size: 11px; }
+.sc-row .num { font-variant-numeric: tabular-nums; font-family: "SF Mono", Consolas, monospace; }
+.sc-row .dim { min-width: 34px; }
+.sc-foot { font-size: 9px; border-top: 1px solid var(--border); padding-top: 4px; }
+.modal-close {
+    background: none; border: none; color: var(--muted);
+    font-size: 18px; cursor: pointer; line-height: 1; padding: 0 4px;
+}
+.modal-close:hover { color: var(--text); }
+
+/* mobile */
+@media (max-width: 900px) {
+    .strat-grid { grid-template-columns: repeat(2, 1fr); }
+    .tb-cell { padding: 5px 10px; flex: 1 1 30%; border-bottom: 1px solid var(--border); }
+    .tb-cell:nth-last-child(-n+3) { border-bottom: none; }
+}
+@media (max-width: 560px) {
+    .strat-grid { grid-template-columns: 1fr; }
+    .tb-cell { flex: 1 1 44%; }
+    .tb-cell:nth-last-child(-n+3) { border-bottom: 1px solid var(--border); }
+    .tb-cell:last-child { border-bottom: none; }
+    .view-tabs .vtab { padding: 3px 7px; font-size: 9px; }
+}

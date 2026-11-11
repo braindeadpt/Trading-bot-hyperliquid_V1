@@ -1,6 +1,6 @@
 # Overnight queue — items testable under research_program.md rules
 
-Curated from `docs/RESEARCH_BACKLOG.md` against the data actually on disk as
+Curated from `docs/ops/RESEARCH_BACKLOG.md` against the data actually on disk as
 of **2026-09-09**. One entry per experiment family: hypothesis, harness
 (CLI/config-dict surface only — no strategy-code edits), fixed window set,
 and the evidence bar the verdict must clear. The runner
@@ -9,7 +9,7 @@ and the evidence bar the verdict must clear. The runner
 **Registry cleanup 2026-09-10:** TrendFollow, MeanReversion, DonchianBreakout,
 FundingArbitrage, CVDOrderFlow(+P90), RangeGrid, TrendPyramid, SFPReversion and
 VARejection were removed from `_STRATEGY_REGISTRY` (verdicts in
-`docs/RESEARCH_BACKLOG.md`). They no longer instantiate — do NOT wire queue
+`docs/ops/RESEARCH_BACKLOG.md`). They no longer instantiate — do NOT wire queue
 entries or families for retired names; class files remain importable for
 research harnesses that reference them directly.
 
@@ -104,7 +104,7 @@ overrides, BTC/ETH untouched (control in every cell).
 - **Window set: 2026-03-13..2026-09-08 split 30d → 6 non-overlapping windows.** W1–W4 read the E: research DB (HYPE 15m+1h from 2026-01-11, ~100% coverage in every planned window; that DB ends exactly 2026-07-10, so W4 seals the seam); W5–W6 read the live `bot.db` — one source per window, preregistered, never mixed mid-window. K=6 makes the sign-flip gate passable (floor p=1/64=0.0156) and aggregate n≥30 clears at every tested parameter (projected n≈45–100).
 - **Budget: two preregistered sessions** — A `--cells 0,1,2` (18 runs) = the harness line above; after A lands, repoint the line to B `--cells 0,3` (12 runs); both ≤20, no third session.
 - **Kill rule:** no variant improves ≥4/6 windows → §1.3 thin-book hypothesis is dead for this regime, HYPE moves to exclude-candidates, no further threshold iteration (fixed +1σ/+2σ steps and single vs2.0 value prevent grid-shopping).
-- **Full design, gate math and the W3/W4-regression warning:** `docs/RESEARCH_BACKLOG.md` → "§1.3 phase 2".
+- **Full design, gate math and the W3/W4-regression warning:** `docs/ops/RESEARCH_BACKLOG.md` → "§1.3 phase 2".
 
 ## Night 3 — IV threshold sweep — (READY, coverage-gated; accumulator run done 2026-09-09, reopen auto ~2026-10-08)
 
@@ -422,7 +422,7 @@ An entry becomes READY only after the family is wired and reviewed.
   in `ecosystem.config.js`). Phase A was then run under a fixed
   pre-registered methodology (usable window = candle coverage ∩ fill
   range clipped by the 1h horizon; per-symbol gap audit; 10,000-perm
-  diagnostics) — `docs/Q13_PHASE_A_RESULT_2026-10-07.md`. Result:
+  diagnostics) — `docs/archive/Q13_PHASE_A_RESULT_2026-10-07.md`. Result:
   **rho = +0.055 / −0.070 / −0.255 at 5m/15m/1h, n_wallets = 53/51/53 —
   rho < 0.30 at every horizon with sufficient n → FAIL.**
   Q13 is dead; Phase B not unlocked. The collector stays OFF unless the
@@ -518,5 +518,5 @@ stop sat in an ask-heavy book during an active cascade.
 selection in the queue entry. Ledger so far: Night 1 = 16 OK, Night 2 =
 12 OK. If a family finishes early, **stop** — spare budget is not spent on
 unplanned windows (post-hoc window selection is forbidden). Verdicts land
-in `docs/OVERNIGHT_RESEARCH_LOG.md`; the flush recheck itself belongs to
+in `docs/ops/OVERNIGHT_RESEARCH_LOG.md`; the flush recheck itself belongs to
 the watchdog supervisor, not this queue.

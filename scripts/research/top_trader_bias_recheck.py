@@ -1,6 +1,6 @@
 """Top-trader bias screening recheck — auto re-run at ≥20 dates of samples.
 
-The screening probe (`docs/FEATURE_SCREENING_TOP_TRADER_BIAS.md`) requires
+The screening probe (`docs/archive/FEATURE_SCREENING_TOP_TRADER_BIAS.md`) requires
 re-running once `top_trader_bias_samples` covers ≥20 distinct UTC dates
 (≈3 weeks of ~60s polling). Below that the strict bootstrap gate is
 structurally unreachable (see `survives_strict` in
@@ -41,7 +41,7 @@ ROOT = Path(__file__).resolve().parents[2]
 STATE_DIR = ROOT / "data" / "research"
 STATE_PATH = STATE_DIR / "top_trader_bias_recheck_state.json"
 PROBE_SCRIPT = ROOT / "scripts" / "research" / "feature_screening_top_trader_bias.py"
-REPORT_PATH = ROOT / "docs" / "TOP_TRADER_BIAS_RECHECK_RESULT.md"
+REPORT_PATH = ROOT / "docs" / "archive" / "TOP_TRADER_BIAS_RECHECK_RESULT.md"
 JSON_OUT = ROOT / "data" / "backtests" / "top_trader_bias_screening_latest.json"
 
 TARGET_DATES = 20
@@ -115,6 +115,11 @@ def save_state(state: Dict[str, Any], path: Optional[Path] = None) -> None:
 def run_probe(json_out: Optional[Path] = None) -> Optional[Path]:
     """Run the screening probe and return the path of the written JSON."""
     out = json_out or JSON_OUT
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        out = STATE_DIR / out.name
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
     log(f"launching {PROBE_SCRIPT.name} --json-out {out}")
     t0 = time.time()
     proc = subprocess.run(
@@ -204,11 +209,19 @@ def write_report(
         "",
         "* Trigger: `top_trader_bias_samples` cobrir ≥20 datas (≈3 semanas de polling).",
         "* Below 20 datas the bootstrap gate is structurally unreachable — see ",
-        "  `docs/FEATURE_SCREENING_TOP_TRADER_BIAS.md`.",
+        "  `docs/archive/FEATURE_SCREENING_TOP_TRADER_BIAS.md`.",
         "",
     ]
-    REPORT_PATH.write_text("\n".join(rows), encoding="utf-8")
-    log(f"report written: {REPORT_PATH}")
+    payload = "\n".join(rows)
+    try:
+        REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        REPORT_PATH.write_text(payload, encoding="utf-8")
+        log(f"report written: {REPORT_PATH}")
+    except OSError as exc:
+        fallback = STATE_DIR / REPORT_PATH.name
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        fallback.write_text(payload, encoding="utf-8")
+        log(f"report fallback written ({exc}): {fallback}")
 
 
 def do_recheck(state: Dict[str, Any], force: bool) -> bool:

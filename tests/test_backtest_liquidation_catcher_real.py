@@ -1,7 +1,7 @@
 """Unit tests for scripts/research/backtest_liquidation_catcher_real.py — the variant
 knobs that break the flush→stop-out loop.
 
-The real-feed backtest (docs/LIQUIDATION_CATCHER_REAL_BACKTEST.md) showed the
+The real-feed backtest (docs/archive/LIQUIDATION_CATCHER_REAL_BACKTEST.md) showed the
 strategy enters at the flush peak and the liquidation stop-out exits ~1 minute
 later (16/16 trades, -142.42 USD). The variants tested here:
 

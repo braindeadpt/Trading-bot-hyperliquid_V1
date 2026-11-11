@@ -108,7 +108,7 @@ def _stub_metrics(monkeypatch):
                 {"family": "vwap_thresholds", "verdicts": ["DISCARD"]},
                 {"family": "flush_fade", "verdicts": ["DISCARD"]},
             ],
-            "ledger_path": "docs/OVERNIGHT_RESEARCH_LOG.md",
+            "ledger_path": "docs/ops/OVERNIGHT_RESEARCH_LOG.md",
             "reason": "",
         },
     )
@@ -154,7 +154,7 @@ def test_overnight_watchdog_payload(_stub_metrics, monkeypatch):
     assert ov["current"] == 2
     assert ov["target"] == 5
     assert ov["triggered"] is True
-    assert ov["report_path"] == "docs/OVERNIGHT_RESEARCH_LOG.md"
+    assert ov["report_path"] == "docs/ops/OVERNIGHT_RESEARCH_LOG.md"
     assert ov["next_ready"]["family"] == "vwap_thresholds"
     assert ov["last_session"]["returncode"] == 0
 
@@ -209,7 +209,7 @@ def test_iv_gate_progress_and_trigger(_stub_metrics):
     assert iv["triggered"] is False
     assert iv["last_run"]["verdict"] == "INCONCLUSIVE"
     assert iv["unit"] == "trades"
-    assert iv["report_path"] == "docs/IV_GATE_SHADOW_RECHECK_RESULT.md"
+    assert iv["report_path"] == "docs/archive/IV_GATE_SHADOW_RECHECK_RESULT.md"
 
 
 def test_iv_gate_projected_decision_before_trigger(_stub_metrics):
@@ -339,7 +339,7 @@ def test_creeping_age_payload(_stub_metrics):
     assert feeds[0]["days"] == 5
     assert feeds[0]["growth_frac"] == pytest.approx(0.417)
     assert feeds[0]["last_max_age_sec"] == 2100.0
-    assert creep_wd["report_path"] == "docs/FEED_AGE_CREEP_RECHECK_RESULT.md"
+    assert creep_wd["report_path"] == "docs/archive/FEED_AGE_CREEP_RECHECK_RESULT.md"
 
 
 def test_creeping_age_quiet_when_nothing_detected(_stub_metrics, monkeypatch):

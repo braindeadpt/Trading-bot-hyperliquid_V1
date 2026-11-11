@@ -20,7 +20,7 @@ pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
-    "wallet_fills_collector", ROOT / "scripts" / "research" / "wallet_fills_collector.py"
+    "wallet_fills_collector", ROOT / "archive" / "research_closed" / "wallet_fills_collector.py"
 )
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)

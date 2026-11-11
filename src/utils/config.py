@@ -150,7 +150,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "1h": 2,
         },
     },
-    # Research L2 levels (not operational DB). See docs/L2_BOOK_RECORDING.md
+    # Research L2 levels (not operational DB). See docs/ops/L2_BOOK_RECORDING.md
     "market_data": {
         "l2_recording": {
             "enabled": True,
@@ -371,6 +371,8 @@ class Config:
 def load_config(
     path: Union[str, Path] = "config/settings.yaml",
     env_prefix: str = "BOT_",
+    *,
+    mode_override: Optional[str] = None,
 ) -> Config:
     """Load, merge, validate and coerce the application configuration.
 
@@ -401,6 +403,8 @@ def load_config(
 
     _validate_unknown_top_level_keys(user_data)
     merged = _deep_merge(dict(DEFAULT_CONFIG), user_data)
+    if mode_override:
+        merged["mode"] = str(mode_override)
     # v3.1.17 C13: mode_overrides runs first, env_overrides second so
     # explicit env vars win over the safer mode defaults.
     _apply_mode_overrides(merged)
@@ -602,20 +606,10 @@ def _apply_mode_overrides(config: Dict[str, Any]) -> None:
         if not isinstance(target, dict):
             config[section] = {}
             target = config[section]
-        # Deep-merge strategy sub-sections so mode overrides patch keys
-        # (e.g. lead_lag.enabled) without wiping the rest of the block.
-        if section == "strategy":
-            for strat_key, strat_vals in values.items():
-                if isinstance(strat_vals, dict):
-                    existing = target.get(strat_key)
-                    if isinstance(existing, dict):
-                        target[strat_key] = _deep_merge(existing, strat_vals)
-                    else:
-                        target[strat_key] = dict(strat_vals)
-                else:
-                    target[strat_key] = strat_vals
-        else:
-            target.update(values)
+        # Deep-merge all sections so nested dictionaries (for example
+        # maker_orders or strategy.<name>) keep their sibling keys
+        # instead of being wiped by a shallow dict.update().
+        config[section] = _deep_merge(target, values)
 
 
 def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:

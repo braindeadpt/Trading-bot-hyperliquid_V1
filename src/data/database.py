@@ -809,6 +809,34 @@ class Database:
             rows = cur.fetchall()
         return [dict(row) for row in rows]
 
+    def get_active_trades(self, strategy: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return trades that are open OR have an in-flight live order lifecycle."""
+        active_statuses = (
+            "open",
+            "resting",
+            "partial",
+            "pending_submission",
+            "submission_unknown",
+            "close_pending",
+        )
+        placeholders = ",".join("?" for _ in active_statuses)
+        if strategy:
+            sql = (
+                f"SELECT * FROM trades WHERE status IN ({placeholders}) "
+                "AND strategy = ? ORDER BY entry_time ASC"
+            )
+            params: tuple = active_statuses + (strategy,)
+        else:
+            sql = (
+                f"SELECT * FROM trades WHERE status IN ({placeholders}) "
+                "ORDER BY entry_time ASC"
+            )
+            params = active_statuses
+        with self._conn():
+            cur = self._conn().execute(sql, params)
+            rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
     def get_trades_by_status(self, status: str) -> List[Dict[str, Any]]:
         """Return trade rows matching *status*."""
         sql = "SELECT * FROM trades WHERE status = ? ORDER BY entry_time ASC"
@@ -1735,25 +1763,27 @@ class Database:
         cutoff_ms = int((time.time() - days * 86400) * 1000)
         deleted: Dict[str, int] = {}
 
-        with self._conn():
-            # Candles
-            for table in self.TIMEFRAME_TABLES.values():
-                cur = self._conn().execute(f"DELETE FROM {table} WHERE timestamp_ms < ?", (cutoff_ms,))
-                deleted[table] = cur.rowcount
+        with self._write_lock:
+            conn = self._conn()
+            with conn:
+                # Candles
+                for table in self.TIMEFRAME_TABLES.values():
+                    cur = conn.execute(f"DELETE FROM {table} WHERE timestamp_ms < ?", (cutoff_ms,))
+                    deleted[table] = cur.rowcount
 
-            # Funding, OI, signals, portfolio, trades
-            for table in ("funding_history", "oi_history", "signals", "portfolio_snapshots"):
-                cur = self._conn().execute(f"DELETE FROM {table} WHERE timestamp < ?", (cutoff_ms,))
-                deleted[table] = cur.rowcount
+                # Funding, OI, signals, portfolio, trades
+                for table in ("funding_history", "oi_history", "signals", "portfolio_snapshots"):
+                    cur = conn.execute(f"DELETE FROM {table} WHERE timestamp < ?", (cutoff_ms,))
+                    deleted[table] = cur.rowcount
 
-            # Trades: only delete closed trades older than cutoff
-            cur = self._conn().execute(
-                "DELETE FROM trades WHERE status = 'closed' AND exit_time < ?",
-                (cutoff_ms,),
-            )
-            deleted["trades_closed"] = cur.rowcount
+                # Trades: only delete closed trades older than cutoff
+                cur = conn.execute(
+                    "DELETE FROM trades WHERE status = 'closed' AND exit_time < ?",
+                    (cutoff_ms,),
+                )
+                deleted["trades_closed"] = cur.rowcount
 
-            # Vacuum to reclaim space
-            self._conn().execute("VACUUM;")
+            # SQLite forbids VACUUM inside an open transaction; execute after commit.
+            conn.execute("VACUUM;")
 
         return deleted

@@ -14,7 +14,8 @@
 #   * bounded pass — a pass that hangs (HTTP stall, DB lock, DNS) is
 #     SIGKILLed at PASS_TIMEOUT_S and the loop moves on. The HTTP call
 #     itself has its own 30s timeout inside the script.
-#   * token budget stays pinned at 4M (counter is at ~2.1M — never raise).
+#   * token budget pinned at 8M — raised 4M->8M 2026-10-26 to feed the
+#     JevJudge v2 exits-only prereg after the 4M stall (commit b7616de).
 set -euo pipefail
 # lives under deploy/macos/ (not copied to root — single source of truth)
 cd "$(dirname "$0")/../.."

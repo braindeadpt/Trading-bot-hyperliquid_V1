@@ -38,7 +38,7 @@ DVOL_CURRENCIES = ("BTC", "ETH")
 ATM_MIN_EXPIRY_DAYS = 7  # skip near-expiry options (pin risk distorts IV)
 
 # Canonical high_iv cut for the IV regime gate. Matches the backtest evidence
-# exactly (docs/IV_HIGH_ONLY_AB_SPLIT.md: high_iv = DVOL percentile(30d) > 66.7).
+# exactly (docs/archive/IV_HIGH_ONLY_AB_SPLIT.md: high_iv = DVOL percentile(30d) > 66.7).
 IV_HIGH_PCT = 66.7
 
 
@@ -200,7 +200,7 @@ def classify_iv(
     """Shadow-gate decision: ``high_iv`` / ``low_iv`` / ``unknown``.
 
     ``high_iv`` = trailing-30d DVOL percentile strictly above the threshold
-    (the backtest gate in docs/IV_HIGH_ONLY_AB_SPLIT.md). ``None`` (no DVOL
+    (the backtest gate in docs/archive/IV_HIGH_ONLY_AB_SPLIT.md). ``None`` (no DVOL
     history yet) is ``unknown`` and must never be treated as a block.
     """
     if percentile is None:

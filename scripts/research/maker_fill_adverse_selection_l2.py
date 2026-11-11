@@ -53,7 +53,7 @@ RESEARCH_DB = ROOT / "data" / "research" / "hyperliquid.db"
 LIVE_DB = ROOT / "data" / "live" / "bot.db"
 L2_BOOKS_DIR = ROOT / "data" / "research" / "l2_books"
 OUT_JSON = ROOT / "data" / "backtests" / "maker_fill_adverse_selection_l2.json"
-OUT_DOC = ROOT / "docs" / "MAKER_FILL_ADVERSE_SELECTION_L2.md"
+OUT_DOC = ROOT / "docs" / "archive" / "MAKER_FILL_ADVERSE_SELECTION_L2.md"
 
 SYMBOLS_DEFAULT = ["BTC", "ETH", "SOL", "HYPE"]
 HOLD_BARS = 4  # 1h on 15m grid

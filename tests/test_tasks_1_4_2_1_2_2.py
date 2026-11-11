@@ -16,7 +16,7 @@ from src.data.orderbook_metrics import estimate_slippage, calculate_fill_ratio, 
 # HlOrderbook and HlPriceLevel removed — they no longer exist in the codebase.
 # Use src.data.orderbook_metrics.PriceLevel if needed.
 from src.strategies.trend_follow import TrendFollow
-from src.strategies.mean_reversion import MeanReversion
+from archive.strategies_closed.mean_reversion import MeanReversion
 from datetime import datetime, timezone
 import time
 import pytest

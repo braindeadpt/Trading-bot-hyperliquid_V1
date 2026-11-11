@@ -2,7 +2,7 @@
 
 Scans ``data/research/overnight_experiments/*.json`` artifacts produced in
 the trailing 7 days and appends a compact digest entry to
-``docs/OVERNIGHT_WEEKLY_DIGEST.md`` (append-only — same discipline as the
+``docs/ops/OVERNIGHT_WEEKLY_DIGEST.md`` (append-only — same discipline as the
 research log: entries are never edited, only added).
 
 Runs standalone or via ``--if-due`` from ``overnight_nightly.py`` — the
@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 ARTIFACT_DIR = ROOT / "data" / "research" / "overnight_experiments"
-DIGEST_PATH = ROOT / "docs" / "OVERNIGHT_WEEKLY_DIGEST.md"
+DIGEST_PATH = ROOT / "docs" / "ops" / "OVERNIGHT_WEEKLY_DIGEST.md"
 STATE_PATH = ROOT / "data" / "research" / "weekly_digest_state.json"
 WEEK_MS = 7 * 86_400_000
 BOT_DB = ROOT / "data" / "live" / "bot.db"

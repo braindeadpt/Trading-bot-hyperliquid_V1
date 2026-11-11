@@ -144,7 +144,7 @@ _FILE_WRITE_RE: re.Pattern[str] = re.compile(
 _SUPPRESSION_RE: re.Pattern[str] = re.compile(r"#\s*audit-ok:\s*([A-Z]+-\d+)\b")
 
 # Accepted HIGH findings baseline — the source of truth for "deliberately
-# accepted HIGH findings" (decisions in docs/SECURITY.md §2.4), tracked by
+# accepted HIGH findings" (decisions in docs/ops/SECURITY.md §2.4), tracked by
 # ``(rule_id, file)`` so line-number edits don't churn the baseline. The CLI
 # flag ``--enforce-baseline`` (always passed by run_pre_push_gate.py and
 # run_ci_tests.py) fails on any HIGH/CRITICAL finding whose pair is NOT here
@@ -162,6 +162,11 @@ ACCEPTED_HIGH_BASELINE: FrozenSet[Tuple[str, str]] = frozenset({
     # are module constants in spec.py; urlopen targets are never
     # caller-controlled.
     ("AUDIT-003", "boros_shadow/boros_client.py"),
+    # resmom_shadow/prices.py — the frozen prereg's declared public
+    # endpoints (HL /info candles+funding, Binance fapi klines) are
+    # module constants in spec.py; urlopen targets are never
+    # caller-controlled.
+    ("AUDIT-003", "resmom_shadow/prices.py"),
 })
 
 
@@ -203,7 +208,7 @@ _ALLOWED_DOMAINS: Tuple[str, ...] = (
     "api.cryptorank.io",
     "api.tokenomist.ai",
     # api.boros.finance + the perp-L2 venues — the boros-shadow prereg's
-    # declared public market-data endpoints (docs/PREREGISTER_BOROS_SPREAD.md
+    # declared public market-data endpoints (docs/ops/PREREGISTER_BOROS_SPREAD.md
     # Phase-1.1/1.2). Public read-only GETs, no keys.
     "api.boros.finance",
     "api.gateio.ws",
@@ -706,7 +711,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--enforce-baseline",
         action="store_true",
         help="fail on HIGH/CRITICAL findings not in the accepted baseline "
-             "(ACCEPTED_HIGH_BASELINE, docs/SECURITY.md §2.4) and on "
+             "(ACCEPTED_HIGH_BASELINE, docs/ops/SECURITY.md §2.4) and on "
              "suppressed HIGHs not mirrored there — the pre-push gate and "
              "the CI trio always pass this",
     )
@@ -751,7 +756,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             for f in unaccepted:
                 logging.error(
                     "UNACCEPTED HIGH %s %s:%d (%s) — not in ACCEPTED_HIGH_BASELINE; "
-                    "remediate, or add with justification to docs/SECURITY.md §2.4",
+                    "remediate, or add with justification to docs/ops/SECURITY.md §2.4",
                     f.rule_id, f.file, f.line, f.message,
                 )
             logging.error(

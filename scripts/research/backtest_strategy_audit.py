@@ -5,7 +5,7 @@ windows that match the data we actually have in bot.db.
 
 Outputs:
   - data/backtests/strategy_audit_<ts>.csv
-  - docs/STRATEGY_AUDIT.md
+  - docs/ops/STRATEGY_AUDIT.md
 
 Usage:
   python scripts/research/backtest_strategy_audit.py
@@ -496,7 +496,7 @@ def main() -> None:
     out_dir = "data/backtests"
     os.makedirs(out_dir, exist_ok=True)
     csv_path = os.path.join(out_dir, f"strategy_audit_{ts}.csv")
-    md_path = "docs/STRATEGY_AUDIT.md"
+    md_path = "docs/ops/STRATEGY_AUDIT.md"
 
     t0 = time.time()
     print(f"Strategy audit: {total} runs, workers={args.workers}")

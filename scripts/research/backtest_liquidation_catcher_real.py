@@ -14,7 +14,7 @@ true` — the production contract) over the 08-09+ window and reports the
 effective manifest, including the per-strategy fidelity tier with
 liquidation provenance.
 
-The real-feed backtest (docs/LIQUIDATION_CATCHER_REAL_BACKTEST.md) exposed a
+The real-feed backtest (docs/archive/LIQUIDATION_CATCHER_REAL_BACKTEST.md) exposed a
 structural loop: the strategy enters at the flush peak and the liquidation
 stop-out (which validates the position side from the SAME window that
 generated the signal) exits ~1 minute later — 16/16 trades at -142.42 USD.

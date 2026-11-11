@@ -240,7 +240,7 @@ def main() -> int:
     ap.add_argument("--symbols", default=",".join(SYMBOLS_DEFAULT))
     ap.add_argument("--n-boot", type=int, default=N_BOOT_DEFAULT)
     ap.add_argument(
-        "--out", type=Path, default=ROOT / "docs" / "FEATURE_SCREENING_TOP_TRADER_BIAS.md"
+        "--out", type=Path, default=ROOT / "docs" / "archive" / "FEATURE_SCREENING_TOP_TRADER_BIAS.md"
     )
     ap.add_argument(
         "--json-out",

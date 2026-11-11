@@ -91,6 +91,7 @@ def _load_persisted_boards(
     the caller surfaces an explicit "evaluation pending" state instead of
     ever running the evaluator in-process).
     """
+    rdb = None
     try:
         rdb = ResearchDatabase(
             ResearchDatabase.resolve_path(cfg), read_only=True
@@ -122,6 +123,12 @@ def _load_persisted_boards(
         return (boards, ts) if boards else None
     except Exception:  # noqa: BLE001 — research DB missing/unreadable
         return None
+    finally:
+        if rdb is not None:
+            try:
+                rdb.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _load_gate_verdict(strategy: str) -> Optional[Dict[str, Any]]:

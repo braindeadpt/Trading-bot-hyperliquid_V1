@@ -17,13 +17,13 @@ permissions:
 
 Canonical references: `research_program.md` (the invariant + verdict schema),
 `data/research/overnight_experiments/QUEUE.md` (what is READY/BLOCKED),
-`docs/OVERNIGHT_RESEARCH_LOG.md` (append-only ledger, morning report on top).
+`docs/ops/OVERNIGHT_RESEARCH_LOG.md` (append-only ledger, morning report on top).
 
 ## Hard invariants — violation means the experiment is BLOCKED, not done
 
 - NEVER edit `config/settings.yaml`, `src/`, `main.py`, `.env`, or the live DB. Variants are CLI flags / config-dict overrides on harness scripts only.
 - NEVER re-register the Fase-10 frozen window, disable `assert_config_matches_preregister`, or bypass `tests/test_config_hash_frozen.py`.
-- NEVER edit strategy code to make a variant look better. If a variant needs code changes → log `NEEDS-CODE` in `docs/RESEARCH_BACKLOG.md` for a human.
+- NEVER edit strategy code to make a variant look better. If a variant needs code changes → log `NEEDS-CODE` in `docs/ops/RESEARCH_BACKLOG.md` for a human.
 - Check config-hash implications (`python -c "from src.utils.config import compute_config_hash; ..."`) before proposing any override that persists.
 
 ## Experiment unit (micro-preregistration — fixed BEFORE running)
@@ -46,4 +46,4 @@ Verdicts are ADVISORY drafts. Promotion runs through shadow + watchdog recheck w
 ## Output
 
 - JSON artifact → `data/research/overnight_experiments/` (gitignored)
-- Ledger block appended to `docs/OVERNIGHT_RESEARCH_LOG.md` — hypothesis, windows, baseline vs variant aggregates, per-window delta, reasons, audit line.
+- Ledger block appended to `docs/ops/OVERNIGHT_RESEARCH_LOG.md` — hypothesis, windows, baseline vs variant aggregates, per-window delta, reasons, audit line.

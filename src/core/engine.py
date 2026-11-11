@@ -1213,7 +1213,13 @@ class TradingEngine:
             self._notify(lambda m=message, lv=level: self._notifier.send_alert(m, lv))
 
     def _on_oms_status_change(self, order_id: str, status: str, record: Dict[str, Any]) -> None:
-        asyncio.create_task(self._handle_oms_status_change(order_id, status, record))
+        task_set = getattr(self, "_oms_callback_tasks", None)
+        if task_set is None:
+            task_set = set()
+            self._oms_callback_tasks = task_set
+        task = asyncio.create_task(self._handle_oms_status_change(order_id, status, record))
+        task_set.add(task)
+        task.add_done_callback(task_set.discard)
 
     def _on_oms_alert(self, event: str, order_id: str, record: Dict[str, Any]) -> None:
         if self._notifier is None:
@@ -1802,8 +1808,13 @@ class TradingEngine:
                 )
                 continue
             last_price = self._latest_price.get(symbol)
-            if last_price is not None:
-                await self._execute_exit(position, last_price.mid, reason="engine_shutdown")
+            fallback_px = (
+                last_price.mid
+                if last_price is not None and getattr(last_price, "mid", 0) > 0
+                else (safe_float(position.current_price) or safe_float(position.entry_price))
+            )
+            if fallback_px > 0:
+                await self._execute_exit(position, fallback_px, reason="engine_shutdown")
             else:
                 logger.warning("No last price for %s during shutdown - skipping close", symbol)
 
@@ -2530,7 +2541,7 @@ class TradingEngine:
         """Shadow-only IV gate: record the high/low-IV decision per routed trade.
 
         Observability only — the IV gate is **not** enforced (the backtest
-        evidence is n=13, INCONCLUSIVE per docs/IV_HIGH_ONLY_AB_SPLIT.md). Each
+        evidence is n=13, INCONCLUSIVE per docs/archive/IV_HIGH_ONLY_AB_SPLIT.md). Each
         routed trade is classified against the trailing DVOL percentile and a
         ``iv_gate_shadow`` decision is persisted, so live can be compared with
         the backtest gate without touching execution. ``None`` percentile (no
@@ -3181,7 +3192,7 @@ class TradingEngine:
         """Return (notional_5m, side_5m, count_5m) from accumulator.
 
         Returns the dominant side by notional.
-        Sum across venues = cross-venue market pressure (see docs/LIQUIDATION_AGGREGATOR.md).
+        Sum across venues = cross-venue market pressure (see docs/ops/LIQUIDATION_AGGREGATOR.md).
         """
         acc = self._liquidation_acc[symbol]
         if not acc["events"]:
@@ -3969,6 +3980,30 @@ class TradingEngine:
             )
             return
 
+        # Persist stop/TP levels for BOTH pending/live and paper trades BEFORE
+        # OMS fill callbacks or restart recovery inspect the trade row.
+        if int(result.trade_id) > 0:
+            try:
+                self._db.enrich_trade_stop_metadata(
+                    trade_id=int(result.trade_id),
+                    stop_loss_price=float(stop_loss_price),
+                    take_profit_price=(
+                        float(take_profit_price) if take_profit_price is not None else None
+                    ),
+                    stop_loss_pct=float(stop_distance_pct),
+                    take_profit_pct=(
+                        float(signal.take_profit_pct)
+                        if signal.take_profit_pct is not None
+                        else None
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to persist stop metadata for trade %s: %s",
+                    result.trade_id,
+                    exc,
+                )
+
         if result.status == "pending":
             logger.info(
                 "Signal PENDING %s %s — live order submitted, awaiting fill (id=%d)",
@@ -4042,28 +4077,6 @@ class TradingEngine:
                 },
             )
             await self._portfolio.add_position(position, cost=total_cost)
-
-            # v3.1.42: persist stop/TP levels for position restore after restart
-            try:
-                self._db.enrich_trade_stop_metadata(
-                    trade_id=int(result.trade_id),
-                    stop_loss_price=float(stop_loss_price),
-                    take_profit_price=(
-                        float(take_profit_price) if take_profit_price is not None else None
-                    ),
-                    stop_loss_pct=float(stop_distance_pct),
-                    take_profit_pct=(
-                        float(signal.take_profit_pct)
-                        if signal.take_profit_pct is not None
-                        else None
-                    ),
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Failed to persist stop metadata for trade %s: %s",
-                    result.trade_id,
-                    exc,
-                )
         else:
             logger.info(
                 "Live entry submitted — portfolio update deferred to OMS fill callback "
@@ -4211,6 +4224,31 @@ class TradingEngine:
                 await self._execute_exit(position, current_price, reason="take_profit")
                 return
 
+        # Orphaned/demoted strategy max-hold fallback: when a strategy (e.g.
+        # JevJudge after its 2026-11-11 kill readout) is removed from the
+        # active strategy roster while open paper trades still drain, enforce its
+        # configured max_hold_hours so positions never linger past horizon.
+        owner_strat = str((position.metadata or {}).get("strategy", ""))
+        active_names = {getattr(s, "name", "") for s in self._strategies}
+        if owner_strat and owner_strat not in active_names and position.entry_time_ms > 0:
+            strat_key_map = {
+                "JevJudge": "strategy.jev_judge.max_hold_hours",
+                "VWAPDeviation": "strategy.vwap_deviation.max_hold_hours",
+                "VolatilityBreakout": "strategy.volatility_breakout.max_hold_hours",
+                "ChecklistMeta": "strategy.checklist_meta.max_hold_hours",
+            }
+            cfg_key = strat_key_map.get(owner_strat)
+            max_hold_h = float(self._config.get(cfg_key, 0.0) or 0.0) if cfg_key else 0.0
+            if max_hold_h > 0:
+                age_ms = int(time.time() * 1000) - int(position.entry_time_ms)
+                if age_ms >= int(max_hold_h * 3_600_000):
+                    await self._execute_exit(
+                        position,
+                        current_price,
+                        reason=f"max_hold_{owner_strat.lower()}_retired",
+                    )
+                    return
+
     async def _maybe_update_trailing_stop(
         self,
         position: Position,
@@ -4247,7 +4285,7 @@ class TradingEngine:
             await self._sync_native_stop(position.symbol, new_stop)
 
     async def _sync_native_stop(self, symbol: str, new_stop: float) -> None:
-        """Resize native SL trigger when trailing stop ratchets (live only)."""
+        """Resize native SL trigger when trailing stop ratchets (live only, throttled)."""
         if not self._native_protection_enabled or self._protection_manager is None:
             return
         if self._mode not in ("testnet", "mainnet"):
@@ -4256,6 +4294,18 @@ class TradingEngine:
         pos = positions.get(symbol)
         if pos is None or not (pos.metadata or {}).get("native_protection_active"):
             return
+        # Throttle live exchange trigger updates to >= 10s and >= 0.10% step
+        # so rapid WS ticks do not burn Hyperliquid's signed action quota.
+        trail_state = self._trailing_data.setdefault(symbol, {})
+        now_s = time.time()
+        last_sync_s = float(trail_state.get("last_native_sync_s", 0.0))
+        last_synced_stop = float(trail_state.get("last_native_stop", 0.0))
+        if last_sync_s > 0 and (now_s - last_sync_s) < 10.0:
+            return
+        if last_synced_stop > 0 and abs(new_stop - last_synced_stop) / last_synced_stop < 0.001:
+            return
+        trail_state["last_native_sync_s"] = now_s
+        trail_state["last_native_stop"] = float(new_stop)
         trade_id = (pos.metadata or {}).get("trade_id")
         await self._protection_manager.ensure_protection(
             pos,
@@ -4464,11 +4514,16 @@ class TradingEngine:
                     if current is None:
                         continue
                     tick = self._latest_price.get(sym)
-                    if tick is None or tick.mid <= 0:
+                    exit_px = (
+                        tick.mid
+                        if tick is not None and tick.mid > 0
+                        else (safe_float(current.current_price) or safe_float(current.entry_price))
+                    )
+                    if exit_px <= 0:
                         logger.warning("No price for %s — skipping flatten", sym)
                         continue
                     await self._execute_exit(
-                        current, tick.mid, reason=f"flatten:{reason}",
+                        current, exit_px, reason=f"flatten:{reason}",
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Flatten failed for %s: %s", sym, exc)
@@ -4558,6 +4613,10 @@ class TradingEngine:
         current = await self._portfolio.positions
         for trade in list(self._executor._open_trades.values()):
             if trade.symbol in current:
+                if hasattr(self._portfolio, "ensure_entry_fee_debited"):
+                    await self._portfolio.ensure_entry_fee_debited(
+                        trade.symbol, safe_float(getattr(trade, "entry_fee", 0.0))
+                    )
                 logger.debug(
                     "Open trade %s already in portfolio — skip restore",
                     trade.symbol,
@@ -4661,6 +4720,30 @@ class TradingEngine:
                             self._latest_candles[symbol][tf_s] = candles[-1]
                             if tf_s == 900:
                                 self._candles_15m_history[symbol].extend(candles)
+                                # Seed correlation monitor & ADX regime so restart has zero fail-open blind window
+                                for idx in range(1, len(candles)):
+                                    prev_c = float(candles[idx - 1].close)
+                                    curr_c = float(candles[idx].close)
+                                    if prev_c > 0 and curr_c > 0:
+                                        self._correlation_monitor.add_candle_return(
+                                            symbol, prev_c, curr_c
+                                        )
+                                self._last_candle_close[symbol] = float(candles[-1].close)
+                                hist = self._candles_15m_history[symbol]
+                                if len(hist) >= 2 * self._adx_period + 1:
+                                    from src.strategies.indicators import calculate_adx
+
+                                    adx_val = calculate_adx(list(hist), self._adx_period)
+                                    if adx_val is not None:
+                                        self._latest_adx[symbol] = adx_val
+                            elif tf_s == 3600:
+                                # Seed 1h ATR baseline into VolatilityCircuitBreaker on boot
+                                for c_1h in candles:
+                                    if c_1h.high > 0 and c_1h.low > 0 and c_1h.close > 0:
+                                        atr_proxy = (c_1h.high - c_1h.low) / c_1h.close
+                                        self._vol_circuit.update(
+                                            symbol, atr_proxy, int(c_1h.timestamp_ms)
+                                        )
                             self._inject_candles(symbol, tf_s, candles, all_strategies)
                             if self._shadow_strategies:
                                 closed = [

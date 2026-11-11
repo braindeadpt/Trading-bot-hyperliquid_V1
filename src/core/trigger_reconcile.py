@@ -223,7 +223,12 @@ def compute_realized_pnl(
     """Return (pnl_usd, pnl_pct_notional)."""
     notional = entry_price * size
     if abs(closed_pnl_exchange) > 1e-12:
-        pnl_usd = closed_pnl_exchange - safe_float(exit_fee)
+        # Hyperliquid's closing-fill closedPnl is gross of both entry and exit fees.
+        pnl_usd = (
+            closed_pnl_exchange
+            - safe_float(entry_fee)
+            - safe_float(exit_fee)
+        )
     elif side == "long":
         pnl_usd = (exit_price - entry_price) * size - entry_fee - exit_fee
     else:

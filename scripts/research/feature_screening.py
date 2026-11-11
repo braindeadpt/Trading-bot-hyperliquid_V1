@@ -981,7 +981,7 @@ def main() -> int:
     ap.add_argument(
         "--report",
         type=Path,
-        default=ROOT / "docs" / "FEATURE_SCREENING_REPORT.md",
+        default=ROOT / "docs" / "archive" / "FEATURE_SCREENING_REPORT.md",
     )
     ap.add_argument(
         "--symbols",

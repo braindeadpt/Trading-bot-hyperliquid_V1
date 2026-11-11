@@ -896,7 +896,7 @@ _CARRY_SHADOW_STALE_S = 600.0  # heartbeat cadence 60s; red past 10min
 def _carry_shadow_status() -> Optional[Dict[str, Any]]:
     """Carry-shadow daemon heartbeat — read-only against its own ledger DB.
 
-    The daemon (separate process, per docs/PREREGISTER_CARRY_SHADOW.md)
+    The daemon (separate process, per docs/ops/PREREGISTER_CARRY_SHADOW.md)
     writes meta['heartbeat_ms'] every 60s. Surfaced in the feed_silence map
     as a pseudo-feed row so the ops panel colors it like any silent feed —
     degraded past 10min without heartbeat, or when the experiment died.
@@ -1246,6 +1246,25 @@ def _feed_silence_imminent(feed_silence: Dict[str, Any]) -> bool:
     )
 
 
+def _is_cb_tripped(risk_obj: Any) -> bool:
+    """Resolve RiskManager circuit-breaker state safely across real/mock objects."""
+    if risk_obj is None:
+        return False
+    fn = getattr(risk_obj, "is_circuit_breaker_tripped", None)
+    if callable(fn):
+        try:
+            return bool(fn())
+        except Exception:  # noqa: BLE001
+            pass
+    return bool(
+        getattr(
+            risk_obj,
+            "circuit_breaker_tripped",
+            getattr(risk_obj, "_circuit_breaker_tripped", False),
+        )
+    )
+
+
 def _is_direct_local_request() -> bool:
     """True only for direct loopback hits — never for proxied traffic.
 
@@ -1527,7 +1546,7 @@ def _engine_monitor_payload(engine: Any) -> Dict[str, Any]:
     funding_blackout_active = bool(
         fb.is_blocked(int(time.time() * 1000)) if fb is not None else False
     )
-    circuit_breaker = bool(getattr(risk, "circuit_breaker_tripped", False)) if risk else False
+    circuit_breaker = _is_cb_tripped(risk)
 
     return {
         "ticks_per_second": stats.get("per_second", 0),
@@ -1684,7 +1703,7 @@ class DashboardEmitter:
             "mode": getattr(_engine, "_config", {}).get("mode", "paper") if hasattr(_engine, "_config") else "paper",
             "uptime_sec": getattr(_engine, "uptime_sec", 0),
             "memory_mb": getattr(_engine, "memory_mb", 0),
-            "circuit_breaker": "ON" if getattr(getattr(_engine, "_risk", None), "circuit_breaker_tripped", False) else "OFF",
+            "circuit_breaker": "ON" if _is_cb_tripped(getattr(_engine, "_risk", None)) else "OFF",
             "running": getattr(_engine, "_running", False),
             "ws_healthy": ws_healthy,
         })
@@ -2086,6 +2105,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
         cors_allowed_origins=allowed_origins,
         async_mode="threading",
         ping_timeout=60,
+        allow_upgrades=False,
     )
 
     global _socketio
@@ -2196,7 +2216,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
         body: Dict[str, Any] = {"status": "ok"}
         if _engine is not None:
             last_tick = getattr(_engine, "last_tick_age_sec", None)
-            cb = getattr(getattr(_engine, "_risk", None), "circuit_breaker_tripped", False)
+            cb = _is_cb_tripped(getattr(_engine, "_risk", None))
             running = getattr(_engine, "_running", False)
             data_bus_lag = None
             bus = getattr(_engine, "_bus", None)
@@ -2266,7 +2286,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
             "mode": getattr(_engine, "_config", {}).get("mode", "paper") if hasattr(_engine, "_config") else "paper",
             "uptime": getattr(_engine, "uptime_sec", 0),
             "memory_mb": getattr(_engine, "memory_mb", 0),
-            "circuit_breaker": "ON" if getattr(getattr(_engine, "_risk", None), "circuit_breaker_tripped", False) else "OFF",
+            "circuit_breaker": "ON" if _is_cb_tripped(getattr(_engine, "_risk", None)) else "OFF",
             "running": getattr(_engine, "_running", False),
         })
 
@@ -2605,6 +2625,150 @@ def create_app(config: Dict[str, Any]) -> tuple:
             payload = {"hypotheses": [], "error": str(exc)[:200]}
         return jsonify(_ttl_put("hypotheses", payload, _RESEARCH_CACHE_TTL_S))
 
+    @app.route("/api/paper_ledger")
+    def api_paper_ledger():
+        """Unified paper ledger — every strategy/experiment, one schema:
+        prereg state, n vs readout n, readout date, net PnL."""
+        cached = _ttl_get("paper_ledger")
+        if cached is not None:
+            return jsonify(cached)
+        try:
+            from src.research.paper_ledger import (
+                build_paper_ledger_payload)
+            payload = build_paper_ledger_payload()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("paper_ledger failed: %s", exc)
+            payload = {"rows": [], "error": str(exc)[:200]}
+        return jsonify(_ttl_put(
+            "paper_ledger", payload, _RESEARCH_CACHE_TTL_S))
+
+    @app.route("/api/paper_strategies")
+    def api_paper_strategies():
+        """Strategy cards — unified ledger read (paper_trades layer)."""
+        cached = _ttl_get("paper_strategies")
+        if cached is not None:
+            return jsonify(cached)
+        try:
+            from src.research.paper_trades import (
+                build_strategies_payload)
+            payload = build_strategies_payload()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("paper_strategies failed: %s", exc)
+            payload = {"rows": [], "error": str(exc)[:200]}
+        return jsonify(_ttl_put(
+            "paper_strategies", payload, _RESEARCH_CACHE_TTL_S))
+
+    @app.route("/api/paper_strategy/<sid>")
+    def api_paper_strategy(sid):
+        """Per-strategy drill-down — open positions, closed trades,
+        equity + drawdown. Read-only, safe to call with no engine."""
+        cached = _ttl_get(f"paper_strategy:{sid}")
+        if cached is not None:
+            return jsonify(cached)
+        try:
+            from src.research.paper_trades import build_strategy_detail
+            payload = build_strategy_detail(sid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("paper_strategy %s failed: %s", sid, exc)
+            payload = {"id": sid, "error": str(exc)[:200],
+                       "open": [], "closed": [], "equity": [], "dd": []}
+        return jsonify(_ttl_put(
+            f"paper_strategy:{sid}", payload, _RESEARCH_CACHE_TTL_S))
+
+    @app.route("/api/paper_trades_feed")
+    def api_paper_trades_feed():
+        """Merged closed-trade feed across every strategy ledger."""
+        cached = _ttl_get("paper_trades_feed")
+        if cached is not None:
+            return jsonify(cached)
+        try:
+            limit = int(request.args.get("limit", "60"))
+        except ValueError:
+            limit = 60
+        try:
+            from src.research.paper_trades import build_trades_feed
+            payload = {"rows": build_trades_feed(limit)}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("paper_trades_feed failed: %s", exc)
+            payload = {"rows": [], "error": str(exc)[:200]}
+        return jsonify(_ttl_put(
+            "paper_trades_feed", payload, _MD_HEALTH_TTL_S))
+
+    @app.route("/api/topbar")
+    def api_topbar():
+        """Health strip — live prices + candle age, feed latency, disk
+        usage and healthchecks.io service count. DB-driven so it works
+        without a live engine (scratch/read-only deployments)."""
+        cached = _ttl_get("topbar")
+        if cached is not None:
+            return jsonify(cached)
+        import shutil
+        payload: Dict[str, Any] = {"prices": {}, "services": None,
+                                   "disk_pct": None, "candle_age_s": None}
+        try:
+            import sqlite3 as _sq
+            db_path = ROOT / "data" / "live" / "bot.db"
+            con = _sq.connect(f"file:{db_path}?mode=ro", uri=True,
+                              timeout=2.0)
+            con.row_factory = _sq.Row
+            try:
+                now_ms = int(time.time() * 1000)
+                ages = []
+                for r in con.execute(
+                        "SELECT symbol, close, MAX(timestamp_ms) ts"
+                        " FROM candles_1m GROUP BY symbol").fetchall():
+                    age_s = max(0, int((now_ms - int(r["ts"])) / 1000))
+                    ages.append(age_s)
+                    payload["prices"][r["symbol"]] = {
+                        "close": r["close"], "age_s": age_s}
+                if ages:
+                    payload["candle_age_s"] = max(ages)
+            finally:
+                con.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("topbar candles failed: %s", exc)
+        try:
+            usage = shutil.disk_usage(str(ROOT / "data"))
+            payload["disk_pct"] = round(usage.used / usage.total * 100.0, 1)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            # Services = the 7 data-writing services this dashboard can
+            # observe directly: engine (tick age) + the 6 ledger writers
+            # (jev/carry/unlock/boros/resmom/ivgate card states).
+            from src.research.paper_trades import build_strategies_payload
+            cards = build_strategies_payload().get("rows", [])
+            active_cards = [c for c in cards if c.get("state") != "closed"]
+            ok = sum(1 for c in active_cards if c.get("state") != "error")
+            engine_ok = 0
+            if _engine is not None:
+                try:
+                    tick = getattr(_engine, "last_tick_age_sec", None)
+                    if tick is not None and float(tick) < 120.0:
+                        engine_ok = 1
+                except (TypeError, ValueError):
+                    pass
+            else:
+                # Read-only/scratch deployments: fresh candles stand in
+                # for engine liveness.
+                ca = payload.get("candle_age_s")
+                engine_ok = 1 if ca is not None and ca < 300 else 0
+            payload["services"] = {"ok": ok + engine_ok,
+                                   "total": len(active_cards) + 1}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("topbar services failed: %s", exc)
+        try:
+            if _engine is not None:
+                last_events = getattr(_engine, "_last_market_events", {})
+                ages_ms = [
+                    int((time.time() - e.get("processed_at", 0)) * 1000)
+                    for e in last_events.values() if e.get("processed_at")]
+                if ages_ms:
+                    payload["feed_age_ms"] = min(ages_ms)
+        except Exception:  # noqa: BLE001
+            pass
+        return jsonify(_ttl_put("topbar", payload, 15))
+
     @app.route("/api/execution_pnl")
     def api_execution_pnl():
         """Net-PnL decomposition (gross/fees/slippage/funding/net) for the
@@ -2656,7 +2820,7 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
         Read-only research-feed data — never touches execution. BTC/ETH use
         their own Deribit index; SOL/HYPE classify against BTC (global proxy),
-        mirroring the backtest evidence (docs/IV_HIGH_ONLY_AB_SPLIT.md).
+        mirroring the backtest evidence (docs/archive/IV_HIGH_ONLY_AB_SPLIT.md).
         """
         cached = _ttl_get("dvol")
         if cached is not None:
@@ -3078,5 +3242,10 @@ def create_app(config: Dict[str, Any]) -> tuple:
     @socketio.on("disconnect")
     def on_disconnect(reason=None):
         logger.info("Dashboard client disconnected: %s", reason)
+
+    @socketio.on("ping")
+    def on_ping():
+        # Client measures RTT via the ack callback (latency badge).
+        return "pong"
 
     return app, socketio, emitter._emit_all

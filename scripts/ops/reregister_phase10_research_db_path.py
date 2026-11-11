@@ -42,7 +42,7 @@ from src.research.phase10_preregister import (  # noqa: E402
 )
 from src.utils.config import Config, compute_config_hash, load_config  # noqa: E402
 
-REREG_REASON = ("research data-collection change only — research.database excluded from the config hash BY PATH (a bare `database` key also exists at top level for the operational DB and must stay frozen; research strict_mode / min_coverage_pct / gap_intervals remain hashed). The 3.8 GB research DB moves to the E: HDD per docs/DATA_ARCHITECTURE.md. No strategy, risk, fee or execution_strategies change. OOS window PRESERVED.")
+REREG_REASON = ("research data-collection change only — research.database excluded from the config hash BY PATH (a bare `database` key also exists at top level for the operational DB and must stay frozen; research strict_mode / min_coverage_pct / gap_intervals remain hashed). The 3.8 GB research DB moves to the E: HDD per docs/ops/DATA_ARCHITECTURE.md. No strategy, risk, fee or execution_strategies change. OOS window PRESERVED.")
 IN_SAMPLE_NOTE = ("Research DB relocation only. VWAPDeviation remains the sole paper execution control (INCONCLUSIVE sample). No promotion; mainnet still blocked. Accumulated OOS evidence intentionally retained.")
 
 EXPECTED_PATH_PREFIX = "E:"

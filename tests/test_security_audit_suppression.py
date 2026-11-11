@@ -1,6 +1,6 @@
 """Tests for the ``# audit-ok`` suppression mechanism + the closed audit.
 
-Decisions closed on 2026-08-13 (docs/SECURITY.md §2.4):
+Decisions closed on 2026-08-13 (docs/ops/SECURITY.md §2.4):
 
   * AUDIT-004 (file write, MEDIUM) in ``top_trader_tracker.py`` — REMEDIATED:
     the direct ``path.write_text`` was replaced by the atomic

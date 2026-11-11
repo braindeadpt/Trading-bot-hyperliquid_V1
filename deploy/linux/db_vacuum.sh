@@ -18,6 +18,6 @@ for db in "$DATA_ROOT/research/hyperliquid.db" "$DATA_ROOT/live/bot.db"; do
         continue
     fi
     echo "db_vacuum: VACUUM $db ($(numfmt --to=iec "$((size_kb*1024))"))"
-    sqlite3 "$db" "PRAGMA journal_size_limit=$JSL; VACUUM;"
+    sqlite3 "$db" "PRAGMA busy_timeout=30000; PRAGMA journal_size_limit=$JSL; VACUUM;"
     echo "db_vacuum: done $db"
 done

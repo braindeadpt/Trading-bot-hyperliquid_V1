@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A1 feasibility — delta-neutral spot–perp funding carry, maker entry.
 
-Implements docs/PREREGISTER_SPOTPERP_CARRY_2026-10-06.md EXACTLY:
+Implements docs/archive/PREREGISTER_SPOTPERP_CARRY_2026-10-06.md EXACTLY:
   * universe: HL spot base/USDC pairs mapping to a perp (name match or
     'U'+perp unit wrapper), PIT liquidity gates (spot median 30d daily
     notional >= $100k, perp >= $1M, >=30d dual history)

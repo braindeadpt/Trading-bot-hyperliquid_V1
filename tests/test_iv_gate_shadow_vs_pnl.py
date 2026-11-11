@@ -1,6 +1,6 @@
 """Tests for scripts/research/iv_gate_shadow_vs_pnl.py — live high_iv vs low_iv comparison.
 
-The IV gate is shadow-only (docs/IV_HIGH_ONLY_AB_SPLIT.md, n=13 INCONCLUSIVE):
+The IV gate is shadow-only (docs/archive/IV_HIGH_ONLY_AB_SPLIT.md, n=13 INCONCLUSIVE):
 the router records an ``iv_gate_shadow`` decision per routed trade (research
 DB, IV class in snapshot metadata) *before* execution. This script joins those
 decisions to executed trades (live DB, key strategy+symbol+side + nearest
