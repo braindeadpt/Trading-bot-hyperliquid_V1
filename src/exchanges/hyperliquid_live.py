@@ -371,6 +371,14 @@ class HyperliquidLiveClient:
         _meta_cache.clear()
         logger.info("HyperliquidLiveClient closed")
 
+    def _get_action_lock(self) -> asyncio.Lock:
+        """Lazily return the action lock (supports bare ``__new__`` test instances)."""
+        lock = getattr(self, "_action_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._action_lock = lock
+        return lock
+
     def _build_cloid_obj(self, cloid_hex: Optional[str]) -> Any:
         """Convert a ``0x`` + 32-hex string into ``hyperliquid.utils.types.Cloid``."""
         if not cloid_hex:
@@ -395,7 +403,7 @@ class HyperliquidLiveClient:
     ) -> Any:
         """Invoke ``self._exchange.order`` under the nonce/session lock."""
         cloid_obj = self._build_cloid_obj(cloid)
-        async with self._action_lock:
+        async with self._get_action_lock():
             if cloid_obj is not None:
                 try:
                     return await asyncio.to_thread(
@@ -507,7 +515,7 @@ class HyperliquidLiveClient:
                 raise ValueError(
                     f"Order notional ${sz * safe_float(limit_price):.2f} below Hyperliquid ${MIN_ORDER_NOTIONAL_USD:.0f} minimum for {symbol}"
                 )
-            async with self._action_lock:
+            async with self._get_action_lock():
                 result = await asyncio.to_thread(
                     self._exchange.market_open,
                     coin,
@@ -622,7 +630,7 @@ class HyperliquidLiveClient:
             )
         else:
             coin = resolve_wire_coin(symbol)
-            async with self._action_lock:
+            async with self._get_action_lock():
                 result = await asyncio.to_thread(
                     self._exchange.market_close,
                     coin,
@@ -651,7 +659,7 @@ class HyperliquidLiveClient:
             raise ValueError(f"Invalid order_id for {symbol}: {order_id}")
 
         coin = resolve_wire_coin(symbol)
-        async with self._action_lock:
+        async with self._get_action_lock():
             result = await asyncio.to_thread(
                 self._exchange.cancel,
                 coin,
@@ -923,7 +931,7 @@ class HyperliquidLiveClient:
         max_lev = int(info.get("max_leverage", 50)) if info else 50
         eff_lev = max(1, min(int(leverage), max_lev))
         coin = resolve_wire_coin(symbol)
-        async with self._action_lock:
+        async with self._get_action_lock():
             result = await asyncio.to_thread(fn, eff_lev, coin, bool(is_cross))
         logger.info("HL update_leverage %s lev=%dx cross=%s: %s", symbol, eff_lev, is_cross, result)
         return result if isinstance(result, dict) else {"raw": result}
@@ -939,7 +947,7 @@ class HyperliquidLiveClient:
         fn = getattr(self._exchange, "schedule_cancel", None)
         if not callable(fn):
             return {"status": "unsupported"}
-        async with self._action_lock:
+        async with self._get_action_lock():
             result = await asyncio.to_thread(fn, cancel_time_ms)
         return result if isinstance(result, dict) else {"raw": result}
 
@@ -956,7 +964,7 @@ class HyperliquidLiveClient:
         fn = getattr(self._exchange, "agent_set_abstraction", None)
         if not callable(fn):
             return {"status": "unsupported"}
-        async with self._action_lock:
+        async with self._get_action_lock():
             result = await asyncio.to_thread(fn, abstraction)
         logger.info("HL agent_set_abstraction(%s): %s", abstraction, result)
         return result if isinstance(result, dict) else {"raw": result}
@@ -976,7 +984,7 @@ class HyperliquidLiveClient:
         fn = getattr(self._exchange, "usd_class_transfer", None)
         if not callable(fn):
             return {"status": "unsupported"}
-        async with self._action_lock:
+        async with self._get_action_lock():
             result = await asyncio.to_thread(fn, amt, bool(to_perp))
         logger.info("HL usd_class_transfer amount=%.2f to_perp=%s: %s", amt, to_perp, result)
         return result if isinstance(result, dict) else {"raw": result}
