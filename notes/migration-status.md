@@ -3,7 +3,17 @@
 Single source of truth for the Linux deployment state. Updated at each
 gate. Mac remains production until Pedro approves cutover explicitly.
 
-## Current state (2026-10-31)
+## Current state (2026-11-11)
+
+- Host repo (`/srv/hl/app/repo`): `0b33923` (`feat/post-cutover`, merged into `main` via PR #14 `e951943`)
+- Image: `hyperliquid-bot:local` = `93664545eb96` (built at `0b33923`); pre-deploy rollback tag `hyperliquid-bot:pre-0b33923` (and `pre-jev-kill`) kept on host
+- `config_hash` = `9e9a6c37d02a1331` (re-registered 2026-11-11 via `scripts/ops/reregister_jev_kill_20261111.py`, experiment_id `460f7253-d1f2-42c9-9922-a8b436469498`)
+- **JevJudge KILLED (2026-11-11):** final preregistered readout (`PREREGISTER_JEV_OOS_KILL_2026-10-08.md`) reached `indep_n = 325 >= 100`, `net PF = 0.8373 <= 1.0` (`-$679.35 USD`). `strategy.jev_judge.enabled = false`, `execution_strategies = []`, `hl-jev-judge` stopped/removed and gated under `profiles: ["killed"]`.
+- **`unlock_shadow.db` WAL + zlib compaction (2026-11-11):** compacted `2.5 GB -> 205 MB` (`PRAGMA integrity_check = ok`), cryptographic readout verified **`1724/1724` snapshots with `0` `sha256` mismatches**.
+- Host hardening applied: `/etc/audit/rules.d/oficina.rules` narrowed from `-w /srv -p wa` to `/srv/hl/secrets` + `/etc/hyperliquid` (load average `1.97 -> 0.20`), `hl-db-vacuum.service` set to `User=101000`, `hl-backup.sh` excludes `/etc/hyperliquid/bot.env`, `hl-watchdogs` report dirs fixed.
+- Mainnet & `src/multileg/` status: **inert and frozen** — zero live executors, zero HL keys on `bots-01`, Mainnet blocked pending a formal forward preregistered `PASS`.
+
+### Prior state (2026-10-31)
 
 - Host repo: `bf06b2d` (deploy package `eb2ee09 + 42a7161 + bf06b2d`)
 - Installed host scripts match repo:
@@ -214,8 +224,9 @@ contracted feeds fresh"**, compose diff clean (0 leftover edits).
 - [x] 1h smoke — **PASS**
 - [x] Manual backup + full restore + integrity — **PASS**
 - [x] **Cutover Mac → bots-01 — EXECUTED 2026-11-01** (window 76min > 30min meta → Amendment 1 record)
-- [ ] Post-cutover soak #3 (24h) + 72h Mac freeze before any Mac cleanup
-- [ ] PR #6 merge — **blocked pending new Pedro OK**
+- [x] Post-cutover soak #3 (24h+) — **PASS** (7d continuous run verified 2026-11-11, `restarts=0`, `OOMKilled=false`)
+- [x] PR #6 merge — **MERGED** (`2026-10-27`)
+- [x] **Deploy `0b33923` + JevJudge KILL (`config_hash = 9e9a6c37d02a1331`) + `unlock_shadow.db` sha256 `1724/1724` verified (`2026-11-11`)**
 
 ## Post-mortem — cutover 2026-11-01 (window 1h16m07s vs meta 30 min)
 
