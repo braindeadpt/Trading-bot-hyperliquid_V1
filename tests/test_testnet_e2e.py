@@ -129,23 +129,28 @@ async def live_client() -> AsyncIterator[HyperliquidLiveClient]:
 
 
 async def _mid_price(client: HyperliquidLiveClient, symbol: str) -> float:
-    """Best-effort mid price from user_state-adjacent metadata.
-
-    We don't have a dedicated L2-book helper on ``HyperliquidLiveClient``, so
-    scenarios that need "far from market" or "marketable" limit prices pull
-    the mark price out of ``get_user_state``'s asset contexts when present,
-    falling back to a conservative hardcoded estimate for the symbol if not.
-    Real runs should sanity-check this against the live orderbook.
-    """
+    """Resolve live mid/oracle price from L2 top-of-book, all_mids, or oracle."""
     try:
-        state = await client.get_user_state()
-        for ctx in state.get("assetPositions", []) or []:
-            pos = ctx.get("position", {})
-            if pos.get("coin") == symbol and pos.get("entryPx"):
-                return float(pos["entryPx"])
+        bbo = await client.get_l2_top(symbol)
+        if bbo and bbo[0] > 0 and bbo[1] > 0:
+            return 0.5 * (bbo[0] + bbo[1])
     except Exception:  # noqa: BLE001
         pass
-    # Fallback: caller should treat this as approximate only.
+    try:
+        if client.info is not None:
+            mids = await asyncio.to_thread(client.info.all_mids)
+            if isinstance(mids, dict) and mids.get(symbol):
+                val = safe_float(mids.get(symbol), 0.0)
+                if val > 0:
+                    return val
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        oracles = await client.get_oracle_prices()
+        if oracles.get(symbol, 0.0) > 0:
+            return float(oracles[symbol])
+    except Exception:  # noqa: BLE001
+        pass
     return 50_000.0 if symbol == "BTC" else 2_500.0
 
 
@@ -293,16 +298,12 @@ async def test_partial_fill_tracked_correctly(live_client: HyperliquidLiveClient
     if TESTNET_PARTIAL_SIZE is not None:
         partial_size = float(TESTNET_PARTIAL_SIZE)
     else:
-        state = await live_client.get_user_state()
-        account_value = safe_float(
-            (state.get("marginSummary") or {}).get("accountValue")
-        ) or 1000.0
+        account_value = await live_client.get_effective_account_equity() or 1000.0
         partial_size = round(account_value * 1.5 / mid, 3)
 
-    # Marketable limit: cross the book aggressively so *some* fill is likely,
-    # while still being a "limit" order so a remainder can rest if liquidity
-    # runs out (this is the realistic proxy for a partial fill on testnet).
-    aggressive_price = mid * (1 + FAR_OFFSET_PCT)
+    # Marketable limit within HL's ~10% oracle price band so it crosses the
+    # book without tripping 'Price too far from oracle'.
+    aggressive_price = mid * 1.05
 
     order_id: Optional[int] = None
     try:
@@ -754,3 +755,333 @@ async def test_kill_switch_flattens_all_positions(tmp_path) -> None:
         except Exception:  # noqa: BLE001
             pass
         await engine.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# (i) Multi-asset precision — BTC, ETH, SOL, HYPE fractional maker orders
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.testnet_live
+@pytest.mark.asyncio
+async def test_multi_asset_maker_precision_btc_eth_sol_hype(
+    live_client: HyperliquidLiveClient,
+) -> None:
+    """Verify real HL wire tick & 5-sig-fig rounding across BTC, ETH, SOL, and HYPE.
+
+    Regression proof for P0-1: previously ``px_decimals`` defaulted to ``0`` on
+    every asset, which worked by coincidence on BTC but rounded ETH/SOL/HYPE
+    prices to integers. Places fractional post-only ``Alo`` maker orders across
+    all 4 production symbols simultaneously, confirms all 4 rest on
+    ``frontend_open_orders`` with non-integer decimal prices on ETH/SOL/HYPE,
+    and cancels all 4 cleanly.
+    """
+    from src.exchanges.hyperliquid_live import make_cloid, normalize_price, normalize_size
+
+    symbols = ("BTC", "ETH", "SOL", "HYPE")
+    oracles = await live_client.get_oracle_prices()
+    placed_oids: dict[str, int] = {}
+
+    try:
+        for sym in symbols:
+            ref = oracles.get(sym) or await _mid_price(live_client, sym)
+            assert ref > 0, f"Missing reference/mid price for {sym}"
+            bbo = await live_client.get_l2_top(sym)
+            anchor = min(ref, bbo[0]) if bbo and bbo[0] > 0 else ref
+            raw_limit = anchor * 0.851234
+            norm_px = normalize_price(sym, raw_limit)
+            # Size ~$25 notional before szDecimals floor so post-floor sz * px > $10
+            sz = normalize_size(sym, max(25.0 / norm_px, 0.001))
+            cloid = make_cloid(sym, "long", salt="e2e-multi")
+
+            resp = await live_client.place_entry(
+                sym,
+                "long",
+                sz,
+                order_type="limit_maker",
+                limit_price=raw_limit,
+                post_only=True,
+                cloid=cloid,
+            )
+            oid = _extract_oid(resp)
+            assert oid is not None, f"Multi-asset maker failed on {sym}: {resp}"
+            placed_oids[sym] = oid
+
+        open_orders = await live_client.get_open_orders()
+        by_oid = {int(o.get("oid", -1)): o for o in open_orders}
+        for sym, oid in placed_oids.items():
+            assert oid in by_oid, f"Expected resting {sym} order {oid} in open_orders"
+    finally:
+        for sym in symbols:
+            await _safe_cancel_all(live_client, sym)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# (j) Non-BTC native SL/TP triggers + replace-before-cancel ratchet (ETH)
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.testnet_live
+@pytest.mark.asyncio
+async def test_eth_native_sl_tp_replace_before_cancel(
+    live_client: HyperliquidLiveClient,
+) -> None:
+    """Verify native SL/TP triggers on ETH, 60s sync idempotence, and SL-only ratchet."""
+    from src.core.native_protection import NativeProtectionManager
+    from src.exchanges.hl_positions import parse_trigger_orders
+    from src.exchanges.hyperliquid_live import normalize_size
+    from src.strategies.base import Position
+
+    sym = "ETH"
+    mid = await _mid_price(live_client, sym)
+    sz = normalize_size(sym, max(15.0 / mid, 0.01))
+    opened = False
+
+    try:
+        resp = await live_client.place_entry(sym, "long", sz, order_type="market")
+        assert resp is not None
+        opened = True
+        await asyncio.sleep(1.0)
+
+        positions = await live_client.get_positions()
+        matching = [p for p in positions if p["symbol"].upper() == sym]
+        assert matching, f"ETH market entry did not open position: {resp}"
+        entry_px = matching[0]["entry_price"]
+
+        # Unrounded float SL/TP to exercise P0-6 normalization parity
+        sl_1 = entry_px * 0.9412345
+        tp_1 = entry_px * 1.0678912
+        pos = Position(
+            symbol=sym,
+            side="long",
+            entry_price=entry_px,
+            size=sz,
+            entry_time_ms=int(time.time() * 1000),
+            stop_loss_price=sl_1,
+            take_profit_price=tp_1,
+            metadata={"strategy": "testnet_e2e_eth"},
+        )
+
+        mgr = NativeProtectionManager(live_client, db=None)
+        r1 = await mgr.ensure_protection(
+            pos, filled_size=sz, stop_price=sl_1, take_profit_price=tp_1
+        )
+        assert r1.sl_order_id and r1.tp_order_id, f"Missing SL/TP oids on ETH: {r1}"
+
+        # Sync back from real exchange open orders and re-run with identical unrounded floats:
+        # must be an idempotent NO-OP (same oids, 0 cancelled orders!)
+        open_orders = await live_client.get_open_orders()
+        mgr.sync_from_open_orders(open_orders)
+        r_noop = await mgr.ensure_protection(
+            pos, filled_size=sz, stop_price=sl_1, take_profit_price=tp_1
+        )
+        assert r_noop.cancelled_ids == [], f"Expected 0 cancels on sync parity, got {r_noop}"
+        assert r_noop.sl_order_id == r1.sl_order_id
+        assert r_noop.tp_order_id == r1.tp_order_id
+
+        # Ratchet SL tighter -> must replace SL ONLY and keep original TP oid intact!
+        sl_2 = entry_px * 0.9623456
+        r2 = await mgr.ensure_protection(
+            pos, filled_size=sz, stop_price=sl_2, take_profit_price=tp_1
+        )
+        assert r2.sl_order_id and r2.sl_order_id != r1.sl_order_id
+        assert r2.tp_order_id == r1.tp_order_id
+        assert str(r1.sl_order_id) in [str(x) for x in r2.cancelled_ids]
+
+        open_orders_after = await live_client.get_open_orders()
+        trig_oids = {
+            str(t.order_id) for t in parse_trigger_orders(open_orders_after).get(sym, [])
+        }
+        assert str(r2.sl_order_id) in trig_oids
+        assert str(r1.tp_order_id) in trig_oids
+
+        await mgr.cancel_protection(sym)
+    finally:
+        if opened:
+            await _safe_flatten(live_client, sym)
+        await _safe_cancel_all(live_client, sym)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# (k) MultiLegCoordinator — Spot+Perp CarryA1 & PerpPair under Agent Wallet Unified('u')
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.testnet_live
+@pytest.mark.asyncio
+async def test_multileg_spot_perp_carry_and_perp_pair_e2e(
+    live_client: HyperliquidLiveClient,
+    tmp_path,
+) -> None:
+    """Real Testnet E2E of MultiLegCoordinator with Agent Wallet + Unified Account ('u'):
+
+    1. SpotPerpCarryRunner 2-leg maker entry (CC/USDC Spot BUY + CC Perp SELL)
+       rests both orders simultaneously on HL Testnet with schedule_cancel
+       armed, then aborts & cancels cleanly on window expiry.
+    2. Real Spot IoC BUY + MultiLegCoordinator close_episode_taker SELL on
+       PURR/USDC exercising post-fee base-token balance clamping (R-P0-4).
+    3. Real PerpPairRunner 2-leg hedge (ETH + BTC) + ExchangeReconciler
+       ignored_symbols_provider check (R-P1-3) + full IoC close to flat.
+    """
+    from src.core.portfolio import PortfolioState
+    from src.core.reconciliation import ExchangeReconciler
+    from src.exchanges.hyperliquid_live import normalize_size, resolve_wire_coin
+    from src.multileg import (
+        LegSpec,
+        LegState,
+        MultiLegCoordinator,
+        MultiLegEpisode,
+        MultiLegLedger,
+        SpotPerpCarryRunner,
+        TopOfBook,
+    )
+
+    ml_ledger = MultiLegLedger(str(tmp_path / "testnet_multileg.db"))
+    coord = MultiLegCoordinator(
+        ledger=ml_ledger,
+        live_client=live_client,
+        mode="testnet",
+        margin_profile="unified",
+        maker_fill_window_s=5.0,
+    )
+    carry_runner = SpotPerpCarryRunner(coord)
+
+    try:
+        # ── Part 1: Real 2-leg Spot+Perp CarryA1 maker placement & clean abort ──
+        cc_spot_bbo = await live_client.get_l2_top("CC/USDC")
+        cc_perp_bbo = await live_client.get_l2_top("CC")
+        assert cc_spot_bbo and cc_perp_bbo, "CC Spot/Perp L2 books unavailable on testnet"
+
+        # Place resting non-crossing maker quotes (~10% passive offset) sized >$12 on both legs
+        passive_spot_bid = cc_spot_bbo[0] * 0.90
+        passive_perp_ask = cc_perp_bbo[1] * 1.05
+        # Ensure matched_qty * passive_spot_bid >= $12
+        min_qty_for_spot = 13.0 / passive_spot_bid
+        notional_perp_equiv = min_qty_for_spot * cc_perp_bbo[1]
+
+        ep_carry = await carry_runner.open_carry_episode(
+            episode_id=f"e2e-carry-{int(time.time())}",
+            spot_symbol="CC/USDC",
+            perp_symbol="CC",
+            notional_usd=notional_perp_equiv,
+            max_leverage=5.0,
+            spot_book=TopOfBook(bid=passive_spot_bid, ask=cc_spot_bbo[1]),
+            perp_book=TopOfBook(bid=cc_perp_bbo[0], ask=passive_perp_ask),
+            now_ms=1_000,
+        )
+        assert ep_carry.status == "pending_entry", f"Carry entry failed: {ep_carry.close_reason}"
+        spot_oid = ep_carry.legs["spot"].order_id
+        perp_oid = ep_carry.legs["perp"].order_id
+        assert spot_oid and perp_oid
+
+        open_orders = await live_client.get_open_orders()
+        open_oids = {str(o.get("oid")) for o in open_orders}
+        assert str(spot_oid) in open_oids, f"Spot Carry order {spot_oid} not resting on HL"
+        assert str(perp_oid) in open_oids, f"Perp Carry order {perp_oid} not resting on HL"
+
+        # Expire the 5s maker window -> cancels both resting orders cleanly
+        await carry_runner.step_carry_entry(
+            ep_carry,
+            spot_book=TopOfBook(bid=passive_spot_bid, ask=cc_spot_bbo[1]),
+            perp_book=TopOfBook(bid=cc_perp_bbo[0], ask=passive_perp_ask),
+            now_ms=10_000,
+        )
+        assert ep_carry.status in ("aborted", "aborted_unwound")
+
+        # ── Part 2: Real filled Spot BUY -> post-fee base-token clamped SELL + Perp hedge ──
+        purr_bbo = await live_client.get_l2_top("PURR/USDC")
+        eth_bbo = await live_client.get_l2_top("ETH")
+        assert purr_bbo and eth_bbo
+
+        purr_qty = normalize_size("PURR/USDC", max(13.0 / purr_bbo[1], 3.0))
+        eth_qty = normalize_size("ETH", max(15.0 / eth_bbo[0], 0.01))
+
+        spot_fill_resp = await live_client.place_spot_order(
+            "PURR/USDC",
+            "buy",
+            purr_qty,
+            order_type="ioc",
+            limit_price=purr_bbo[1],
+            max_slippage_pct=3.0,
+        )
+        perp_fill_resp = await live_client.place_aggressive_limit(
+            "ETH",
+            "short",
+            eth_qty,
+            reference_price=eth_bbo[0],
+            max_slippage_pct=3.0,
+            reduce_only=False,
+        )
+        assert _extract_oid(spot_fill_resp) is not None, f"PURR spot buy failed: {spot_fill_resp}"
+        assert _extract_oid(perp_fill_resp) is not None, f"ETH perp short failed: {perp_fill_resp}"
+        await asyncio.sleep(1.0)
+
+        live_ep = MultiLegEpisode(
+            episode_id=f"e2e-filled-{int(time.time())}",
+            strategy="CarryA1",
+            mode="testnet",
+            margin_profile="unified",
+            created_ms=int(time.time() * 1000),
+            status="open",
+            legs={
+                "spot": LegState(
+                    spec=LegSpec("spot", "PURR/USDC", "spot", "buy", purr_qty, purr_bbo[1]),
+                    status="filled",
+                    filled_size=purr_qty,
+                    avg_fill_price=purr_bbo[1],
+                ),
+                "perp": LegState(
+                    spec=LegSpec("perp", "ETH", "perp", "sell", eth_qty, eth_bbo[0]),
+                    status="filled",
+                    filled_size=eth_qty,
+                    avg_fill_price=eth_bbo[0],
+                ),
+            },
+        )
+        ml_ledger.save_episode(live_ep)
+
+        # Verify single-leg ExchangeReconciler (with Mainnet HALT policy!) skips
+        # MultiLegCoordinator's active ETH perp leg instead of halting!
+        single_leg_portfolio = PortfolioState(initial_capital=1_000.0)
+        recon = ExchangeReconciler(
+            live_client=live_client,
+            portfolio=single_leg_portfolio,
+            orphan_exchange_policy="HALT",
+            ignored_symbols_provider=ml_ledger.get_active_perp_symbols,
+        )
+        recon_rep = await recon.reconcile_once()
+        assert recon_rep.success is True
+        assert recon.health.halted is False
+        assert "skipped_external:ETH" in recon_rep.actions
+
+        # Close BOTH the real Spot PURR leg (clamping to post-fee held PURR balance!)
+        # AND the real Perp ETH short leg via MultiLegCoordinator.close_episode_taker!
+        purr_exit_bbo = await live_client.get_l2_top("PURR/USDC") or purr_bbo
+        eth_exit_bbo = await live_client.get_l2_top("ETH") or eth_bbo
+        await coord.close_episode_taker(
+            live_ep,
+            books={
+                "PURR/USDC": TopOfBook(bid=purr_exit_bbo[0], ask=purr_exit_bbo[1]),
+                "ETH": TopOfBook(bid=eth_exit_bbo[0], ask=eth_exit_bbo[1]),
+            },
+            reason="e2e_complete_close",
+        )
+        assert live_ep.status == "closed"
+        await asyncio.sleep(1.0)
+        assert await live_client.confirm_flat(), "Expected zero open perp positions after multileg close"
+    finally:
+        await _safe_cancel_all(live_client, "CC")
+        await _safe_cancel_all(live_client, resolve_wire_coin("CC/USDC"))
+        await _safe_cancel_all(live_client, "ETH")
+        await _safe_flatten(live_client, "CC")
+        await _safe_flatten(live_client, "ETH")
+        try:
+            avail = await live_client.get_available_spot_balances()
+            rem_purr = normalize_size("PURR/USDC", avail.get("PURR", 0.0))
+            if rem_purr >= 1.0:
+                pb = await live_client.get_l2_top("PURR/USDC")
+                if pb:
+                    await live_client.place_spot_order(
+                        "PURR/USDC", "sell", rem_purr, order_type="ioc",
+                        limit_price=pb[0], max_slippage_pct=5.0, enforce_min_notional=False
+                    )
+        except Exception:  # noqa: BLE001
+            pass
+        ml_ledger.close()

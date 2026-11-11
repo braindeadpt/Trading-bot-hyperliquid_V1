@@ -92,6 +92,33 @@ introduced this suite — see the PR/commit description for the exact
    `ExecutionEngine.kill_switch()` is called and the test asserts all orders
    are cancelled, the position is flattened, `confirm_flat()` reports flat,
    and a follow-up reconciliation pass sees no drift.
+9. **Multi-asset precision (`BTC`, `ETH`, `SOL`, `HYPE`)** — places fractional
+   post-only (`Alo`) maker orders with deterministic `Cloid`s simultaneously
+   across all 4 production symbols, proving `6 - szDecimals` & `<= 5` sig-fig
+   rounding on non-BTC symbols (`P0-1` regression proof), then cancels all 4.
+10. **Non-BTC native SL/TP + replace-before-cancel ratchet (`ETH`)** — opens
+    an `ETH` perp position, places unrounded SL/TP triggers, verifies
+    `sync_from_open_orders` idempotence (zero cancels on sync parity, `P0-6`),
+    ratchets SL tighter while preserving the original TP `oid`, and flattens.
+11. **`MultiLegCoordinator` Spot+Perp `CarryA1` & Perp-Perp Pair (`Unified 'u'` + Agent Wallet)** —
+    proves L1 Unified Account (`'u'`) shared Spot/Perp USDC margin via an API
+    Agent Wallet (zero `usdClassTransfer` / zero master key):
+    (a) submits a simultaneous 2-leg `SpotPerpCarryRunner` maker entry (`CC/USDC`
+    Spot `BUY` + `CC` Perp `SELL`) with `schedule_cancel` armed and aborts cleanly;
+    (b) fills a real Spot `PURR/USDC` buy + `ETH` perp short, proves
+    `ExchangeReconciler(orphan_exchange_policy="HALT", ignored_symbols_provider=...)`
+    skips managed multi-leg perp symbols (`R-P1-3`), and closes both legs 100%
+    flat via `close_episode_taker` clamping to post-fee held Spot tokens (`R-P0-4`).
+
+### Live verification log (`2026-11-11`)
+
+Executed against `api.hyperliquid-testnet.xyz` using a dedicated Testnet
+API/agent wallet under Unified Account (`'u'`):
+
+```text
+11 passed, 3 warnings in 153.43s (0:02:33)
+Post-run check: open_perp_positions=[], open_orders_count=0, hold=0.0
+```
 
 Each scenario is a stand-alone test function marked `@pytest.mark.testnet_live`.
 

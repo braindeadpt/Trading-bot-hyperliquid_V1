@@ -1054,6 +1054,56 @@ class HyperliquidLiveClient:
                 out[coin] = max(0.0, total - hold)
         return out
 
+    async def get_effective_account_equity(self) -> float:
+        """Return total USDC equity across Perp margin and Spot USDC ledgers.
+
+        Under Hyperliquid Unified Account (``'u'``), idle USDC resides in
+        ``spot_user_state()['balances']['USDC']`` while active perp margin is
+        reflected in ``user_state()['marginSummary']['accountValue']``
+        (disjoint partitions summing to total USDC equity). Under Standard
+        mode (``'i'``), Perp and Spot USDC ledgers are also disjoint.
+        """
+        state = await self.get_user_state()
+        perp_acct = safe_float(
+            (state.get("marginSummary") or {}).get("accountValue")
+            if isinstance(state, dict)
+            else 0.0,
+            0.0,
+        )
+        spot_usdc = 0.0
+        try:
+            spot_bals = await self.get_spot_balances()
+            spot_usdc = safe_float(spot_bals.get("USDC"), 0.0)
+        except Exception:  # noqa: BLE001
+            spot_usdc = 0.0
+        return max(0.0, perp_acct + spot_usdc)
+
+    async def get_oracle_prices(self) -> Dict[str, float]:
+        """Return ``{perp_symbol: oracle_px}`` from ``meta_and_asset_ctxs``."""
+        if self._info is None:
+            raise RuntimeError("HyperliquidLiveClient not initialized")
+        fn = getattr(self._info, "meta_and_asset_ctxs", None)
+        if not callable(fn):
+            return {}
+        raw = await asyncio.to_thread(fn)
+        if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+            return {}
+        meta, ctxs = raw[0], raw[1]
+        universe = meta.get("universe", []) if isinstance(meta, dict) else []
+        if not isinstance(universe, list) or not isinstance(ctxs, list):
+            return {}
+        out: Dict[str, float] = {}
+        for idx, entry in enumerate(universe):
+            if idx >= len(ctxs) or not isinstance(entry, dict) or not isinstance(ctxs[idx], dict):
+                continue
+            name = str(entry.get("name", ""))
+            mark = safe_float(ctxs[idx].get("markPx"), 0.0)
+            ora = safe_float(ctxs[idx].get("oraclePx"), 0.0)
+            ref = mark if mark > 0 else ora
+            if name and ref > 0:
+                out[name] = ref
+        return out
+
     async def get_l2_top(self, symbol: str) -> Optional[Tuple[float, float]]:
         """Fetch top-of-book ``(best_bid, best_ask)`` for a perp or spot symbol."""
         if self._info is None:
