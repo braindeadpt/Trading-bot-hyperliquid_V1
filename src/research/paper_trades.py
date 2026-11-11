@@ -450,6 +450,16 @@ def _unlock_detail(now_ms: int) -> Dict[str, Any]:
 
 # ── Boros locked spread (boros_shadow.db) ─────────────────────────────
 
+def _boros_pooled_margin_base() -> float:
+    """Return Boros pooled perp margin base (0.2 * $10,000 = $2,000.0)."""
+    try:
+        from src.boros_shadow import spec as _bs
+
+        return float(_bs.PERP_CAPITAL_FRAC) * float(_bs.NOTIONAL_USD)
+    except Exception:  # noqa: BLE001
+        return 2_000.0
+
+
 def _boros_card(now_ms: int) -> Dict[str, Any]:
     card = _base_card(
         "boros", "Boros locked spread", "shadow",
@@ -458,9 +468,13 @@ def _boros_card(now_ms: int) -> Dict[str, Any]:
     if con is None:
         return card
     try:
-        card["n_open"] = int(con.execute(
-            "SELECT COUNT(*) c FROM boros_trades WHERE state='open'"
-        ).fetchone()["c"])
+        open_ids = [
+            int(r["id"])
+            for r in con.execute(
+                "SELECT id FROM boros_trades WHERE state='open'"
+            ).fetchall()
+        ]
+        card["n_open"] = len(open_ids)
         agg = con.execute(
             "SELECT COUNT(*) c, COALESCE(SUM(realized_usd),0) pnl,"
             " AVG(realized_apy_cap) apy, MAX(ts_ms) last_ts"
@@ -477,9 +491,26 @@ def _boros_card(now_ms: int) -> Dict[str, Any]:
             " WHERE equity_pooled IS NOT NULL ORDER BY ts_ms").fetchall()
         series = [(int(m["ts_ms"]), float(m["equity_pooled"])) for m in mk]
         card["equity"] = _downsample(series)
-        if series:
-            card["open_unreal_usd"] = round(
-                series[-1][1] - float(agg["pnl"]), 4)
+        # equity_pooled = pooled_margin_base ($2,000) + perp uPnL + net funding
+        # on that single trade. Sum (equity_pooled - base) across currently
+        # OPEN trades instead of subtracting closed realized PnL from raw NAV.
+        if open_ids:
+            base_usd = _boros_pooled_margin_base()
+            unreal_sum = 0.0
+            has_mark = False
+            for tid in open_ids:
+                lm = con.execute(
+                    "SELECT equity_pooled FROM boros_marks"
+                    " WHERE trade_id=? AND equity_pooled IS NOT NULL"
+                    " ORDER BY ts_ms DESC LIMIT 1",
+                    (tid,),
+                ).fetchone()
+                if lm is not None and lm["equity_pooled"] is not None:
+                    unreal_sum += float(lm["equity_pooled"]) - base_usd
+                    has_mark = True
+            card["open_unreal_usd"] = round(unreal_sum, 4) if has_mark else 0.0
+        else:
+            card["open_unreal_usd"] = 0.0
         card["state"], card["state_detail"] = _age_state(
             series[-1][0] if series else agg["last_ts"],
             card["n_open"] > 0, now_ms, _STALE_BOROS)
@@ -496,6 +527,7 @@ def _boros_detail(now_ms: int) -> Dict[str, Any]:
     if con is None:
         return out
     try:
+        base_usd = _boros_pooled_margin_base()
         for t in con.execute(
                 "SELECT id, asset, structure, direction, entry_ms,"
                 " capital_usd, fixed_bruto, net_apy FROM boros_trades"
@@ -504,11 +536,15 @@ def _boros_detail(now_ms: int) -> Dict[str, Any]:
                 "SELECT equity_pooled, funding_usd, ts_ms FROM boros_marks"
                 " WHERE trade_id=? ORDER BY ts_ms DESC LIMIT 1",
                 (t["id"],)).fetchone()
+            unreal_val = (
+                round(float(last["equity_pooled"]) - base_usd, 4)
+                if last and last["equity_pooled"] is not None
+                else None
+            )
             out["open"].append({
                 "symbol": t["asset"], "side": t["direction"],
                 "size": t["capital_usd"], "entry": t["fixed_bruto"],
-                "mark": None, "unreal_usd": (last["equity_pooled"]
-                                            if last else None),
+                "mark": None, "unreal_usd": unreal_val,
                 "entry_ms": t["entry_ms"]})
         cum = 0.0
         for e in con.execute(
