@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 FUNDING_SETTLE_INTERVAL_MS = 3_600_000
 
 
+def _next_utc_hour_ms(ts_ms: int) -> int:
+    """Return the next exact UTC top-of-hour timestamp strictly after *ts_ms*."""
+    interval = int(FUNDING_SETTLE_INTERVAL_MS)
+    return ((int(ts_ms) // interval) + 1) * interval
+
+
 def _utc_midnight_ms() -> int:
     """UTC midnight for the current calendar day (ms)."""
     from datetime import datetime, timezone
@@ -480,14 +486,11 @@ class PortfolioState:
 
             next_ts = int(safe_float(pos.metadata.get("next_funding_settle_ms"), 0))
             if next_ts <= 0:
-                next_ts = int(pos.entry_time_ms) + FUNDING_SETTLE_INTERVAL_MS
+                next_ts = _next_utc_hour_ms(int(pos.entry_time_ms))
             if clock_ms < next_ts:
                 return 0.0
 
-            new_next = next_ts
-            while new_next <= clock_ms:
-                new_next += FUNDING_SETTLE_INTERVAL_MS
-            pos.metadata["next_funding_settle_ms"] = new_next
+            pos.metadata["next_funding_settle_ms"] = _next_utc_hour_ms(clock_ms)
 
             if rate_f == 0.0 or size_f == 0.0:
                 return 0.0
@@ -530,7 +533,10 @@ class PortfolioState:
         """Record a new open position and debit cash."""
         async with self._lock:
             await self._check_daily_reset()
-            self._cash -= safe_float(cost)
+            cost_f = safe_float(cost)
+            notional = safe_float(position.entry_price) * safe_float(position.size)
+            inferred_fee = max(0.0, cost_f - notional)
+            self._cash -= cost_f
             snap = _PositionSnapshot(
                 symbol=position.symbol,
                 side=position.side,
@@ -545,8 +551,10 @@ class PortfolioState:
             snap.current_price = position.entry_price
             snap.metadata.setdefault(
                 "next_funding_settle_ms",
-                int(position.entry_time_ms) + FUNDING_SETTLE_INTERVAL_MS,
+                _next_utc_hour_ms(int(position.entry_time_ms)),
             )
+            snap.metadata["entry_fee_debited"] = inferred_fee
+            snap.metadata.setdefault("entry_fee", inferred_fee)
             self._positions[position.symbol] = snap
             self._daily_trades += 1
             self._update_peak_and_drawdown()
@@ -568,11 +576,19 @@ class PortfolioState:
                 logger.warning("remove_position called for unknown symbol: %s", symbol)
                 return
 
-            # Credit cash with the notional value + realized PnL
-            # When opening, we debited entry_price * size (cost).
-            # When closing, we must credit back that cost plus the PnL.
+            # Credit back the exact principal + entry_fee that was debited on open,
+            # plus realized net pnl_usd (which already subtracts entry_fee + exit_fee).
+            # Without refunding entry_fee_debited here, entry_fee was deducted TWICE
+            # on every closed trade.
             notional = pos.entry_price * pos.size
-            self._cash += safe_float(notional) + safe_float(pnl_usd)
+            entry_fee_debited = safe_float(
+                pos.metadata.get("entry_fee_debited", 0.0), 0.0
+            )
+            self._cash += (
+                safe_float(notional)
+                + entry_fee_debited
+                + safe_float(pnl_usd)
+            )
             self._daily_pnl += safe_float(pnl_usd)
 
             self._trade_history.append({
@@ -638,9 +654,11 @@ class PortfolioState:
                 snap.current_price = avg_px
                 snap.metadata.setdefault(
                     "next_funding_settle_ms",
-                    int(position.entry_time_ms) + FUNDING_SETTLE_INTERVAL_MS,
+                    _next_utc_hour_ms(int(position.entry_time_ms)),
                 )
+                debited_fee = max(0.0, cost_delta - (avg_px * fill_sz))
                 snap.metadata["entry_fee"] = safe_float(fee_delta)
+                snap.metadata["entry_fee_debited"] = debited_fee
                 self._positions[symbol] = snap
                 self._daily_trades += 1
             else:
@@ -653,7 +671,32 @@ class PortfolioState:
                 existing.metadata["entry_fee"] = safe_float(
                     existing.metadata.get("entry_fee", 0.0), 0.0,
                 ) + safe_float(fee_delta)
+                existing.metadata["entry_fee_debited"] = safe_float(
+                    existing.metadata.get("entry_fee_debited", 0.0), 0.0,
+                ) + max(0.0, cost_delta - (avg_px * fill_sz))
 
+            self._update_peak_and_drawdown()
+            self._refresh_dashboard_cache_unlocked()
+
+    async def sync_live_account_equity(self, account_value_usd: float) -> None:
+        """Align internal cash/equity baseline to Hyperliquid's real ``accountValue``.
+
+        Prevents sizing against a stale ``$10,000`` YAML ``initial_capital`` when
+        trading a smaller or larger live Mainnet/Testnet wallet.
+        """
+        acct = safe_float(account_value_usd, 0.0)
+        if acct <= 0:
+            return
+        async with self._lock:
+            allocated_notional = sum(
+                p.entry_price * p.size for p in self._positions.values()
+            )
+            unrealized = sum(p.unrealized_pnl for p in self._positions.values())
+            self._cash = acct - allocated_notional - unrealized
+            if not self._positions and self._total_trades_closed == 0:
+                self._initial_capital = acct
+                self._peak_equity = max(self._peak_equity, acct)
+                self._day_start_equity = acct
             self._update_peak_and_drawdown()
             self._refresh_dashboard_cache_unlocked()
 
@@ -669,8 +712,11 @@ class PortfolioState:
             pos = self._positions.pop(symbol, None)
             if pos is None:
                 return
-            # Refund the cost we debited on add_position.
-            cost = pos.entry_price * pos.size
+            # Refund the exact cost (notional + entry_fee_debited) debited on add_position.
+            entry_fee_debited = safe_float(
+                pos.metadata.get("entry_fee_debited", 0.0), 0.0
+            )
+            cost = pos.entry_price * pos.size + entry_fee_debited
             self._cash += safe_float(cost)
             # Roll back the daily_trades counter so a cancelled entry
             # doesn't poison the daily limit.
