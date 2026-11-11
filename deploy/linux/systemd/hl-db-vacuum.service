@@ -4,6 +4,8 @@ After=local-fs.target
 
 [Service]
 Type=oneshot
+User=101000
+Group=101000
 EnvironmentFile=/etc/hyperliquid/bot.env
 ExecStart=/usr/local/sbin/hl-db-vacuum.sh /srv/hl/data
 Nice=19

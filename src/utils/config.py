@@ -606,8 +606,8 @@ def _apply_mode_overrides(config: Dict[str, Any]) -> None:
         if not isinstance(target, dict):
             config[section] = {}
             target = config[section]
-        # Deep-merge all sections so nested dictionaries (e.g.
-        # execution.maker_orders or strategy.<name>) keep their sibling keys
+        # Deep-merge all sections so nested dictionaries (for example
+        # maker_orders or strategy.<name>) keep their sibling keys
         # instead of being wiped by a shallow dict.update().
         config[section] = _deep_merge(target, values)
 

@@ -93,13 +93,21 @@ class CrashRecovery:
                 )
                 return exit_code
 
-            # Restart in fallback mode (paper for safety)
-            cmd = self._rewrite_mode_to_paper(cmd)
+            # Preserve testnet/mainnet mode on restart so live exchange positions
+            # continue to be reconciled and managed, never mixed with simulated
+            # paper trades in the same live SQLite DB.
+            active_mode = self._extract_mode(cmd)
+            if active_mode == "live":
+                cmd = self._rewrite_mode(cmd, "mainnet")
+                active_mode = "mainnet"
+            elif active_mode not in ("testnet", "mainnet"):
+                cmd = self._rewrite_mode_to_paper(cmd)
+                active_mode = "paper"
             logger.warning(
                 "Restart %d/%d in %s mode after %.1fs uptime. "
                 "Waiting %ds before restart...",
                 self._restart_count, self._max_restarts,
-                self._fallback_mode, uptime, self._cooldown_s,
+                active_mode, uptime, self._cooldown_s,
             )
             time.sleep(self._cooldown_s)
 
@@ -175,14 +183,15 @@ class CrashRecovery:
             return False
         if len(cmd) < 2 or not os.path.basename(cmd[1]).endswith("main.py"):
             return False
-        # --mode must be a known value (paper / testnet / live); anything
-        # else — including a crafted extra arg — is refused.
+        # --mode must be a known value (paper / testnet / mainnet / live);
+        # anything else — including a crafted extra arg — is refused.
+        valid_modes = ("paper", "testnet", "mainnet", "live")
         for i, arg in enumerate(cmd):
             if arg == "--mode":
-                if i + 1 >= len(cmd) or cmd[i + 1] not in ("paper", "testnet", "live"):
+                if i + 1 >= len(cmd) or cmd[i + 1] not in valid_modes:
                     return False
             elif arg.startswith("--mode="):
-                if arg.split("=", 1)[1] not in ("paper", "testnet", "live"):
+                if arg.split("=", 1)[1] not in valid_modes:
                     return False
         return True
 
@@ -229,17 +238,32 @@ class CrashRecovery:
             )
 
     @staticmethod
-    def _rewrite_mode_to_paper(cmd: tuple[str, ...]) -> tuple[str, ...]:
-        """Replace --mode X with --mode paper in the command."""
+    def _extract_mode(cmd: tuple[str, ...]) -> str:
+        """Extract --mode value from *cmd*, defaulting to 'paper'."""
+        for i, arg in enumerate(cmd):
+            if arg == "--mode" and i + 1 < len(cmd):
+                return str(cmd[i + 1])
+            if arg.startswith("--mode="):
+                return str(arg.split("=", 1)[1])
+        return "paper"
+
+    @staticmethod
+    def _rewrite_mode(cmd: tuple[str, ...], target_mode: str) -> tuple[str, ...]:
+        """Replace --mode X with --mode *target_mode* in the command."""
         args = list(cmd)
         for i, arg in enumerate(args):
             if arg == "--mode" and i + 1 < len(args):
-                args[i + 1] = "paper"
+                args[i + 1] = target_mode
                 break
             if arg.startswith("--mode="):
-                args[i] = "--mode=paper"
+                args[i] = f"--mode={target_mode}"
                 break
         return tuple(args)
+
+    @staticmethod
+    def _rewrite_mode_to_paper(cmd: tuple[str, ...]) -> tuple[str, ...]:
+        """Replace --mode X with --mode paper in the command."""
+        return CrashRecovery._rewrite_mode(cmd, "paper")
 
 
 def main() -> int:
@@ -249,7 +273,7 @@ def main() -> int:
         description="Run the trading bot with crash recovery",
     )
     parser.add_argument(
-        "--mode", default="paper", choices=["paper", "testnet", "live"],
+        "--mode", default="paper", choices=["paper", "testnet", "mainnet"],
         help="Trading mode (default: paper)",
     )
     parser.add_argument(

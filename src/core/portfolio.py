@@ -695,7 +695,8 @@ class PortfolioState:
             self._cash = acct - allocated_notional - unrealized
             if not self._positions and self._total_trades_closed == 0:
                 self._initial_capital = acct
-                self._peak_equity = max(self._peak_equity, acct)
+                self._peak_capital = acct
+                self._daily_peak_capital = acct
                 self._day_start_equity = acct
             self._update_peak_and_drawdown()
             self._refresh_dashboard_cache_unlocked()
