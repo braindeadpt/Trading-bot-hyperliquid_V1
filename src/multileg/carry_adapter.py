@@ -58,16 +58,6 @@ class SpotPerpCarryRunner:
             pm_enabled=pm_enabled,
             account_value_usd=account_value_usd,
         )
-        perp_collateral = (
-            float(notional_usd) * PM_USDC_BUFFER
-            if margin_params.pm_branch
-            else float(notional_usd) * margin_params.m0_initial
-        )
-        await self._coord.ensure_margin_ready(
-            spot_notional_usd=float(notional_usd),
-            perp_collateral_usd=perp_collateral,
-        )
-
         raw_qty = float(notional_usd) / perp_book.mid
         # Floor to the coarser szDecimals of Spot and Perp so both legs match,
         # and gross up Spot buy by 1 / (1 - MAKER_FEE_RATE) when tick precision
@@ -80,6 +70,18 @@ class SpotPerpCarryRunner:
         spot_buy_qty = normalize_size(spot_symbol, matched_qty / (1.0 - MAKER_FEE_RATE))
         if spot_buy_qty <= 0:
             spot_buy_qty = matched_qty
+
+        perp_notional = matched_qty * perp_book.mid
+        spot_notional = spot_buy_qty * spot_book.bid
+        perp_collateral = (
+            perp_notional * PM_USDC_BUFFER
+            if margin_params.pm_branch
+            else perp_notional * margin_params.m0_initial
+        )
+        await self._coord.ensure_margin_ready(
+            spot_notional_usd=spot_notional,
+            perp_collateral_usd=perp_collateral,
+        )
 
         legs = [
             LegSpec(

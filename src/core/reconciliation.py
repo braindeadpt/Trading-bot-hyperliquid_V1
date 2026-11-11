@@ -146,16 +146,22 @@ class ExchangeReconciler:
             triggers = parse_trigger_orders(open_orders)
             report.exchange_positions = ex_positions
 
-            # Sync real Hyperliquid accountValue into PortfolioState when exposed
-            margin_summary = (
-                user_state.get("marginSummary")
-                if isinstance(user_state, dict)
-                else None
-            )
-            if isinstance(margin_summary, dict) and hasattr(
-                self._portfolio, "sync_live_account_equity"
-            ):
-                acct_val = safe_float(margin_summary.get("accountValue"), 0.0)
+            # Sync real Hyperliquid total USDC equity into PortfolioState when exposed
+            if hasattr(self._portfolio, "sync_live_account_equity"):
+                eff_fn = getattr(self._client, "get_effective_account_equity", None)
+                if callable(eff_fn):
+                    acct_val = safe_float(await eff_fn(), 0.0)
+                else:
+                    margin_summary = (
+                        user_state.get("marginSummary")
+                        if isinstance(user_state, dict)
+                        else None
+                    )
+                    acct_val = (
+                        safe_float(margin_summary.get("accountValue"), 0.0)
+                        if isinstance(margin_summary, dict)
+                        else 0.0
+                    )
                 if acct_val > 0:
                     await self._portfolio.sync_live_account_equity(acct_val)
 

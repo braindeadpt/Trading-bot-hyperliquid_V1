@@ -121,12 +121,15 @@ class MultiLegCoordinator:
             spot_balances = await self._client.get_spot_balances()
         spot_usdc = safe_float(spot_balances.get("USDC"), 0.0)
 
-        # Under Unified ('u') / PM ('p'), Spot and Perp draw from the same USDC pool;
-        # deduct locked perp margin when computing free USDC capacity.
+        # Under Unified ('u'), Hyperliquid keeps idle USDC in Spot balances and
+        # moves active perp margin into marginSummary.accountValue (disjoint
+        # partitions). When a test mock mirrors the same balance in both fields,
+        # guard against double counting via identical non-zero check.
         if self._margin_profile in ("unified", "portfolio_margin"):
-            available_usd = max(free_perp_usd, max(0.0, spot_usdc - total_margin_used))
-            if perp_acct_val > 0 and total_margin_used > 0:
-                available_usd = min(available_usd, free_perp_usd)
+            if perp_acct_val > 0 and abs(perp_acct_val - spot_usdc) < 1e-6:
+                available_usd = free_perp_usd
+            else:
+                available_usd = free_perp_usd + spot_usdc
         else:
             available_usd = free_perp_usd + spot_usdc
             if spot_notional_usd > 0 and spot_usdc < spot_notional_usd:
