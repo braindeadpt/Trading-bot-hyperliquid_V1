@@ -5,34 +5,25 @@
     "timeframe": "15m",
     "timeframe_s": 900
   },
-  "baseline_signal_gate": [
-    {
-      "protocol": "experiment-paper-override-v1",
-      "reason": "owner-requested TypeSafe/Jev paper experiment (2026-09-17) \u2014 zero evidence claimed; paper-only enforced by assert_experiment_paper_only + strategy _mode guard",
-      "strategy": "JevJudge",
-      "verdict": "EXPERIMENT"
-    }
-  ],
-  "config_hash": "4077927fec6a880c",
+  "config_hash": "9e9a6c37d02a1331",
   "edge_demonstrated": false,
   "execution_scope": {
     "mode": "paper",
     "paper_only": true,
     "shadow_strategies": [
+      "VWAPDeviation",
       "VolatilityBreakout",
       "FundingMomentum",
       "SpotPerpCarry",
       "LeadLag",
       "LiquidationCatcher"
     ],
-    "strategies": [
-      "JevJudge"
-    ]
+    "strategies": []
   },
-  "experiment_id": "b1c97a45-4567-4a16-9f72-f9d5fe45c340",
+  "experiment_id": "d9784c7a-821b-48b6-9a18-89ec7f7216e1",
   "fidelity_note": "tier_a_hl_ohlc certifies Hyperliquid OHLC data availability only; it does not certify strategy edge.",
-  "in_sample_selection_note": "Tape-off only. JevJudge remains the sole paper execution control (owner-requested EXPERIMENT, zero evidence claimed). No promotion; mainnet still blocked. Accumulated OOS evidence intentionally retained.",
-  "manifest_hash": "d00cb7dbcb1708bd02341787125a210aa098fe7bace388ac0b8e957e4471f242",
+  "in_sample_selection_note": "One-shot preregistered kill execution \u2014 zero strategies executing in TradingEngine; no retuning or second JevJudge version.",
+  "manifest_hash": "40abe7197a6df7ba8e7784443cb8185ada09345decba20dc5c1b95ef14f77d5b",
   "oos_protocol": "phase06-train-val-test-v1",
   "oos_status": "pending",
   "protocol": "phase08-preregister-v2",
@@ -56,8 +47,8 @@
       "low_vol"
     ]
   },
-  "registered_at_ms": 1791370424591,
-  "reregistration_reason": "research cost reduction \u2014 stop WS trade_tape collection (research.ws_microstructure_enabled: false; ~103 MB/day measured, no runtime or backtest consumer since CVDOrderFlow retired 2026-09-10). Collateral: l2_snapshots/microstructure_gaps/feed_health_snapshots stop too (same recorder). market_data.l2_recording untouched. config_hash legitimately drifts \u2014 OOS window PRESERVED.",
+  "registered_at_ms": 1794404812428,
+  "reregistration_reason": "JevJudge KILLED at final preregistered readout (2026-11-11, docs/ops/PREREGISTER_JEV_OOS_KILL_2026-10-08.md): post-boundary indep_n=325 (>=100 target), net PF=0.8373 (<=1.0 kill threshold), net PnL=-$679.35 USD (BTC -$203.91/87t, ETH -$277.88/66t, SOL -$265.53/67t, HYPE +$67.97/105t). JevJudge disabled and removed from execution_strategies (now []); hl-jev-judge container stopped. Independent shadow studies continue unaffected.",
   "strategies": {
     "ChecklistMeta": {
       "expected_max_signals_per_symbol_per_week": 1344.0,
@@ -142,5 +133,5 @@
       "signal_throttle_ms": 1800000
     }
   },
-  "supersedes_experiment_id": "d54e4067-4300-4974-adb0-25d11cd0edd9"
+  "supersedes_experiment_id": "b1c97a45-4567-4a16-9f72-f9d5fe45c340"
 }

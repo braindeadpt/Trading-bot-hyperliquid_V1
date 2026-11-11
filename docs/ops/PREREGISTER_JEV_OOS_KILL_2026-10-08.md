@@ -1,8 +1,7 @@
 # PREREGISTER — JevJudge geometry-v2 kill criterion + random control
 
 Date: 2026-10-08
-Status: ACTIVE — the read happens once, when `indep_n >= 100` post-boundary
-(or at expiry, whichever comes first).
+Status: KILLED (final readout executed 2026-11-11 — `indep_n = 325 >= 100`, `net PF = 0.8373 <= 1.0`).
 
 ## Scope
 
@@ -65,3 +64,22 @@ for the read, not the kill criterion — the kill rule is the PF clause above.
 - `jev_decisions.model` already stores the resolved version per row;
   `jev_latest.json` verdicts now carry `model` too, so the executed trade
   is traceable to the model version that produced it.
+
+---
+
+## Final Readout — 2026-11-11 (`VERDICT: KILL`)
+
+Executed read-only against production `bots-01:/srv/hl/data/live/bot.db` on the
+preregistered expiry date (`2026-11-11`):
+
+- **Boundary:** `entry_time > 1791124780000` (`2026-10-04 14:39:40 UTC`)
+- **Post-boundary closed trades:** `325` raw / `0` stale verdicts / **`indep_n = 325`** (target `>= 100` met)
+- **Wins / Win Rate:** `165 / 325` (`50.77%`)
+- **Net Profit Factor (`pnl_pct`):** **`0.8373`** (`<= 1.0` kill threshold triggered)
+- **Net Profit Factor (`pnl_usd`):** `0.8364`
+- **Net Realized PnL:** **`-$679.35 USD`** (`BTC: -$203.91 / 87t`, `ETH: -$277.88 / 66t`, `SOL: -$265.53 / 67t`, `HYPE: +$67.97 / 105t`)
+
+**Action Applied (Owner-Authorized 2026-11-11):**
+1. Stopped and removed `hl-jev-judge` daemon on `bots-01` (`profiles: ["killed"]` in `deploy/linux/compose.yaml`).
+2. Disabled `strategy.jev_judge.enabled: false` and emptied `strategy.phase08.execution_strategies: []`.
+3. Re-registered Phase 08 & Phase 10 manifests via `scripts/ops/reregister_jev_kill_20261111.py`. No second version, no re-tuning.
