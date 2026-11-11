@@ -64,6 +64,8 @@ class ParsedEntryResponse:
     exchange_order_id: Optional[str]
     error_message: Optional[str] = None
     ambiguous: bool = False
+    filled_size: Optional[float] = None
+    avg_fill_price: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,9 @@ class ParsedCloseResponse:
     lifecycle_state: str
     error_message: Optional[str] = None
     ambiguous: bool = False
+    filled_size: Optional[float] = None
+    avg_fill_price: Optional[float] = None
+    resting_order_id: Optional[str] = None
 
 
 def extract_order_id(hl_response: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -153,11 +158,20 @@ def parse_hyperliquid_entry_response(
         if "filled" in entry:
             oid = extract_order_id(hl_response)
             sub = entry.get("filled")
-            if isinstance(sub, dict) and "oid" in sub:
-                oid = str(sub["oid"])
+            filled_sz: Optional[float] = None
+            avg_px: Optional[float] = None
+            if isinstance(sub, dict):
+                if "oid" in sub and sub["oid"] is not None:
+                    oid = str(sub["oid"])
+                if "totalSz" in sub:
+                    filled_sz = safe_float(sub.get("totalSz"), 0.0)
+                if "avgPx" in sub:
+                    avg_px = safe_float(sub.get("avgPx"), 0.0)
             return ParsedEntryResponse(
                 lifecycle_state=ORDER_FILLED,
                 exchange_order_id=oid,
+                filled_size=filled_sz if filled_sz and filled_sz > 0 else None,
+                avg_fill_price=avg_px if avg_px and avg_px > 0 else None,
             )
         if "resting" in entry:
             oid = extract_order_id(hl_response)
@@ -206,8 +220,18 @@ def parse_hyperliquid_entry_response(
     )
 
 
-def parse_hyperliquid_close_response(hl_response: Any) -> ParsedCloseResponse:
-    """Interpret a Hyperliquid close / reduce response."""
+def parse_hyperliquid_close_response(
+    hl_response: Any,
+    *,
+    expected_size: Optional[float] = None,
+) -> ParsedCloseResponse:
+    """Interpret a Hyperliquid close / reduce response.
+
+    Unlike entries, a close order that lands ``resting`` on the book has NOT
+    flattened exposure and must return ``ORDER_CLOSE_PENDING`` (never
+    ``ORDER_FILLED``). Likewise, an IoC partial fill smaller than
+    *expected_size* returns ``ORDER_PARTIAL`` so the residual stays protected.
+    """
     if not isinstance(hl_response, dict):
         return ParsedCloseResponse(
             lifecycle_state=ORDER_REJECTED,
@@ -230,8 +254,42 @@ def parse_hyperliquid_close_response(hl_response: Any) -> ParsedCloseResponse:
                 lifecycle_state=ORDER_REJECTED,
                 error_message=str(entry["error"]),
             )
-        if "filled" in entry or "resting" in entry:
-            return ParsedCloseResponse(lifecycle_state=ORDER_FILLED)
+        if "resting" in entry:
+            oid = extract_order_id(hl_response)
+            sub = entry.get("resting")
+            if isinstance(sub, dict) and "oid" in sub and sub["oid"] is not None:
+                oid = str(sub["oid"])
+            return ParsedCloseResponse(
+                lifecycle_state=ORDER_CLOSE_PENDING,
+                error_message="close_order_resting",
+                resting_order_id=oid,
+            )
+        if "filled" in entry:
+            sub = entry.get("filled")
+            filled_sz: Optional[float] = None
+            avg_px: Optional[float] = None
+            if isinstance(sub, dict):
+                if "totalSz" in sub:
+                    filled_sz = safe_float(sub.get("totalSz"), 0.0)
+                if "avgPx" in sub:
+                    avg_px = safe_float(sub.get("avgPx"), 0.0)
+            exp = safe_float(expected_size, 0.0) if expected_size is not None else 0.0
+            if (
+                exp > 0
+                and filled_sz is not None
+                and 0.0 < filled_sz < exp * 0.999
+            ):
+                return ParsedCloseResponse(
+                    lifecycle_state=ORDER_PARTIAL,
+                    error_message=f"partial_close_fill:{filled_sz:.8f}<{exp:.8f}",
+                    filled_size=filled_sz,
+                    avg_fill_price=avg_px if avg_px and avg_px > 0 else None,
+                )
+            return ParsedCloseResponse(
+                lifecycle_state=ORDER_FILLED,
+                filled_size=filled_sz if filled_sz and filled_sz > 0 else None,
+                avg_fill_price=avg_px if avg_px and avg_px > 0 else None,
+            )
 
     if top_status in ("ok", "success") or hl_response.get("raw") is not None:
         return ParsedCloseResponse(lifecycle_state=ORDER_FILLED)

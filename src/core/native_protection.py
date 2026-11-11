@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from src.exchanges.hl_positions import ExchangeTriggerOrder, parse_trigger_orders
+from src.exchanges.hyperliquid_live import normalize_price, normalize_size
 from src.strategies.base import Position
 from src.utils.helpers import safe_float
 
@@ -90,80 +91,126 @@ class NativeProtectionManager:
         take_profit_price: Optional[float],
         trade_id: Optional[int] = None,
     ) -> ProtectionResult:
-        """Place or resize native SL/TP for *filled_size* (idempotent)."""
+        """Place or resize native SL/TP for *filled_size* (idempotent, replace-before-cancel).
+
+        Trigger prices are normalized with ``normalize_price`` BEFORE comparing
+        with ``ProtectionState`` so ``sync_from_open_orders`` (which reads back
+        exchange-rounded trigger prices) never triggers a 60-second infinite
+        cancel/replace loop. When replacing an existing trigger, the new order
+        is placed BEFORE cancelling the old order so a transient 429 or network
+        failure never leaves an open position without exchange protection.
+        """
         symbol = position.symbol.upper()
-        size = safe_float(filled_size)
-        if size <= 0:
+        raw_size = safe_float(filled_size)
+        if raw_size <= 0:
             return ProtectionResult()
+        size = normalize_size(symbol, raw_size)
+        if size <= 0:
+            size = raw_size
+
+        norm_sl = (
+            normalize_price(symbol, float(stop_price))
+            if stop_price and stop_price > 0
+            else None
+        )
+        norm_tp = (
+            normalize_price(symbol, float(take_profit_price))
+            if take_profit_price and take_profit_price > 0
+            else None
+        )
 
         st = self.get_state(symbol)
         result = ProtectionResult(protected_size=size)
 
-        needs_replace = (
-            abs(st.protected_size - size) > max(1e-8, size * 1e-4)
-            or (stop_price and st.stop_price and abs(st.stop_price - stop_price) > 1e-6)
-            or (
-                take_profit_price
-                and st.take_profit_price
-                and abs(st.take_profit_price - take_profit_price) > 1e-6
+        size_changed = (
+            st.protected_size > 0
+            and abs(st.protected_size - size) > max(1e-8, size * 1e-4)
+        )
+        sl_needs_update = bool(
+            norm_sl
+            and (
+                not st.sl_order_id
+                or size_changed
+                or st.stop_price is None
+                or abs(st.stop_price - norm_sl) > 1e-6
+            )
+        )
+        tp_needs_update = bool(
+            norm_tp
+            and (
+                not st.tp_order_id
+                or size_changed
+                or st.take_profit_price is None
+                or abs(st.take_profit_price - norm_tp) > 1e-6
             )
         )
 
-        if not needs_replace and st.sl_order_id and (not take_profit_price or st.tp_order_id):
+        if not sl_needs_update and not tp_needs_update:
             result.sl_order_id = st.sl_order_id
             result.tp_order_id = st.tp_order_id
-            result.protected_size = st.protected_size
+            result.protected_size = st.protected_size or size
             return result
 
-        if needs_replace:
-            cancel_ids = [oid for oid in (st.sl_order_id, st.tp_order_id) if oid]
-            cancelled = await self._cancel_ids(symbol, cancel_ids)
-            result.cancelled_ids.extend(cancelled)
-            st.sl_order_id = None
-            st.tp_order_id = None
+        old_sl_oid = st.sl_order_id if sl_needs_update else None
+        old_tp_oid = st.tp_order_id if tp_needs_update else None
 
-        if stop_price and stop_price > 0:
+        if sl_needs_update and norm_sl and norm_sl > 0:
             try:
                 resp = await self._client.place_trigger_order(
                     symbol,
                     position.side,
                     size,
-                    trigger_price=float(stop_price),
+                    trigger_price=float(norm_sl),
                     tpsl="sl",
                 )
                 oid = self._extract_oid(resp)
                 if oid:
                     st.sl_order_id = oid
-                    st.stop_price = float(stop_price)
+                    st.stop_price = float(norm_sl)
                     result.sl_order_id = oid
+                    if old_sl_oid and str(old_sl_oid) != str(oid):
+                        cancelled = await self._cancel_ids(symbol, [old_sl_oid])
+                        result.cancelled_ids.extend(cancelled)
                 else:
                     result.errors.append("sl_missing_oid")
+                    result.sl_order_id = st.sl_order_id
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Native SL placement failed for %s: %s", symbol, exc)
                 result.errors.append(f"sl_error:{exc}")
+                result.sl_order_id = st.sl_order_id
+        else:
+            result.sl_order_id = st.sl_order_id
 
-        if take_profit_price and take_profit_price > 0:
+        if tp_needs_update and norm_tp and norm_tp > 0:
             try:
                 resp = await self._client.place_trigger_order(
                     symbol,
                     position.side,
                     size,
-                    trigger_price=float(take_profit_price),
+                    trigger_price=float(norm_tp),
                     tpsl="tp",
                 )
                 oid = self._extract_oid(resp)
                 if oid:
                     st.tp_order_id = oid
-                    st.take_profit_price = float(take_profit_price)
+                    st.take_profit_price = float(norm_tp)
                     result.tp_order_id = oid
+                    if old_tp_oid and str(old_tp_oid) != str(oid):
+                        cancelled = await self._cancel_ids(symbol, [old_tp_oid])
+                        result.cancelled_ids.extend(cancelled)
                 else:
                     result.errors.append("tp_missing_oid")
+                    result.tp_order_id = st.tp_order_id
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Native TP placement failed for %s: %s", symbol, exc)
                 result.errors.append(f"tp_error:{exc}")
+                result.tp_order_id = st.tp_order_id
+        else:
+            result.tp_order_id = st.tp_order_id
 
-        st.protected_size = size
-        result.protected_size = size
+        if result.sl_order_id or result.tp_order_id:
+            st.protected_size = size
+            result.protected_size = size
         self._persist_trade_protection(trade_id, st)
         return result
 
