@@ -44,6 +44,15 @@ exit 0
 """
 
 
+SHADOW_DB_NAMES = (
+    "unlock_shadow.db",
+    "carry_shadow.db",
+    "boros_shadow.db",
+    "resmom_shadow.db",
+    "latency_probe.db",
+)
+
+
 def _mk_db(path: Path, rows: int = 3) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(path))
@@ -51,6 +60,12 @@ def _mk_db(path: Path, rows: int = 3) -> None:
     con.executemany("INSERT INTO t (v) VALUES (?)", [(f"r{i}",) for i in range(rows)])
     con.commit()
     con.close()
+
+
+def _mk_daily_dbs(data: Path) -> None:
+    _mk_db(data / "live" / "bot.db")
+    for name in SHADOW_DB_NAMES:
+        _mk_db(data / "research" / name)
 
 
 def _env(tmp_path: Path) -> dict:
@@ -87,18 +102,19 @@ def _run(env: dict) -> subprocess.CompletedProcess:
 def test_vacuum_overwrites_stale_staging(tmp_path):
     """A leftover staged .db from a killed run must not fail the backup."""
     env, data = _env(tmp_path)
-    _mk_db(data / "live" / "bot.db")
+    _mk_daily_dbs(data)
     _mk_db(data / "research" / "hyperliquid.db")
     staging = Path(env["STAGING"])
     staging.mkdir()
     # simulate a previous killed run: garbage where VACUUM INTO will target
     (staging / "bot.db").write_text("killed-run leftover — not sqlite")
     (staging / "hyperliquid.db").write_text("killed-run leftover — not sqlite")
+    (staging / "unlock_shadow.db").write_text("killed-run leftover — not sqlite")
 
     res = _run(env)
     assert res.returncode == 0, res.stderr + res.stdout
     snap = Path(env["SNAP_DIR"])
-    for name in ("bot.db", "hyperliquid.db"):
+    for name in ("bot.db", "hyperliquid.db", *SHADOW_DB_NAMES):
         staged = snap / name
         assert staged.exists(), f"{name} missing from captured staging"
         con = sqlite3.connect(str(staged))
@@ -108,9 +124,9 @@ def test_vacuum_overwrites_stale_staging(tmp_path):
 
 
 def test_daily_run_skips_research_when_not_weekday(tmp_path):
-    """bot.db still stages + snapshots when today is not the research day."""
+    """bot.db + all 5 shadow DBs stage daily when today is not the research day."""
     env, data = _env(tmp_path)
-    _mk_db(data / "live" / "bot.db")
+    _mk_daily_dbs(data)
     # research db absent entirely on non-weekly runs — it must not be required
     env["BACKUP_RESEARCH_WEEKDAY"] = str((datetime.now().isoweekday() % 7) + 1)
 
@@ -119,6 +135,8 @@ def test_daily_run_skips_research_when_not_weekday(tmp_path):
     assert "daily run" in res.stdout
     snap = Path(env["SNAP_DIR"])
     assert (snap / "bot.db").exists()
+    for name in SHADOW_DB_NAMES:
+        assert (snap / name).exists(), f"daily shadow DB {name} was not staged"
     assert not (snap / "hyperliquid.db").exists()
 
 
