@@ -1009,3 +1009,127 @@ class HyperliquidLiveClient:
             result = await asyncio.to_thread(fn, amt, bool(to_perp))
         logger.info("HL usd_class_transfer amount=%.2f to_perp=%s: %s", amt, to_perp, result)
         return result if isinstance(result, dict) else {"raw": result}
+
+    # ── Spot & L2 helpers for Multi-Leg Coordinator ─────────────
+
+    async def get_spot_user_state(self) -> Dict[str, Any]:
+        """Return Hyperliquid spot clearinghouse balances for the traded wallet."""
+        if self._info is None or self._wallet_address is None:
+            raise RuntimeError("HyperliquidLiveClient not initialized")
+        fn = getattr(self._info, "spot_user_state", None)
+        if not callable(fn):
+            return {"balances": []}
+        result = await asyncio.to_thread(fn, self._wallet_address)
+        return result if isinstance(result, dict) else {"balances": []}
+
+    async def get_spot_balances(self) -> Dict[str, float]:
+        """Return ``{token_name: total_balance}`` from ``spot_user_state``."""
+        state = await self.get_spot_user_state()
+        balances = state.get("balances", [])
+        out: Dict[str, float] = {}
+        if not isinstance(balances, list):
+            return out
+        for row in balances:
+            if not isinstance(row, dict):
+                continue
+            coin = str(row.get("coin", "")).upper()
+            if coin:
+                out[coin] = safe_float(row.get("total", 0.0), 0.0)
+        return out
+
+    async def get_l2_top(self, symbol: str) -> Optional[Tuple[float, float]]:
+        """Fetch top-of-book ``(best_bid, best_ask)`` for a perp or spot symbol."""
+        if self._info is None:
+            raise RuntimeError("HyperliquidLiveClient not initialized")
+        fn = getattr(self._info, "l2_snapshot", None)
+        if not callable(fn):
+            return None
+        coin = resolve_wire_coin(symbol)
+        snap = await asyncio.to_thread(fn, coin)
+        if not isinstance(snap, dict):
+            return None
+        levels = snap.get("levels")
+        if not isinstance(levels, list) or len(levels) < 2:
+            return None
+        bids, asks = levels[0], levels[1]
+        if not bids or not asks:
+            return None
+        best_bid = safe_float(bids[0].get("px") if isinstance(bids[0], dict) else 0.0)
+        best_ask = safe_float(asks[0].get("px") if isinstance(asks[0], dict) else 0.0)
+        if best_bid <= 0 or best_ask <= 0:
+            return None
+        return (best_bid, best_ask)
+
+    async def place_spot_order(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        *,
+        order_type: str = "limit_maker",
+        limit_price: Optional[float] = None,
+        max_slippage_pct: float = 2.0,
+        cloid: Optional[str] = None,
+        enforce_min_notional: bool = True,
+    ) -> Dict[str, Any]:
+        """Place a Spot ``buy`` or ``sell`` order on Hyperliquid.
+
+        Spot orders never set ``reduce_only=True`` (selling spot reduces held
+        token inventory directly). Supports ``limit_maker`` (``Alo``) and
+        ``ioc`` / ``limit_slippage_cap`` (``Ioc`` with hard slippage cap).
+        """
+        if self._exchange is None:
+            raise RuntimeError("HyperliquidLiveClient not initialized")
+
+        is_buy = side in ("long", "buy", "B")
+        sz = normalize_size(symbol, safe_float(size))
+        if sz <= 0:
+            raise ValueError(f"Invalid spot order size for {symbol}: {sz}")
+
+        coin = resolve_wire_coin(symbol)
+        if order_type == "limit_maker":
+            px = normalize_price(symbol, safe_float(limit_price))
+            if px <= 0:
+                raise ValueError(f"Invalid spot limit price for {symbol}: {px}")
+            if enforce_min_notional and (sz * px) < MIN_ORDER_NOTIONAL_USD:
+                raise ValueError(
+                    f"Spot order notional ${sz * px:.2f} below ${MIN_ORDER_NOTIONAL_USD:.0f} minimum for {symbol}"
+                )
+            hl_order_type = {"limit": {"tif": "Alo"}}
+            result = await self._call_exchange_order(
+                coin,
+                is_buy,
+                sz,
+                px,
+                hl_order_type,
+                reduce_only=False,
+                cloid=cloid,
+            )
+        else:
+            ref = safe_float(limit_price)
+            if ref <= 0:
+                bbo = await self.get_l2_top(symbol)
+                if not bbo:
+                    raise ValueError(f"Spot IoC order requires reference price for {symbol}")
+                ref = bbo[1] if is_buy else bbo[0]
+            if enforce_min_notional and is_buy and (sz * ref) < MIN_ORDER_NOTIONAL_USD:
+                raise ValueError(
+                    f"Spot buy notional ${sz * ref:.2f} below ${MIN_ORDER_NOTIONAL_USD:.0f} minimum for {symbol}"
+                )
+            cap = max(0.0, safe_float(max_slippage_pct)) / 100.0
+            raw_px = ref * (1.0 + cap) if is_buy else ref * (1.0 - cap)
+            px = normalize_price(symbol, raw_px)
+            if px <= 0:
+                raise ValueError(f"Invalid spot IoC price for {symbol}: {px}")
+            hl_order_type = {"limit": {"tif": "Ioc"}}
+            result = await self._call_exchange_order(
+                coin,
+                is_buy,
+                sz,
+                px,
+                hl_order_type,
+                reduce_only=False,
+                cloid=cloid,
+            )
+        logger.info("HL spot order %s %s sz=%.6f: %s", symbol, side, sz, result)
+        return result if isinstance(result, dict) else {"raw": result}
