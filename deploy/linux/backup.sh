@@ -31,12 +31,14 @@ hc() { [ -n "${HL_BACKUP_HC_URL:-}" ] && curl -fsS -m 10 --retry 2 "$1" >/dev/nu
 RESEARCH_WEEKDAY="${BACKUP_RESEARCH_WEEKDAY:-7}"   # ISO weekday, 7=Sunday
 TODAY=$(date -u +%u)
 
-DBS="$LIVE_DB"
+# Daily mandatory SQLite sources: operational bot.db + all 5 standalone shadow ledgers
+SHADOW_DBS="$HL_DATA/research/unlock_shadow.db $HL_DATA/research/carry_shadow.db $HL_DATA/research/boros_shadow.db $HL_DATA/research/resmom_shadow.db $HL_DATA/research/latency_probe.db"
+DBS="$LIVE_DB $SHADOW_DBS"
 if [ "$TODAY" = "$RESEARCH_WEEKDAY" ]; then
     DBS="$HL_DATA/research/hyperliquid.db $DBS"
-    echo "$LOG_TAG: weekly run — research DB included (weekday $RESEARCH_WEEKDAY)"
+    echo "$LOG_TAG: weekly run — research DB + live + 5 shadow DBs included (weekday $RESEARCH_WEEKDAY)"
 else
-    echo "$LOG_TAG: daily run — research DB skipped (weekly on day $RESEARCH_WEEKDAY)"
+    echo "$LOG_TAG: daily run — live + 5 shadow DBs included; research DB skipped (weekly on day $RESEARCH_WEEKDAY)"
 fi
 
 # Free space: need ~1x staged DB size on the staging fs
@@ -65,8 +67,8 @@ for db in $DBS; do
     # leave staged .db files the EXIT trap would have cleaned on a normal exit.
     rm -f "$STAGING/$name"
     echo "$LOG_TAG: VACUUM INTO $name"
-    sqlite3 "file:$db?mode=ro" "VACUUM INTO '$STAGING/$name'"
-    if ! sqlite3 -readonly "$STAGING/$name" "PRAGMA integrity_check;" | grep -qx "ok"; then
+    sqlite3 "file:$db?mode=ro" "PRAGMA busy_timeout=30000; VACUUM INTO '$STAGING/$name'"
+    if ! sqlite3 -readonly "$STAGING/$name" "PRAGMA busy_timeout=30000; PRAGMA integrity_check;" | grep -qx "ok"; then
         echo "$LOG_TAG: integrity_check FAILED on $name — aborting" >&2
         hc "${HL_BACKUP_HC_URL:-}/fail"; exit 1
     fi
