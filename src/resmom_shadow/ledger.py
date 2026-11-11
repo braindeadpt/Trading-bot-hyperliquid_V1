@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS resmom_rebalances (
     cost_usd REAL NOT NULL,
     flags_json TEXT,                     -- e.g. beta_neutral_unsolvable
     inputs_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ok',   -- 'ok' | 'failed'
     UNIQUE (week_key_ms, arm)
 );
 
@@ -124,6 +125,11 @@ class ResmomLedger:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(_SCHEMA)
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(resmom_rebalances)")}
+        if "status" not in cols:
+            self.conn.execute(
+                "ALTER TABLE resmom_rebalances ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'"
+            )
         self.conn.commit()
 
     # ── meta ──────────────────────────────────────────────────────────

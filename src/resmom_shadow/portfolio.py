@@ -99,13 +99,26 @@ def apply_rebalance(ledger: ResmomLedger, arm: str, week_key_ms: int,
         opened.append(sym)
         fills_used[sym] = px
 
-    tover = turnover_usd(prev_w, targets)
+    # Compute turnover & cost STRICTLY on legs that actually filled:
+    #   - prev legs skipped (no exit fill) stayed open at their previous weight
+    #     (zero turnover contribution).
+    #   - target legs skipped (no entry fill) did NOT open (zero turnover
+    #     contribution — never charge cost_usd on unfilled legs!).
+    executed_w: Dict[str, float] = {}
+    for pos in prev_open:
+        if pos["symbol"] in skipped:
+            executed_w[pos["symbol"]] = signed_weight(pos)
+    for sym in opened:
+        executed_w[sym] = executed_w.get(sym, 0.0) + float(targets[sym])
+
+    tover = turnover_usd(prev_w, executed_w)
     cost = tover * spec.COST_BPS_SIDE / 1e4
     _bump(ledger, arm, "realized", realized)
     _bump(ledger, arm, "costs", cost)
+    failed = bool(targets) and len(opened) == 0
     return {"realized": realized, "turnover_usd": tover, "cost_usd": cost,
             "opened": opened, "skipped_no_fill": skipped,
-            "fills": fills_used}
+            "fills": fills_used, "status": "failed" if failed else "ok"}
 
 
 def unrealized(ledger: ResmomLedger, arm: str,

@@ -61,11 +61,41 @@ def default_fetch() -> Dict[str, Callable[..., Any]]:
 
 class ResmomShadowDaemon:
     LOOKBACK_D = 105                     # >= 90d history + 60d beta margin
+    CANDLE_PACE_S = 0.08                 # ~12.5 req/s pacing across ~180 HL 1d candle calls
+    FILL_POLL_S = 15.0                   # poll interval when 00:05 1m bar is still forming
+    FILL_MAX_WAIT_MS = 30 * MS_MIN       # retry up to 30 min for the 00:05 1m bar to exist
 
-    def __init__(self, db_path: str = spec.DB_PATH,
-                 fetch: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        db_path: str = spec.DB_PATH,
+        fetch: Optional[Dict[str, Any]] = None,
+        *,
+        candle_pace_s: Optional[float] = None,
+        fill_poll_s: Optional[float] = None,
+        fill_max_wait_ms: Optional[int] = None,
+        sleep_fn: Callable[[float], None] = time.sleep,
+        clock_fn: Callable[[], int] = _now_ms,
+        alert_fn: Optional[Callable[[str, int, str], bool]] = None,
+    ) -> None:
         self.ledger = ResmomLedger(db_path)
+        is_injected = fetch is not None
         self.fetch = fetch or default_fetch()
+        self.candle_pace_s = (
+            float(candle_pace_s)
+            if candle_pace_s is not None
+            else (0.0 if is_injected else self.CANDLE_PACE_S)
+        )
+        self.fill_poll_s = (
+            float(fill_poll_s) if fill_poll_s is not None else self.FILL_POLL_S
+        )
+        self.fill_max_wait_ms = (
+            int(fill_max_wait_ms)
+            if fill_max_wait_ms is not None
+            else (0 if is_injected else self.FILL_MAX_WAIT_MS)
+        )
+        self._sleep = sleep_fn
+        self._clock = clock_fn
+        self._alert = alert_fn or prices.notify_rebalance_failure
         self._shutdown = False
         # Binance universe fetcher for arm BIN — lazy default
         if self.fetch.get("bn_meta") is None:
@@ -133,40 +163,92 @@ class ResmomShadowDaemon:
     # ── data assembly ─────────────────────────────────────────────────
 
     def _hl_candles_all(self, cutoff_ms: int) -> Dict[str, List[dict]]:
-        """One 1d-candle fetch per main-dex perp (universe + signals)."""
+        """One 1d-candle fetch per main-dex perp (universe + signals), paced."""
         names = [n for n in self.fetch["meta"]() if is_perp_symbol(n)]
         out: Dict[str, List[dict]] = {}
-        for n in names:
+        for idx, n in enumerate(names):
+            if idx > 0 and self.candle_pace_s > 0:
+                self._sleep(self.candle_pace_s)
             try:
                 out[n] = self.fetch["c1d"](n, self.LOOKBACK_D, cutoff_ms)
-            except Exception:  # noqa: BLE001
-                logger.warning("resmom: candle fetch failed for %s", n)
+            except Exception as exc:  # noqa: BLE001
+                code = getattr(exc, "code", None)
+                logger.error(
+                    "resmom: 1d candle fetch failed symbol=%s status=%s err=%s",
+                    n, code if code is not None else "error", exc,
+                )
         return out
 
     def _bn_candles_all(self, cutoff_ms: int) -> Dict[str, List[dict]]:
         out: Dict[str, List[dict]] = {}
-        for n in self.fetch["bn_meta"]():
+        for idx, n in enumerate(self.fetch["bn_meta"]()):
+            if idx > 0 and self.candle_pace_s > 0:
+                self._sleep(self.candle_pace_s * 0.5)
             try:
                 out[n] = self.fetch["bn_klines"](n, self.LOOKBACK_D,
                                                 cutoff_ms)
-            except Exception:  # noqa: BLE001
-                logger.warning("resmom: binance kline failed for %s", n)
+            except Exception as exc:  # noqa: BLE001
+                code = getattr(exc, "code", None)
+                logger.error(
+                    "resmom: binance kline failed symbol=%s status=%s err=%s",
+                    n, code if code is not None else "error", exc,
+                )
         return out
 
     # ── passes ────────────────────────────────────────────────────────
 
-    def _fills(self, symbols: List[str], week_key_ms: int
-               ) -> Dict[str, float]:
+    def _fills(
+        self,
+        symbols: List[str],
+        week_key_ms: int,
+        now_ms: Optional[int] = None,
+    ) -> Dict[str, float]:
+        """Resolve open of the first 1m candle with t >= W+300s (00:05 UTC).
+
+        If the 00:05 UTC 1m bar is not yet indexed/closed or transient errors
+        occur, polls missing symbols until available up to ``fill_max_wait_ms``
+        (30 min). The returned price is ALWAYS the open of that 00:05 UTC 1m
+        candle — never a fetch-time spot or mid price.
+        """
         t_fill = week_key_ms + spec.FILL_LAG_S * 1000
+        start_clock = int(now_ms if now_ms is not None else self._clock())
+        deadline_ms = start_clock + max(0, self.fill_max_wait_ms)
+        ordered = sorted(set(symbols))
         out: Dict[str, float] = {}
-        for s in symbols:
-            try:
-                px = self.fetch["fill"](s, t_fill)
-            except Exception:  # noqa: BLE001
-                px = None
-            if px is not None:
-                out[s] = px
-        return out
+
+        while True:
+            missing = [s for s in ordered if s not in out]
+            if not missing:
+                return out
+            for idx, s in enumerate(missing):
+                if idx > 0 and self.candle_pace_s > 0:
+                    self._sleep(self.candle_pace_s)
+                try:
+                    px = self.fetch["fill"](s, t_fill)
+                except Exception as exc:  # noqa: BLE001
+                    code = getattr(exc, "code", None)
+                    logger.error(
+                        "resmom: fill fetch error symbol=%s status=%s err=%s",
+                        s, code if code is not None else "error", exc,
+                    )
+                    px = None
+                if px is not None:
+                    out[s] = px
+
+            still_missing = [s for s in ordered if s not in out]
+            if not still_missing:
+                return out
+            if self.fill_max_wait_ms <= 0 or self._clock() >= deadline_ms:
+                logger.error(
+                    "resmom: 1m fill bar unavailable after wait window week=%s t_fill=%s missing=%s",
+                    week_key_ms, t_fill, still_missing,
+                )
+                return out
+            logger.info(
+                "resmom: waiting %.1fs for 00:05 UTC 1m bar on %d symbols (%s)",
+                self.fill_poll_s, len(still_missing), still_missing[:5],
+            )
+            self._sleep(self.fill_poll_s)
 
     def _arm_pass(self, week_key_ms: int, arm: str,
                   universe_syms: List[str],
@@ -200,15 +282,45 @@ class ResmomShadowDaemon:
         prev = self.ledger.positions_open(arm)
         st = pf.apply_rebalance(self.ledger, arm, week_key_ms, rid, prev,
                                 targets, prices_map, entry_ms)
+        reb_status = st.get("status", "ok")
         self.ledger.conn.execute(
-            "UPDATE resmom_rebalances SET turnover_usd=?, cost_usd=? WHERE id=?",
-            (st["turnover_usd"], st["cost_usd"], rid))
+            "UPDATE resmom_rebalances SET turnover_usd=?, cost_usd=?, status=? WHERE id=?",
+            (st["turnover_usd"], st["cost_usd"], reb_status, rid))
         self.ledger.conn.commit()
         self.ledger.log("rebalance", {"arm": arm, "n_targets": len(targets),
+                                      "status": reb_status,
                                       "skipped": st["skipped_no_fill"],
                                       "turnover": st["turnover_usd"],
                                       "cost": st["cost_usd"],
-                                      "flags": port.flags}, rid, _now_ms())
+                                      "flags": port.flags}, rid, self._clock())
+
+        if reb_status == "failed":
+            msg = (
+                f"0/{len(targets)} target legs filled at week={week_key_ms} "
+                f"(skipped={st['skipped_no_fill']})"
+            )
+            logger.error("resmom: rebalance FAILED arm=%s %s", arm, msg)
+            self.ledger.meta_set(
+                f"rebalance_failed_{arm}",
+                json.dumps({"week_key_ms": week_key_ms, "rebalance_id": rid, "msg": msg}),
+            )
+            self.ledger.log(
+                "rebalance_failed",
+                {"arm": arm, "week_key_ms": week_key_ms, "msg": msg},
+                rid,
+                self._clock(),
+            )
+            if arm == "A":
+                # Poison hb_ts_ms so host hl-healthcheck (hc-resmom) pings /fail
+                self.ledger.meta_set("hb_ts_ms", "0")
+            try:
+                self._alert(arm, week_key_ms, msg)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("resmom: alert handler error arm=%s: %s", arm, exc)
+        else:
+            if self.ledger.meta_get(f"rebalance_failed_{arm}"):
+                self.ledger.meta_set(f"rebalance_failed_{arm}", "")
+
         return {"rebalance_id": rid, **st, "flags": port.flags}
 
     def rebalance_pass(self, now_ms: Optional[int] = None) -> Dict[str, Any]:
@@ -232,7 +344,7 @@ class ResmomShadowDaemon:
                          {p["symbol"] for a in pf.ARMS
                           for p in self.ledger.positions_open(a)
                           if a in ("A", "B")})
-        fills = self._fills(fill_syms, wk)
+        fills = self._fills(fill_syms, wk, now_ms=now_ms)
         umeta = [{"sym": e.symbol, "vol30": e.vol30_notional,
                   "hist_d": e.history_d} for e in universe]
         stats = {"week": wk, "universe_n": len(uni_syms),
@@ -403,11 +515,16 @@ class ResmomShadowDaemon:
         self._heartbeat()
 
     def _heartbeat(self) -> None:
-        self.ledger.meta_set("hb_ts_ms", str(_now_ms()))
+        # Keep hb_ts_ms=0 while primary Arm A has an unresolved failed rebalance
+        # so the host hl-healthcheck timer continues alerting /fail.
+        if self.ledger.meta_get("rebalance_failed_A"):
+            self.ledger.meta_set("hb_ts_ms", "0")
+        else:
+            self.ledger.meta_set("hb_ts_ms", str(self._clock()))
         self.ledger.meta_set("counts", json.dumps({
-            "rebalances": self.ledger.count("resmom_rebalances"),
+            "rebalances": self.ledger.count("resmom_rebalances", "WHERE arm='A'"),
             "open_positions": self.ledger.count(
-                "resmom_positions", "WHERE status='open'")}))
+                "resmom_positions", "WHERE arm='A' AND status='open'")}))
 
     async def run(self) -> None:
         import asyncio
