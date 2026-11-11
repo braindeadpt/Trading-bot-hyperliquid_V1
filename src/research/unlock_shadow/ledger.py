@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -97,13 +98,23 @@ CREATE TABLE IF NOT EXISTS unlock_meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
 
+def decode_snapshot_payload(raw: Any) -> str:
+    """Decode either a zlib-compressed BLOB or a legacy plain-text JSON snapshot."""
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        return zlib.decompress(bytes(raw)).decode("utf-8")
+    return str(raw)
+
+
 class UnlockLedger:
     """Writer + reader for the unlock-shadow evidence store."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._con = sqlite3.connect(str(self.path))
+        self._con = sqlite3.connect(str(self.path), timeout=30.0)
+        self._con.execute("PRAGMA journal_mode=WAL;")
+        self._con.execute("PRAGMA synchronous=NORMAL;")
+        self._con.execute("PRAGMA busy_timeout=30000;")
         self._con.executescript(_SCHEMA)
         self._migrate()
         self._con.commit()
@@ -131,13 +142,70 @@ class UnlockLedger:
 
     def snapshot_write(self, ts_ms: int, source: str, token: str,
                        sha256: str, payload_json: str, n_raw: int) -> int:
+        compressed = zlib.compress(payload_json.encode("utf-8"), level=6)
         cur = self._con.execute(
             "INSERT INTO unlock_snapshots"
             " (ts_ms, source, token, sha256, payload_json, n_raw)"
             " VALUES (?,?,?,?,?,?)",
-            (ts_ms, source, token, sha256, payload_json, n_raw))
+            (ts_ms, source, token, sha256, sqlite3.Binary(compressed), n_raw))
         self._con.commit()
         return int(cur.lastrowid)
+
+    def snapshot_read(self, snapshot_id: int) -> Optional[Dict[str, Any]]:
+        """Read a single snapshot row with transparent zlib decompression."""
+        cur = self._con.execute(
+            "SELECT id, ts_ms, source, token, sha256, payload_json, n_raw"
+            " FROM unlock_snapshots WHERE id=?",
+            (snapshot_id,))
+        r = cur.fetchone()
+        if r is None:
+            return None
+        return {
+            "id": int(r[0]),
+            "ts_ms": int(r[1]),
+            "source": str(r[2]),
+            "token": str(r[3]),
+            "sha256": str(r[4]),
+            "payload_json": decode_snapshot_payload(r[5]),
+            "n_raw": int(r[6]),
+        }
+
+    def compact_snapshots(self, *, vacuum: bool = True, batch_size: int = 200) -> Dict[str, int]:
+        """Compress legacy uncompressed text rows in ``unlock_snapshots`` and optionally VACUUM.
+
+        Preserves every row's ``id``, ``ts_ms``, ``source``, ``token``, ``sha256``,
+        and byte-exact decoded JSON string (mirroring ``boros_shadow`` zlib + sha256).
+        """
+        compacted = 0
+        while True:
+            rows = self._con.execute(
+                "SELECT id, payload_json FROM unlock_snapshots"
+                " WHERE typeof(payload_json) = 'text' LIMIT ?",
+                (int(batch_size),),
+            ).fetchall()
+            if not rows:
+                break
+            updates = []
+            for sid, text_payload in rows:
+                raw_str = str(text_payload)
+                comp = zlib.compress(raw_str.encode("utf-8"), level=6)
+                if zlib.decompress(comp).decode("utf-8") != raw_str:
+                    raise RuntimeError(f"zlib roundtrip mismatch on snapshot id={sid}")
+                updates.append((sqlite3.Binary(comp), int(sid)))
+            with self._con:
+                self._con.executemany(
+                    "UPDATE unlock_snapshots SET payload_json=? WHERE id=?",
+                    updates,
+                )
+            compacted += len(updates)
+        if vacuum:
+            self._con.commit()
+            self._con.execute("VACUUM;")
+            self._con.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        return {
+            "compacted_rows": compacted,
+            "total_rows": self.count("unlock_snapshots"),
+        }
 
     def calendar_seen(self, token: str, event_ms: int, amount: float,
                       pct: Optional[float], category: str, kind: str,
