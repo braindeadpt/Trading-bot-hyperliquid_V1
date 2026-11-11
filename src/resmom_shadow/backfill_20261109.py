@@ -38,10 +38,19 @@ TARGET_WEEK_MS: int = 1794182400000  # Monday 2026-11-09 00:00:00 UTC
 ENTRY_FILL_MS: int = TARGET_WEEK_MS + spec.FILL_LAG_S * 1000  # 2026-11-09 00:05:00 UTC
 
 
+def _default_first_1m_bar(coin: str, not_before_ms: int) -> Optional[tuple[int, float]]:
+    """Return ``(candle_ts_ms, open_px)`` of the first 1m bar with ``t >= not_before_ms``."""
+    rows = prices.hl_candles(coin, "1m", not_before_ms, not_before_ms + 10 * 60_000)
+    rows = [r for r in rows if r["t"] >= not_before_ms]
+    if not rows:
+        return None
+    return int(rows[0]["t"]), float(rows[0]["o"])
+
+
 def build_backfill_plan(
     db_path: str,
     *,
-    fill_fn: Callable[[str, int], Optional[float]] = prices.first_1m_open,
+    fill_fn: Optional[Callable[[str, int], Optional[float]]] = None,
     pace_s: float = 0.08,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> Dict[str, Any]:
@@ -97,13 +106,20 @@ def build_backfill_plan(
 
         needed_syms = sorted(set(weights_a) | set(weights_b) | null_syms)
         fills: Dict[str, float] = {}
+        candle_ts_by_sym: Dict[str, int] = {}
         missing_syms: List[str] = []
         for idx, sym in enumerate(needed_syms):
             if idx > 0 and pace_s > 0:
                 sleep_fn(pace_s)
-            px = fill_fn(sym, ENTRY_FILL_MS)
+            if fill_fn is not None:
+                px = fill_fn(sym, ENTRY_FILL_MS)
+                bar_ts = ENTRY_FILL_MS
+            else:
+                bar = _default_first_1m_bar(sym, ENTRY_FILL_MS)
+                bar_ts, px = (bar[0], bar[1]) if bar is not None else (0, None)
             if px is not None and px > 0:
                 fills[sym] = float(px)
+                candle_ts_by_sym[sym] = int(bar_ts)
             else:
                 missing_syms.append(sym)
 
@@ -127,6 +143,7 @@ def build_backfill_plan(
                     "weight": abs(w),
                     "qty": qty,
                     "entry_px": px,
+                    "candle_ts_ms": candle_ts_by_sym.get(sym, ENTRY_FILL_MS),
                     "entry_ms": ENTRY_FILL_MS,
                 })
                 executed_w[sym] = w
