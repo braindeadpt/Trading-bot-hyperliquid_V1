@@ -197,8 +197,16 @@ def write_report(cell: Dict[str, Any], span_days: float, n_events: int,
         "* Caveats: okx/bybit feed, not Hyperliquid; 30 days still modest for regime diversity.",
         "",
     ]
-    REPORT_PATH.write_text("\n".join(rows), encoding="utf-8")
-    log(f"report written: {REPORT_PATH}")
+    payload = "\n".join(rows)
+    try:
+        REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        REPORT_PATH.write_text(payload, encoding="utf-8")
+        log(f"report written: {REPORT_PATH}")
+    except OSError as exc:
+        fallback = STATE_DIR / REPORT_PATH.name
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        fallback.write_text(payload, encoding="utf-8")
+        log(f"report fallback written ({exc}): {fallback}")
 
 
 def do_recheck(state: Dict[str, Any], force: bool) -> bool:
