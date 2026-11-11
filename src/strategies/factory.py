@@ -147,6 +147,17 @@ def _instantiate_from_registry(
     if shadow:
         section["_shadow_mode"] = True
         _apply_shadow_section_overrides(section, path)
+    if (
+        getattr(cls, "SYNTHETIC_SPOT_ONLY", False)
+        and not shadow
+        and str(section.get("_mode", "paper")) in ("testnet", "mainnet")
+    ):
+        logger.warning(
+            "Refusing to instantiate synthetic-spot-only strategy %s for live execution (mode=%s) — use MultiLegCoordinator",
+            cls.__name__,
+            section.get("_mode"),
+        )
+        return None
     if not force and not _should_load_strategy(section):
         return None
     inst = cls(section)
