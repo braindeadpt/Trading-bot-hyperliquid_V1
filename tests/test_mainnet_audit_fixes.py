@@ -409,3 +409,115 @@ def test_p1_ops_proxy_cb_telegram_kill_and_crash_recovery() -> None:
     mainnet_cmd = (sys.executable, "main.py", "--mode", "mainnet")
     assert cr._validate_cmd(mainnet_cmd) is True
     assert cr._extract_mode(mainnet_cmd) == "mainnet"
+
+
+@pytest.mark.unit
+def test_review_r_p0_and_r_p1_remediations() -> None:
+    """Verify PR #9 adversarial review fixes: SDK internal TypeError no-retry,
+    partial close portfolio sync, keep-alive proxy Connection: close, legacy
+    entry_fee_debited backfill, and reconciler ignored_symbols_provider."""
+    from src.core.reconciliation import ExchangeReconciler
+
+    # R-P0-1: Internal TypeError inside 7-arg Exchange.order must NOT submit a 2nd order!
+    _meta_cache.clear()
+    _meta_cache["SOL"] = {
+        "sz_decimals": 2,
+        "px_decimals": 4,
+        "is_spot": False,
+        "enforce_sig_figs": True,
+        "wire_coin": "SOL",
+    }
+    calls = 0
+
+    def buggy_sdk_order(coin, is_buy, sz, px, order_type, reduce_only=False, cloid=None):
+        nonlocal calls
+        calls += 1
+        raise TypeError("internal_response_parse_type_error")
+
+    client = HyperliquidLiveClient("0x" + "a" * 64, use_testnet=True)
+    client._exchange = SimpleNamespace(order=buggy_sdk_order)
+    client._info = MagicMock()
+    client._wallet_address = "0x" + "b" * 40
+    with pytest.raises(TypeError, match="internal_response_parse_type_error"):
+        asyncio.run(
+            client.place_entry(
+                "SOL",
+                "long",
+                1.0,
+                order_type="limit_maker",
+                limit_price=150.0,
+                post_only=True,
+                cloid="0x" + "1" * 32,
+            )
+        )
+    assert calls == 1, "SDK internal TypeError must NEVER trigger a 2nd fallback order!"
+
+    # R-P0-2 + R-P1-2: Partial close keeps PortfolioState size & fees exact; legacy backfill works
+    async def _run_portfolio_and_reconciler() -> None:
+        p = PortfolioState(10_000.0)
+        pos = Position(
+            symbol="SOL",
+            side="long",
+            entry_price=100.0,
+            size=2.0,  # notional = $200
+            entry_time_ms=1_700_000_000_000,
+        )
+        # Simulate legacy restored position without entry_fee_debited, then backfill $1.00
+        await p.add_position(pos, cost=200.0)
+        p._positions["SOL"].metadata.pop("entry_fee_debited", None)
+        p._cash -= 1.00
+        await p.ensure_entry_fee_debited("SOL", 1.00)
+
+        # Partial close of 0.5 SOL at $110 (+$5 gross, -$0.25 entry_fee_share, -$0.25 exit_fee = +$4.50 net)
+        await p.reduce_position_partial("SOL", closed_size=0.5, realized_pnl_usd=4.50)
+        positions = await p.positions
+        assert abs(positions["SOL"].size - 1.5) < 1e-9
+        # Remaining 1.5 SOL closes at $100 (0 gross, -$0.75 entry_fee_share, -$0.75 exit_fee = -$1.50 net)
+        await p.remove_position("SOL", exit_price=100.0, pnl_usd=-1.50, pnl_pct=-0.01, reason="sl")
+        # Net PnL across both slices = +4.50 - 1.50 = +3.00 -> total equity MUST be 10_003.00!
+        assert abs((await p.get_total_value()) - 10_003.00) < 1e-9
+
+        # R-P1-3: ExchangeReconciler skips external MultiLegCoordinator perp symbols on Mainnet HALT policy
+        fake_live = SimpleNamespace(
+            get_user_state=AsyncMock(
+                return_value={
+                    "assetPositions": [
+                        {"position": {"coin": "HYPE", "szi": "-20.0", "entryPx": "25.0", "unrealizedPnl": "0.0"}}
+                    ],
+                    "marginSummary": {"accountValue": "10003.0"},
+                }
+            ),
+            get_open_orders=AsyncMock(return_value=[]),
+        )
+        recon = ExchangeReconciler(
+            live_client=fake_live,
+            portfolio=p,
+            orphan_exchange_policy="HALT",
+            ignored_symbols_provider=lambda: {"HYPE"},
+        )
+        rep = await recon.reconcile_once()
+        assert rep.success is True
+        assert recon.health.halted is False
+        assert "skipped_external:HYPE" in rep.actions
+
+    asyncio.run(_run_portfolio_and_reconciler())
+
+    # R-P1-1: Dashboard proxy injects Connection: close on HTTP/1.1 keep-alive but preserves WebSocket Upgrade
+    keepalive_req = (
+        b"GET /api/status HTTP/1.1\r\n"
+        b"Host: localhost:8091\r\n"
+        b"Connection: keep-alive\r\n\r\n"
+    )
+    rw = rewrite_http_head(keepalive_req, "172.18.0.9")
+    assert b"Connection: close\r\n" in rw
+    assert b"Connection: keep-alive" not in rw
+    assert b"X-Forwarded-For: 172.18.0.9\r\n" in rw
+
+    ws_req = (
+        b"GET /socket.io/?EIO=4&transport=websocket HTTP/1.1\r\n"
+        b"Upgrade: websocket\r\n"
+        b"Connection: Upgrade\r\n\r\n"
+    )
+    rw_ws = rewrite_http_head(ws_req, "172.18.0.9")
+    assert b"Connection: Upgrade\r\n" in rw_ws
+    assert b"X-Forwarded-For: 172.18.0.9\r\n" in rw_ws

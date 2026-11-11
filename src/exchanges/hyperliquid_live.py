@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import logging
 import math
 import os
@@ -390,6 +391,24 @@ class HyperliquidLiveClient:
         except Exception:  # noqa: BLE001
             return None
 
+    @staticmethod
+    def _order_callable_arity(order_fn: Any) -> int:
+        """Return max positional parameters accepted by *order_fn* (99 for *args)."""
+        try:
+            sig = inspect.signature(order_fn)
+        except (TypeError, ValueError):
+            return 99
+        count = 0
+        for param in sig.parameters.values():
+            if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                return 99
+            if param.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                count += 1
+        return count
+
     async def _call_exchange_order(
         self,
         coin: str,
@@ -401,25 +420,27 @@ class HyperliquidLiveClient:
         reduce_only: bool = False,
         cloid: Optional[str] = None,
     ) -> Any:
-        """Invoke ``self._exchange.order`` under the nonce/session lock."""
+        """Invoke ``self._exchange.order`` ONCE under the nonce/session lock.
+
+        Inspects signature arity beforehand rather than catching ``TypeError``
+        around ``to_thread(self._exchange.order, ...)`` so an internal SDK
+        ``TypeError`` after HTTP submission can never trigger a duplicate order.
+        """
         cloid_obj = self._build_cloid_obj(cloid)
+        arity = self._order_callable_arity(self._exchange.order)
         async with self._get_action_lock():
-            if cloid_obj is not None:
-                try:
-                    return await asyncio.to_thread(
-                        self._exchange.order,
-                        coin,
-                        is_buy,
-                        sz,
-                        px,
-                        hl_order_type,
-                        bool(reduce_only),
-                        cloid_obj,
-                    )
-                except TypeError:
-                    # Fallback for minimal test doubles with 5- or 6-arg order()
-                    pass
-            if reduce_only:
+            if cloid_obj is not None and arity >= 7:
+                return await asyncio.to_thread(
+                    self._exchange.order,
+                    coin,
+                    is_buy,
+                    sz,
+                    px,
+                    hl_order_type,
+                    bool(reduce_only),
+                    cloid_obj,
+                )
+            if reduce_only and arity >= 6:
                 return await asyncio.to_thread(
                     self._exchange.order,
                     coin,

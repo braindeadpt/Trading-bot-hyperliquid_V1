@@ -4588,6 +4588,10 @@ class TradingEngine:
         current = await self._portfolio.positions
         for trade in list(self._executor._open_trades.values()):
             if trade.symbol in current:
+                if hasattr(self._portfolio, "ensure_entry_fee_debited"):
+                    await self._portfolio.ensure_entry_fee_debited(
+                        trade.symbol, safe_float(getattr(trade, "entry_fee", 0.0))
+                    )
                 logger.debug(
                     "Open trade %s already in portfolio — skip restore",
                     trade.symbol,

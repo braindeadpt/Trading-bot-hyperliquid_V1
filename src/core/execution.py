@@ -963,7 +963,26 @@ class ExecutionEngine:
                         safe_divide(pnl_usd, capital, 0.0) if capital > 0 else 0.0
                     )
                 if parsed.lifecycle_state == ORDER_PARTIAL and parsed.filled_size:
-                    residual_sz = max(0.0, position.size - float(parsed.filled_size))
+                    closed_sz = min(position.size, float(parsed.filled_size))
+                    residual_sz = max(0.0, position.size - closed_sz)
+                    ratio = safe_divide(closed_sz, position.size, 0.0)
+                    fee_share = entry_fee * ratio
+                    remaining_entry_fee = max(0.0, entry_fee - fee_share)
+                    slice_exit_fee = fill_exit * closed_sz * exit_fee_pct
+                    slice_gross = (
+                        (fill_exit - position.entry_price) * closed_sz
+                        if position.side == "long"
+                        else (position.entry_price - fill_exit) * closed_sz
+                    )
+                    slice_net_pnl = slice_gross - slice_exit_fee - fee_share
+                    if self._portfolio is not None and hasattr(
+                        self._portfolio, "reduce_position_partial"
+                    ):
+                        await self._portfolio.reduce_position_partial(
+                            position.symbol,
+                            closed_size=closed_sz,
+                            realized_pnl_usd=slice_net_pnl,
+                        )
                     open_trade = TradeResult(
                         trade_id=open_trade.trade_id,
                         symbol=open_trade.symbol,
@@ -976,7 +995,7 @@ class ExecutionEngine:
                         status="open",
                         reason=open_trade.reason,
                         timestamp_ms=open_trade.timestamp_ms,
-                        entry_fee=open_trade.entry_fee,
+                        entry_fee=remaining_entry_fee,
                         exchange_order_id=open_trade.exchange_order_id,
                     )
                     position = Position(
@@ -996,6 +1015,7 @@ class ExecutionEngine:
                             int(open_trade.trade_id),
                             size=residual_sz,
                             filled_size=residual_sz,
+                            entry_fee=remaining_entry_fee,
                         )
                     except Exception:
                         logger.debug("Partial close DB size update skipped", exc_info=True)

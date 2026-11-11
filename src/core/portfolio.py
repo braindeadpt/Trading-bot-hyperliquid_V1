@@ -701,6 +701,45 @@ class PortfolioState:
             self._update_peak_and_drawdown()
             self._refresh_dashboard_cache_unlocked()
 
+    async def ensure_entry_fee_debited(self, symbol: str, entry_fee: float) -> None:
+        """Backfill ``entry_fee_debited`` on legacy pre-upgrade restored positions."""
+        fee_val = max(0.0, safe_float(entry_fee, 0.0))
+        async with self._lock:
+            pos = self._positions.get(symbol)
+            if pos is None:
+                return
+            if "entry_fee_debited" not in pos.metadata:
+                pos.metadata["entry_fee_debited"] = fee_val
+                pos.metadata.setdefault("entry_fee", fee_val)
+
+    async def reduce_position_partial(
+        self,
+        symbol: str,
+        *,
+        closed_size: float,
+        realized_pnl_usd: float,
+    ) -> None:
+        """Apply a partial close to *symbol* while keeping the residual open in sync."""
+        c_sz = safe_float(closed_size, 0.0)
+        if c_sz <= 0:
+            return
+        async with self._lock:
+            await self._check_daily_reset()
+            pos = self._positions.get(symbol)
+            if pos is None or pos.size <= 0:
+                return
+            old_sz = pos.size
+            ratio = min(1.0, c_sz / old_sz)
+            released_notional = pos.entry_price * c_sz
+            total_fee_debited = safe_float(pos.metadata.get("entry_fee_debited", 0.0), 0.0)
+            fee_share = total_fee_debited * ratio
+            pos.size = max(0.0, old_sz - c_sz)
+            pos.metadata["entry_fee_debited"] = max(0.0, total_fee_debited - fee_share)
+            self._cash += released_notional + fee_share + safe_float(realized_pnl_usd)
+            self._daily_pnl += safe_float(realized_pnl_usd)
+            self._update_peak_and_drawdown()
+            self._refresh_dashboard_cache_unlocked()
+
     async def cancel_position(self, symbol: str) -> None:
         """Rollback a freshly-opened position (e.g. after a failed live order).
 
