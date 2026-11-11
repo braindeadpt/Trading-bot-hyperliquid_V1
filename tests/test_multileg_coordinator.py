@@ -460,3 +460,118 @@ def test_unlegged_adverse_excursion_circuit_and_unlock_short_pair(tmp_path) -> N
         asyncio.run(_run())
     finally:
         ledger.close()
+
+
+@pytest.mark.unit
+def test_review_spot_fee_dust_close_validation_margin_and_reload(tmp_path) -> None:
+    """Verify PR #10 adversarial review fixes:
+      - R-P0-4: Spot base-token fee deduction (19.98 bought -> 19.97 held) clamps sell & clears fee dust.
+      - R-P0-3: Rejected live close raises RuntimeError and keeps status='pending_exit' (never 'closed').
+      - R-P1-4: ensure_margin_ready deducts totalMarginUsed from accountValue.
+      - R-P1-5 + R-P1-3: load_active_episodes() & get_active_perp_symbols() hydrate after restart.
+    """
+    _seed_hl_meta()
+    ledger = MultiLegLedger(str(tmp_path / "ml_review.db"))
+
+    class SpotFeeAndMarginClient(FakeMultiLegHLClient):
+        def __init__(self) -> None:
+            super().__init__(account_value=1_500.0, spot_usdc=1_500.0)
+            self.total_margin_used = 0.0
+            self.spot_hype_avail = 0.0
+            self.reject_next_perp_close = False
+
+        async def get_user_state(self) -> Dict[str, Any]:
+            return {
+                "marginSummary": {
+                    "accountValue": str(self.account_value),
+                    "totalMarginUsed": str(self.total_margin_used),
+                }
+            }
+
+        async def get_available_spot_balances(self) -> Dict[str, float]:
+            return {"USDC": self.spot_usdc, "HYPE": self.spot_hype_avail}
+
+        async def place_aggressive_limit(self, symbol, side, size, **kwargs):
+            if self.reject_next_perp_close:
+                return {"status": "err", "response": "slippage_exceeded"}
+            return await super().place_aggressive_limit(symbol, side, size, **kwargs)
+
+    async def _run() -> None:
+        client = SpotFeeAndMarginClient()
+        coord = MultiLegCoordinator(ledger=ledger, live_client=client, mode="testnet")
+        runner = SpotPerpCarryRunner(coord)
+        spot_bbo = TopOfBook(bid=25.00, ask=25.02, timestamp_ms=1_000)
+        perp_bbo = TopOfBook(bid=25.01, ask=25.03, timestamp_ms=1_000)
+
+        ep = await runner.open_carry_episode(
+            episode_id="carry-review-1",
+            spot_symbol="HYPE/USDC",
+            perp_symbol="HYPE",
+            notional_usd=500.0,
+            max_leverage=10.0,
+            spot_book=spot_bbo,
+            perp_book=perp_bbo,
+            now_ms=1_000,
+        )
+        s_oid = ep.legs["spot"].order_id
+        p_oid = ep.legs["perp"].order_id
+        assert s_oid and p_oid
+        s_sz = ep.legs["spot"].spec.target_size
+        p_sz = ep.legs["perp"].spec.target_size
+        client.fills_by_oid[s_oid] = [{"coin": "@107", "sz": str(s_sz), "px": "25.00", "fee": "0.075"}]
+        client.fills_by_oid[p_oid] = [{"coin": "HYPE", "sz": str(p_sz), "px": "25.03", "fee": "0.075"}]
+        await runner.step_carry_entry(ep, spot_book=spot_bbo, perp_book=perp_bbo, now_ms=2_000)
+        assert ep.status == "open"
+
+        # R-P1-5 + R-P1-3: Reload active episodes & active perp symbols from SQLite
+        assert ledger.get_active_perp_symbols() == {"HYPE"}
+        reloaded = ledger.load_active_episodes(default_max_leverage=10.0)
+        assert len(reloaded) == 1 and reloaded[0].episode_id == "carry-review-1"
+        assert reloaded[0].legs["spot"].filled_size == s_sz
+
+        # R-P1-4: Lock $1,100 of $1,500 account -> free = $400 < $800 required -> must reject 2nd entry!
+        client.total_margin_used = 1_100.0
+        with pytest.raises(ValueError, match="Insufficient Hyperliquid USDC"):
+            await runner.open_carry_episode(
+                episode_id="carry-review-2",
+                spot_symbol="HYPE/USDC",
+                perp_symbol="HYPE",
+                notional_usd=500.0,
+                max_leverage=10.0,
+                spot_book=spot_bbo,
+                perp_book=perp_bbo,
+                now_ms=3_000,
+            )
+
+        # R-P0-4 + R-P0-3: Wallet holds s_sz - 0.01 HYPE (base-token buy fee deducted),
+        # AND first perp close rejects -> must NOT mark episode closed!
+        client.spot_hype_avail = round(s_sz - 0.01, 2)
+        client.reject_next_perp_close = True
+        with pytest.raises(RuntimeError, match="multileg_close_incomplete"):
+            await coord.close_episode_taker(
+                ep,
+                books={"HYPE/USDC": spot_bbo, "HYPE": perp_bbo},
+                reason="exit_attempt_1",
+                now_ms=10_000,
+            )
+        assert ep.status == "pending_exit"
+        # Spot leg sold exact clamped available balance (s_sz - 0.01) and cleared 0.01 fee dust!
+        assert client.spot_orders[-1]["size"] == round(s_sz - 0.01, 2)
+        assert ep.legs["spot"].filled_size == 0.0
+        assert ep.legs["perp"].filled_size == p_sz
+
+        # Retry close when perp succeeds -> episode transitions cleanly to 'closed'!
+        client.reject_next_perp_close = False
+        await coord.close_episode_taker(
+            ep,
+            books={"HYPE/USDC": spot_bbo, "HYPE": perp_bbo},
+            reason="exit_attempt_2",
+            now_ms=15_000,
+        )
+        assert ep.status == "closed"
+        assert ledger.get_active_perp_symbols() == set()
+
+    try:
+        asyncio.run(_run())
+    finally:
+        ledger.close()

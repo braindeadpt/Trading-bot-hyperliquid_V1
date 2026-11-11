@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Optional
 
 from src.exchanges.hyperliquid_live import normalize_size
-from src.multileg.coordinator import MultiLegCoordinator
+from src.multileg.coordinator import MAKER_FEE_RATE, MultiLegCoordinator
 from src.multileg.types import (
     CarryMarginParams,
     DeleverageAction,
@@ -69,12 +69,17 @@ class SpotPerpCarryRunner:
         )
 
         raw_qty = float(notional_usd) / perp_book.mid
-        # Floor to the coarser szDecimals of Spot and Perp so both legs hold identical quantity
-        qty_spot = normalize_size(spot_symbol, raw_qty)
-        qty_perp = normalize_size(perp_symbol, qty_spot)
-        matched_qty = min(qty_spot, qty_perp)
+        # Floor to the coarser szDecimals of Spot and Perp so both legs match,
+        # and gross up Spot buy by 1 / (1 - MAKER_FEE_RATE) when tick precision
+        # permits so post-fee Spot base-token inventory matches Perp short size.
+        qty_spot_base = normalize_size(spot_symbol, raw_qty)
+        qty_perp = normalize_size(perp_symbol, qty_spot_base)
+        matched_qty = min(qty_spot_base, qty_perp)
         if matched_qty <= 0:
             raise ValueError(f"Carry matched quantity rounded to 0 for {perp_symbol}")
+        spot_buy_qty = normalize_size(spot_symbol, matched_qty / (1.0 - MAKER_FEE_RATE))
+        if spot_buy_qty <= 0:
+            spot_buy_qty = matched_qty
 
         legs = [
             LegSpec(
@@ -82,7 +87,7 @@ class SpotPerpCarryRunner:
                 symbol=spot_symbol,
                 market_kind="spot",
                 side="buy",
-                target_size=matched_qty,
+                target_size=spot_buy_qty,
                 limit_price=spot_book.bid,
             ),
             LegSpec(

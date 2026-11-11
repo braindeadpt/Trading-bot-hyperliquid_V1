@@ -22,10 +22,12 @@ from src.core.order_lifecycle import (
     ORDER_FILLED,
     ORDER_PARTIAL,
     ORDER_RESTING,
+    parse_hyperliquid_close_response,
     parse_hyperliquid_entry_response,
 )
 from src.exchanges.hyperliquid_live import (
     MIN_ORDER_NOTIONAL_USD,
+    get_symbol_info,
     make_cloid,
     normalize_price,
     normalize_size,
@@ -106,14 +108,27 @@ class MultiLegCoordinator:
             user_state.get("marginSummary", {}) if isinstance(user_state, dict) else {}
         )
         perp_acct_val = safe_float(margin_summary.get("accountValue"), 0.0)
-        spot_balances = await self._client.get_spot_balances()
-        spot_usdc = safe_float(spot_balances.get("USDC"), 0.0)
-        # Under Unified ('u'), Hyperliquid reflects shared USDC across spot/perp;
-        # take max(perp_acct_val, spot_usdc) when unified, or sum when standard.
-        if self._margin_profile in ("unified", "portfolio_margin"):
-            available_usd = max(perp_acct_val, spot_usdc)
+        total_margin_used = safe_float(margin_summary.get("totalMarginUsed"), 0.0)
+        if isinstance(user_state, dict) and user_state.get("withdrawable") is not None:
+            free_perp_usd = max(0.0, safe_float(user_state.get("withdrawable"), 0.0))
         else:
-            available_usd = perp_acct_val + spot_usdc
+            free_perp_usd = max(0.0, perp_acct_val - total_margin_used)
+
+        avail_spot_fn = getattr(self._client, "get_available_spot_balances", None)
+        if callable(avail_spot_fn):
+            spot_balances = await avail_spot_fn()
+        else:
+            spot_balances = await self._client.get_spot_balances()
+        spot_usdc = safe_float(spot_balances.get("USDC"), 0.0)
+
+        # Under Unified ('u') / PM ('p'), Spot and Perp draw from the same USDC pool;
+        # deduct locked perp margin when computing free USDC capacity.
+        if self._margin_profile in ("unified", "portfolio_margin"):
+            available_usd = max(free_perp_usd, max(0.0, spot_usdc - total_margin_used))
+            if perp_acct_val > 0 and total_margin_used > 0:
+                available_usd = min(available_usd, free_perp_usd)
+        else:
+            available_usd = free_perp_usd + spot_usdc
             if spot_notional_usd > 0 and spot_usdc < spot_notional_usd:
                 shortfall = round(spot_notional_usd - spot_usdc + 1.0, 2)
                 await self._client.transfer_usd_class(shortfall, to_perp=False)
@@ -328,6 +343,15 @@ class MultiLegCoordinator:
         self._ledger.save_episode(ep)
         return ep
 
+    @staticmethod
+    def _spot_base_token(symbol: str) -> str:
+        info = get_symbol_info(symbol)
+        pair_name = str(info.get("pair_name", "")) if info else ""
+        candidate = pair_name or symbol
+        if "/" in candidate:
+            return candidate.split("/", 1)[0].upper()
+        return candidate.upper()
+
     async def close_episode_taker(
         self,
         ep: MultiLegEpisode,
@@ -343,12 +367,21 @@ class MultiLegCoordinator:
         if frac <= 0:
             return 0.0
 
+        spot_avail: Dict[str, float] = {}
+        if self._mode in ("testnet", "mainnet") and self._client is not None:
+            avail_fn = getattr(self._client, "get_available_spot_balances", None)
+            if callable(avail_fn):
+                spot_avail = await avail_fn()
+            else:
+                spot_avail = await self._client.get_spot_balances()
+
         fees_added = 0.0
+        incomplete_legs: List[str] = []
         for leg in ep.legs.values():
             if leg.filled_size <= 0:
                 continue
-            close_qty = normalize_size(leg.spec.symbol, leg.filled_size * frac)
-            if close_qty <= 0:
+            requested_qty = normalize_size(leg.spec.symbol, leg.filled_size * frac)
+            if requested_qty <= 0:
                 continue
             exit_side = "sell" if leg.spec.side == "buy" else "buy"
             book = books.get(leg.spec.symbol)
@@ -357,35 +390,89 @@ class MultiLegCoordinator:
                 if book and book.mid > 0
                 else leg.avg_fill_price
             )
+
+            eff_close_qty = requested_qty
+            fee_dust_qty = 0.0
+            if (
+                self._mode in ("testnet", "mainnet")
+                and leg.spec.market_kind == "spot"
+                and exit_side == "sell"
+            ):
+                base_tok = self._spot_base_token(leg.spec.symbol)
+                if base_tok in spot_avail:
+                    held_qty = normalize_size(leg.spec.symbol, spot_avail[base_tok])
+                    if 0.0 < held_qty < requested_qty:
+                        gap = requested_qty - held_qty
+                        info = get_symbol_info(leg.spec.symbol)
+                        sz_dec = int(info.get("sz_decimals", 4)) if info else 4
+                        max_fee_dust = max(leg.filled_size * 0.002, 2.0 * (10.0 ** (-sz_dec)))
+                        eff_close_qty = held_qty
+                        if gap <= max_fee_dust and frac >= 0.999:
+                            fee_dust_qty = gap
+
+            confirmed_closed = eff_close_qty
+            exec_px = ref_px
             if self._mode in ("testnet", "mainnet") and self._client is not None:
                 if leg.spec.market_kind == "spot":
-                    await self._client.place_spot_order(
+                    resp = await self._client.place_spot_order(
                         leg.spec.symbol,
                         exit_side,
-                        close_qty,
+                        eff_close_qty,
                         order_type="ioc",
                         limit_price=ref_px,
                         enforce_min_notional=False,
                     )
                 else:
-                    await self._client.place_aggressive_limit(
+                    resp = await self._client.place_aggressive_limit(
                         leg.spec.symbol,
                         exit_side,
-                        close_qty,
+                        eff_close_qty,
                         reference_price=ref_px,
                         max_slippage_pct=3.0,
                         reduce_only=True,
                     )
-            fee_usd = close_qty * ref_px * TAKER_FEE_RATE
-            fees_added += fee_usd
-            leg.cumulative_fee += fee_usd
-            leg.filled_size = max(0.0, leg.filled_size - close_qty)
-            if leg.filled_size <= 1e-10:
-                leg.filled_size = 0.0
-                leg.status = "closed"
+                parsed_close = parse_hyperliquid_close_response(
+                    resp, expected_size=eff_close_qty
+                )
+                if parsed_close.avg_fill_price and parsed_close.avg_fill_price > 0:
+                    exec_px = float(parsed_close.avg_fill_price)
+                if parsed_close.lifecycle_state == ORDER_FILLED:
+                    confirmed_closed = eff_close_qty
+                elif parsed_close.lifecycle_state == ORDER_PARTIAL and parsed_close.filled_size:
+                    confirmed_closed = float(parsed_close.filled_size)
+                    fee_dust_qty = 0.0
+                    incomplete_legs.append(
+                        f"{leg.spec.leg_id}:partial:{confirmed_closed:.6f}/{eff_close_qty:.6f}"
+                    )
+                else:
+                    confirmed_closed = 0.0
+                    fee_dust_qty = 0.0
+                    incomplete_legs.append(
+                        f"{leg.spec.leg_id}:{parsed_close.error_message or parsed_close.lifecycle_state}"
+                    )
+
+            if confirmed_closed > 0:
+                fee_usd = confirmed_closed * exec_px * TAKER_FEE_RATE
+                fees_added += fee_usd
+                leg.cumulative_fee += fee_usd
+                leg.filled_size = max(0.0, leg.filled_size - confirmed_closed - fee_dust_qty)
+                if leg.filled_size <= 1e-10:
+                    leg.filled_size = 0.0
+                    leg.status = "closed"
 
         ep.total_fees_usd += fees_added
-        if frac >= 0.999:
+        if incomplete_legs:
+            ep.status = "pending_exit"
+            self._ledger.save_episode(ep)
+            self._ledger.append_event(
+                ep.episode_id,
+                "close_incomplete",
+                {"reason": reason, "incomplete_legs": incomplete_legs, "fees_usd": fees_added},
+                timestamp_ms=ts_ms,
+            )
+            raise RuntimeError(f"multileg_close_incomplete:{','.join(incomplete_legs)}")
+
+        if frac >= 0.999 and all(lg.filled_size <= 1e-10 for lg in ep.legs.values()):
             ep.status = "closed"
             ep.open_qty = 0.0
             ep.closed_ms = ts_ms

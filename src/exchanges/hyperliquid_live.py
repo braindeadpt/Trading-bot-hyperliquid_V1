@@ -1037,6 +1037,23 @@ class HyperliquidLiveClient:
                 out[coin] = safe_float(row.get("total", 0.0), 0.0)
         return out
 
+    async def get_available_spot_balances(self) -> Dict[str, float]:
+        """Return ``{token_name: max(0.0, total - hold)}`` free spot balances."""
+        state = await self.get_spot_user_state()
+        balances = state.get("balances", [])
+        out: Dict[str, float] = {}
+        if not isinstance(balances, list):
+            return out
+        for row in balances:
+            if not isinstance(row, dict):
+                continue
+            coin = str(row.get("coin", "")).upper()
+            if coin:
+                total = safe_float(row.get("total", 0.0), 0.0)
+                hold = safe_float(row.get("hold", 0.0), 0.0)
+                out[coin] = max(0.0, total - hold)
+        return out
+
     async def get_l2_top(self, symbol: str) -> Optional[Tuple[float, float]]:
         """Fetch top-of-book ``(best_bid, best_ask)`` for a perp or spot symbol."""
         if self._info is None:

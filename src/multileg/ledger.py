@@ -13,7 +13,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.multileg.types import MultiLegEpisode
+from src.multileg.types import (
+    CarryMarginParams,
+    LegSpec,
+    LegState,
+    MultiLegEpisode,
+)
 from src.utils.helpers import validate_safe_path
 
 
@@ -219,6 +224,111 @@ class MultiLegLedger:
                 (episode_id,),
             )
             return [dict(r) for r in cur.fetchall()]
+
+    def get_active_perp_symbols(self) -> set[str]:
+        """Return uppercase perp symbols currently open/pending in MultiLegCoordinator.
+
+        Pass ``ignored_symbols_provider=ledger.get_active_perp_symbols`` into
+        ``ExchangeReconciler`` when sharing a single Hyperliquid wallet.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT DISTINCT l.symbol
+                FROM multileg_legs l
+                JOIN multileg_episodes e ON e.episode_id = l.episode_id
+                WHERE e.status IN ('pending_entry', 'open', 'pending_exit')
+                  AND l.market_kind = 'perp'
+                """
+            )
+            return {str(r["symbol"]).upper() for r in cur.fetchall() if r["symbol"]}
+
+    def load_active_episodes(
+        self,
+        *,
+        default_max_leverage: float = 10.0,
+    ) -> List[MultiLegEpisode]:
+        """Reconstruct active ``MultiLegEpisode`` + ``LegState`` objects after restart."""
+        with self._lock:
+            ep_rows = self._conn.execute(
+                """
+                SELECT * FROM multileg_episodes
+                WHERE status IN ('pending_entry', 'open', 'pending_exit')
+                ORDER BY created_ms ASC
+                """
+            ).fetchall()
+            out: List[MultiLegEpisode] = []
+            for er in ep_rows:
+                eid = str(er["episode_id"])
+                leg_rows = self._conn.execute(
+                    "SELECT * FROM multileg_legs WHERE episode_id = ? ORDER BY leg_id ASC",
+                    (eid,),
+                ).fetchall()
+                legs = {}
+                perp_sym = ""
+                for lr in leg_rows:
+                    if str(lr["market_kind"]) == "perp":
+                        perp_sym = str(lr["symbol"])
+                    spec = LegSpec(
+                        leg_id=str(lr["leg_id"]),
+                        symbol=str(lr["symbol"]),
+                        market_kind=str(lr["market_kind"]),  # type: ignore[arg-type]
+                        side=str(lr["side"]),  # type: ignore[arg-type]
+                        target_size=float(lr["target_size"]),
+                        limit_price=(
+                            float(lr["limit_price"])
+                            if lr["limit_price"] is not None
+                            else None
+                        ),
+                        reduce_only=bool(lr["reduce_only"]),
+                    )
+                    legs[spec.leg_id] = LegState(
+                        spec=spec,
+                        status=str(lr["status"]),
+                        order_id=str(lr["order_id"]) if lr["order_id"] else None,
+                        cloid=str(lr["cloid"]) if lr["cloid"] else None,
+                        filled_size=float(lr["filled_size"]),
+                        avg_fill_price=float(lr["avg_fill_price"]),
+                        cumulative_fee=float(lr["cumulative_fee"]),
+                        filled_at_ms=(
+                            int(lr["filled_at_ms"])
+                            if lr["filled_at_ms"] is not None
+                            else None
+                        ),
+                    )
+                mp = (
+                    CarryMarginParams.for_pair(
+                        perp_sym or "BTC",
+                        default_max_leverage,
+                        pm_enabled=(str(er["margin_profile"]) == "portfolio_margin"),
+                        account_value_usd=100_000.0 if str(er["margin_profile"]) == "portfolio_margin" else 0.0,
+                    )
+                    if str(er["strategy"]) == "CarryA1"
+                    else None
+                )
+                ep = MultiLegEpisode(
+                    episode_id=eid,
+                    strategy=str(er["strategy"]),
+                    mode=str(er["mode"]),
+                    margin_profile=str(er["margin_profile"]),  # type: ignore[arg-type]
+                    created_ms=int(er["created_ms"]),
+                    legs=legs,
+                    status=str(er["status"]),  # type: ignore[arg-type]
+                    opened_ms=int(er["opened_ms"]),
+                    closed_ms=int(er["closed_ms"]),
+                    close_reason=str(er["close_reason"]),
+                    max_unlegged_adverse_bps=float(er["max_unlegged_adverse_bps"]),
+                    open_qty=float(er["open_qty"]),
+                    entry_spot_px=float(er["entry_spot_px"]),
+                    entry_perp_px=float(er["entry_perp_px"]),
+                    collateral_usd=float(er["collateral_usd"]),
+                    funding_accrued_usd=float(er["funding_accrued_usd"]),
+                    total_fees_usd=float(er["total_fees_usd"]),
+                    deleverages_count=int(er["deleverages_count"]),
+                    margin_params=mp,
+                )
+                out.append(ep)
+            return out
 
     def close(self) -> None:
         with self._lock:
