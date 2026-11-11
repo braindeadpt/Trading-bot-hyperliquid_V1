@@ -180,17 +180,13 @@ def _jev_card(now_ms: int) -> Dict[str, Any]:
             cum += float(e["pnl_usd"] or 0.0)
             series.append((int(e["ts"]), round(cum, 4)))
         card["equity"] = _downsample(series)
-        # Heartbeat = last judge decision (hourly cadence), not last trade —
-        # a flat market means few closes but the loop is still alive.
-        hb = None
-        try:
-            hb = con.execute(
-                "SELECT MAX(timestamp) ts FROM decision_audit"
-                " WHERE strategy LIKE '%Jev%'").fetchone()["ts"]
-        except sqlite3.OperationalError:
-            card["_hb_failed"] = True
-        card["state"], card["state_detail"] = _age_state(
-            hb or r["last_ts"], card["n_open"] > 0, now_ms, _STALE_JEV)
+        # JevJudge was formally KILLED on 2026-11-11 (indep_n=325 >= 100,
+        # net PF=0.8373 <= 1.0) and hl-jev-judge is stopped. Report 'closed'
+        # instead of 'error · stale' once open paper rows drain.
+        if card["n_open"] > 0:
+            card["state"], card["state_detail"] = "running", "drenando posições abertas (KILLED)"
+        else:
+            card["state"], card["state_detail"] = "closed", "KILLED 11/11 · PF 0.84"
         return card
     except Exception:  # noqa: BLE001
         return card

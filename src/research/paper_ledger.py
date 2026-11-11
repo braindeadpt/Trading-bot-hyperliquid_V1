@@ -118,10 +118,10 @@ def _jev_row(now_ms: int) -> Dict[str, Any]:
         finally:
             db.close()
     return _row(
-        id="JevJudge::experiment", name="JevJudge (paper)",
-        kind="execution", prereg_state="EXPERIMENT (v2 exits-only)",
-        n=n, n_readout=100, readout_ms=_ms(2026, 12, 31), net=net,
-        detail="kill read at n>=100 sealed until 2026-12-31")
+        id="JevJudge::experiment", name="JevJudge (paper — KILLED)",
+        kind="execution", prereg_state="KILLED 2026-11-11 (PF 0.84, n=325)",
+        n=n, n_readout=100, readout_ms=_ms(2026, 11, 11), net=net,
+        detail="final readout 2026-11-11: indep_n=325 >= 100, net PF=0.8373 <= 1.0 -> OFF")
 
 
 # ── standalone daemon ledgers ─────────────────────────────────────────

@@ -1,17 +1,7 @@
 {
-  "baseline_signal_gate": [
-    {
-      "protocol": "experiment-paper-override-v1",
-      "reason": "owner-requested TypeSafe/Jev paper experiment (2026-09-17) \u2014 zero evidence claimed; paper-only enforced by assert_experiment_paper_only + strategy _mode guard",
-      "strategy": "JevJudge",
-      "verdict": "EXPERIMENT"
-    }
-  ],
-  "config_hash": "4077927fec6a880c",
-  "execution_strategies": [
-    "JevJudge"
-  ],
-  "experiment_id": "ed6ef269-f0e6-44e8-8b02-4a2a7c7a57de",
+  "config_hash": "9e9a6c37d02a1331",
+  "execution_strategies": [],
+  "experiment_id": "460f7253-d1f2-42c9-9922-a8b436469498",
   "gate_note": "All four criteria must be a real PASS (not merely 'no FAIL yet due to insufficient data') for the frozen window to be considered met. Drift in execution_strategies or config_hash after freeze invalidates the window \u2014 see assert_config_matches_preregister().",
   "gate_thresholds": {
     "expectancy_r_gt": 0.0,
@@ -19,17 +9,17 @@
     "min_profit_factor": 1.2,
     "min_trades": 100
   },
-  "in_sample_selection_note": "Tape-off only. JevJudge remains the sole paper execution control (owner-requested EXPERIMENT, zero evidence claimed). No promotion; mainnet still blocked. Accumulated OOS evidence intentionally retained.",
-  "manifest_hash": "b28275490af047e7ce175fcc7cd12933af5002d633dc174e0f19e2a41cea2789",
+  "in_sample_selection_note": "One-shot preregistered kill execution \u2014 zero strategies executing in TradingEngine; no retuning or second JevJudge version.",
+  "manifest_hash": "a594f3f09ebbcb495e22577c20cb23ad9231aeeb10dbf73b9dc48298fbe5432e",
   "protocol": "phase10-frozen-window-v1",
-  "registered_at_ms": 1791370424578,
-  "reregistration_reason": "research cost reduction \u2014 stop WS trade_tape collection (research.ws_microstructure_enabled: false; ~103 MB/day measured, no runtime or backtest consumer since CVDOrderFlow retired 2026-09-10). Collateral: l2_snapshots/microstructure_gaps/feed_health_snapshots stop too (same recorder). market_data.l2_recording untouched. config_hash legitimately drifts \u2014 OOS window PRESERVED.",
-  "supersedes_experiment_id": "c826f004-c797-4209-b0f8-6969f40265b2",
+  "registered_at_ms": 1794404812398,
+  "reregistration_reason": "JevJudge KILLED at final preregistered readout (2026-11-11, docs/ops/PREREGISTER_JEV_OOS_KILL_2026-10-08.md): post-boundary indep_n=325 (>=100 target), net PF=0.8373 (<=1.0 kill threshold), net PnL=-$679.35 USD (BTC -$203.91/87t, ETH -$277.88/66t, SOL -$265.53/67t, HYPE +$67.97/105t). JevJudge disabled and removed from execution_strategies (now []); hl-jev-judge container stopped. Independent shadow studies continue unaffected.",
+  "supersedes_experiment_id": "ed6ef269-f0e6-44e8-8b02-4a2a7c7a57de",
   "window": {
-    "max_end_ms": 1798382190903,
+    "max_end_ms": 1801662412055,
     "max_weeks": 12,
-    "min_end_ms": 1795962990903,
+    "min_end_ms": 1799243212055,
     "min_weeks": 8
   },
-  "window_start_ms": 1791124590903
+  "window_start_ms": 1794404812055
 }
