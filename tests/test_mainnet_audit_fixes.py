@@ -521,3 +521,80 @@ def test_review_r_p0_and_r_p1_remediations() -> None:
     rw_ws = rewrite_http_head(ws_req, "172.18.0.9")
     assert b"Connection: Upgrade\r\n" in rw_ws
     assert b"X-Forwarded-For: 172.18.0.9\r\n" in rw_ws
+
+
+@pytest.mark.unit
+def test_boros_unrealized_pnl_and_watchdog_report_mkdir(tmp_path, monkeypatch) -> None:
+    """Verify Boros dashboard card/detail subtracts $2,000 pooled margin base
+    from equity_pooled (fixing the +$2,064.35 visual bug) and iv_gate_shadow_recheck
+    creates missing report parent directories instead of raising FileNotFoundError."""
+    import sqlite3 as _sqlite3
+    import scripts.research.iv_gate_shadow_recheck as iv_recheck
+    import src.research.paper_trades as pt
+
+    # 1. Boros dashboard unrealized PnL fix
+    bdb = tmp_path / "boros_shadow.db"
+    con = _sqlite3.connect(str(bdb))
+    con.executescript(
+        """
+        CREATE TABLE boros_trades (
+            id INTEGER PRIMARY KEY, asset TEXT, structure TEXT, direction TEXT,
+            state TEXT, entry_ms INTEGER, capital_usd REAL, fixed_bruto REAL, net_apy REAL
+        );
+        CREATE TABLE boros_close (
+            trade_id INTEGER, ts_ms INTEGER, reason TEXT, fixed_usd REAL,
+            floating_usd REAL, basis_usd REAL, costs_usd REAL, realized_usd REAL,
+            realized_apy_cap REAL
+        );
+        CREATE TABLE boros_marks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, trade_id INTEGER, ts_ms INTEGER,
+            equity_pooled REAL, funding_usd REAL
+        );
+        """
+    )
+    con.execute("INSERT INTO boros_trades VALUES (1, 'HYPE', 'simple', 'short_hl_long_b', 'closed', 1000, 4000.0, 0.07, 0.09)")
+    con.execute("INSERT INTO boros_trades VALUES (3, 'HYPE', 'simple', 'short_hl_long_b', 'open', 2000, 4000.0, 0.08, 0.12)")
+    con.execute("INSERT INTO boros_close VALUES (1, 1500, 'state_change', 10.0, -5.0, -35.0, 25.30, -55.30, -5.52)")
+    # Pooled margin base = $2,000.0 -> equity_pooled=2009.05 means +$9.05 unrealized!
+    con.execute("INSERT INTO boros_marks (trade_id, ts_ms, equity_pooled, funding_usd) VALUES (3, 3000, 2009.05, 4.20)")
+    con.commit()
+    con.close()
+
+    monkeypatch.setattr(pt, "_RESEARCH", tmp_path)
+    card = pt._boros_card(3500)
+    detail = pt._boros_detail(3500)
+    assert card["net"] == -55.3
+    assert card["open_unreal_usd"] == 9.05
+    assert len(detail["open"]) == 1
+    assert detail["open"][0]["unreal_usd"] == 9.05
+
+    # 2. Watchdog write_report creates missing parent dirs cleanly
+    nested_report = tmp_path / "missing_docs" / "archive" / "IV_GATE_SHADOW_RECHECK_RESULT.md"
+    monkeypatch.setattr(iv_recheck, "REPORT_PATH", nested_report)
+    monkeypatch.setattr(iv_recheck, "STATE_DIR", tmp_path / "state_fallback")
+    empty_slice = {
+        "n": 15,
+        "n_closed": 15,
+        "n_open": 0,
+        "win_rate": 0.5,
+        "net_pnl_usd": 10.0,
+        "avg_pnl_usd": 0.67,
+        "median_pnl_usd": 0.5,
+        "best_usd": 5.0,
+        "worst_usd": -3.0,
+    }
+    iv_recheck.write_report(
+        {
+            "slices": {
+                "high_iv": empty_slice,
+                "low_iv": empty_slice,
+                "unknown": empty_slice,
+            },
+            "concentration": {},
+        },
+        {"status": "HOLD_SHADOW", "detail": "test"},
+        n_closed=30,
+        n_high=15,
+        n_low=15,
+    )
+    assert nested_report.exists()

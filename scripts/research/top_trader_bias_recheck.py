@@ -115,6 +115,11 @@ def save_state(state: Dict[str, Any], path: Optional[Path] = None) -> None:
 def run_probe(json_out: Optional[Path] = None) -> Optional[Path]:
     """Run the screening probe and return the path of the written JSON."""
     out = json_out or JSON_OUT
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        out = STATE_DIR / out.name
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
     log(f"launching {PROBE_SCRIPT.name} --json-out {out}")
     t0 = time.time()
     proc = subprocess.run(
@@ -207,8 +212,16 @@ def write_report(
         "  `docs/archive/FEATURE_SCREENING_TOP_TRADER_BIAS.md`.",
         "",
     ]
-    REPORT_PATH.write_text("\n".join(rows), encoding="utf-8")
-    log(f"report written: {REPORT_PATH}")
+    payload = "\n".join(rows)
+    try:
+        REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        REPORT_PATH.write_text(payload, encoding="utf-8")
+        log(f"report written: {REPORT_PATH}")
+    except OSError as exc:
+        fallback = STATE_DIR / REPORT_PATH.name
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        fallback.write_text(payload, encoding="utf-8")
+        log(f"report fallback written ({exc}): {fallback}")
 
 
 def do_recheck(state: Dict[str, Any], force: bool) -> bool:

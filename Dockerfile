@@ -22,7 +22,7 @@ COPY audit_all.py ./
 COPY socket.io.min.js ./
 COPY deploy/linux/ ./deploy/linux/
 
-RUN mkdir -p /data /logs && chown -R bot:bot /data /logs /opt/hyperliquid
+RUN mkdir -p /data /logs /opt/hyperliquid/docs/archive /opt/hyperliquid/docs/ops /opt/hyperliquid/data/backtests && chown -R bot:bot /data /logs /opt/hyperliquid
 USER bot
 
 # No default ENTRYPOINT — each compose service sets its command.
