@@ -18,9 +18,12 @@ Security hardening (2026-11-11 audit + review R-P1-1):
 """
 from __future__ import annotations
 
+import logging
 import socket
 import sys
 import threading
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_LISTEN_PORT = 8091
 DEFAULT_TARGET_PORT = 5000
@@ -105,9 +108,8 @@ def relay(src: socket.socket, peer_ip: str, target_port: int = DEFAULT_TARGET_PO
                 if rewritten is None:
                     # Fail closed: an unverifiable head would arrive at the
                     # backend as loopback with no X-Forwarded-* markers.
-                    print(
-                        f"dashboard_proxy: dropped {peer_ip}: unparseable HTTP head",
-                        file=sys.stderr,
+                    logger.warning(
+                        "dashboard_proxy: dropped %s: unparseable HTTP head", peer_ip
                     )
                     return
                 dst.sendall(rewritten)
