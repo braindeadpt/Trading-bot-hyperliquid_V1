@@ -191,11 +191,17 @@ class TestDashboardAuthEndpoints:
         with self.app.test_request_context(f"/socket.io?token={self._token}"):
             assert _socket_connect_auth(None, True, self._token) is None
 
-    # ── local-loopback bypass (public tunnel still gated) ──
+    # ── loopback is not trusted: token required for every peer ──
+    #
+    # The TCP relay reaches the backend from 127.0.0.1, so "local peer"
+    # cannot separate host-admin from relayed traffic — with auth on,
+    # everyone presents a token.
 
-    def test_direct_local_request_bypasses_auth(self):
+    def test_direct_local_request_requires_token(self):
         r = self.client.get("/api/status")
-        assert r.status_code == 200  # test client REMOTE_ADDR is loopback, no XFF
+        assert r.status_code == 401  # loopback without token is gated too
+        r = self.client.get("/api/status", headers={"X-Dashboard-Token": self._token})
+        assert r.status_code == 200
 
     def test_proxied_request_without_token_still_401(self):
         r = self.client.get(
@@ -204,27 +210,34 @@ class TestDashboardAuthEndpoints:
         )
         assert r.status_code == 401
 
-    def test_auth_check_reports_not_required_for_local(self):
-        r = self.client.get("/api/auth/check")
-        assert r.get_json() == {"ok": True, "auth_required": False}
+    def test_auth_check_requires_token_for_local(self):
+        assert self.client.get("/api/auth/check").status_code == 401
+        r = self.client.get(
+            "/api/auth/check", headers={"X-Dashboard-Token": self._token}
+        )
+        assert r.get_json() == {"ok": True, "auth_required": True}
 
-    def test_index_shows_no_gate_for_local(self):
+    def test_index_shows_gate_for_local(self):
         r = self.client.get("/")
         assert r.status_code == 200
-        assert b"const AUTH_REQUIRED = false" in r.data
+        assert b"const AUTH_REQUIRED = true" in r.data
 
     def test_index_shows_gate_for_proxied(self):
         r = self.client.get("/", headers={"X-Forwarded-For": "203.0.113.9"})
         assert r.status_code == 200
         assert b"const AUTH_REQUIRED = true" in r.data
 
-    def test_socketio_connect_accepts_direct_local(self):
+    def test_socketio_connect_rejects_direct_local_without_token(self):
         from src.dashboard.web import _socket_connect_auth
 
         with self.app.test_request_context(
             "/socket.io", environ_overrides={"REMOTE_ADDR": "127.0.0.1"}
         ):
-            assert _socket_connect_auth(None, True, self._token) is None
+            assert _socket_connect_auth(None, True, self._token) is False
+            assert (
+                _socket_connect_auth({"token": self._token}, True, self._token)
+                is None
+            )
 
     def test_socketio_connect_proxied_still_rejected(self):
         from src.dashboard.web import _socket_connect_auth
