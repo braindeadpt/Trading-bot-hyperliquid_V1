@@ -98,6 +98,27 @@ def _age_state(last_write_ms: Optional[int], has_open: bool,
     return "no_signal", "sem sinal"
 
 
+# Minimum closed observations before an annualized figure is treated as
+# more than noise. Annualizing 2 trades (or 1 week) extrapolates a tiny
+# sample by ~50x, so below this the APY is still shown (owner wants every
+# number) but flagged `apy_indicative`. 10 = a coarse floor, not a
+# significance test. `n` is the card's own closed-observation count:
+# closed trades (Boros) or closed weeks (ResMom); a missing n counts as 0.
+APY_MIN_N = 10
+
+
+def _mark_apy_reliability(card: Dict[str, Any]) -> None:
+    """Add apy_indicative / apy_n to a card that reports an APY."""
+    if card.get("apy") is None:
+        return
+    try:
+        n = int(card.get("n") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    card["apy_n"] = n
+    card["apy_indicative"] = n < APY_MIN_N
+
+
 def _base_card(sid: str, name: str, kind: str, n_readout=None,
                readout_ms=None, prereg_state="") -> Dict[str, Any]:
     return {
@@ -486,6 +507,7 @@ def _boros_card(now_ms: int) -> Dict[str, Any]:
         wr_rows = con.execute(
             "SELECT realized_usd p FROM boros_close").fetchall()
         card["wr"] = _wr([r["p"] for r in wr_rows])
+        _mark_apy_reliability(card)
         mk = con.execute(
             "SELECT ts_ms, equity_pooled FROM boros_marks"
             " WHERE equity_pooled IS NOT NULL ORDER BY ts_ms").fetchall()
@@ -585,6 +607,21 @@ def _boros_detail(now_ms: int) -> Dict[str, Any]:
 
 # ── ResidualMomentum forward (resmom_shadow.db) ───────────────────────
 
+_RESMOM_ARMS: Tuple[str, ...] = ("A", "B", "BIN")
+# Registered arm = A (HL, prereg 2026-10-28); B is descriptive, BIN is a
+# descriptive Binance reference. Only A feeds the card's headline numbers.
+_RESMOM_REG_ARM = "A"
+_RESMOM_ARM_LABEL = {
+    "A": "ResMom·A",
+    "B": "ResMom·B (desc.)",
+    "BIN": "ResMom·BIN (ref.)",
+}
+
+
+def _resmom_arm_label(arm: Any) -> str:
+    return _RESMOM_ARM_LABEL.get(str(arm), f"ResMom·{arm}")
+
+
 def _resmom_card(now_ms: int) -> Dict[str, Any]:
     card = _base_card(
         "resmom", "ResMom forward", "shadow",
@@ -609,18 +646,40 @@ def _resmom_card(now_ms: int) -> Dict[str, Any]:
     if con is None:
         return card
     try:
-        nav = con.execute(
-            "SELECT ts_ms, nav_usd FROM resmom_nav ORDER BY ts_ms"
-        ).fetchall()
-        series = [(int(m["ts_ms"]), float(m["nav_usd"])) for m in nav]
+        arms: Dict[str, Dict[str, Any]] = {}
+        nav_by_arm: Dict[str, List[Tuple[int, float]]] = {}
+        for arm in _RESMOM_ARMS:
+            nav = con.execute(
+                "SELECT ts_ms, nav_usd FROM resmom_nav WHERE arm=?"
+                " ORDER BY ts_ms", (arm,)).fetchall()
+            ser = [(int(m["ts_ms"]), float(m["nav_usd"])) for m in nav]
+            nav_by_arm[arm] = ser
+            n_open = int(con.execute(
+                "SELECT COUNT(*) c FROM resmom_positions"
+                " WHERE arm=? AND status='open'", (arm,)).fetchone()["c"])
+            wr_rows = con.execute(
+                "SELECT pnl_usd p FROM resmom_positions"
+                " WHERE arm=? AND status='closed'", (arm,)).fetchall()
+            n_reb = int(con.execute(
+                "SELECT COUNT(*) c FROM resmom_rebalances WHERE arm=?",
+                (arm,)).fetchone()["c"])
+            ret = None
+            if ser and ser[0][1]:
+                ret = round((ser[-1][1] / ser[0][1] - 1.0) * 100.0, 3)
+            arms[arm] = {
+                "nav": round(ser[-1][1], 2) if ser else None,
+                "cum_return_pct": ret,
+                "n_open": n_open,
+                "wr": _wr([r["p"] for r in wr_rows]),
+                "n_rebalances": n_reb,
+                "n_nav": len(ser),
+                "registered": arm == _RESMOM_REG_ARM,
+            }
+        card["arms"] = arms
+        series = nav_by_arm[_RESMOM_REG_ARM]
         card["equity"] = _downsample(series)
-        card["n_open"] = int(con.execute(
-            "SELECT COUNT(*) c FROM resmom_positions"
-            " WHERE status='open'").fetchone()["c"])
-        wr_rows = con.execute(
-            "SELECT pnl_usd p FROM resmom_positions"
-            " WHERE status='closed'").fetchall()
-        card["wr"] = _wr([r["p"] for r in wr_rows])
+        card["n_open"] = arms[_RESMOM_REG_ARM]["n_open"]
+        card["wr"] = arms[_RESMOM_REG_ARM]["wr"]
         if len(series) >= 2 and series[-1][0] > series[0][0]:
             span = series[-1][0] - series[0][0]
             base = series[0][1] or 1.0
@@ -629,7 +688,10 @@ def _resmom_card(now_ms: int) -> Dict[str, Any]:
                 * 100.0, 2)
         last_ts = con.execute(
             "SELECT MAX(entry_ms) ts FROM resmom_positions").fetchone()["ts"]
-        hb = series[-1][0] if series else last_ts
+        # Heartbeat = freshest nav of ANY arm (daemon liveness); the
+        # headline numbers above stay arm-A only.
+        navs_last = [v[-1][0] for v in nav_by_arm.values() if v]
+        hb = max(navs_last) if navs_last else last_ts
         if hb is None:
             # Newborn shadow (first nav snapshot may lag deploy) — flag as
             # starting, not error.
@@ -637,6 +699,7 @@ def _resmom_card(now_ms: int) -> Dict[str, Any]:
         else:
             card["state"], card["state_detail"] = _age_state(
                 hb, card["n_open"] > 0, now_ms, _STALE_RESMOM)
+        _mark_apy_reliability(card)
         return card
     except Exception:  # noqa: BLE001
         return card
@@ -651,28 +714,31 @@ def _resmom_detail(now_ms: int) -> Dict[str, Any]:
         return out
     try:
         for p in con.execute(
-                "SELECT symbol, side, weight, qty, entry_px, entry_ms,"
+                "SELECT arm, symbol, side, weight, qty, entry_px, entry_ms,"
                 " funding_usd FROM resmom_positions"
-                " WHERE status='open'").fetchall():
+                " WHERE status='open' ORDER BY arm, symbol").fetchall():
             out["open"].append({
+                "arm": p["arm"],
                 "symbol": p["symbol"], "side": p["side"],
                 "size": p["qty"], "entry": p["entry_px"], "mark": None,
                 "unreal_usd": p["funding_usd"], "entry_ms": p["entry_ms"]})
         for p in con.execute(
-                "SELECT symbol, side, qty, entry_px, exit_px, pnl_usd,"
+                "SELECT arm, symbol, side, qty, entry_px, exit_px, pnl_usd,"
                 " funding_usd, entry_ms, exit_ms, close_reason"
                 " FROM resmom_positions WHERE status='closed'"
                 " ORDER BY exit_ms DESC LIMIT 200").fetchall():
             out["closed"].append({
+                "arm": p["arm"],
                 "symbol": p["symbol"], "side": p["side"], "size": p["qty"],
                 "entry": p["entry_px"], "exit": p["exit_px"],
                 "pnl_usd": p["pnl_usd"], "pnl_pct": None,
                 "funding_usd": p["funding_usd"], "fees_usd": None,
                 "entry_ms": p["entry_ms"], "exit_ms": p["exit_ms"],
                 "reason": p["close_reason"]})
+        # Headline equity/drawdown = registered arm A only.
         nav = con.execute(
-            "SELECT ts_ms, nav_usd, dd_pct FROM resmom_nav"
-            " ORDER BY ts_ms").fetchall()
+            "SELECT ts_ms, nav_usd, dd_pct FROM resmom_nav WHERE arm=?"
+            " ORDER BY ts_ms", (_RESMOM_REG_ARM,)).fetchall()
         out["equity"] = [(int(m["ts_ms"]), float(m["nav_usd"]))
                          for m in nav]
         out["dd"] = [(int(m["ts_ms"]), float(m["dd_pct"])) for m in nav]
@@ -795,6 +861,7 @@ def _card_or_last_good(sid: str, now_ms: int) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — degrade, never 500
         logger.debug("paper_trades card %s failed: %s", sid, exc)
         card = _base_card(sid, sid, "shadow")
+    _mark_apy_reliability(card)
     hb_failed = bool(card.pop("_hb_failed", False))
     build_failed = card.get("state") == "error" and card.get(
         "state_detail") in ("", "sem dados")
@@ -924,7 +991,8 @@ def build_trades_feed(limit: int = 60,
         pass
     try:
         d = _resmom_detail(now)
-        push([{**t, "strat": "ResMom"} for t in d["closed"]])
+        push([{**t, "strat": _resmom_arm_label(t.get("arm"))}
+              for t in d["closed"]])
     except Exception:  # noqa: BLE001
         pass
 

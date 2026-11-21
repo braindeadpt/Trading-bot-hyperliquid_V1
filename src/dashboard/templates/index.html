@@ -1882,6 +1882,33 @@ function _fmtNet(v, unit) {
     if (unit === "bps") return sign + fmtNum(v, 1) + "bp";
     return sign + "$" + fmtNum(v, 2);
 }
+function _apyHtml(r) {
+    if (r.apy == null) return '<span class="num">—</span>';
+    if (r.apy_indicative) {
+        return '<span class="num" style="opacity:.5;color:var(--text-dim,#888)" title="APY anualizado de poucas observações — ruído">'
+            + r.apy + '% <span class="tiny">(indicativo, n=' + (r.apy_n != null ? r.apy_n : 0) + ')</span></span>';
+    }
+    return '<span class="num">' + r.apy + '%</span>';
+}
+// ResMom: arm A is the registered one (headline numbers); B/BIN are
+// descriptive/reference — shown small, never hidden (A with 0 open is visible).
+function _armsHtml(r) {
+    if (!r.arms) return "";
+    const lbl = {A: "A (registado)", B: "B (desc.)", BIN: "BIN (ref.)"};
+    const fmt = (k) => {
+        const a = r.arms[k];
+        if (!a) return "";
+        const ret = a.cum_return_pct != null ? (a.cum_return_pct >= 0 ? "+" : "") + a.cum_return_pct + "%" : "—";
+        const nav = a.nav != null ? "$" + fmtNum(a.nav, 0) : "—";
+        return '<span>' + (lbl[k] || k) + ': NAV ' + nav + ' · ' + ret + ' · open ' + (a.n_open || 0)
+            + ' · reb ' + (a.n_rebalances || 0) + '</span>';
+    };
+    return '<div class="sc-arms tiny dim" style="display:flex;flex-direction:column;gap:1px;margin-top:2px;">'
+        + ["A", "B", "BIN"].map(fmt).join("") + '</div>';
+}
+function _armTag(x) {
+    return x && x.arm ? '<span class="tiny dim">[' + x.arm + ']</span> ' : "";
+}
 function renderStrategies(d) {
     const grid = document.getElementById("strat-grid");
     if (!grid) return;
@@ -1906,11 +1933,12 @@ function renderStrategies(d) {
             </div>
             <div class="sc-spark">${_sparkSVG(r.equity, 220, 44)}</div>
             <div class="sc-row"><span class="dim">Net</span><span class="num ${netCls}">${_fmtNet(r.net, r.net_unit)}</span>
-                <span class="dim">APY</span><span class="num">${r.apy != null ? r.apy + "%" : "—"}</span></div>
+                <span class="dim">APY</span>${_apyHtml(r)}</div>
             <div class="sc-row"><span class="dim">WR</span><span class="num">${r.wr != null ? r.wr + "%" : "—"}</span>
                 <span class="dim">Open</span><span class="num">${r.n_open || 0}${r.open_unreal_usd != null ? ' (' + _fmtNet(r.open_unreal_usd, "usd") + ')' : ''}</span></div>
             <div class="sc-row"><span class="dim">n</span><span class="num">${nTxt}</span>
                 <span class="dim">readout</span><span class="num">${roTxt}</span></div>
+            ${_armsHtml(r)}
             <div class="sc-foot dim" title="${r.prereg_state || ''}">${r.prereg_state || ''}</div>
         </div>`;
     }).join("");
@@ -1996,7 +2024,7 @@ function _smRender(d, name) {
     const ot = document.getElementById("sm-open-tbody");
     const opens = (d && d.open) || [];
     ot.innerHTML = opens.length ? opens.map(o => `<tr>
-        <td>${o.symbol}</td><td>${o.side}</td>
+        <td>${_armTag(o)}${o.symbol}</td><td>${o.side}</td>
         <td class="num">${o.size != null ? fmtNum(o.size, 4) : "—"}</td>
         <td class="num">${o.entry != null ? "$" + fmtPrice(o.entry) : "—"}</td>
         <td class="num">${o.mark != null ? "$" + fmtPrice(o.mark) : "—"}</td>
@@ -2009,7 +2037,7 @@ function _smRender(d, name) {
     const ct = document.getElementById("sm-closed-tbody");
     const closed = (d && d.closed) || [];
     ct.innerHTML = closed.length ? closed.map(t => `<tr>
-        <td class="tiny">${fmtDate(t.exit_ms)}</td><td>${t.symbol}</td><td>${t.side}</td>
+        <td class="tiny">${fmtDate(t.exit_ms)}</td><td>${_armTag(t)}${t.symbol}</td><td>${t.side}</td>
         <td class="num">${t.size != null ? fmtNum(t.size, 4) : "—"}</td>
         <td class="num">${t.entry != null ? "$" + fmtPrice(t.entry) : "—"}</td>
         <td class="num">${t.exit != null ? "$" + fmtPrice(t.exit) : "—"}</td>
