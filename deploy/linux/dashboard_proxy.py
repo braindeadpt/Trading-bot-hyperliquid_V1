@@ -11,12 +11,19 @@ Security hardening (2026-11-11 audit + review R-P1-1):
     client-spoofed ``X-Forwarded-For`` headers, stamps the verified TCP peer IP,
     and forces ``Connection: close`` on non-WebSocket HTTP requests so a second
     keep-alive request on the same TCP socket can never bypass header injection.
+  - Fails closed (2026-11-21): a non-loopback connection whose buffered bytes
+    cannot be verified as a complete, parseable HTTP request head is dropped —
+    never forwarded raw. Forwarding it would reach the backend as loopback
+    with no ``X-Forwarded-*`` markers.
 """
 from __future__ import annotations
 
+import logging
 import socket
 import sys
 import threading
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_LISTEN_PORT = 8091
 DEFAULT_TARGET_PORT = 5000
@@ -25,22 +32,27 @@ MAX_HEADER_BYTES = 65536
 _LOOPBACK_PEERS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1"})
 
 
-def rewrite_http_head(raw: bytes, peer_ip: str) -> bytes:
-    """Inject verified ``X-Forwarded-For`` and ``Connection: close`` for non-loopback peers."""
+def rewrite_http_head(raw: bytes, peer_ip: str) -> bytes | None:
+    """Inject verified ``X-Forwarded-For`` and ``Connection: close`` for non-loopback peers.
+
+    Returns ``None`` when the buffered bytes cannot be verified as a complete,
+    parseable HTTP request head — the caller must drop the connection instead
+    of forwarding them (fail closed).
+    """
     if not raw or peer_ip in _LOOPBACK_PEERS:
         return raw
     sep = b"\r\n\r\n"
     idx = raw.find(sep)
     if idx < 0:
-        return raw
+        return None
     head_bytes = raw[:idx]
     rest = raw[idx + len(sep):]
     try:
         lines = head_bytes.decode("latin-1").split("\r\n")
     except Exception:
-        return raw
+        return None
     if not lines or "HTTP/" not in lines[0]:
-        return raw
+        return None
     is_websocket = any(
         ln.lower().startswith("upgrade:") and "websocket" in ln.lower()
         for ln in lines[1:]
@@ -92,7 +104,15 @@ def relay(src: socket.socket, peer_ip: str, target_port: int = DEFAULT_TARGET_PO
                 initial = recv_initial_http_head(src)
                 if not initial:
                     return
-                dst.sendall(rewrite_http_head(initial, peer_ip))
+                rewritten = rewrite_http_head(initial, peer_ip)
+                if rewritten is None:
+                    # Fail closed: an unverifiable head would arrive at the
+                    # backend as loopback with no X-Forwarded-* markers.
+                    logger.warning(
+                        "dashboard_proxy: dropped %s: unparseable HTTP head", peer_ip
+                    )
+                    return
+                dst.sendall(rewritten)
             while True:
                 data = src.recv(65536)
                 if not data:

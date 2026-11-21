@@ -524,6 +524,22 @@ def test_review_r_p0_and_r_p1_remediations() -> None:
 
 
 @pytest.mark.unit
+def test_proxy_fails_closed_on_unverifiable_http_head() -> None:
+    """A non-loopback head the relay cannot rewrite is dropped (None), never
+    forwarded raw — raw bytes would reach the backend as loopback with no
+    X-Forwarded-* and, before the backend hardening, read as a trusted
+    local request."""
+    # HTTP/0.9-style request line: no "HTTP/" token.
+    assert rewrite_http_head(b"GET /api/positions\r\n\r\n", "172.18.0.5") is None
+    # Headers with no \r\n\r\n terminator inside the buffered window.
+    unterminated = b"GET /api/positions HTTP/1.1\r\n" + b"X-Pad: " + b"a" * 70_000
+    assert rewrite_http_head(unterminated, "172.18.0.5") is None
+    # Loopback peers stay untouched (container-netns local tools only).
+    raw = b"GET /api/positions\r\n\r\n"
+    assert rewrite_http_head(raw, "127.0.0.1") == raw
+
+
+@pytest.mark.unit
 def test_boros_unrealized_pnl_and_watchdog_report_mkdir(tmp_path, monkeypatch) -> None:
     """Verify Boros dashboard card/detail subtracts $2,000 pooled margin base
     from equity_pooled (fixing the +$2,064.35 visual bug) and iv_gate_shadow_recheck

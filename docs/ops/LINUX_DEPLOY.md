@@ -85,9 +85,12 @@ never in repo/image/logs. Rotate with
   binds loopback so `deploy/linux/dashboard_proxy.py` relays 0.0.0.0:8091).
   Dashboard auth is ON (`DASHBOARD_AUTH_ENABLED=true`): set a stable
   `BOT_DASHBOARD_TOKEN` in `/srv/hl/secrets/bot-data.env` (0600).
-  The TCP relay makes every hit look loopback to Flask, so host-local
-  requests (e.g. `hl-heartbeat`) bypass the token; tailnet traffic via
-  `tailscale serve` carries `X-Forwarded-*` and is always gated.
+  The TCP relay makes every hit look loopback to Flask, so loopback is
+  NOT a trust signal: with auth on, the token is required for every peer —
+  host-local included (`?token=` or `X-Dashboard-Token`; `/`, `/health`,
+  `/api/auth/check` stay exempt, so `hl-heartbeat`'s `GET /` still works).
+  The relay also fails closed: a non-loopback connection whose head can't
+  be verified as a complete HTTP request is dropped, never forwarded raw.
   Meridian `8092` at `/meridian` — untouched. (A :8443
   alias was tried and dropped: blocked by the tailnet ACL and redundant —
   root :443 covers it.)
