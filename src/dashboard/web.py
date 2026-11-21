@@ -2160,7 +2160,9 @@ def create_app(config: Dict[str, Any]) -> tuple:
 
         @app.before_request
         def _require_auth():
-            if request.path in ("/", "/health", "/api/auth/check"):
+            # Page shells (/ and /ops render the auth gate themselves; every
+            # data route and the Socket.IO connect stays token-gated).
+            if request.path in ("/", "/ops", "/health", "/api/auth/check"):
                 return None
             if request.path.startswith(("/socket.io", "/static/")):
                 return None
