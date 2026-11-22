@@ -189,9 +189,10 @@ novos downloads e sem alterar nenhuma definicao nem o par selado
 canonico LF `6351131c…` do ficheiro de decisoes e o registado no
 resultado). O calculo esta em
 `data/backtests/fundcarry/phase1_diag_funding_split.json`
-(commit do codigo usado: a358c4a; o artefacto regista tambem o sha256 do
-script executado, `diag_script_sha256`, para provar reproducibilidade
-mesmo com worktree sujo), produzido por
+(commit do codigo usado: e096266; o artefacto regista o sha256 do
+script executado em bytes LF-canonicos, `diag_script_sha256`, e o id
+do blob git, `diag_script_git_blob`, verificaveis com
+`git show`/`git cat-file` mesmo com worktree sujo), produzido por
 `--diag-funding-split` em `scripts/research/fundcarry_phase1.py`.
 
 Resultado (USD, sobre o nocional fixo de 10.000 por semana):
