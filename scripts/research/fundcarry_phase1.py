@@ -29,6 +29,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from src.utils.helpers import safe_float, safe_json_loads   # noqa: E402
 from src.research.fundcarry import core                      # noqa: E402
 from src.resmom_shadow import spec as rspec                  # noqa: E402
 from src.resmom_shadow.read import percentile, sharpe_annual  # noqa: E402
@@ -754,6 +755,13 @@ def evaluate(D: Data, uni: Dict[int, List[str]], R: Dict[str, Any]
     }
 
 
+def _git_blob_bytes(path: Path) -> bytes:
+    """Git object representation of a file: b"blob <len>\\0<content>"
+    with LF-canonical content — the id `git hash-object`/`cat-file` sees."""
+    content = path.read_bytes().replace(b"\r\n", b"\n")
+    return b"blob " + str(len(content)).encode() + b"\0" + content
+
+
 def _git_head() -> Optional[str]:
     """HEAD sha without subprocess (handles worktree .git pointers and
     packed refs)."""
@@ -786,7 +794,11 @@ def diag_funding_split() -> int:
     sealed pair (DECISIONS_FROZEN.txt / phase1_result.json).
     """
     res_p = OUT_DIR / "phase1_result.json"
-    sealed = json.loads(res_p.read_text(encoding="utf-8"))
+    sealed = safe_json_loads(res_p.read_bytes(), default=None)
+    if not isinstance(sealed, dict):
+        logging.warning("phase1_result.json unreadable — cannot "
+                        "verify the diagnostic against it")
+        return 3
     sealed_sha = hashlib.sha256(res_p.read_bytes()).hexdigest()
     D = Data()
     uni = compute_universes(D)
@@ -798,8 +810,8 @@ def diag_funding_split() -> int:
     rec = fs["long"]["received"] + fs["short"]["received"]
     paid = fs["long"]["paid"] + fs["short"]["paid"]
     net = rec - paid
-    sealed_f = float((sealed.get("decomposition_usd") or {})
-                     .get("funding") or 0.0)
+    sealed_f = safe_float((sealed.get("decomposition_usd") or {})
+                          .get("funding"), 0.0)
     # A diagnostic that simulated zero weeks must never produce a trivial
     # MATCH (e.g. against a hypothetical zero-funding sealed result).
     ok = abs(net - sealed_f) < 1e-6 and bool(R["rows"])
@@ -808,11 +820,15 @@ def diag_funding_split() -> int:
         "diagnostic": ("prereg line 62 — funding received vs paid; "
                        "computed post-verdict, changes no criterion"),
         # Provenance: HEAD is only *where the run happened* — the tree
-        # may be dirty. diag_script_sha256 identifies the exact code
-        # that ran; compare with the blob at code_commit to verify.
+        # may be dirty. diag_script_* identify the exact code that ran:
+        # sha256 of the LF-canonical bytes (matches `git show` output on
+        # every platform) and the git blob id (matches `git cat-file`).
         "code_commit": _git_head(),
         "diag_script_sha256": hashlib.sha256(
-            Path(__file__).read_bytes()).hexdigest(),
+            Path(__file__).read_bytes()
+            .replace(b"\r\n", b"\n")).hexdigest(),
+        "diag_script_git_blob": hashlib.sha1(
+            _git_blob_bytes(Path(__file__))).hexdigest(),
         "n_weeks_simulated": len(R["rows"]),
         "sealed_result_file": "phase1_result.json",
         "sealed_result_sha256": sealed_sha,
