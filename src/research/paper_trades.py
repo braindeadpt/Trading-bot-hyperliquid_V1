@@ -987,15 +987,19 @@ def _fc_first(d: Dict[str, Any], *paths: Tuple[str, ...]) -> Any:
 
 
 def _fc_week_ts(w: Dict[str, Any]) -> Optional[int]:
-    """Weekly-row timestamp: ts_ms, then week_ms, then the date string."""
+    """Weekly-row timestamp. Weekly pnl is realized at the week's CLOSE,
+    so week_ms/date (the entry Monday) are shifted +7d — otherwise the
+    last curve point is dated a week before the actual exit."""
     try:
         ts = w.get("ts_ms")
-        if ts is None:
-            ts = w.get("week_ms")
         if ts is not None:
             return int(ts)
-        return int(datetime.strptime(str(w.get("date")), "%Y-%m-%d")
+        ts = w.get("week_ms")
+        if ts is not None:
+            return int(ts) + 7 * _MS_DAY
+        return (int(datetime.strptime(str(w.get("date")), "%Y-%m-%d")
                    .replace(tzinfo=timezone.utc).timestamp() * 1000)
+                + 7 * _MS_DAY)
     except (TypeError, ValueError):
         return None
 

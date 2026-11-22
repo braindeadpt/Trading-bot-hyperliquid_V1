@@ -15,6 +15,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import logging
 import math
 import sys
 import time
@@ -791,20 +792,28 @@ def diag_funding_split() -> int:
     uni = compute_universes(D)
     R = run(D, uni)
     fs = R["fund_split"]
-    if fs is None:
-        print("no simulated weeks — nothing to decompose")
+    if fs is None or not R["rows"]:
+        logging.warning("no simulated weeks — nothing to decompose")
         return 3
     rec = fs["long"]["received"] + fs["short"]["received"]
     paid = fs["long"]["paid"] + fs["short"]["paid"]
     net = rec - paid
     sealed_f = float((sealed.get("decomposition_usd") or {})
                      .get("funding") or 0.0)
-    ok = abs(net - sealed_f) < 1e-6
+    # A diagnostic that simulated zero weeks must never produce a trivial
+    # MATCH (e.g. against a hypothetical zero-funding sealed result).
+    ok = abs(net - sealed_f) < 1e-6 and bool(R["rows"])
     out = {
         "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "diagnostic": ("prereg line 62 — funding received vs paid; "
                        "computed post-verdict, changes no criterion"),
+        # Provenance: HEAD is only *where the run happened* — the tree
+        # may be dirty. diag_script_sha256 identifies the exact code
+        # that ran; compare with the blob at code_commit to verify.
         "code_commit": _git_head(),
+        "diag_script_sha256": hashlib.sha256(
+            Path(__file__).read_bytes()).hexdigest(),
+        "n_weeks_simulated": len(R["rows"]),
         "sealed_result_file": "phase1_result.json",
         "sealed_result_sha256": sealed_sha,
         "sealed_decisions_file_sha256": sealed.get(
@@ -827,9 +836,10 @@ def diag_funding_split() -> int:
           f"net {net:,.2f} vs sealed {sealed_f:,.2f} -> "
           f"{'MATCH' if ok else 'MISMATCH'}", flush=True)
     if not ok:
-        print("MISMATCH: received-paid != sealed funding — possible bug "
-              "in the original result; investigate before trusting "
-              "either file", flush=True)
+        logging.warning(
+            "MISMATCH: received-paid != sealed funding — possible bug "
+            "in the original result; investigate before trusting "
+            "either file")
     return 0 if ok else 3
 
 
@@ -882,9 +892,10 @@ def main() -> int:
         # the cache is insufficient, not that the strategy is INCONCLUSIVO.
         # Writing it would overwrite the sealed verdict with an empty
         # report (Devin Review PR#21 second pass). Refuse, keep the file.
-        print("refusing to publish: 0 weeks simulated — cache coverage "
-              "insufficient (run without --skip-download). Sealed "
-              "phase1_result.json left untouched.", flush=True)
+        logging.warning(
+            "refusing to publish: 0 weeks simulated — cache coverage "
+            "insufficient (run without --skip-download). Sealed "
+            "phase1_result.json left untouched.")
         return 2
     out = evaluate(D, uni, R)
     out["decisions_file_sha256"] = hashlib.sha256(
