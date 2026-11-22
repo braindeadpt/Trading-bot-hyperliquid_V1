@@ -349,6 +349,18 @@ details.fold .panel { max-height: none; }
 .sc-row { display: flex; gap: 8px; align-items: baseline; font-size: 11px; }
 .sc-row .num { font-variant-numeric: tabular-nums; font-family: "SF Mono", Consolas, monospace; }
 .sc-row .dim { min-width: 34px; }
+.closed-list { display: flex; flex-direction: column; gap: 2px; }
+.closed-row {
+    display: grid; grid-template-columns: 1.3fr 2.2fr 0.9fr 0.8fr 0.6fr 74px;
+    gap: 8px; align-items: center; font-size: 11px; cursor: pointer;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 3px 10px; opacity: 0.85;
+}
+.closed-row:hover { border-color: var(--accent2); opacity: 1; }
+.closed-row .cr-name { font-weight: 700; }
+.closed-row .num { font-variant-numeric: tabular-nums; font-family: "SF Mono", Consolas, monospace; }
+.closed-row .cr-spark { display: flex; justify-content: flex-end; }
+@media (max-width: 900px) { .closed-row { grid-template-columns: 1fr 1fr; } }
 .sc-foot { font-size: 9px; border-top: 1px solid var(--border); padding-top: 4px; }
 .modal-close {
     background: none; border: none; color: var(--muted);

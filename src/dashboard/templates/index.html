@@ -6,7 +6,7 @@
 <title>Hyperliquid Trading Bot Dashboard</title>
 <script src="socket.io.min.js"></script>
 <script src="static/lightweight-charts.standalone.production.js"></script>
-<link rel="stylesheet" href="static/dashboard.css?v=12">
+<link rel="stylesheet" href="static/dashboard.css?v=13">
 <style>
 /* Inline fallback — guaranteed to apply */
 :root {
@@ -247,6 +247,14 @@ th { font-size: 10px; }
     <span class="bar"></span><span class="text">Estratégias ativas</span><span class="line"></span>
 </div>
 <div class="strat-grid" id="strat-grid"><span class="muted">Waiting...</span></div>
+
+<!-- ENCERRADAS — estratégias com estado `closed` (genérico por estado) -->
+<div id="closed-section" style="display:none;">
+    <div class="section-label">
+        <span class="bar"></span><span class="text">Encerradas</span><span class="line"></span>
+    </div>
+    <div class="closed-list" id="closed-list"></div>
+</div>
 
 <!-- FEED ÚNICO — últimas trades de todas as estratégias -->
 <div class="panel" style="margin-top:var(--gap);">
@@ -1874,7 +1882,47 @@ const _STATE_BADGE = {
     running: ["badge-green", "a correr"],
     no_signal: ["badge-dim", "sem sinal"],
     error: ["badge-red", "erro"],
+    stale: ["badge-yellow", "stale"],
+    verdict: ["badge-yellow", "readout"],
+    testing: ["badge-blue", "a testar"],
+    historical: ["badge-purple", "histórico"],
+    closed: ["badge-dim", "encerrada"],
 };
+function fmtDay(ts) {
+    if (!ts) return "—";
+    const d = new Date(ts);
+    return String(d.getUTCDate()).padStart(2, "0") + "/" + String(d.getUTCMonth() + 1).padStart(2, "0") + "/" + d.getUTCFullYear();
+}
+function _histHtml(r) {
+    const h = r.hist;
+    if (!h) return "";
+    const f = (v, d, suf) => v == null ? "—" : Number(v).toFixed(d) + (suf || "");
+    const usd = (v) => v == null ? "—" : _fmtNet(v, "usd");
+    return '<div class="sc-arms tiny" style="display:flex;flex-direction:column;gap:1px;">'
+        + '<span>Sharpe <b>' + f(h.sharpe, 2) + '</b> · janelas + <b>' + (h.windows_pos != null && h.windows_k != null ? h.windows_pos + '/' + h.windows_k : "—") + '</b></span>'
+        + '<span>sign-flip p <b>' + f(h.signflip_p, 3) + '</b> · pct vs nulos <b>' + f(h.null_percentile, 1) + '</b></span>'
+        + '<span>PnL ex-top3 <b>' + usd(h.pnl_ex_top3_usd) + '</b>'
+        + (h.cum_return_pct != null ? ' · cum ' + f(h.cum_return_pct, 2, "%") : "") + '</span></div>';
+}
+function renderClosed(rows) {
+    const sec = document.getElementById("closed-section");
+    const list = document.getElementById("closed-list");
+    if (!sec || !list) return;
+    sec.style.display = rows.length ? "" : "none";
+    list.innerHTML = rows.map(r => {
+        const last = (r.equity && r.equity.length) ? r.equity[r.equity.length - 1][0] : null;
+        const netCls = r.net == null ? "" : (r.net >= 0 ? "up" : "down");
+        return `<div class="closed-row" onclick="openStratDetail('${r.id}')" role="button" tabindex="0"
+                 onkeydown="if(event.key==='Enter')openStratDetail('${r.id}')">
+            <span class="cr-name">${r.name}</span>
+            <span class="cr-verdict">${r.state_detail || "encerrada"}</span>
+            <span class="cr-date dim" title="data do último trade registado">${last ? fmtDay(last) : "—"}</span>
+            <span class="num ${netCls}">${_fmtNet(r.net, r.net_unit)}</span>
+            <span class="num dim">n ${r.n != null ? r.n : "—"}</span>
+            <span class="cr-spark">${_sparkSVG(r.equity, 70, 16)}</span>
+        </div>`;
+    }).join("");
+}
 function _fmtNet(v, unit) {
     if (v == null) return "—";
     const sign = v > 0 ? "+" : "";
@@ -1918,13 +1966,18 @@ function renderStrategies(d) {
         grid.innerHTML = '<span class="muted">Sem dados de estratégias</span>';
         return;
     }
-    grid.innerHTML = rows.map(r => {
-        const [cls, lbl] = _STATE_BADGE[r.state] || ["badge-dim", r.state || "—"];
+    // Closed strategies leave the active grid for the compact "Encerradas" list.
+    const closedRows = rows.filter(r => r.state === "closed");
+    renderClosed(closedRows);
+    grid.innerHTML = rows.filter(r => r.state !== "closed").map(r => {
+        const [cls, lbl] = r.badge || _STATE_BADGE[r.state] || ["badge-dim", r.state || "—"];
         const netCls = r.net == null ? "" : (r.net >= 0 ? "up" : "down");
         const nTxt = r.n != null
             ? r.n + (r.n_readout ? "/" + r.n_readout : "")
             : "—";
-        const roTxt = r.readout_ms ? fmtDate(r.readout_ms) : "—";
+        const roTxt = r.readout_ms ? fmtDay(r.readout_ms) : "—";
+        const histBadge = r.kind === "historical"
+            ? '<span class="badge badge-purple" style="align-self:flex-start;">HISTÓRICO (backtest) — não é paper</span>' : "";
         return `<div class="strat-card" onclick="openStratDetail('${r.id}')" role="button" tabindex="0"
                  onkeydown="if(event.key==='Enter')openStratDetail('${r.id}')">
             <div class="sc-head">
@@ -1938,6 +1991,8 @@ function renderStrategies(d) {
                 <span class="dim">Open</span><span class="num">${r.n_open || 0}${r.open_unreal_usd != null ? ' (' + _fmtNet(r.open_unreal_usd, "usd") + ')' : ''}</span></div>
             <div class="sc-row"><span class="dim">n</span><span class="num">${nTxt}</span>
                 <span class="dim">readout</span><span class="num">${roTxt}</span></div>
+            ${histBadge}${_histHtml(r)}
+            ${r.kind === "historical" ? "" : '<div class="tiny dim" title="' + (r.state_detail || '') + '">' + (r.state_detail || "") + '</div>'}
             ${_armsHtml(r)}
             <div class="sc-foot dim" title="${r.prereg_state || ''}">${r.prereg_state || ''}</div>
         </div>`;
@@ -2020,7 +2075,7 @@ function _smRender(d, name) {
         <span class="dim">Net</span><span class="num">${_fmtNet(cards.net, cards.net_unit)}</span>
         <span class="dim">WR</span><span class="num">${cards.wr != null ? cards.wr + "%" : "—"}</span>
         <span class="dim">n</span><span class="num">${cards.n != null ? cards.n : "—"}${cards.n_readout ? "/" + cards.n_readout : ""}</span>
-        <span class="dim">readout</span><span class="num">${cards.readout_ms ? fmtDate(cards.readout_ms) : "—"}</span></div>` : "";
+        <span class="dim">readout</span><span class="num">${cards.readout_ms ? fmtDay(cards.readout_ms) : "—"}</span></div>` : "";
     const ot = document.getElementById("sm-open-tbody");
     const opens = (d && d.open) || [];
     ot.innerHTML = opens.length ? opens.map(o => `<tr>
