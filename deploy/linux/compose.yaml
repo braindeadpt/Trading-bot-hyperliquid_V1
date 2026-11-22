@@ -46,6 +46,9 @@ x-base: &base
     # what persist_* sees, never a fresh mint on the data volume.
     - ../../data/research/phase08_preregister.json:/opt/hyperliquid/data/research/phase08_preregister.json:ro
     - ../../data/research/phase10:/opt/hyperliquid/data/research/phase10:ro
+    # FundCarry Phase-1 result artifact — versioned in the repo, read by
+    # the dashboard card; data/ is dockerignored so it needs a ro bind.
+    - ../../data/backtests/fundcarry:/opt/hyperliquid/data/backtests/fundcarry:ro
 
 services:
   hyperliquid:

@@ -2733,13 +2733,17 @@ def create_app(config: Dict[str, Any]) -> tuple:
         except Exception:  # noqa: BLE001
             pass
         try:
-            # Services = the 7 data-writing services this dashboard can
-            # observe directly: engine (tick age) + the 6 ledger writers
-            # (jev/carry/unlock/boros/resmom/ivgate card states).
+            # Services = the data-writing services this dashboard can
+            # observe directly: engine (tick age) + the ledger writers
+            # behind the cards. Historical backtest cards (FundCarry) are
+            # not services; a `stale` card is not healthy.
             from src.research.paper_trades import build_strategies_payload
             cards = build_strategies_payload().get("rows", [])
-            active_cards = [c for c in cards if c.get("state") != "closed"]
-            ok = sum(1 for c in active_cards if c.get("state") != "error")
+            active_cards = [c for c in cards
+                            if c.get("state") != "closed"
+                            and c.get("kind") != "historical"]
+            ok = sum(1 for c in active_cards
+                     if c.get("state") not in ("error", "stale"))
             engine_ok = 0
             if _engine is not None:
                 try:

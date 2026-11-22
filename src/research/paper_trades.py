@@ -408,6 +408,13 @@ def _unlock_card(now_ms: int) -> Dict[str, Any]:
         states = {r["state"]: int(r["c"]) for r in st}
         card["n"] = states.get("closed", 0)
         card["n_open"] = states.get("open", 0)
+        # Readout threshold (§6): only events closed at/before the
+        # deadline count. Events closed later stay in `n` for display but
+        # must never flip a post-deadline INCONCLUSIVO.
+        card["_n_by_deadline"] = int(con.execute(
+            "SELECT COUNT(*) c FROM unlock_sims WHERE kind='event'"
+            " AND state='closed' AND priced_out_ms <= ?",
+            (_UNLOCK_READOUT_MS,)).fetchone()["c"])
         agg = con.execute(
             "SELECT COALESCE(SUM(net_usd),0) net, COALESCE(SUM(gross_usd),0)"
             " g, MAX(priced_out_ms) last_ts FROM unlock_sims"
@@ -459,18 +466,27 @@ def _apply_unlock_readout(card: Dict[str, Any], now_ms: int) -> None:
     appended instead of replacing it.
     """
     n = int(card.get("n") or 0)
+    n_due = int(card.pop("_n_by_deadline", 0) or 0)
+    if now_ms >= _UNLOCK_READOUT_MS:
+        # Deadline reached — the preregistered read is frozen by the
+        # events that had closed at that instant, nothing later.
+        if n_due >= _UNLOCK_N_READOUT:
+            card["verdict"] = "por registar"
+            card["state_detail"] = (
+                f"n {n_due}/{_UNLOCK_N_READOUT} atingido antes do prazo "
+                "— leitura §6 por registar")
+        else:
+            card["verdict"] = "INCONCLUSIVO"
+            card["state"] = "verdict"
+            card["state_detail"] = (
+                f"readout passou em {_fmt_day(_UNLOCK_READOUT_MS)} · "
+                f"n {n_due}/{_UNLOCK_N_READOUT} < {_UNLOCK_N_READOUT} → "
+                "INCONCLUSIVO (prereg §6)")
+        return
     if n >= _UNLOCK_N_READOUT:
         card["verdict"] = "por registar"
         card["state_detail"] = (
             f"n {n}/{_UNLOCK_N_READOUT} atingido — leitura §6 por registar")
-        return
-    if now_ms >= _UNLOCK_READOUT_MS:
-        card["verdict"] = "INCONCLUSIVO"
-        card["state"] = "verdict"
-        card["state_detail"] = (
-            f"readout passou em {_fmt_day(_UNLOCK_READOUT_MS)} · n {n}/"
-            f"{_UNLOCK_N_READOUT} < {_UNLOCK_N_READOUT} → INCONCLUSIVO "
-            "(prereg §6)")
 
 
 def _unlock_detail(now_ms: int) -> Dict[str, Any]:
@@ -658,6 +674,13 @@ _RESMOM_ARMS: Tuple[str, ...] = ("A", "B", "BIN")
 # Registered arm = A (HL, prereg 2026-10-28); B is descriptive, BIN is a
 # descriptive Binance reference. Only A feeds the card's headline numbers.
 _RESMOM_REG_ARM = "A"
+# Fixed gross notional per arm — same constant the daemon accounts NAV
+# against (src/resmom_shadow/spec.py). Returns must be vs this base: the
+# first NAV mark already discounts entry cost.
+try:
+    from src.resmom_shadow.spec import NOTIONAL_USD as _RESMOM_NOTIONAL
+except Exception:  # noqa: BLE001 — spec import must never break the page
+    _RESMOM_NOTIONAL = 10_000.0
 _RESMOM_ARM_LABEL = {
     "A": "ResMom·A",
     "B": "ResMom·B (desc.)",
@@ -710,9 +733,13 @@ def _resmom_card(now_ms: int) -> Dict[str, Any]:
             n_reb = int(con.execute(
                 "SELECT COUNT(*) c FROM resmom_rebalances WHERE arm=?",
                 (arm,)).fetchone()["c"])
+            # cum_return is vs the fixed gross NOTIONAL — the first NAV
+            # mark already discounts entry cost, so basing the return on
+            # it would hide that cost (Devin Review PR#21).
             ret = None
-            if ser and ser[0][1]:
-                ret = round((ser[-1][1] / ser[0][1] - 1.0) * 100.0, 3)
+            if ser:
+                ret = round(
+                    (ser[-1][1] / _RESMOM_NOTIONAL - 1.0) * 100.0, 3)
             arms[arm] = {
                 "nav": round(ser[-1][1], 2) if ser else None,
                 "cum_return_pct": ret,
@@ -729,10 +756,9 @@ def _resmom_card(now_ms: int) -> Dict[str, Any]:
         card["wr"] = arms[_RESMOM_REG_ARM]["wr"]
         if len(series) >= 2 and series[-1][0] > series[0][0]:
             span = series[-1][0] - series[0][0]
-            base = series[0][1] or 1.0
             card["apy"] = round(
-                ((series[-1][1] / base) ** (_MS_YEAR / span) - 1.0)
-                * 100.0, 2)
+                ((series[-1][1] / _RESMOM_NOTIONAL) ** (_MS_YEAR / span)
+                 - 1.0) * 100.0, 2)
         last_ts = con.execute(
             "SELECT MAX(entry_ms) ts FROM resmom_positions").fetchone()["ts"]
         # Heartbeat = freshest nav of ANY arm (daemon liveness); the
@@ -960,6 +986,20 @@ def _fc_first(d: Dict[str, Any], *paths: Tuple[str, ...]) -> Any:
     return None
 
 
+def _fc_week_ts(w: Dict[str, Any]) -> Optional[int]:
+    """Weekly-row timestamp: ts_ms, then week_ms, then the date string."""
+    try:
+        ts = w.get("ts_ms")
+        if ts is None:
+            ts = w.get("week_ms")
+        if ts is not None:
+            return int(ts)
+        return int(datetime.strptime(str(w.get("date")), "%Y-%m-%d")
+                   .replace(tzinfo=timezone.utc).timestamp() * 1000)
+    except (TypeError, ValueError):
+        return None
+
+
 def _fc_equity(res: Dict[str, Any]) -> List[Tuple[int, float]]:
     """Cumulative net USD series: explicit `equity` [[ts_ms, v], ...] if
     present, else cumulative sum of `weekly[].pnl_usd` keyed by `date`."""
@@ -978,17 +1018,32 @@ def _fc_equity(res: Dict[str, Any]) -> List[Tuple[int, float]]:
         if not isinstance(w, dict):
             continue
         pnl = _fc_num(w.get("pnl_usd"))
-        if pnl is None:
-            continue
-        try:
-            ts = w.get("ts_ms")
-            ts = int(ts) if ts is not None else int(datetime.strptime(
-                str(w.get("date")), "%Y-%m-%d").replace(
-                tzinfo=timezone.utc).timestamp() * 1000)
-        except (TypeError, ValueError):
+        ts = _fc_week_ts(w)
+        if pnl is None or ts is None:
             continue
         cum += pnl
         out.append((ts, round(cum, 4)))
+    return _downsample(out)
+
+
+def _fc_dd(res: Dict[str, Any]) -> List[Tuple[int, float]]:
+    """Drawdown series in percentage points, rebuilt from weekly
+    compounded returns — the same convention the artifact uses for
+    `max_drawdown` (nav *= 1+ret, drop vs running peak), so the series
+    minimum equals the artifact's value."""
+    nav = 1.0
+    peak = 1.0
+    out: List[Tuple[int, float]] = []
+    for w in res.get("weekly") or []:
+        if not isinstance(w, dict):
+            continue
+        r = _fc_num(w.get("ret"))
+        ts = _fc_week_ts(w)
+        if r is None or ts is None:
+            continue
+        nav *= 1.0 + r
+        peak = max(peak, nav)
+        out.append((ts, round((nav / peak - 1.0) * 100.0, 4)))
     return _downsample(out)
 
 
@@ -1074,6 +1129,7 @@ def _fundcarry_detail(now_ms: int) -> Dict[str, Any]:
     _status, res = _fundcarry_result()
     if res is not None:
         out["equity"] = _fc_equity(res)
+        out["dd"] = _fc_dd(res)
     return out
 
 

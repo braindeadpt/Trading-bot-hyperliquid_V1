@@ -108,15 +108,17 @@ def test_ivgate_zero_independent_stays_zero(tmp_path, monkeypatch):
 
 # -- unlock ---------------------------------------------------------------
 
-def _mk_unlock(tmp_path: Path, n_closed: int, hb_ms: int) -> None:
+def _mk_unlock(tmp_path: Path, closes: list, hb_ms: int) -> None:
+    """closes = list of priced_out_ms for closed events (explicit so tests
+    can place events on either side of the readout deadline)."""
     con = sqlite3.connect(str(tmp_path / "unlock_shadow.db"))
     con.execute("CREATE TABLE unlock_sims (kind TEXT, state TEXT,"
                 " net_usd REAL, gross_usd REAL, priced_out_ms INTEGER)")
     con.execute("CREATE TABLE unlock_snapshots (ts_ms INTEGER)")
     con.execute("INSERT INTO unlock_snapshots VALUES (?)", (hb_ms,))
-    for i in range(n_closed):
+    for t in closes:
         con.execute("INSERT INTO unlock_sims VALUES ('event','closed',1,1,?)",
-                    (hb_ms - i,))
+                    (t,))
     con.commit()
     con.close()
 
@@ -131,7 +133,7 @@ def test_unlock_constants_match_ledger():
 def test_unlock_before_readout_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(pt, "_RESEARCH", tmp_path)
     now = _ms(2026, 11, 22)
-    _mk_unlock(tmp_path, 0, now - 1000)
+    _mk_unlock(tmp_path, [], now - 1000)
     c = pt._unlock_card(now)
     assert c["state"] == "no_signal" and "verdict" not in c
 
@@ -139,7 +141,9 @@ def test_unlock_before_readout_unchanged(tmp_path, monkeypatch):
 def test_unlock_readout_passed_below_min_is_inconclusive(tmp_path, monkeypatch):
     monkeypatch.setattr(pt, "_RESEARCH", tmp_path)
     now = _ms(2027, 10, 15)
-    _mk_unlock(tmp_path, 3, now - 1000)
+    # 3 events closed BEFORE the deadline -> 3/15 at expiry -> INCONCLUSIVO
+    _mk_unlock(tmp_path, [pt._UNLOCK_READOUT_MS - i * DAY - 1
+                          for i in range(3)], now - 1000)
     c = pt._unlock_card(now)
     assert c["verdict"] == "INCONCLUSIVO"
     assert c["state"] == "verdict"
@@ -149,10 +153,39 @@ def test_unlock_readout_passed_below_min_is_inconclusive(tmp_path, monkeypatch):
 def test_unlock_n_reached_does_not_invent_verdict(tmp_path, monkeypatch):
     monkeypatch.setattr(pt, "_RESEARCH", tmp_path)
     now = _ms(2027, 3, 1)
-    _mk_unlock(tmp_path, 15, now - 1000)
+    _mk_unlock(tmp_path, [now - 1000 - i * DAY for i in range(15)],
+               now - 1000)
     c = pt._unlock_card(now)
     assert c["verdict"] == "por registar"
     assert "INCONCLUSIVO" not in c["state_detail"]
+
+
+def test_unlock_late_close_after_deadline_keeps_inconclusivo(
+        tmp_path, monkeypatch):
+    """Prereg §6: read at n>=15 OR deadline, whichever FIRST. Once the
+    deadline passes with <15 closed, INCONCLUSIVO is final — a 15th close
+    after the deadline must not flip it to 'por registar'."""
+    monkeypatch.setattr(pt, "_RESEARCH", tmp_path)
+    now = _ms(2027, 10, 15)
+    closes = [pt._UNLOCK_READOUT_MS - i * DAY - 1 for i in range(14)]
+    closes.append(pt._UNLOCK_READOUT_MS + DAY)      # 15th: after deadline
+    _mk_unlock(tmp_path, closes, now - 1000)
+    c = pt._unlock_card(now)
+    assert c["n"] == 15                             # raw count still shown
+    assert c["verdict"] == "INCONCLUSIVO"
+    assert "14/15" in c["state_detail"]
+
+
+def test_unlock_15_closed_before_deadline_is_due_after_deadline(
+        tmp_path, monkeypatch):
+    """The n>=15 trigger fired before the deadline — the readout stays
+    'por registar' even when evaluated after the deadline."""
+    monkeypatch.setattr(pt, "_RESEARCH", tmp_path)
+    now = _ms(2027, 10, 15)
+    _mk_unlock(tmp_path, [pt._UNLOCK_READOUT_MS - i * DAY - 1
+                          for i in range(15)], now - 1000)
+    c = pt._unlock_card(now)
+    assert c["verdict"] == "por registar"
 
 
 # -- FundCarry ------------------------------------------------------------
@@ -191,6 +224,25 @@ def test_fundcarry_full_json(tmp_path, monkeypatch):
     assert c["net"] == 1234.5 and c["net_unit"] == "usd"
     assert [v for _, v in c["equity"]] == [10.0, 6.0]
     assert pt._fundcarry_detail(0)["equity"] == c["equity"]
+
+
+def test_fundcarry_detail_dd_matches_artifact_max_drawdown(
+        tmp_path, monkeypatch):
+    """The modal expects a drawdown series in percentage points; its
+    minimum must equal the artifact's max_drawdown (compounded weekly
+    returns, drop vs peak — the artifact's own convention)."""
+    f = tmp_path / "r.json"
+    f.write_text(json.dumps({
+        "verdict": "KILL (C)", "max_drawdown": -0.24,
+        "weekly": [{"date": "2026-01-05", "ret": 0.10, "pnl_usd": 1000.0},
+                   {"date": "2026-01-12", "ret": -0.20, "pnl_usd": -2200.0},
+                   {"date": "2026-01-19", "ret": -0.05, "pnl_usd": -440.0}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(pt, "_FUNDCARRY_JSON", f)
+    d = pt._fundcarry_detail(0)
+    assert d["dd"] != []
+    assert [v for _, v in d["dd"]] == [0.0, -20.0, -24.0]
+    assert min(v for _, v in d["dd"]) == pytest.approx(-0.24 * 100)
 
 
 def test_fundcarry_partial_json_shows_none_not_crash(tmp_path, monkeypatch):

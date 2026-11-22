@@ -147,6 +147,23 @@ def test_feed_labels_each_arm(three_arms):
 
 
 @pytest.mark.unit
+def test_arm_cum_return_base_is_notional_not_first_mark(tmp_path, monkeypatch):
+    """The first NAV mark already discounts entry cost — using it as the
+    base hides that cost. cum_return_pct must be NAV / NOTIONAL_USD - 1."""
+    # first mark 9 990 (10 entry cost already paid) -> honest return is
+    # +1.90 % on the 10 000 notional, not +2.10 % vs the first mark.
+    _mk_db(tmp_path / "resmom_shadow.db",
+           {"A": [9_990.0, 10_100.0], "B": [9_990.0, 9_500.0],
+            "BIN": [9_990.0, 10_500.0]}, [],
+           {"A": 1, "B": 1, "BIN": 1})
+    monkeypatch.setattr(pt, "_RESEARCH", tmp_path)
+    arms = pt._resmom_card(T0 + MS_WEEK)["arms"]
+    assert arms["A"]["cum_return_pct"] == pytest.approx(1.0)
+    assert arms["B"]["cum_return_pct"] == pytest.approx(-5.0)
+    assert arms["BIN"]["cum_return_pct"] == pytest.approx(5.0)
+
+
+@pytest.mark.unit
 def test_apy_indicative_when_few_closed_weeks(tmp_path, monkeypatch):
     # 3 marks -> 2 closed weeks
     _mk_db(tmp_path / "resmom_shadow.db",

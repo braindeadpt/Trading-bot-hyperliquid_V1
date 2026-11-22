@@ -368,6 +368,14 @@ def week_pnl(D: Data, w: Dict[str, float], dw: int
 def run(D: Data, uni: Dict[int, List[str]]) -> Dict[str, Any]:
     weeks = sorted(uni)
     weeks = [dw for dw in weeks if (dw + 7) <= D.d1]
+    if not weeks:
+        # No completed week can be simulated (empty universe or all
+        # beyond the candle end) — evaluate() maps this to INCONCLUSIVO.
+        return {"rows": [], "nav": NOTIONAL, "nav_resmom": NOTIONAL,
+                "sym_pnl": {}, "sym_cost": {}, "sym_weeks": {},
+                "nulls_ret": [[] for _ in range(core.N_NULLS)],
+                "corr_sig": [], "legs_overlap": [], "cap_bind": 0,
+                "flags": {}, "skipped": [], "first_dw": None}
     first_dw = weeks[0]
     nav = NOTIONAL
     nav_r = NOTIONAL
@@ -519,6 +527,40 @@ def evaluate(D: Data, uni: Dict[int, List[str]], R: Dict[str, Any]
              ) -> Dict[str, Any]:
     rows = R["rows"]
     rets = [x["ret"] for x in rows]
+    if not rows:
+        # Frozen rule: K<4 complete windows -> INCONCLUSIVO. K=0 is the
+        # degenerate case — emit the verdict (with the skip reasons) instead
+        # of IndexError on rows[0]. An empty `uni` (cache coverage gap) is
+        # distinguished from weeks that were eligible but all skipped.
+        skipped = R.get("skipped") or []
+        return {
+            "verdict": "INCONCLUSIVO", "criteria": {}, "K": 0,
+            "survivorship_controlled": False,
+            "inconclusive_reason": (
+                "no eligible weeks in universe (cache coverage gap)"
+                if not uni else
+                f"{len(uni)} eligible weeks, 0 simulated — "
+                f"{len(skipped)} skipped"),
+            "period": None, "universe": None,
+            "cum_return": None, "sharpe": None, "n_weeks": 0,
+            "weekly_mean": None, "weekly_std": None, "max_drawdown": None,
+            "nulls": {"n": 0, "p": {}, "real_percentile": None,
+                      "mean": None, "seed_tag": core.NULL_SEED_TAG},
+            "windows": [],
+            "sign_flip": {"p": None, "method": "none", "n_pos": 0,
+                          "K": 0, "seed": core.SIGNFLIP_SEED,
+                          "samples": core.SIGNFLIP_SAMPLES},
+            "ex_top3": {"pnl_ex_top3_usd": 0.0, "top3": [],
+                        "total_sym_pnl": 0.0,
+                        "cost_allocated_variant_usd": 0.0},
+            "top10": [], "bottom10": [],
+            "decomposition_usd": {"price": 0.0, "funding": 0.0,
+                                  "cost": 0.0, "net": 0.0},
+            "turnover": None, "cap": None, "resmom_diag": None,
+            "data_quality": {"skipped_weeks": skipped,
+                             "beta_unsolvable_flags": R.get("flags") or {}},
+            "weekly": [],
+        }
     cum = R["nav"] / NOTIONAL - 1.0
     sh = sharpe_annual(rets)
     null_sh = [s for s in (sharpe_annual(x) for x in R["nulls_ret"])
@@ -704,8 +746,11 @@ def main() -> int:
             print("already frozen:", dec)
             return 1
         stamp = dt.datetime.now(dt.timezone.utc).isoformat()
-        dec.write_text("frozen_at_utc: " + stamp + chr(10) + DECISIONS,
-                       encoding="utf-8")
+        # write_bytes: text-mode \n -> \r\n translation on Windows made the
+        # frozen file CRLF there but LF on Linux checkouts, so the recorded
+        # sha256 only verified on Windows. Freeze canonical LF bytes.
+        dec.write_bytes(("frozen_at_utc: " + stamp + "\n" + DECISIONS)
+                        .encode("utf-8"))
         print("frozen at", stamp)
         return 0
     if not a.skip_download:

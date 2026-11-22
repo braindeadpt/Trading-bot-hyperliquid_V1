@@ -11,6 +11,9 @@
 *.sh text eol=lf
 *.bat text eol=crlf
 
+# Frozen research artifact — the recorded sha256 must verify on any OS.
+data/backtests/fundcarry/DECISIONS_FROZEN.txt text eol=lf
+
 *.db binary
 *.sqlite binary
 *.png binary

@@ -1,6 +1,8 @@
 """Unit tests for src/research/fundcarry/core.py (funding-carry Phase 1)."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from src.research.fundcarry import core
@@ -88,6 +90,52 @@ def test_sign_flip_monte_carlo_seeded_and_close_to_exact():
     assert m1 == "monte_carlo" and p1 == p2           # seeded -> repeatable
     pe, me = core.sign_flip_p(vals, exact_max_k=13)    # exact reference
     assert me == "exact" and abs(p1 - pe) < 0.01
+
+
+# ── evaluate() degenerate paths + artifact integrity ──────────────────────
+
+def _load_phase1_script():
+    """The harness lives in scripts/ (not a package) — load it by path."""
+    import importlib.util
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "fundcarry_phase1", root / "scripts" / "research" /
+        "fundcarry_phase1.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_evaluate_empty_rows_returns_inconclusivo_not_indexerror():
+    """Zero completed simulated weeks -> verdict INCONCLUSIVO with K=0,
+    never IndexError on rows[0]. (Devin Review PR#21: the evaluation used
+    to read rows[0] unconditionally.)"""
+    mod = _load_phase1_script()
+    R = {"rows": [], "skipped": [{"dw": 1, "why": "btc_returns"}],
+         "flags": {"x": 2}}
+    res = mod.evaluate(object(), {}, R)
+    assert res["verdict"] == "INCONCLUSIVO" and res["K"] == 0
+    assert res["cum_return"] is None and res["sharpe"] is None
+    assert res["weekly"] == [] and res["data_quality"]["skipped_weeks"]
+    # non-empty universe but nothing simulated -> different reason text
+    res2 = mod.evaluate(object(), {1: ["BTC"], 2: ["ETH"]}, R)
+    assert res2["verdict"] == "INCONCLUSIVO"
+    assert "0 simulated" in res2["inconclusive_reason"]
+
+
+def test_frozen_decisions_pair_verifies_cross_platform():
+    """DECISIONS_FROZEN.txt must hash identically on every platform:
+    LF-only bytes on disk, and phase1_result.json records the sha256 of
+    exactly those bytes (the CRLF/Windows bug made them diverge)."""
+    import hashlib
+    import json as _json
+    root = Path(__file__).resolve().parents[1]
+    dec = root / "data" / "backtests" / "fundcarry" / "DECISIONS_FROZEN.txt"
+    res = root / "data" / "backtests" / "fundcarry" / "phase1_result.json"
+    blob = dec.read_bytes()
+    assert b"\r\n" not in blob
+    assert hashlib.sha256(blob).hexdigest() == _json.loads(
+        res.read_bytes())["decisions_file_sha256"]
 
 
 # ── signal ──────────────────────────────────────────────────────────────────
