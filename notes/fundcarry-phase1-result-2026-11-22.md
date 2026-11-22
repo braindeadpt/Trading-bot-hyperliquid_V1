@@ -194,6 +194,10 @@ script executado em bytes LF-canonicos, `diag_script_sha256`, e o id
 do blob git, `diag_script_git_blob`, verificaveis com
 `git show`/`git cat-file` mesmo com worktree sujo), produzido por
 `--diag-funding-split` em `scripts/research/fundcarry_phase1.py`.
+O script exacto executado esta arquivado em
+`data/backtests/fundcarry/phase1_diag_script_snapshot.py` — o sha256
+dos seus bytes LF iguala `diag_script_sha256`, pelo que a verificacao
+nao depende de o commit e096266 sobreviver a um merge por squash.
 
 Resultado (USD, sobre o nocional fixo de 10.000 por semana):
 
