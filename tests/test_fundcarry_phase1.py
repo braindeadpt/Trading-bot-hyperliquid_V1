@@ -123,6 +123,26 @@ def test_evaluate_empty_rows_returns_inconclusivo_not_indexerror():
     assert "0 simulated" in res2["inconclusive_reason"]
 
 
+def test_main_refuses_to_overwrite_sealed_result_on_empty_run(
+        tmp_path, monkeypatch):
+    """Regression (Devin Review PR#21 pass 2): with an insufficient cache,
+    run() returns 0 simulated weeks — main() must NOT overwrite the
+    published phase1_result.json with an empty INCONCLUSIVO report."""
+    mod = _load_phase1_script()
+    sealed = tmp_path / "phase1_result.json"
+    sealed.write_text('{"verdict": "KILL (C)", "K": 39}')
+    (tmp_path / "DECISIONS_FROZEN.txt").write_text("frozen")
+    monkeypatch.setattr(mod, "OUT_DIR", tmp_path)
+    monkeypatch.setattr(mod, "Data", lambda: object())
+    monkeypatch.setattr(mod, "compute_universes", lambda D: {})
+    monkeypatch.setattr(
+        mod, "run", lambda D, uni: {"rows": [], "skipped": []})
+    monkeypatch.setattr(mod.sys, "argv", ["x", "--skip-download"])
+    rc = mod.main()
+    assert rc == 2
+    assert sealed.read_text() == '{"verdict": "KILL (C)", "K": 39}'
+
+
 def test_frozen_decisions_pair_verifies_cross_platform():
     """DECISIONS_FROZEN.txt must hash identically on every platform:
     LF-only bytes on disk, and phase1_result.json records the sha256 of

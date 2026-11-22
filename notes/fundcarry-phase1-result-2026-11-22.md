@@ -8,7 +8,7 @@ Todos os criterios falham (ver tabela). Regra da pre-registacao: qualquer falha 
 
 ## Decisoes de definicao (congeladas ANTES de calcular o veredicto)
 
-Ficheiro `data/backtests/fundcarry/DECISIONS_FROZEN.txt`, escrito pelo script a 2026-11-21T23:45:47.353250+00:00 (depois de descarregar candles/meta e verificar que nao ha buracos nos candles e que a API serve dados de moedas delistadas; antes de correr o backtest). sha256 registado no JSON: `2f436e596db461f3...`.
+Ficheiro `data/backtests/fundcarry/DECISIONS_FROZEN.txt`, escrito pelo script a 2026-11-21T23:45:47.353250+00:00 (depois de descarregar candles/meta e verificar que nao ha buracos nos candles e que a API serve dados de moedas delistadas; antes de correr o backtest). sha256 registado no JSON: `6351131c4a698a7e...` (canonicalizado para LF em 2026-11-22 — o valor originalmente registado, `2f436e596db461f3`, era o hash da copia Windows/CRLF; conteudo inalterado, ver emenda no fim).
 
 ```
 frozen_at_utc: 2026-11-21T23:45:47.353250+00:00

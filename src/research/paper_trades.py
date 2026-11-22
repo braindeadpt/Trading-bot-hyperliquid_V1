@@ -1044,7 +1044,17 @@ def _fc_dd(res: Dict[str, Any]) -> List[Tuple[int, float]]:
         nav *= 1.0 + r
         peak = max(peak, nav)
         out.append((ts, round((nav / peak - 1.0) * 100.0, 4)))
-    return _downsample(out)
+    if not out:
+        return out
+    ds = _downsample(out)
+    # The modal shows min(dd) as the max drawdown — stride downsampling
+    # can drop the true trough, so re-insert it if it was decimated.
+    argmin = min(range(len(out)), key=lambda i: out[i][1])
+    if out[argmin] not in ds:
+        pos = next((i for i, p in enumerate(ds)
+                    if p[0] > out[argmin][0]), len(ds))
+        ds.insert(pos, out[argmin])
+    return ds
 
 
 def _fundcarry_result() -> Tuple[str, Optional[Dict[str, Any]]]:

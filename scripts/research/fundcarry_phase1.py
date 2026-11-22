@@ -877,6 +877,15 @@ def main() -> int:
         print("DECISIONS_FROZEN.txt missing: write it BEFORE the backtest")
         return 2
     R = run(D, uni)
+    if not R["rows"]:
+        # Zero simulated weeks is never a publishable result — it means
+        # the cache is insufficient, not that the strategy is INCONCLUSIVO.
+        # Writing it would overwrite the sealed verdict with an empty
+        # report (Devin Review PR#21 second pass). Refuse, keep the file.
+        print("refusing to publish: 0 weeks simulated — cache coverage "
+              "insufficient (run without --skip-download). Sealed "
+              "phase1_result.json left untouched.", flush=True)
+        return 2
     out = evaluate(D, uni, R)
     out["decisions_file_sha256"] = hashlib.sha256(
         dec.read_bytes()).hexdigest()
