@@ -123,13 +123,13 @@ def hl_post(payload: Dict[str, Any], tries: int = 9) -> Any:
                 return json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             if e.code in (429, 500, 502, 503, 504):
-                print(f"  HTTP {e.code}, backoff {delay:.0f}s", flush=True)
+                logging.warning("HL HTTP %d, backoff %.0fs", e.code, delay)
                 time.sleep(delay)
                 delay = min(delay * 2, 120)
                 continue
             raise
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            print(f"  net error {e!r}, backoff {delay:.0f}s", flush=True)
+            logging.warning("HL net error %r, backoff %.0fs", e, delay)
             time.sleep(delay)
             delay = min(delay * 2, 120)
     raise RuntimeError(f"HL request failed after {tries} tries: {payload}")
@@ -900,7 +900,7 @@ def main() -> int:
     D = Data()                       # reload with funding
     dec = OUT_DIR / "DECISIONS_FROZEN.txt"
     if not dec.exists():
-        print("DECISIONS_FROZEN.txt missing: write it BEFORE the backtest")
+        logging.error("DECISIONS_FROZEN.txt missing: write it BEFORE the backtest")
         return 2
     R = run(D, uni)
     if not R["rows"]:
