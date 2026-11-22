@@ -375,7 +375,8 @@ def run(D: Data, uni: Dict[int, List[str]]) -> Dict[str, Any]:
                 "sym_pnl": {}, "sym_cost": {}, "sym_weeks": {},
                 "nulls_ret": [[] for _ in range(core.N_NULLS)],
                 "corr_sig": [], "legs_overlap": [], "cap_bind": 0,
-                "flags": {}, "skipped": [], "first_dw": None}
+                "flags": {}, "skipped": [], "first_dw": None,
+                "fund_split": None, "fund_split_weekly": []}
     first_dw = weeks[0]
     nav = NOTIONAL
     nav_r = NOTIONAL
@@ -394,6 +395,12 @@ def run(D: Data, uni: Dict[int, List[str]]) -> Dict[str, Any]:
     gross_after: List[float] = []
     flags_ct: Dict[str, int] = {}
     skipped: List[dict] = []
+    # Prereg line 62 diagnostic: funding received vs paid, by leg side.
+    # Accumulation only — touches none of the existing result fields.
+    fund_split: Dict[str, Dict[str, float]] = {
+        "long": {"received": 0.0, "paid": 0.0},
+        "short": {"received": 0.0, "paid": 0.0}}
+    fund_split_weekly: List[dict] = []
 
     for dw in weeks:
         cutoff = dw * MS_D
@@ -447,9 +454,17 @@ def run(D: Data, uni: Dict[int, List[str]]) -> Dict[str, Any]:
         pnl = price + fund - cost
         r = pnl / nav
         nav += pnl
+        wk_rec = wk_paid = 0.0
         for s, (p_, f_) in per.items():
             sym_pnl[s] = sym_pnl.get(s, 0.0) + p_ + f_
             sym_weeks[s] = sym_weeks.get(s, 0) + 1
+            leg = "long" if w[s] > 0 else "short"
+            if f_ >= 0.0:
+                fund_split[leg]["received"] += f_
+                wk_rec += f_
+            else:
+                fund_split[leg]["paid"] += -f_
+                wk_paid += -f_
         tot_abs = sum(abs(x) for x in set(w) | set(prev_w)
                       for x in [w.get(x, 0.0) - prev_w.get(x, 0.0)]) or 1.0
         for s in set(w) | set(prev_w):
@@ -515,11 +530,18 @@ def run(D: Data, uni: Dict[int, List[str]]) -> Dict[str, Any]:
             "shorts": sorted(s for s, x in w.items() if x < 0),
             "ret_resmom": r_a, "pool": len(pool),
             "universe": list(syms)})
+        fund_split_weekly.append({
+            "dw": dw,
+            "date": dt.datetime.fromtimestamp(
+                cutoff / 1000, dt.timezone.utc).strftime("%Y-%m-%d"),
+            "received": wk_rec, "paid": wk_paid})
     return {"rows": rows, "nav": nav, "nav_resmom": nav_r,
             "sym_pnl": sym_pnl, "sym_cost": sym_cost, "sym_weeks": sym_weeks,
             "nulls_ret": nulls_ret, "corr_sig": corr_sig,
             "legs_overlap": legs_overlap, "cap_bind": cap_bind,
-            "flags": flags_ct, "skipped": skipped, "first_dw": first_dw}
+            "flags": flags_ct, "skipped": skipped, "first_dw": first_dw,
+            "fund_split": fund_split,
+            "fund_split_weekly": fund_split_weekly}
 
 
 # ── evaluation ──────────────────────────────────────────────────────────────
@@ -731,6 +753,86 @@ def evaluate(D: Data, uni: Dict[int, List[str]], R: Dict[str, Any]
     }
 
 
+def _git_head() -> Optional[str]:
+    """HEAD sha without subprocess (handles worktree .git pointers and
+    packed refs)."""
+    try:
+        gitdir = ROOT / ".git"
+        if gitdir.is_file():
+            txt = gitdir.read_text(encoding="utf-8").strip()
+            gitdir = Path(txt.split(":", 1)[1].strip())
+        head = (gitdir / "HEAD").read_text(encoding="utf-8").strip()
+        if head.startswith("ref:"):
+            ref = head.split(None, 1)[1]
+            refp = gitdir / ref
+            if refp.exists():
+                return refp.read_text(encoding="utf-8").strip()
+            for ln in (gitdir / "packed-refs").read_text(
+                    encoding="utf-8").splitlines():
+                if ln.endswith(" " + ref):
+                    return ln.split()[0]
+            return None
+        return head[:40]
+    except OSError:
+        return None
+
+
+def diag_funding_split() -> int:
+    """Prereg line 62: funding received vs paid, by leg side.
+
+    Diagnostic computed AFTER the verdict — reads the local cache only
+    (no downloads), writes a separate artifact, and never rewrites the
+    sealed pair (DECISIONS_FROZEN.txt / phase1_result.json).
+    """
+    res_p = OUT_DIR / "phase1_result.json"
+    sealed = json.loads(res_p.read_text(encoding="utf-8"))
+    sealed_sha = hashlib.sha256(res_p.read_bytes()).hexdigest()
+    D = Data()
+    uni = compute_universes(D)
+    R = run(D, uni)
+    fs = R["fund_split"]
+    if fs is None:
+        print("no simulated weeks — nothing to decompose")
+        return 3
+    rec = fs["long"]["received"] + fs["short"]["received"]
+    paid = fs["long"]["paid"] + fs["short"]["paid"]
+    net = rec - paid
+    sealed_f = float((sealed.get("decomposition_usd") or {})
+                     .get("funding") or 0.0)
+    ok = abs(net - sealed_f) < 1e-6
+    out = {
+        "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "diagnostic": ("prereg line 62 — funding received vs paid; "
+                       "computed post-verdict, changes no criterion"),
+        "code_commit": _git_head(),
+        "sealed_result_file": "phase1_result.json",
+        "sealed_result_sha256": sealed_sha,
+        "sealed_decisions_file_sha256": sealed.get(
+            "decisions_file_sha256"),
+        "funding_received_usd": rec,
+        "funding_paid_usd": paid,
+        "net_usd": net,
+        "check_net_equals_sealed_funding": {
+            "diag_net_usd": net, "sealed_funding_usd": sealed_f,
+            "delta": net - sealed_f, "ok": ok},
+        "by_leg": {
+            side: {"received_usd": v["received"],
+                   "paid_usd": v["paid"],
+                   "net_usd": v["received"] - v["paid"]}
+            for side, v in fs.items()},
+        "weekly": R["fund_split_weekly"],
+    }
+    _w(OUT_DIR / "phase1_diag_funding_split.json", out)
+    print(f"funding received {rec:,.2f} | paid {paid:,.2f} | "
+          f"net {net:,.2f} vs sealed {sealed_f:,.2f} -> "
+          f"{'MATCH' if ok else 'MISMATCH'}", flush=True)
+    if not ok:
+        print("MISMATCH: received-paid != sealed funding — possible bug "
+              "in the original result; investigate before trusting "
+              "either file", flush=True)
+    return 0 if ok else 3
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--skip-download", action="store_true",
@@ -738,6 +840,10 @@ def main() -> int:
     ap.add_argument("--download-only", action="store_true")
     ap.add_argument("--freeze-decisions", action="store_true",
                     help="write DECISIONS_FROZEN.txt (once) and exit")
+    ap.add_argument("--diag-funding-split", action="store_true",
+                    help="prereg line 62 diagnostic: funding received vs "
+                    "paid -> phase1_diag_funding_split.json; cache only, "
+                    "sealed result never rewritten")
     a = ap.parse_args()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     if a.freeze_decisions:
@@ -753,6 +859,8 @@ def main() -> int:
                         .encode("utf-8"))
         print("frozen at", stamp)
         return 0
+    if a.diag_funding_split:
+        return diag_funding_split()
     if not a.skip_download:
         download_candles()
     D = Data()

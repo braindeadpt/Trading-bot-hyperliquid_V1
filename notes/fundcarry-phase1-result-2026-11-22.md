@@ -175,3 +175,37 @@ Bottom 10: kPEPE -5,506, ENA -1,483, ZEC -1,331, HYPE -1,294, NEAR -1,212, VVV -
 - Fills em open diario, nao 1m (declarado). Funding valorizado com preco interpolado.
 - Sobrevivencia controlada via meta `isDelisted` (9 delistadas entraram no universo); completude da meta nao verificavel. O veredicto e KILL, pelo que o vies (que favorece a estrategia) nao altera a conclusao.
 - Tecto 10% com 5 pernas/lado torna a carteira quase equal-weight; consequencia directa da regra congelada.
+
+## Emenda 2026-11-22 — diagnostico funding recebido/pago (linha 62 do prereg)
+
+O resultado selado (`phase1_result.json`) reporta apenas o funding liquido
+(+3,929.15 USD em `decomposition_usd.funding`). A linha 62 do
+pre-registo pede a decomposicao entre funding recebido e pago; esse
+diagnostico faltava no artefacto selado.
+
+Foi calculado DEPOIS do veredicto, a partir da mesma cache local, sem
+novos downloads e sem alterar nenhuma definicao nem o par selado
+(`phase1_result.json` / `DECISIONS_FROZEN.txt` mantem-se; o sha256
+canonico LF `6351131c…` do ficheiro de decisoes e o registado no
+resultado). O calculo esta em
+`data/backtests/fundcarry/phase1_diag_funding_split.json`
+(commit do codigo usado: 17af2a5), produzido por
+`--diag-funding-split` em `scripts/research/fundcarry_phase1.py`.
+
+Resultado (USD, sobre o nocional fixo de 10.000 por semana):
+
+| perna | recebido | pago | liquido |
+|-------|----------|------|---------|
+| short | +3 927.64 | -95.67 | +3 831.97 |
+| long  | +1 803.26 | -1 706.07 | +97.19 |
+| total | +5 730.90 | -1 801.74 | **+3 929.15** |
+
+Verificacao obrigatoria: recebido - pago = +3 929.15 USD, igual ao
+funding liquido selado (`delta` 0.0, `ok: true` no ficheiro de
+diagnostico).
+
+Leitura: as pernas short entregaram o carry esperado (+3.8k liquido) e
+as long foram aproximadamente neutras em funding (+97). O veredicto
+KILL (C) vem inteiramente do movimento de preco (-8 543 USD), nao do
+carry. Este diagnostico e posterior ao veredicto e nao muda nenhum dos
+quatro criterios; o veredicto KILL (C) mantem-se.
