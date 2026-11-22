@@ -17,10 +17,12 @@ ledger degrades that fragment to ``None``/``[]`` — never a 500.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -46,8 +48,26 @@ _STALE_IVGATE = 12 * 3_600_000  # board re-eval on demand
 # Living strategies shown on the main page, in display order. `id` is the
 # stable key used by /api/paper_strategy/<id> and the frontend card click.
 STRATEGY_IDS: Tuple[str, ...] = (
-    "jev", "carry", "unlock", "boros", "resmom", "ivgate",
+    "jev", "carry", "unlock", "boros", "resmom", "ivgate", "fundcarry",
 )
+
+# UnlockShort registered read (docs/ops/PREREGISTER_UNLOCK_SHADOW.md §6):
+# "n >= 15 closed eligible events or 2027-10-14, whichever comes first";
+# "fewer than 15 eligible events at expiry -> INCONCLUSIVE". Kept equal to
+# paper_ledger._unlock_row (a test pins the equality).
+_UNLOCK_N_READOUT = 15
+_UNLOCK_READOUT_MS = int(datetime(2027, 10, 14, tzinfo=timezone.utc)
+                         .timestamp() * 1000)
+
+# FundCarry Phase 1 (historical backtest, not paper) result artifact.
+_FUNDCARRY_JSON = ROOT / "data" / "backtests" / "fundcarry" / "phase1_result.json"
+
+
+def _fmt_day(ms: Optional[int]) -> str:
+    """UTC dd/mm/yyyy — year included so a 2027 readout is never read as 2026."""
+    if ms is None:
+        return "—"
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%d/%m/%Y")
 
 
 def _ro(path: Path, timeout: float = 6.0) -> Optional[sqlite3.Connection]:
@@ -96,6 +116,27 @@ def _age_state(last_write_ms: Optional[int], has_open: bool,
     if has_open:
         return "running", "em posição"
     return "no_signal", "sem sinal"
+
+
+# Minimum closed observations before an annualized figure is treated as
+# more than noise. Annualizing 2 trades (or 1 week) extrapolates a tiny
+# sample by ~50x, so below this the APY is still shown (owner wants every
+# number) but flagged `apy_indicative`. 10 = a coarse floor, not a
+# significance test. `n` is the card's own closed-observation count:
+# closed trades (Boros) or closed weeks (ResMom); a missing n counts as 0.
+APY_MIN_N = 10
+
+
+def _mark_apy_reliability(card: Dict[str, Any]) -> None:
+    """Add apy_indicative / apy_n to a card that reports an APY."""
+    if card.get("apy") is None:
+        return
+    try:
+        n = int(card.get("n") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    card["apy_n"] = n
+    card["apy_indicative"] = n < APY_MIN_N
 
 
 def _base_card(sid: str, name: str, kind: str, n_readout=None,
@@ -358,6 +399,7 @@ def _unlock_card(now_ms: int) -> Dict[str, Any]:
         prereg_state="in_progress")
     con = _ro(_RESEARCH / "unlock_shadow.db")
     if con is None:
+        _apply_unlock_readout(card, now_ms)
         return card
     try:
         st = con.execute(
@@ -366,6 +408,13 @@ def _unlock_card(now_ms: int) -> Dict[str, Any]:
         states = {r["state"]: int(r["c"]) for r in st}
         card["n"] = states.get("closed", 0)
         card["n_open"] = states.get("open", 0)
+        # Readout threshold (§6): only events closed at/before the
+        # deadline count. Events closed later stay in `n` for display but
+        # must never flip a post-deadline INCONCLUSIVO.
+        card["_n_by_deadline"] = int(con.execute(
+            "SELECT COUNT(*) c FROM unlock_sims WHERE kind='event'"
+            " AND state='closed' AND priced_out_ms <= ?",
+            (_UNLOCK_READOUT_MS,)).fetchone()["c"])
         agg = con.execute(
             "SELECT COALESCE(SUM(net_usd),0) net, COALESCE(SUM(gross_usd),0)"
             " g, MAX(priced_out_ms) last_ts FROM unlock_sims"
@@ -398,11 +447,46 @@ def _unlock_card(now_ms: int) -> Dict[str, Any]:
         card["state"], card["state_detail"] = _age_state(
             hb_ts or agg["last_ts"],
             card["n_open"] > 0, now_ms, _STALE_UNLOCK)
+        _apply_unlock_readout(card, now_ms)
         return card
     except Exception:  # noqa: BLE001
         return card
     finally:
         con.close()
+
+
+def _apply_unlock_readout(card: Dict[str, Any], now_ms: int) -> None:
+    """Surface the pre-registered readout outcome once the read is due.
+
+    Rule (PREREGISTER_UNLOCK_SHADOW §6): read at n>=15 closed eligible
+    events or at 2027-10-14, whichever first; <15 at expiry = INCONCLUSIVE.
+    PASS/FAIL themselves need the four §6 criteria (not computed here), so
+    when n>=15 the card only says the read is due — never invents a verdict.
+    A healthy-but-stale writer keeps its error state; the readout note is
+    appended instead of replacing it.
+    """
+    n = int(card.get("n") or 0)
+    n_due = int(card.pop("_n_by_deadline", 0) or 0)
+    if now_ms >= _UNLOCK_READOUT_MS:
+        # Deadline reached — the preregistered read is frozen by the
+        # events that had closed at that instant, nothing later.
+        if n_due >= _UNLOCK_N_READOUT:
+            card["verdict"] = "por registar"
+            card["state_detail"] = (
+                f"n {n_due}/{_UNLOCK_N_READOUT} atingido antes do prazo "
+                "— leitura §6 por registar")
+        else:
+            card["verdict"] = "INCONCLUSIVO"
+            card["state"] = "verdict"
+            card["state_detail"] = (
+                f"readout passou em {_fmt_day(_UNLOCK_READOUT_MS)} · "
+                f"n {n_due}/{_UNLOCK_N_READOUT} < {_UNLOCK_N_READOUT} → "
+                "INCONCLUSIVO (prereg §6)")
+        return
+    if n >= _UNLOCK_N_READOUT:
+        card["verdict"] = "por registar"
+        card["state_detail"] = (
+            f"n {n}/{_UNLOCK_N_READOUT} atingido — leitura §6 por registar")
 
 
 def _unlock_detail(now_ms: int) -> Dict[str, Any]:
@@ -486,6 +570,7 @@ def _boros_card(now_ms: int) -> Dict[str, Any]:
         wr_rows = con.execute(
             "SELECT realized_usd p FROM boros_close").fetchall()
         card["wr"] = _wr([r["p"] for r in wr_rows])
+        _mark_apy_reliability(card)
         mk = con.execute(
             "SELECT ts_ms, equity_pooled FROM boros_marks"
             " WHERE equity_pooled IS NOT NULL ORDER BY ts_ms").fetchall()
@@ -585,6 +670,28 @@ def _boros_detail(now_ms: int) -> Dict[str, Any]:
 
 # ── ResidualMomentum forward (resmom_shadow.db) ───────────────────────
 
+_RESMOM_ARMS: Tuple[str, ...] = ("A", "B", "BIN")
+# Registered arm = A (HL, prereg 2026-10-28); B is descriptive, BIN is a
+# descriptive Binance reference. Only A feeds the card's headline numbers.
+_RESMOM_REG_ARM = "A"
+# Fixed gross notional per arm — same constant the daemon accounts NAV
+# against (src/resmom_shadow/spec.py). Returns must be vs this base: the
+# first NAV mark already discounts entry cost.
+try:
+    from src.resmom_shadow.spec import NOTIONAL_USD as _RESMOM_NOTIONAL
+except Exception:  # noqa: BLE001 — spec import must never break the page
+    _RESMOM_NOTIONAL = 10_000.0
+_RESMOM_ARM_LABEL = {
+    "A": "ResMom·A",
+    "B": "ResMom·B (desc.)",
+    "BIN": "ResMom·BIN (ref.)",
+}
+
+
+def _resmom_arm_label(arm: Any) -> str:
+    return _RESMOM_ARM_LABEL.get(str(arm), f"ResMom·{arm}")
+
+
 def _resmom_card(now_ms: int) -> Dict[str, Any]:
     card = _base_card(
         "resmom", "ResMom forward", "shadow",
@@ -609,27 +716,55 @@ def _resmom_card(now_ms: int) -> Dict[str, Any]:
     if con is None:
         return card
     try:
-        nav = con.execute(
-            "SELECT ts_ms, nav_usd FROM resmom_nav ORDER BY ts_ms"
-        ).fetchall()
-        series = [(int(m["ts_ms"]), float(m["nav_usd"])) for m in nav]
+        arms: Dict[str, Dict[str, Any]] = {}
+        nav_by_arm: Dict[str, List[Tuple[int, float]]] = {}
+        for arm in _RESMOM_ARMS:
+            nav = con.execute(
+                "SELECT ts_ms, nav_usd FROM resmom_nav WHERE arm=?"
+                " ORDER BY ts_ms", (arm,)).fetchall()
+            ser = [(int(m["ts_ms"]), float(m["nav_usd"])) for m in nav]
+            nav_by_arm[arm] = ser
+            n_open = int(con.execute(
+                "SELECT COUNT(*) c FROM resmom_positions"
+                " WHERE arm=? AND status='open'", (arm,)).fetchone()["c"])
+            wr_rows = con.execute(
+                "SELECT pnl_usd p FROM resmom_positions"
+                " WHERE arm=? AND status='closed'", (arm,)).fetchall()
+            n_reb = int(con.execute(
+                "SELECT COUNT(*) c FROM resmom_rebalances WHERE arm=?",
+                (arm,)).fetchone()["c"])
+            # cum_return is vs the fixed gross NOTIONAL — the first NAV
+            # mark already discounts entry cost, so basing the return on
+            # it would hide that cost (Devin Review PR#21).
+            ret = None
+            if ser:
+                ret = round(
+                    (ser[-1][1] / _RESMOM_NOTIONAL - 1.0) * 100.0, 3)
+            arms[arm] = {
+                "nav": round(ser[-1][1], 2) if ser else None,
+                "cum_return_pct": ret,
+                "n_open": n_open,
+                "wr": _wr([r["p"] for r in wr_rows]),
+                "n_rebalances": n_reb,
+                "n_nav": len(ser),
+                "registered": arm == _RESMOM_REG_ARM,
+            }
+        card["arms"] = arms
+        series = nav_by_arm[_RESMOM_REG_ARM]
         card["equity"] = _downsample(series)
-        card["n_open"] = int(con.execute(
-            "SELECT COUNT(*) c FROM resmom_positions"
-            " WHERE status='open'").fetchone()["c"])
-        wr_rows = con.execute(
-            "SELECT pnl_usd p FROM resmom_positions"
-            " WHERE status='closed'").fetchall()
-        card["wr"] = _wr([r["p"] for r in wr_rows])
+        card["n_open"] = arms[_RESMOM_REG_ARM]["n_open"]
+        card["wr"] = arms[_RESMOM_REG_ARM]["wr"]
         if len(series) >= 2 and series[-1][0] > series[0][0]:
             span = series[-1][0] - series[0][0]
-            base = series[0][1] or 1.0
             card["apy"] = round(
-                ((series[-1][1] / base) ** (_MS_YEAR / span) - 1.0)
-                * 100.0, 2)
+                ((series[-1][1] / _RESMOM_NOTIONAL) ** (_MS_YEAR / span)
+                 - 1.0) * 100.0, 2)
         last_ts = con.execute(
             "SELECT MAX(entry_ms) ts FROM resmom_positions").fetchone()["ts"]
-        hb = series[-1][0] if series else last_ts
+        # Heartbeat = freshest nav of ANY arm (daemon liveness); the
+        # headline numbers above stay arm-A only.
+        navs_last = [v[-1][0] for v in nav_by_arm.values() if v]
+        hb = max(navs_last) if navs_last else last_ts
         if hb is None:
             # Newborn shadow (first nav snapshot may lag deploy) — flag as
             # starting, not error.
@@ -637,6 +772,7 @@ def _resmom_card(now_ms: int) -> Dict[str, Any]:
         else:
             card["state"], card["state_detail"] = _age_state(
                 hb, card["n_open"] > 0, now_ms, _STALE_RESMOM)
+        _mark_apy_reliability(card)
         return card
     except Exception:  # noqa: BLE001
         return card
@@ -651,28 +787,31 @@ def _resmom_detail(now_ms: int) -> Dict[str, Any]:
         return out
     try:
         for p in con.execute(
-                "SELECT symbol, side, weight, qty, entry_px, entry_ms,"
+                "SELECT arm, symbol, side, weight, qty, entry_px, entry_ms,"
                 " funding_usd FROM resmom_positions"
-                " WHERE status='open'").fetchall():
+                " WHERE status='open' ORDER BY arm, symbol").fetchall():
             out["open"].append({
+                "arm": p["arm"],
                 "symbol": p["symbol"], "side": p["side"],
                 "size": p["qty"], "entry": p["entry_px"], "mark": None,
                 "unreal_usd": p["funding_usd"], "entry_ms": p["entry_ms"]})
         for p in con.execute(
-                "SELECT symbol, side, qty, entry_px, exit_px, pnl_usd,"
+                "SELECT arm, symbol, side, qty, entry_px, exit_px, pnl_usd,"
                 " funding_usd, entry_ms, exit_ms, close_reason"
                 " FROM resmom_positions WHERE status='closed'"
                 " ORDER BY exit_ms DESC LIMIT 200").fetchall():
             out["closed"].append({
+                "arm": p["arm"],
                 "symbol": p["symbol"], "side": p["side"], "size": p["qty"],
                 "entry": p["entry_px"], "exit": p["exit_px"],
                 "pnl_usd": p["pnl_usd"], "pnl_pct": None,
                 "funding_usd": p["funding_usd"], "fees_usd": None,
                 "entry_ms": p["entry_ms"], "exit_ms": p["exit_ms"],
                 "reason": p["close_reason"]})
+        # Headline equity/drawdown = registered arm A only.
         nav = con.execute(
-            "SELECT ts_ms, nav_usd, dd_pct FROM resmom_nav"
-            " ORDER BY ts_ms").fetchall()
+            "SELECT ts_ms, nav_usd, dd_pct FROM resmom_nav WHERE arm=?"
+            " ORDER BY ts_ms", (_RESMOM_REG_ARM,)).fetchall()
         out["equity"] = [(int(m["ts_ms"]), float(m["nav_usd"]))
                          for m in nav]
         out["dd"] = [(int(m["ts_ms"]), float(m["dd_pct"])) for m in nav]
@@ -731,27 +870,56 @@ def _ivgate_card(now_ms: int) -> Dict[str, Any]:
                     break
                 if board:
                     break
+        if con is None:
+            card["state"], card["state_detail"] = (
+                "error", "sem dados (research DB ausente)")
+            return card
         if board:
-            # The board's seal state stays on the card as information —
-            # the owner decided (2026-10-27) the dashboard shows every
-            # metric; discipline lives in only acting at the registered
-            # readout, not in hiding numbers.
-            sealed = bool(board.get("sealed", True)) and not board.get(
+            # `sealed` is only present in to_dict() for confirmation boards
+            # (shadow_outcome_evaluator.StrategyScoreboard.to_dict): an
+            # absent key means "not a sealed board", NOT sealed.
+            sealed = bool(board.get("sealed", False)) and not board.get(
                 "confirmation_expired")
             card["sealed"] = sealed
             if sealed:
                 card["prereg_state"] = "SEALED"
-            card["n"] = (board.get("n_independent")
-                         or board.get("n_evaluated"))
-            card["net"] = board.get("net_hypothetical_pnl_pct")
+            # n = independent outcomes (the gate's n). Fall back to
+            # n_evaluated only when n_independent is absent - a real 0 stays 0.
+            n_ind = board.get("n_independent")
+            card["n"] = n_ind if n_ind is not None else board.get(
+                "n_evaluated")
+            min_indep = board.get("confirmation_min_indep")
+            if min_indep:
+                card["n_readout"] = min_indep
             card["net_unit"] = "pct"
-            card["wr"] = (round(board["win_rate"] * 100.0, 1)
-                          if board.get("win_rate") is not None
-                          else None)
+            if sealed:
+                # A sealed board deliberately leaves every metric at its
+                # dataclass default (0.0) - build_scoreboard returns early.
+                # Those zeros are "not computed", not "0% WR / 0% net":
+                # show "-" instead of fabricating a result.
+                card["net"], card["wr"] = None, None
+            else:
+                card["net"] = board.get("net_hypothetical_pnl_pct")
+                card["wr"] = (round(board["win_rate"] * 100.0, 1)
+                              if board.get("win_rate") is not None
+                              else None)
             detail = (board.get("evaluated_ms")
                       or board.get("batch_ms") or batch_ts)
+            card["data_ms"] = detail
             card["state"], card["state_detail"] = _age_state(
                 detail, False, now_ms, _STALE_IVGATE)
+            if detail is not None and now_ms - detail > _STALE_IVGATE:
+                # Explicit "stale" with the data date - never a silent
+                # "sem sinal" for a board nobody is refreshing.
+                card["state"] = "stale"
+                card["state_detail"] = (
+                    f"dados de {_fmt_day(detail)} "
+                    f"(há {int((now_ms - detail) / _MS_DAY)}d) — "
+                    "research DB sem escritas")
+            elif sealed:
+                card["state_detail"] += (
+                    f" · métricas seladas até n≥{min_indep}"
+                    if min_indep else " · métricas seladas")
             return card
         card["state"], card["state_detail"] = "no_signal", "sem board"
         return card
@@ -769,16 +937,227 @@ def _ivgate_detail(now_ms: int) -> Dict[str, Any]:
     return {"open": [], "closed": [], "equity": [], "dd": []}
 
 
+# -- FundCarry - HISTORICAL backtest (not paper) --------------------------
+
+_FC_VERDICT_BADGE = {
+    "PASS": ("badge-green", "PASS"),
+    "PASS-provisório": ("badge-yellow", "PASS-provisório"),
+    "KILL (C)": ("badge-red", "KILL (C)"),
+    "INCONCLUSIVO": ("badge-dim", "INCONCLUSIVO"),
+}
+
+
+def _fc_norm_verdict(raw: Any) -> Optional[str]:
+    if raw is None or not str(raw).strip():
+        return None
+    v = str(raw).strip().lower().replace("ó", "o").replace("í", "i")
+    if v.startswith("pass") and "provis" in v:
+        return "PASS-provisório"
+    if v.startswith("pass"):
+        return "PASS"
+    if v.startswith("kill"):
+        return "KILL (C)"
+    if v.startswith("inconcl"):
+        return "INCONCLUSIVO"
+    return str(raw).strip()
+
+
+def _fc_get(d: Any, *path: str) -> Any:
+    for k in path:
+        if not isinstance(d, dict):
+            return None
+        d = d.get(k)
+    return d
+
+
+def _fc_num(v: Any) -> Optional[float]:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _fc_first(d: Dict[str, Any], *paths: Tuple[str, ...]) -> Any:
+    for p in paths:
+        v = _fc_get(d, *p)
+        if v is not None:
+            return v
+    return None
+
+
+def _fc_week_ts(w: Dict[str, Any]) -> Optional[int]:
+    """Weekly-row timestamp. Weekly pnl is realized at the week's CLOSE,
+    so week_ms/date (the entry Monday) are shifted +7d — otherwise the
+    last curve point is dated a week before the actual exit."""
+    try:
+        ts = w.get("ts_ms")
+        if ts is not None:
+            return int(ts)
+        ts = w.get("week_ms")
+        if ts is not None:
+            return int(ts) + 7 * _MS_DAY
+        return (int(datetime.strptime(str(w.get("date")), "%Y-%m-%d")
+                   .replace(tzinfo=timezone.utc).timestamp() * 1000)
+                + 7 * _MS_DAY)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fc_equity(res: Dict[str, Any]) -> List[Tuple[int, float]]:
+    """Cumulative net USD series: explicit `equity` [[ts_ms, v], ...] if
+    present, else cumulative sum of `weekly[].pnl_usd` keyed by `date`."""
+    out: List[Tuple[int, float]] = []
+    eq = res.get("equity")
+    if isinstance(eq, list):
+        for pt in eq:
+            try:
+                out.append((int(pt[0]), float(pt[1])))
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue
+        if out:
+            return _downsample(out)
+    cum = 0.0
+    for w in res.get("weekly") or []:
+        if not isinstance(w, dict):
+            continue
+        pnl = _fc_num(w.get("pnl_usd"))
+        ts = _fc_week_ts(w)
+        if pnl is None or ts is None:
+            continue
+        cum += pnl
+        out.append((ts, round(cum, 4)))
+    return _downsample(out)
+
+
+def _fc_dd(res: Dict[str, Any]) -> List[Tuple[int, float]]:
+    """Drawdown series in percentage points, rebuilt from weekly
+    compounded returns — the same convention the artifact uses for
+    `max_drawdown` (nav *= 1+ret, drop vs running peak), so the series
+    minimum equals the artifact's value."""
+    nav = 1.0
+    peak = 1.0
+    out: List[Tuple[int, float]] = []
+    for w in res.get("weekly") or []:
+        if not isinstance(w, dict):
+            continue
+        r = _fc_num(w.get("ret"))
+        ts = _fc_week_ts(w)
+        if r is None or ts is None:
+            continue
+        nav *= 1.0 + r
+        peak = max(peak, nav)
+        out.append((ts, round((nav / peak - 1.0) * 100.0, 4)))
+    if not out:
+        return out
+    ds = _downsample(out)
+    # The modal shows min(dd) as the max drawdown — stride downsampling
+    # can drop the true trough, so re-insert it if it was decimated.
+    argmin = min(range(len(out)), key=lambda i: out[i][1])
+    if out[argmin] not in ds:
+        pos = next((i for i, p in enumerate(ds)
+                    if p[0] > out[argmin][0]), len(ds))
+        ds.insert(pos, out[argmin])
+    return ds
+
+
+def _fundcarry_result() -> Tuple[str, Optional[Dict[str, Any]]]:
+    """('missing'|'unreadable'|'ok', parsed JSON)."""
+    if not _FUNDCARRY_JSON.exists():
+        return "missing", None
+    try:
+        res = json.loads(_FUNDCARRY_JSON.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "unreadable", None
+    return ("ok", res) if isinstance(res, dict) else ("unreadable", None)
+
+
+def _fundcarry_card(now_ms: int) -> Dict[str, Any]:
+    """FundCarry Phase 1 historical card (kind="historical").
+
+    Reads ``data/backtests/fundcarry/phase1_result.json`` defensively.
+    Keys looked up (first hit wins, every one optional -> shown as "-"):
+      verdict                         PASS | PASS-provisorio | KILL (C) |
+                                      INCONCLUSIVO (accent/case tolerant)
+      decomposition_usd.net | net_usd net cumulative PnL (USD)
+      cum_return                      fraction (0.12 = +12%), fallback net
+      sharpe                          annualised Sharpe
+      sign_flip.n_pos / sign_flip.K   positive windows / K  (also n_pos, K)
+      sign_flip.p | sign_flip_p       sign-flip p-value
+      nulls.real_percentile | null_percentile   percentile vs null Sharpes
+      ex_top3.pnl_ex_top3_usd | pnl_ex_top3_usd PnL excluding top-3
+      equity [[ts_ms, usd]] | weekly[{date|ts_ms, pnl_usd}]  equity curve
+      max_drawdown                    fraction (optional)
+    Never touches paper ledgers; the card is flagged as not paper.
+    """
+    card = _base_card("fundcarry", "FundCarry", "historical",
+                      prereg_state="HISTÓRICO (backtest) — não é paper")
+    status, res = _fundcarry_result()
+    if status == "missing":
+        card["state"] = "testing"
+        card["state_detail"] = "a testar — Fase 1 histórica em curso"
+        card["badge"] = ["badge-blue", "a testar"]
+        return card
+    if res is None:
+        card["state"], card["state_detail"] = (
+            "error", "phase1_result.json ilegível")
+        return card
+    verdict = _fc_norm_verdict(res.get("verdict"))
+    net_usd = _fc_num(_fc_first(res, ("decomposition_usd", "net"),
+                                ("net_usd",), ("net_pnl_usd",)))
+    cum = _fc_num(res.get("cum_return"))
+    n_pos = _fc_first(res, ("sign_flip", "n_pos"), ("n_pos",))
+    k = _fc_first(res, ("sign_flip", "K"), ("K",))
+    mdd = _fc_num(res.get("max_drawdown"))
+    hist = {
+        "verdict": verdict,
+        "net_usd": net_usd,
+        "cum_return_pct": round(cum * 100.0, 2) if cum is not None else None,
+        "sharpe": _fc_num(res.get("sharpe")),
+        "windows_pos": int(n_pos) if _fc_num(n_pos) is not None else None,
+        "windows_k": int(k) if _fc_num(k) is not None else None,
+        "signflip_p": _fc_num(_fc_first(res, ("sign_flip", "p"),
+                                        ("sign_flip_p",))),
+        "null_percentile": _fc_num(_fc_first(
+            res, ("nulls", "real_percentile"), ("null_percentile",))),
+        "pnl_ex_top3_usd": _fc_num(_fc_first(
+            res, ("ex_top3", "pnl_ex_top3_usd"), ("pnl_ex_top3_usd",))),
+        "max_drawdown_pct": round(mdd * 100.0, 2) if mdd is not None else None,
+    }
+    card["hist"] = hist
+    if net_usd is not None:
+        card["net"], card["net_unit"] = round(net_usd, 2), "usd"
+    elif hist["cum_return_pct"] is not None:
+        card["net"], card["net_unit"] = hist["cum_return_pct"], "pct"
+    card["n"] = hist["windows_k"]
+    card["equity"] = _fc_equity(res)
+    card["state"] = "historical"
+    card["badge"] = list(_FC_VERDICT_BADGE.get(
+        verdict or "", ("badge-dim", verdict or "sem veredicto")))
+    card["state_detail"] = (verdict or "sem veredicto") + " · backtest histórico"
+    return card
+
+
+def _fundcarry_detail(now_ms: int) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"open": [], "closed": [], "equity": [], "dd": []}
+    _status, res = _fundcarry_result()
+    if res is not None:
+        out["equity"] = _fc_equity(res)
+        out["dd"] = _fc_dd(res)
+    return out
+
+
 # ── assembly ──────────────────────────────────────────────────────────
 
 _CARDS = {
     "jev": _jev_card, "carry": _carry_card, "unlock": _unlock_card,
     "boros": _boros_card, "resmom": _resmom_card, "ivgate": _ivgate_card,
+    "fundcarry": _fundcarry_card,
 }
 _DETAILS = {
     "jev": _jev_detail, "carry": _carry_detail, "unlock": _unlock_detail,
     "boros": _boros_detail, "resmom": _resmom_detail,
-    "ivgate": _ivgate_detail,
+    "ivgate": _ivgate_detail, "fundcarry": _fundcarry_detail,
 }
 
 
@@ -795,6 +1174,7 @@ def _card_or_last_good(sid: str, now_ms: int) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — degrade, never 500
         logger.debug("paper_trades card %s failed: %s", sid, exc)
         card = _base_card(sid, sid, "shadow")
+    _mark_apy_reliability(card)
     hb_failed = bool(card.pop("_hb_failed", False))
     build_failed = card.get("state") == "error" and card.get(
         "state_detail") in ("", "sem dados")
@@ -924,7 +1304,8 @@ def build_trades_feed(limit: int = 60,
         pass
     try:
         d = _resmom_detail(now)
-        push([{**t, "strat": "ResMom"} for t in d["closed"]])
+        push([{**t, "strat": _resmom_arm_label(t.get("arm"))}
+              for t in d["closed"]])
     except Exception:  # noqa: BLE001
         pass
 

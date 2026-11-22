@@ -60,11 +60,14 @@ def test_factory_respects_enabled_flags() -> None:
         subs, shadow = build_phase08_strategies(cfg)
         names = {s.name for s in subs}
         shadow_names = {s.name for s in shadow}
-        # 2026-09-17: only the owner-requested JevJudge EXPERIMENT executes;
-        # all evidence-based names sit in shadow per the demotion audit.
+        # The execution roster is an owner/prereg decision that changes
+        # (JevJudge EXPERIMENT 2026-09-17, KILLED 2026-11-11 -> empty), so
+        # assert the factory instantiates EXACTLY the configured list, as for
+        # shadow below, instead of hardcoding a name that goes stale.
         # 2026-09-29: dead-name prune — shadow factory instantiates exactly
         # the configured list; retired names must not appear anywhere.
-        assert "JevJudge" in names
+        expected_exec = set(cfg.get("strategy.phase08.execution_strategies") or [])
+        assert names == expected_exec
         expected_shadow = set(cfg.get("strategy.phase08.shadow_strategies") or [])
         assert shadow_names == expected_shadow
         assert "VolatilityBreakout" in shadow_names

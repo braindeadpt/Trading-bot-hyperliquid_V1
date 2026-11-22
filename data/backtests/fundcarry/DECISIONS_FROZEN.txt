@@ -1,0 +1,59 @@
+frozen_at_utc: 2026-11-21T23:45:47.353250+00:00
+FUNDCARRY PHASE 1 - operational definitions (fixed BEFORE any result was computed)
+1. Universe PIT: each Monday D, candidates = main-dex perps in meta (INCLUDING
+   isDelisted=True). Eligible iff: not stable / no 'dex:' prefix; history
+   (D - first 1d candle with trades n>0) >= 90 d; all 30 daily candles
+   D-30..D-1 present (so a coin delisted before D drops out). Ranked by
+   resmom_shadow.universe.select_universe (mean close*volume, 30 d), top 25.
+   BTC ranks in, is never a leg. A week is VALID only if exactly 25 eligible
+   names exist; first rebalance = first valid week.
+2. Signal needs: >= 61 finite daily closes (60 returns for beta, vol30,
+   resid15 via resmom_shadow.signal.compute_signals) AND >= 120 hourly funding
+   observations in the 7 d before D. Names lacking either are not leg
+   candidates that week. s = -mean(hourly funding, [D-7d, D)).
+3. Ranking ties broken by symbol (asc). Quintile = floor(0.2*25)=5 per leg
+   (resmom build_portfolio; min(n_legs, pool//2)). 1/vol30 weights, gross 0.5
+   per leg through beta-neutral solve as in resmom portfolio.py (unsolvable ->
+   0.5/0.5), THEN the 10% cap: |w|>0.10 (of GROSS_TOTAL=1.0) is cut and the
+   excess goes to the other legs of the same side proportionally to their
+   current weights, iterated until none exceeds. If every leg of a side is at
+   the cap the leftover excess is DROPPED (side gross < pre-cap).
+4. Fill fidelity: entry = open of the Monday 1d candle, exit = open of the next
+   Monday (forward uses 1m open after 00:05; HL serves only the last 5000 1m
+   candles). If a coin has no candle at that open (delisted mid-week) the last
+   available close (<=10 d back) is used.
+5. Accounting (resmom precedent): fixed gross NOTIONAL 10,000 USD; weekly
+   return = (price pnl + funding pnl - cost) / running NAV; NAV compounds with
+   pnl. Cost = 6.5 bps * sum|w_new - w_prev| * 10,000 charged at the weekly
+   rebalance (first week = full entry). No exit cost after the last week.
+6. Funding: real hourly HL fundingHistory events with entry <= t < exit; paid
+   on notional qty*price(t), price(t) = linear interpolation of daily opens.
+   Long pays rate>0, short receives. A held coin-week with no funding events
+   is counted and reported (contributes 0).
+7. Windows: 30-d non-overlapping from the first valid rebalance; week -> window
+   floor((rebalance - first)/30d). Window COMPLETE iff its end <= exit of the
+   last closed week. K = complete windows; K < 4 -> INCONCLUSIVE. Window
+   return = compounded weekly net returns of its weeks. Last closed week:
+   rebalance + 7d <= most recent Monday 00:00 UTC.
+8. Sharpe = sqrt(52)*mean/std(ddof=1) of ALL closed weekly net returns.
+   Nulls: 200 random-direction books per week (random 2*n_legs names from that
+   week's pool, first half long; resmom nulls.py method) through the same
+   weights/cap/costs/FUNDING, seed sha256('fundcarry-null|<week_ms>|<i>').
+   PASS cond.2 needs Sharpe > 0.5 AND > p95 (linear interpolation, resmom
+   percentile) of the 200 null Sharpes.
+9. Sign-flip: one-sided on the K window returns, p = share of the 2^K sign
+   patterns with sum >= observed (ties count; exact K<=12). K>12: 200,000
+   seeded samples (seed 20261121), p=(count+1)/(N+1). Majority = positives >
+   K/2. Cond.3 = majority AND p <= 0.10.
+10. Ex-top-3 (resmom read.py): sum over symbols of (price pnl + funding pnl)
+    minus the 3 largest symbol sums. Costs are not allocated (precedent);
+    a cost-allocated variant is reported as a diagnostic only.
+11. Survivorship: controlled iff the API returns candles AND funding for
+    isDelisted coins and >=1 of them enters a weekly universe. If not
+    controlled: FAIL stays FAIL, PASS becomes 'PASS-provisorio: sobrevivencia
+    nao controlada'. Meta-completeness (coins removed from meta entirely)
+    cannot be verified and is reported as a caveat.
+12. Verdict: all 4 criteria with K>=4 -> PASS; any failure -> KILL (C);
+    K<4 -> INCONCLUSIVO. No second round.
+13. ResMom diagnostic: arm A (resmom signal.py: resid15/vol30, frozen
+    build_portfolio, no cap) on the same history, fills, costs and funding.
